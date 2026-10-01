@@ -1,0 +1,9 @@
+5714416279e44cb5b3ab1bdcaac8f3a9d8f0db9aa12da5bb2a791a9395ec12c5  docs/performance-audits/evidence/2026-09-30T193624Z/x86_encode_runs/census-opcode.json.gz
+5de37c8be1b70cfe8b01e07f52798dcf17358b3c32040e52141ba5006b240abe  docs/performance-audits/evidence/2026-09-30T193624Z/x86_encode_runs/census-table.json.gz
+04465fb8ae05eb1531171c1e2be5a6dd9665d522de29e2a5e7fb69c278d0f93a  docs/performance-audits/evidence/2026-09-30T193624Z/x86_encode_runs/census-unity-fast.stderr.gz
+5cf70e8d878039b2614180a4330d815537f9f78de49fe2c050698ed38968d28a  docs/performance-audits/evidence/2026-09-30T193624Z/x86_encode_runs/pairs-aa.json.gz
+0b18bab5d257d93563f31b7f0d9a6e727c1f769c7d189bdf26a26145a3244e5f  docs/performance-audits/evidence/2026-09-30T193624Z/x86_encode_runs/pairs-push-scalar.json.gz
+880f6f635827a897a8cd62effe1d893f34d70d049a737bd85b51e1e7ea92301f  docs/performance-audits/evidence/2026-09-30T193624Z/x86_encode_runs/pairs-push-simd.json.gz
+bb4772177efd7b945529aa9079902b2a206ab11caa28e6d0cd0d64ba83147746  docs/performance-audits/evidence/2026-09-30T193624Z/x86_encode_runs/pairs-store-scalar.json.gz
+fa00f861e3067284ea04d6cf362cd84c4f770a2a6a417be0fda159d276021e5b  docs/performance-audits/evidence/2026-09-30T193624Z/x86_encode_runs/pairs-store-simd.json.gz
+d9cec2948a6796ce5684006cd07391647e767cb2f0d3e616cb56cb82726dd6d2  docs/performance-audits/evidence/2026-09-30T193624Z/x86_encode_runs/census-unity-fast.stdout

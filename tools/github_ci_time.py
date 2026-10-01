@@ -10,8 +10,13 @@ interruption_evidence) for failed jobs whose runner stopped reporting.
 queue-collect/queue-summarize measure runner scheduling across every workflow
 (#1805): queue_collect, queue_summarize, _queue_job_record, _occupancy.
 require-jobs is CI complete's inventory gate (require_jobs, validate_required_jobs);
+transient API reads retry inside its metadata budget (_transient_api_failure,
+_gate_get) and an unsuccessful verdict is printed (report_gate_failure).
+combination_jobs selects the complete combined or dispatch-only split layout;
+measure recognizes both as distinct timing cohorts and rejects mixed inventories.
 draft_pull_request_run and deferred_base_name admit the draft-only macOS
-deferral (#1825) and nothing else.
+deferral (#1825) and nothing else; latest_run_jobs and _carried_forward_copy
+keep a "Re-run failed jobs" attempt's re-stamped deferrals at attempt 1 (#2052).
 """
 import argparse
 from collections import Counter, defaultdict
@@ -24,31 +29,48 @@ import re
 import statistics
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
-PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS x86-64", "macOS AArch64",
+# Current scheduling policy; historical inventories are timing inputs only.
+PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS AArch64",
              "Windows x86-64", "Windows AArch64")
-MOBILE = ("Android x86-64", "iOS x86-64", "iOS AArch64")
-SHARDED_JOBS = PLATFORMS + MOBILE + ("Workflow lint", "CI complete")
-UNIX_NATIVE = tuple(name + " native" for name in PLATFORMS if not name.startswith("Windows"))
+MOBILE = ("Android x86-64", "iOS AArch64")
 NATIVE = tuple(name + " native" for name in PLATFORMS)
-LEGACY_PARTITIONED_JOBS = SHARDED_JOBS + UNIX_NATIVE
-PARTITIONED_JOBS = SHARDED_JOBS + NATIVE
+UNIX_NATIVE = tuple(name for name in NATIVE if not name.startswith("Windows"))
+HISTORICAL_PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS x86-64", "macOS AArch64",
+                        "Windows x86-64", "Windows AArch64")
+HISTORICAL_MOBILE = ("Android x86-64", "iOS x86-64", "iOS AArch64")
+HISTORICAL_NATIVE = tuple(name + " native" for name in HISTORICAL_PLATFORMS)
+HISTORICAL_UNIX_NATIVE = tuple(name for name in HISTORICAL_NATIVE if not name.startswith("Windows"))
+SHARDED_JOBS = HISTORICAL_PLATFORMS + HISTORICAL_MOBILE + ("Workflow lint", "CI complete")
+LEGACY_PARTITIONED_JOBS = SHARDED_JOBS + HISTORICAL_UNIX_NATIVE
+PARTITIONED_JOBS = SHARDED_JOBS + HISTORICAL_NATIVE
 UEFI = ("UEFI firmware boot",)
 ANALYZER = ("Clang analyzer shards",)
 LEGACY_SUITE_JOBS = LEGACY_PARTITIONED_JOBS + UEFI + ANALYZER
 SUITE_JOBS = PARTITIONED_JOBS + UEFI + ANALYZER
 COMBINATION_SHARDS = ("release", "checks")
+HISTORICAL_COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in HISTORICAL_PLATFORMS for shard in COMBINATION_SHARDS)
 COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in PLATFORMS for shard in COMBINATION_SHARDS)
-LEGACY_COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+LEGACY_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+HISTORICAL_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
-# The eight jobs that hold macOS runners. A first-attempt draft pull-request
-# run reports each as a named Linux no-op instead (#1825); nothing else may.
+SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
+SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "Windows x86-64")
+SPLIT_QUALIFICATION_BRANCH = "codex/ci-checks-split-overlap"
+SPLIT_COMBINATION_PLATFORMS = tuple(
+    f"{platform} {shard}" for platform in PLATFORMS
+    for shard in (("release",) + SPLIT_CHECK_SHARDS
+                  if platform in SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS))
+SPLIT_COMBINATION_JOBS = SPLIT_COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+# Only these four retained Apple jobs may defer on first-attempt draft PRs.
 MACOS_RUNNER_JOBS = tuple(name for name in COMBINATION_PLATFORMS + NATIVE + MOBILE
                           if name.startswith(("macOS ", "iOS ")))
 DEFERRED_SUFFIX = " (deferred for draft PR)"
 DEFERRAL_STEP = "Defer macOS runner lane for draft pull request"
+MAIN_REUSE_JOB = "Main CI reuse decision"
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
               "run_attempt", "created_at", "run_started_at", "html_url")
 JOB_FIELDS = ("id", "name", "run_attempt", "status", "conclusion", "created_at", "started_at", "completed_at", "labels")
@@ -56,6 +78,10 @@ STEP_FIELDS = ("name", "status", "conclusion", "started_at", "completed_at")
 API_TIMEOUT_SECONDS = 30.0
 JOB_METADATA_REFRESH_BUDGET_SECONDS = 30.0
 JOB_METADATA_REFRESH_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+JOB_PAGE_SIZE = 100
+# The jobs listing returned 502 at per_page=100 while smaller pages of the same
+# run succeeded (#1984); later snapshots of the gate use this size after a 5xx.
+JOB_PAGE_FALLBACK_SIZE = 30
 INTERRUPTION_EVIDENCE_BUDGET_SECONDS = 30.0
 RUNNER_LOST_MESSAGE = "The hosted runner lost communication with the server."
 # The run search API returns at most 1000 results for one query.
@@ -80,16 +106,25 @@ def timestamp(value):
     return result
 
 
+def combination_jobs(checks_layout="combined"):
+    """Exactly one complete desktop layout; the default remains accepted policy."""
+    if checks_layout not in ("combined", "split"):
+        raise ValueError("Unknown checks layout")
+    return SPLIT_COMBINATION_JOBS if checks_layout == "split" else COMBINATION_JOBS
+
+
 def measure(run):
-    """A successful six-platform first attempt, or an explicit exclusion reason."""
+    """A successful declared-inventory first attempt, or an explicit exclusion reason."""
     reason = None
     result = None
-    jobs = run.get("jobs", [])
+    # The read-only main admission is extra metadata, never a workload. A
+    # reused main run is a separate cohort and cannot be pooled with full runs.
+    jobs = [job for job in run.get("jobs", []) if job.get("name") != MAIN_REUSE_JOB]
     names = sorted(job.get("name", "") for job in jobs)
-    combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
+    combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS),
+                             sorted(COMBINATION_JOBS), sorted(SPLIT_COMBINATION_JOBS))
     suites = names in (sorted(LEGACY_PARTITIONED_JOBS), sorted(PARTITIONED_JOBS),
-                       sorted(LEGACY_SUITE_JOBS), sorted(SUITE_JOBS),
-                       sorted(LEGACY_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
+                       sorted(LEGACY_SUITE_JOBS), sorted(SUITE_JOBS)) or combinations
     sharded = names == sorted(SHARDED_JOBS) or suites
     if run.get("status") != "completed":
         reason = "not-completed"
@@ -97,7 +132,11 @@ def measure(run):
         reason = run.get("conclusion") or "no-conclusion"
     elif run.get("run_attempt") != 1:
         reason = "rerun"
-    elif names != sorted(PLATFORMS) and not sharded:
+    elif run.get("event") == "push" and any(
+            job.get("name") in NATIVE + MOBILE + UEFI and job.get("conclusion") == "skipped"
+            for job in jobs):
+        reason = "reused-queue-coverage"
+    elif names != sorted(HISTORICAL_PLATFORMS) and not sharded:
         reason = "incomplete-or-different-matrix"
     elif not run.get("workflow_blob_sha"):
         reason = "unknown-workflow-revision"
@@ -111,7 +150,7 @@ def measure(run):
         for job in jobs:
             name = job["name"]
             required = set()
-            if name in PLATFORMS or name in COMBINATION_PLATFORMS:
+            if name in HISTORICAL_PLATFORMS + HISTORICAL_COMBINATION_PLATFORMS + SPLIT_COMBINATION_PLATFORMS:
                 required.add("Combination matrix (Windows)" if name.startswith("Windows")
                              else "Combination matrix (Linux, macOS)")
                 if combinations:
@@ -125,7 +164,7 @@ def measure(run):
                         required.add("Test (iOS simulator)")
                     if name == "Linux x86-64":
                         required.add("Test (Android)")
-            elif name in NATIVE:
+            elif name in HISTORICAL_NATIVE:
                 required.add("Execution-mode matrix (Windows)" if name.startswith("Windows")
                              else "Execution-mode matrix")
                 if not name.startswith("Windows"):
@@ -191,7 +230,8 @@ def summarize(data):
         if reason:
             excluded[reason] += 1
         else:
-            runners = tuple(sorted((job["name"], tuple(sorted(job.get("labels", [])))) for job in run["jobs"]))
+            runners = tuple(sorted((job["name"], tuple(sorted(job.get("labels", []))))
+                                   for job in run["jobs"] if job.get("name") != MAIN_REUSE_JOB))
             cohorts[(run["workflow_blob_sha"], runners)].append(sample)
     rows = []
     for (revision, runners), samples in sorted(cohorts.items()):
@@ -248,7 +288,7 @@ def _required_job_steps(name):
     required = set()
     if deferred_base_name(name) is not None:
         required.add(DEFERRAL_STEP)
-    elif name in COMBINATION_PLATFORMS:
+    elif name in COMBINATION_PLATFORMS + SPLIT_COMBINATION_PLATFORMS:
         required.update(("Install verified Zig", "Desktop result and reproduction", "Retain desktop logs",
                          "Combination matrix (Windows)" if name.startswith("Windows")
                          else "Combination matrix (Linux, macOS)"))
@@ -269,6 +309,46 @@ def _metadata_pending(message):
 
 def _metadata_can_refresh(errors):
     return bool(errors) and all(error.startswith("metadata pending:") for error in errors)
+
+
+def _transient_api_failure(error):
+    """A GitHub read that a later bounded attempt may answer: 5xx, 429 or transport loss.
+
+    Any other HTTP status (a 4xx such as 401/403/404) is a definite answer.
+    """
+    if isinstance(error, urllib.error.HTTPError):
+        result = error.code >= 500 or error.code == 429
+    else:
+        result = isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError))
+    return result
+
+
+def _api_failure_text(error):
+    if isinstance(error, urllib.error.HTTPError):
+        result = f"HTTP {error.code} {error.reason}"
+    else:
+        result = f"{type(error).__name__}: {error}"
+    return result
+
+
+def _gate_get(repository, path, token, timeout, lookups):
+    """One gate read: (response, None), or (None, transient failure); other errors raise.
+
+    Every outcome is appended to `lookups` so the retained report shows which
+    reads failed, even when a later snapshot succeeds.
+    """
+    response = None
+    failure = None
+    try:
+        response = api_get(repository, path, token, timeout=timeout)
+    except OSError as error:
+        lookups.append({"path": path, "outcome": _api_failure_text(error)})
+        if not _transient_api_failure(error):
+            raise
+        failure = error
+    else:
+        lookups.append({"path": path, "outcome": "ok"})
+    return response, failure
 
 
 def _job_steps(job):
@@ -384,19 +464,21 @@ def _job_evidence(jobs, interruptions=None):
     return evidence
 
 
-def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_request=False):
+def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_request=False, *,
+                           expected_names=COMBINATION_JOBS, complete_active=True):
     """Pure fail-closed gate for the latest jobs of this exact workflow run.
 
     A partial rerun may retain a successful job from an earlier attempt of the
     same immutable run/source. Failed historical attempts are not substituted
     for latest results, and timing cohorts still reject all reruns. A deferred
-    macOS-runner no-op counts only in a draft pull-request run's first attempt.
+    macOS-runner no-op counts only in a draft pull-request run's first attempt;
+    latest_run_jobs resolves its carried-forward copies to that record.
     """
     errors = []
     if not isinstance(jobs, list):
         return [_metadata_pending("job inventory is not a list")]
     names = [logical_job_name(job.get("name")) if isinstance(job, dict) else None for job in jobs]
-    if Counter(names) != Counter(COMBINATION_JOBS):
+    if Counter(names) != Counter(expected_names):
         errors.append(_metadata_pending("required job identities are missing, duplicated or unexpected"))
     for job in jobs:
         if not isinstance(job, dict):
@@ -412,7 +494,7 @@ def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_reque
         if base is not None and not (draft_pull_request and attempt == 1):
             errors.append(f"{name}: only the first attempt of a draft pull-request run may defer {base}; "
                           f"this run requires the {base} job itself")
-        if name == "CI complete":
+        if name == "CI complete" and complete_active:
             if attempt != run_attempt or job.get("status") != "in_progress":
                 errors.append(_metadata_pending("CI complete is not the current active attempt"))
         elif job.get("status") != "completed":
@@ -427,6 +509,9 @@ def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_reque
                 errors.append(_metadata_pending(f"{name}: completed job has no conclusion"))
             else:
                 errors.append(f"{name}: required job did not complete successfully (conclusion={conclusion!r})")
+        if _required_job_steps(name) and job.get("status") == "completed" and job.get("steps") == []:
+            # Observed on a successful job (#1984): a distinct evidence case, still no proof.
+            errors.append(_metadata_pending(f"{name}: completed job returned no step records (steps=[])"))
         for step_name in _required_job_steps(name):
             steps = job.get("steps", [])
             if not isinstance(steps, list):
@@ -448,14 +533,35 @@ def validate_required_jobs(jobs, run_id, run_attempt, head_sha, draft_pull_reque
     return sorted(set(errors))
 
 
+def _job_execution(job):
+    """The fields a carried-forward copy shares with its original: all but id and attempt."""
+    steps = job.get("steps")
+    if isinstance(steps, list):
+        steps = [tuple(step.get(key) for key in STEP_FIELDS) if isinstance(step, dict) else None for step in steps]
+    return (job.get("name"), job.get("status"), job.get("conclusion"),
+            job.get("started_at"), job.get("completed_at"), steps)
+
+
+def _carried_forward_copy(job, original):
+    """Whether job is GitHub's re-stamped copy of a completed earlier record (#2052).
+
+    "Re-run failed jobs" lists each retained success again under every later
+    attempt with a new id and run_attempt but the original timing and steps.
+    """
+    timed = all(isinstance(original.get(key), str) and original.get(key) for key in ("started_at", "completed_at"))
+    return timed and original.get("status") == "completed" and _job_execution(job) == _job_execution(original)
+
+
 def latest_run_jobs(jobs, run_id, run_attempt, head_sha):
     """Select by attempt, never by success; prior green cannot hide later red.
 
     A deferred draft no-op and its macOS job are one logical job, so a later
-    "Re-run all jobs" attempt replaces the deferral.
+    "Re-run all jobs" attempt replaces the deferral. When every later record of
+    a deferral is a carried-forward copy of its attempt-1 original, the
+    original is selected, so a "Re-run failed jobs" attempt judges the
+    deferral exactly as attempt 1 did (#2052); a deferral that ran again does not.
     """
-    latest = {}
-    seen = set()
+    records = defaultdict(dict)
     for job in jobs:
         if not isinstance(job, dict):
             raise ValueError("Malformed historical job")
@@ -465,13 +571,36 @@ def latest_run_jobs(jobs, run_id, run_attempt, head_sha):
         if job.get("run_id") != run_id or job.get("head_sha") != head_sha:
             raise ValueError("Historical job belongs to another run or source")
         logical = logical_job_name(name)
-        identity = (logical, attempt)
-        if identity in seen:
+        if attempt in records[logical]:
             raise ValueError("Duplicate job identity within one attempt")
-        seen.add(identity)
-        if logical not in latest or attempt > latest[logical]["run_attempt"]:
-            latest[logical] = job
-    return list(latest.values())
+        records[logical][attempt] = job
+    latest = []
+    for attempts in records.values():
+        selected = attempts[max(attempts)]
+        original = attempts.get(1)
+        if original is not None and deferred_base_name(original.get("name")) is not None and \
+                all(_carried_forward_copy(job, original) for attempt, job in attempts.items() if attempt > 1):
+            selected = original
+        latest.append(selected)
+    return latest
+
+
+def separate_reuse_job(jobs, run_id, run_attempt, head_sha, *, required=False):
+    """Keep the optional cheap admission out of the required job contract."""
+    decision = [job for job in jobs if job.get("name") == MAIN_REUSE_JOB]
+    errors = []
+    if len(decision) > 1 or (required and len(decision) != 1):
+        errors.append("main reuse decision is missing or ambiguous")
+    for job in decision:
+        if (job.get("run_id") != run_id or job.get("head_sha") != head_sha or
+                type(job.get("run_attempt")) is not int or
+                not 1 <= job["run_attempt"] <= run_attempt or
+                job.get("status") != "completed" or
+                job.get("conclusion") not in ("success", "skipped")):
+            errors.append("main reuse decision has invalid identity or result")
+        if required and job.get("conclusion") != "success":
+            errors.append("main reuse decision did not succeed")
+    return [job for job in jobs if job.get("name") != MAIN_REUSE_JOB], errors
 
 
 def require_jobs(args):
@@ -480,22 +609,48 @@ def require_jobs(args):
     if args.run_id <= 0 or args.run_attempt <= 0:
         raise ValueError("A positive current run ID and attempt are required")
     token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
-    run = api_get(args.repository, f"actions/runs/{args.run_id}", token)
+    # One budget covers the run read and every jobs snapshot, retries included.
+    deadline = time.monotonic() + JOB_METADATA_REFRESH_BUDGET_SECONDS
+    lookups = []
+    run = None
+    run_delays = list(JOB_METADATA_REFRESH_DELAYS_SECONDS)
+    while run is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise OSError(f"run {args.run_id} metadata unavailable: refresh budget exhausted")
+        run, failure = _gate_get(args.repository, f"actions/runs/{args.run_id}", token,
+                                 min(API_TIMEOUT_SECONDS, remaining), lookups)
+        if run is None:
+            if not run_delays or run_delays[0] >= deadline - time.monotonic():
+                raise OSError(f"run {args.run_id} metadata unavailable after {len(lookups)} reads "
+                              f"within the refresh budget: {_api_failure_text(failure)}")
+            time.sleep(run_delays.pop(0))
+    if not isinstance(run, dict):
+        raise ValueError("The API run is not an object")
     if run.get("id") != args.run_id or run.get("run_attempt") != args.run_attempt or \
             run.get("path", "").split("@", 1)[0] != ".github/workflows/ci.yml":
         raise ValueError("The API run identity does not match this CI execution")
     head_sha = run.get("head_sha")
     if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
         raise ValueError("The API run has no exact source identity")
+    checks_layout = getattr(args, "checks_layout", "combined")
+    expected_names = combination_jobs(checks_layout)
+    if checks_layout == "split" and run.get("event") != "workflow_dispatch":
+        raise ValueError("The split checks layout requires a workflow_dispatch run")
+    if checks_layout == "split" and run.get("head_branch") != SPLIT_QUALIFICATION_BRANCH:
+        raise ValueError("The split checks layout requires the exact qualification branch")
     draft = draft_pull_request_run(run, head_sha, getattr(args, "event_name", None),
                                    getattr(args, "event_path", None))
-    deadline = time.monotonic() + JOB_METADATA_REFRESH_BUDGET_SECONDS
     jobs = []
     errors = []
     snapshot_attempts = 0
+    page_size = JOB_PAGE_SIZE
     for snapshot_attempt in range(len(JOB_METADATA_REFRESH_DELAYS_SECONDS) + 1):
         snapshot_attempts = snapshot_attempt + 1
+        # Each snapshot stands alone; nothing from an earlier one is reused.
+        jobs = []
         errors = []
+        exhausted = False
         inventory = []
         total = None
         page = 1
@@ -503,10 +658,19 @@ def require_jobs(args):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 errors = [_metadata_pending("job metadata refresh budget exhausted before a complete snapshot")]
+                exhausted = True
                 break
-            batch = api_get(args.repository,
-                            f"actions/runs/{args.run_id}/jobs?filter=all&per_page=100&page={page}",
-                            token, timeout=min(API_TIMEOUT_SECONDS, remaining))
+            path = f"actions/runs/{args.run_id}/jobs?filter=all&per_page={page_size}&page={page}"
+            batch, failure = _gate_get(args.repository, path, token, min(API_TIMEOUT_SECONDS, remaining), lookups)
+            if failure is not None:
+                # Discard the partial snapshot; the refresh loop re-reads every page.
+                errors = [_metadata_pending(f"jobs page {page} (per_page={page_size}) unavailable: "
+                                            f"{_api_failure_text(failure)}")]
+                if isinstance(failure, urllib.error.HTTPError) and failure.code >= 500:
+                    page_size = JOB_PAGE_FALLBACK_SIZE
+                break
+            if not isinstance(batch, dict):
+                raise ValueError("Malformed job inventory page")
             count = batch.get("total_count")
             if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 1000 or \
                     (total is not None and count != total):
@@ -517,17 +681,22 @@ def require_jobs(args):
                 raise ValueError("Incomplete job pagination; refusing a partial inventory snapshot")
             inventory.extend(chunk)
             page += 1
-        if errors:
+        if exhausted:
             break
-        try:
-            # filter=latest can hide successful non-rerun jobs. Reconstruct each
-            # logical job from all attempts of this exact immutable run/head.
-            jobs = latest_run_jobs(inventory, args.run_id, args.run_attempt, head_sha)
-        except ValueError as error:
-            jobs = []
-            errors = [_metadata_pending(f"job-attempt inventory is inconsistent: {error}")]
-        else:
-            errors = validate_required_jobs(jobs, args.run_id, args.run_attempt, head_sha, draft)
+        if not errors:
+            try:
+                # filter=latest can hide successful non-rerun jobs. Reconstruct each
+                # logical job from all attempts of this exact immutable run/head.
+                jobs = latest_run_jobs(inventory, args.run_id, args.run_attempt, head_sha)
+            except ValueError as error:
+                jobs = []
+                errors = [_metadata_pending(f"job-attempt inventory is inconsistent: {error}")]
+            else:
+                jobs, decision_errors = separate_reuse_job(
+                    jobs, args.run_id, args.run_attempt, head_sha)
+                errors = decision_errors + validate_required_jobs(
+                    jobs, args.run_id, args.run_attempt, head_sha, draft,
+                    expected_names=expected_names)
         if not _metadata_can_refresh(errors) or snapshot_attempt >= len(JOB_METADATA_REFRESH_DELAYS_SECONDS):
             break
         delay = JOB_METADATA_REFRESH_DELAYS_SECONDS[snapshot_attempt]
@@ -549,10 +718,12 @@ def require_jobs(args):
     return {"schema": 1, "run_id": args.run_id, "run_attempt": args.run_attempt,
             "run_head_sha": head_sha, "checkout_sha": os.getenv("GITHUB_SHA", "unknown"),
             "success": not errors, "errors": errors,
+            "checks_layout": checks_layout,
             "draft_pull_request": draft, "deferred_macos_jobs": deferred,
             "job_metadata": {"snapshot_attempts": snapshot_attempts,
                              "refreshes": max(0, snapshot_attempts - 1),
-                             "refresh_budget_seconds": JOB_METADATA_REFRESH_BUDGET_SECONDS},
+                             "refresh_budget_seconds": JOB_METADATA_REFRESH_BUDGET_SECONDS,
+                             "final_page_size": page_size, "lookups": lookups},
             "jobs": _job_evidence(jobs, interruptions)}
 
 
@@ -566,12 +737,33 @@ def report_deferrals(data, summary_path, notice):
         if notice:
             print(f"::notice title=macOS lanes deferred::Draft pull request: {len(deferred)} macOS-runner "
                   f"lanes did not run ({verdict} by CI complete). They run on the first push after the pull "
-                  "request is ready, on Re-run all jobs, and always in the merge queue.")
+                  "request is ready, on Re-run all jobs, and always in the merge queue; "
+                  "Re-run failed jobs keeps them deferred.")
         if summary_path:
             lines = [f"## macOS lanes deferred for this draft pull request ({verdict})", "",
                      "These lanes did not request a macOS runner. The merge queue always runs them; "
                      "so do the first push after the pull request is ready and Re-run all jobs.", ""]
             lines += [f"- {name}" for name in deferred]
+            with open(summary_path, "a", encoding="utf-8") as summary:
+                summary.write("\n".join(lines) + "\n\n")
+
+
+def report_gate_failure(data, summary_path):
+    """Print an unsuccessful require-jobs verdict; the JSON artifact alone left failures silent (#1984)."""
+    if not data.get("success"):
+        metadata = data.get("job_metadata") or {}
+        failed_reads = sum(1 for lookup in metadata.get("lookups") or [] if lookup.get("outcome") != "ok")
+        heading = (f"CI complete inventory gate unsuccessful: run {data.get('run_id')} attempt "
+                   f"{data.get('run_attempt')} head {data.get('run_head_sha')}; "
+                   f"{metadata.get('snapshot_attempts')} snapshots, {metadata.get('refreshes')} refreshes, "
+                   f"{failed_reads} failed API reads")
+        errors = data.get("errors") or []
+        print(heading, file=sys.stderr)
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
+        if summary_path:
+            lines = ["## CI complete inventory gate unsuccessful", "", heading.split(": ", 1)[1], ""]
+            lines += [f"- `{error}`" for error in errors]
             with open(summary_path, "a", encoding="utf-8") as summary:
                 summary.write("\n".join(lines) + "\n\n")
 
@@ -927,6 +1119,7 @@ def main():
     gate.add_argument("--run-attempt", type=int, default=os.getenv("GITHUB_RUN_ATTEMPT", "0"))
     gate.add_argument("--event-name", default=os.getenv("GITHUB_EVENT_NAME"))
     gate.add_argument("--event-path", default=os.getenv("GITHUB_EVENT_PATH"))
+    gate.add_argument("--checks-layout", choices=("combined", "split"), default="combined")
     gate.add_argument("--output")
     report = sub.add_parser("summarize")
     report.add_argument("input")
@@ -951,6 +1144,7 @@ def main():
             status = 0 if data["success"] else 1
             # Workflow commands share stdout with the JSON unless --output is set.
             report_deferrals(data, os.getenv("GITHUB_STEP_SUMMARY"), notice=bool(args.output))
+            report_gate_failure(data, os.getenv("GITHUB_STEP_SUMMARY"))
         elif args.command == "queue-collect":
             data = queue_collect(args)
         elif args.command == "queue-summarize":

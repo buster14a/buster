@@ -29,6 +29,7 @@
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   bench_service_recipe                        fixed validate-buster service recipe
+//   bench_service_zen5_*                        served zen5-calibration-v1 recipe (tools/bench_service/zen5_recipe.c)
 //   bench_service_broker_add                    Linux broker, static entry/payload gates and regression probes
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
@@ -38,6 +39,10 @@
 //   process_arguments, main                      command dispatch
 
 #define BUSTER_UNITY_BUILD 1
+// The allocation-census harness builds this driver with
+// BUSTER_BENCH_ALLOCATIONS=1, but the work ledger's storage lives in the
+// compiler's ir.c, which the driver does not include (work_ledger.h).
+#define BUSTER_WORK_LEDGER 0
 // TCC's bootstrap headers/atomics retain the serial fallback. Hosted Clang
 // drivers can opt into the existing lane gang with test_differential --jobs.
 #if defined(__TINYC__) && !defined(BUSTER_SINGLE_THREADED)
@@ -88,6 +93,9 @@ typedef enum BuildCommand
     BUILD_COMMAND_BENCH_SERVICE_BROKER,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
+    BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE,
+    BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE,
+    BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
     BUILD_COMMAND_PRODUCTION_PROFILE,
@@ -1512,7 +1520,8 @@ BUSTER_GLOBAL_LOCAL void make_directory_recursive(Arena* arena, String8 path)
             if (i > start)
             {
                 String8 part = string_duplicate_arena(arena, string_slice(path, 0, i), true);
-                os_make_directory(part);
+                OsDirectoryCreateResult directory = os_make_directory(part);
+                BUSTER_CHECK(!directory.error.v && (directory.created || directory.existing_directory));
             }
         }
     }
@@ -23095,17 +23104,39 @@ BUSTER_GLOBAL_LOCAL String8 matrix_coverage_shard_current(void)
 }
 BUSTER_GLOBAL_LOCAL bool matrix_coverage_shard_valid(String8 shard)
 {
-    bool result = string_equal(shard, S8("combinations")) || string_equal(shard, S8("release")) || string_equal(shard, S8("checks"));
+    bool result = string_equal(shard, S8("combinations")) || string_equal(shard, S8("release")) || string_equal(shard, S8("checks")) ||
+                  string_equal(shard, S8("sanitized-debug")) || string_equal(shard, S8("sanitized-release")) || string_equal(shard, S8("portability"));
     return result;
 }
 BUSTER_GLOBAL_LOCAL String8 matrix_coverage_row_shard(MatrixCoverageRow row)
 {
-    String8 result = row.compiler == BUILD_COMPILER_CLANG && !row.sanitize && row.optimize ? S8("release") : S8("checks");
+    String8 result = S8("portability");
+    if (row.compiler == BUILD_COMPILER_CLANG)
+    {
+        result = row.sanitize ? (row.optimize ? S8("sanitized-release") : S8("sanitized-debug")) :
+                               (row.optimize ? S8("release") : S8("portability"));
+    }
     return result;
 }
 BUSTER_GLOBAL_LOCAL bool matrix_coverage_row_selected(MatrixCoverageRow row, String8 shard)
 {
-    bool result = string_equal(shard, S8("combinations")) || string_equal(shard, matrix_coverage_row_shard(row));
+    String8 owner = matrix_coverage_row_shard(row);
+    bool result = string_equal(shard, S8("combinations")) || string_equal(shard, owner) ||
+                  (string_equal(shard, S8("checks")) && !string_equal(owner, S8("release")));
+    return result;
+}
+BUSTER_GLOBAL_LOCAL String8 matrix_coverage_test_admission_current(void)
+{
+    String8 result = os_get_environment_variable(S8("BUSTER_MATRIX_TEST_ADMISSION"));
+    if (!result.length) { result = S8("overlap"); }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL bool matrix_coverage_test_admission_valid(String8 shard)
+{
+    String8 admission = matrix_coverage_test_admission_current();
+    bool result = string_equal(admission, S8("overlap")) ||
+                  (string_equal(admission, S8("all-builds")) && BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64 &&
+                   string_equal(shard, S8("checks")) && !environment_flag_is_on(S8("BUSTER_MATRIX_DIRECT")));
     return result;
 }
 BUSTER_GLOBAL_LOCAL u32 matrix_coverage_selected_count(MatrixCoveragePlan* plan, String8 shard)
@@ -23439,7 +23470,10 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_partition_validate(MatrixCoveragePlan* 
         String8 owner = matrix_coverage_row_shard(plan->rows[tree.row_indices[0]]);
         for (u32 row_i = 0; row_i < tree.row_count; row_i += 1)
         {
-            result = result && string_equal(owner, matrix_coverage_row_shard(plan->rows[tree.row_indices[row_i]]));
+            String8 next_owner = matrix_coverage_row_shard(plan->rows[tree.row_indices[row_i]]);
+            // Apple multi-config sanitizer trees are retained in grouped checks.
+            bool same_group = !string_equal(owner, S8("release")) && !string_equal(next_owner, S8("release"));
+            result = result && (string_equal(owner, next_owner) || (tree.sanitize && tree.optimize_count == 2 && same_group));
         }
     }
     return result;
@@ -23486,7 +23520,7 @@ BUSTER_GLOBAL_LOCAL MatrixCoverageObligations matrix_coverage_obligations_for_la
     result.table_audit_state = has_unity ? S8("scheduled") : S8("not-applicable");
     result.table_audit_reason = has_unity ? (direct_matrix ? S8("direct-matrix-default-audit") : S8("canonical-superbuild-tree")) :
                                         S8("no-canonical-clang-release");
-    if (string_equal(shard, S8("checks")))
+    if (!string_equal(shard, S8("release")) && !string_equal(shard, S8("combinations")))
     {
         String8 reason = S8("owned-by-release-shard");
         result.self_host_reason = reason;
@@ -24005,7 +24039,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_coverage_manifest_write(Arena* arena, MatrixCove
     String8 phase = complete ? S8("complete") : S8("planned");
     string8_list_push(arena, &lines, S8("{"));
     string8_list_push(arena, &lines, S8("  \"schema\": 1,"));
-    string8_list_push(arena, &lines, S8("  \"partition_version\": 1,"));
+    string8_list_push(arena, &lines, S8("  \"partition_version\": 2,"));
     string8_list_push(arena, &lines, string_format(arena, S8("  \"kind\": {S8},"), matrix_coverage_json_escape(arena, S8("desktop-matrix-coverage"))));
     string8_list_push(arena, &lines, S8("  \"hash_algorithm\": \"sha256\","));
     string8_list_push(arena, &lines, string_format(arena, S8("  \"mode\": {S8},"), matrix_coverage_json_escape(arena, manifest->mode)));
@@ -24688,6 +24722,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_BUILD_DRIVER [==[{S8}]==])\n"), build_driver));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_TREE_COUNT {u32})\n"), tree_count));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_OUTER_JOBS {u32})\n"), outer_jobs));
+    string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_TEST_ADMISSION {S8})\n"), matrix_coverage_test_admission_current()));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_VERBOSE {S8})\n"), verbose ? S8("ON") : S8("OFF")));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_QUIET {S8})\n"), quiet ? S8("ON") : S8("OFF")));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_ENABLED {u32})\n"), self_host.enabled));
@@ -24847,7 +24882,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Ar
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     String8 shard = matrix_coverage_shard_current();
-    bool owns_preflight = !string_equal(shard, S8("checks"));
+    bool owns_preflight = string_equal(shard, S8("release")) || string_equal(shard, S8("combinations"));
     if (!matrix_coverage_ci_table_audit_override_allowed(ci, os_get_environment_variable(S8("BUSTER_TEST_TABLE_AUDITS"))))
     {
         // Direct matrix trees inherit the process environment instead of the
@@ -36636,6 +36671,15 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     // Resolve before opening the arena-backed argument builder: lookup also
     // allocates. Windows CreateProcess does not search PATH for this argument.
     String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
+    String8 test_root = service ? S8("build/bench-service-tests") : (sanitize ? S8("build/throughput-tool-tests-sanitized") : S8("build/throughput-tool-tests"));
+    // Throughput fixtures write fixed paths that the tool refuses to reuse
+    // (admit-workload rejects an existing --output), so a rerun over the
+    // previous root fails. Clear the driver-owned root before the argument
+    // builder opens: the removal allocates from the same arena.
+    if (self_test && !service)
+    {
+        remove_path_recursive(arena, test_root);
+    }
     ProcessRun* compile = run_add(arena, step_add(arena));
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, compiler);
@@ -36679,7 +36723,7 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     os_argument_builder_append(&builder, executable);
     if (self_test)
     {
-        os_argument_builder_append(&builder, service ? S8("build/bench-service-tests") : (sanitize ? S8("build/throughput-tool-tests-sanitized") : S8("build/throughput-tool-tests")));
+        os_argument_builder_append(&builder, test_root);
 #if BUSTER_LINUX
         if (service)
         {
@@ -39304,6 +39348,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
     return result;
 }
 
+#include "tools/bench_service/zen5_recipe.c"
+
 #if BUSTER_LINUX
 typedef struct BenchServiceRecipeTestFixture BenchServiceRecipeTestFixture;
 struct BenchServiceRecipeTestFixture
@@ -40234,6 +40280,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Ar
 }
 #endif
 
+#include "tools/bench_service/zen5_recipe_test.c"
+
 BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
 {
     native_foundation_tool_add(arena, arguments, true);
@@ -40519,6 +40567,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_BENCH_SERVICE_BROKER] = S8_INITIALIZER("bench_service_broker"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE] = S8_INITIALIZER("bench_service_recipe"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
+        [BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE] = S8_INITIALIZER("bench_service_zen5_recipe"),
+        [BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE] = S8_INITIALIZER("bench_service_zen5_capture"),
+        [BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_zen5_recipe_self_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
         [BUILD_COMMAND_PRODUCTION_PROFILE] = S8_INITIALIZER("production_profile"),
@@ -40675,6 +40726,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_BROKER ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST || command == BUILD_COMMAND_BENCH_THROUGHPUT ||
+            command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE || command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE ||
+            command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST ||
             command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
         {
             string8_list_push(arena, &throughput_arguments, argument);
@@ -41556,10 +41609,26 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     String8 matrix_shard = matrix_coverage_shard_current();
     if (result == PROCESS_RESULT_SUCCESS && combination_matrix && !matrix_coverage_shard_valid(matrix_shard))
     {
-        string_print(S8("error: BUSTER_MATRIX_SHARD must be all, release or checks\n"));
+        string_print(S8("error: BUSTER_MATRIX_SHARD must be all, release, checks, sanitized-debug, sanitized-release or portability\n"));
         result = PROCESS_RESULT_FAILED;
     }
-    if (result == PROCESS_RESULT_SUCCESS && combination_matrix && !string_equal(matrix_shard, S8("checks")))
+    if (result == PROCESS_RESULT_SUCCESS && combination_matrix)
+    {
+        MatrixCoverageTarget target = matrix_coverage_target_current();
+        MatrixCoverageLane lane = {.suite = S8("desktop"), .shard = matrix_shard, .platform = target.platform, .architecture = target.architecture};
+        MatrixCoveragePlan plan = {0};
+        bool selected = matrix_coverage_plan_build_for_target(arena, &plan, lane, target) &&
+                        matrix_coverage_selected_count(&plan, matrix_shard) > 0;
+        bool shared_sanitizer = target.apple && (string_equal(matrix_shard, S8("sanitized-debug")) ||
+                                                string_equal(matrix_shard, S8("sanitized-release")));
+        if (!selected || shared_sanitizer || !matrix_coverage_test_admission_valid(matrix_shard))
+        {
+            string_print(S8("error: matrix selector or test admission is unavailable for this host; Apple sanitizer trees require grouped checks\n"));
+            result = PROCESS_RESULT_FAILED;
+        }
+    }
+    if (result == PROCESS_RESULT_SUCCESS && combination_matrix &&
+        (string_equal(matrix_shard, S8("release")) || string_equal(matrix_shard, S8("combinations"))))
     {
         result = build_compiler_discovery_self_test(arena);
     }
@@ -41626,6 +41695,21 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             result = recipe_self_test_arguments.length ?
                      bench_service_recipe_materialized_self_test(arena, recipe_self_test_arguments) :
                      bench_service_recipe_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE:
+        {
+            result = bench_service_zen5_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE:
+        {
+            result = bench_service_zen5_capture_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST:
+        {
+            result = bench_service_zen5_recipe_self_test(arena, string8_list_to_slice(arena, throughput_arguments));
         }
         break;
         case BUILD_COMMAND_BENCH_THROUGHPUT:

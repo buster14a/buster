@@ -121,6 +121,11 @@ struct CompilerDriverInvocation
     // API-only opt-out from retaining structured records. Legacy diagnostic
     // text and warnings remain available; clean compilation allocates neither.
     bool suppress_diagnostic_records;
+    // API opt-out from summing preprocessed.bytes, which only the `-v` source
+    // report and the source-metrics file read. The field is then zero; every
+    // other preprocessed count is still gathered. The cc command sets it when
+    // it prints neither report.
+    bool omit_spelled_bytes;
     // Opt-in, checked token / canonical IR / selected MIR evidence.
     String8 bootstrap_trace_prefix;
     String8 gpu_architecture;
@@ -134,6 +139,7 @@ struct CompilerDriverInvocation
     GpuToolchain gpu_tools;
     GpuTarget gpu_target;
     Target target;
+    TargetPlainCharPolicy plain_char_policy;
     u32 input_count;
     // Zero when input_languages is null; otherwise exactly input_count.
     u32 input_language_count;
@@ -188,6 +194,7 @@ struct CompilerDriverInvocation
     bool has_gpu_target;
     bool save_gpu_temporaries;
     bool register_allocator_explicit;
+    bool plain_char_policy_explicit;
     // -fno-machine-fallback: fail native C compilation before writing its
     // object if any function needed the canonical differential oracle.
     bool reject_machine_fallback;

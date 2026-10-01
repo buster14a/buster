@@ -1,0 +1,354 @@
+{
+  "source_revision": "f8c7ad49492ae210d6e43f5e69a372dbd970fa39",
+  "workflow_run": 36766644711,
+  "job": 110062372148,
+  "modules": [
+    {
+      "module": "byte_writer_tests",
+      "passed": 484,
+      "failed": 0,
+      "assertions": 484
+    },
+    {
+      "module": "arena_tests",
+      "passed": 122,
+      "failed": 0,
+      "assertions": 122
+    },
+    {
+      "module": "integer_tests",
+      "passed": 1526605,
+      "failed": 0,
+      "assertions": 1526605
+    },
+    {
+      "module": "sanitizer_tests",
+      "passed": 1,
+      "failed": 0,
+      "assertions": 1
+    },
+    {
+      "module": "hash_tests",
+      "passed": 705,
+      "failed": 0,
+      "assertions": 705
+    },
+    {
+      "module": "simd_tests",
+      "passed": 157,
+      "failed": 0,
+      "assertions": 157
+    },
+    {
+      "module": "string_tests",
+      "passed": 161607,
+      "failed": 0,
+      "assertions": 161607
+    },
+    {
+      "module": "os_tests",
+      "passed": 1032,
+      "failed": 0,
+      "assertions": 1032
+    },
+    {
+      "module": "file_tests",
+      "passed": 807,
+      "failed": 0,
+      "assertions": 807
+    },
+    {
+      "module": "target_tests",
+      "passed": 6596,
+      "failed": 0,
+      "assertions": 6596
+    },
+    {
+      "module": "truetype_tests",
+      "passed": 65,
+      "failed": 0,
+      "assertions": 65
+    },
+    {
+      "module": "c_frontend_tests",
+      "passed": 1062297,
+      "failed": 0,
+      "assertions": 1062297
+    },
+    {
+      "module": "c_once_tests",
+      "passed": 47431,
+      "failed": 0,
+      "assertions": 47431
+    },
+    {
+      "module": "c_type_layout_tests",
+      "passed": 171,
+      "failed": 0,
+      "assertions": 171
+    },
+    {
+      "module": "c_macro_conditional_tests",
+      "passed": 657,
+      "failed": 0,
+      "assertions": 657
+    },
+    {
+      "module": "record_layout_tests",
+      "passed": 47,
+      "failed": 0,
+      "assertions": 47
+    },
+    {
+      "module": "metamorphic_tests",
+      "passed": 116,
+      "failed": 0,
+      "assertions": 116
+    },
+    {
+      "module": "aarch64_encoding_tests",
+      "passed": 236732,
+      "failed": 0,
+      "assertions": 236732
+    },
+    {
+      "module": "aarch64_exact_bridge_tests",
+      "passed": 102,
+      "failed": 0,
+      "assertions": 102
+    },
+    {
+      "module": "aarch64_control_semantics_tests",
+      "passed": 3377,
+      "failed": 0,
+      "assertions": 3377
+    },
+    {
+      "module": "aarch64_system_registers_tests",
+      "passed": 108,
+      "failed": 0,
+      "assertions": 108
+    },
+    {
+      "module": "aarch64_semantics_tests",
+      "passed": 215,
+      "failed": 0,
+      "assertions": 215
+    },
+    {
+      "module": "aarch64_system_semantics_tests",
+      "passed": 694,
+      "failed": 0,
+      "assertions": 694
+    },
+    {
+      "module": "aarch64_syntax_tests",
+      "passed": 112,
+      "failed": 0,
+      "assertions": 112
+    },
+    {
+      "module": "aarch64_semantic_vm_tests",
+      "passed": 90,
+      "failed": 0,
+      "assertions": 90
+    },
+    {
+      "module": "aarch64_direct_simd_tests",
+      "passed": 152,
+      "failed": 0,
+      "assertions": 152
+    },
+    {
+      "module": "aarch64_complex_simd_tests",
+      "passed": 32,
+      "failed": 0,
+      "assertions": 32
+    },
+    {
+      "module": "aarch64_memory_semantics_tests",
+      "passed": 18,
+      "failed": 0,
+      "assertions": 18
+    },
+    {
+      "module": "aarch64_alias_projection_tests",
+      "passed": 28,
+      "failed": 0,
+      "assertions": 28
+    },
+    {
+      "module": "assembly_tests",
+      "passed": 6189,
+      "failed": 0,
+      "assertions": 6189
+    },
+    {
+      "module": "x86_64_forwarding_tests",
+      "passed": 13113,
+      "failed": 0,
+      "assertions": 13113
+    },
+    {
+      "module": "x86_64_metadata_tests",
+      "passed": 1619,
+      "failed": 0,
+      "assertions": 1619
+    },
+    {
+      "module": "x86_64_tls_tests",
+      "passed": 294552,
+      "failed": 0,
+      "assertions": 294552
+    },
+    {
+      "module": "executable_padding_tests",
+      "passed": 33062,
+      "failed": 0,
+      "assertions": 33062
+    },
+    {
+      "module": "x86_64_got_tests",
+      "passed": 156385,
+      "failed": 0,
+      "assertions": 156385
+    },
+    {
+      "module": "x86_64_completion_census_tests",
+      "passed": 34046,
+      "failed": 0,
+      "assertions": 34046
+    },
+    {
+      "module": "ir_tests",
+      "passed": 351156,
+      "failed": 0,
+      "assertions": 351156
+    },
+    {
+      "module": "vector_contract_tests",
+      "passed": 3376,
+      "failed": 0,
+      "assertions": 3376
+    },
+    {
+      "module": "llvm_bitcode_tests",
+      "passed": 900,
+      "failed": 0,
+      "assertions": 900
+    },
+    {
+      "module": "machine_selection_tests",
+      "passed": 631,
+      "failed": 0,
+      "assertions": 631
+    },
+    {
+      "module": "machine_tests",
+      "passed": 516333,
+      "failed": 0,
+      "assertions": 516333
+    },
+    {
+      "module": "codegen_tests",
+      "passed": 7018,
+      "failed": 0,
+      "assertions": 7018
+    },
+    {
+      "module": "aarch64_stride_tests",
+      "passed": 98,
+      "failed": 0,
+      "assertions": 98
+    },
+    {
+      "module": "debug_model_tests",
+      "passed": 716,
+      "failed": 0,
+      "assertions": 716
+    },
+    {
+      "module": "dwarf_tests",
+      "passed": 110,
+      "failed": 0,
+      "assertions": 110
+    },
+    {
+      "module": "codeview_tests",
+      "passed": 46748,
+      "failed": 0,
+      "assertions": 46748
+    },
+    {
+      "module": "pdb_tests",
+      "passed": 24848,
+      "failed": 0,
+      "assertions": 24848
+    },
+    {
+      "module": "object_tests",
+      "passed": 122053,
+      "failed": 0,
+      "assertions": 122053
+    },
+    {
+      "module": "jit_tests",
+      "passed": 149,
+      "failed": 0,
+      "assertions": 149
+    },
+    {
+      "module": "link_tests",
+      "passed": 147073,
+      "failed": 0,
+      "assertions": 147073
+    },
+    {
+      "module": "gpu_pipeline_tests",
+      "passed": 231,
+      "failed": 0,
+      "assertions": 231
+    },
+    {
+      "module": "compiler_diagnostic_tests",
+      "passed": 539,
+      "failed": 0,
+      "assertions": 539
+    },
+    {
+      "module": "compiler_driver_tests",
+      "passed": 46102,
+      "failed": 0,
+      "assertions": 46102
+    },
+    {
+      "module": "compiler_driver_object_path_tests",
+      "passed": 39,
+      "failed": 0,
+      "assertions": 39
+    },
+    {
+      "module": "x86_64_tests",
+      "passed": 18,
+      "failed": 0,
+      "assertions": 18
+    }
+  ],
+  "passed": 4857664,
+  "failed": 0,
+  "self_host": {
+    "self-host-baseline.log": [
+      "SELF_HOST fixed_point bytes=47031224 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2"
+    ],
+    "self-host-candidate.log": [
+      "SELF_HOST fixed_point bytes=47037128 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2"
+    ]
+  },
+  "log_sha256": {
+    "test-all.log": "2bed9fb5198b49e4dd5e46dd23b1114826fe5c401471fe9d67f969c7ce5b2006",
+    "self-host-baseline.log": "f995f812a4fdc4b3a074022b6956c0f5a3be9dd9bb0daf1eebabe55e515120f5",
+    "self-host-candidate.log": "18ca5b11f649419187cbe022012e8cc6da2e98f285904c3cdfa7acc862a9b7cb",
+    "mode-matrix.log": "111376426ec7fbd24b6d5613c6af4bc86936312cc497c5bf8ad27b187cdf38fa",
+    "source-size.log": "f348b1b2ecc8b20129d2d0267e7c846ceac07fd067eb1a46a113b6152bbb52fe"
+  }
+}

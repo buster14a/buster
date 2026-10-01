@@ -99,6 +99,95 @@ class PhaseValidationTests(unittest.TestCase):
         self.assertFalse(first["predictions"]["acceptance"])
         self.assertEqual(first, self.check())
 
+    def test_absent_admission_preserves_overlap_and_explicit_policy(self):
+        self.assertEqual(self.check()["test_admission"], "overlap")
+        self.mutate("plan.json", lambda p: p.update(test_admission="overlap"))
+        self.assertEqual(self.check()["test_admission"], "overlap")
+
+    def test_unknown_admission_policy_fails_closed(self):
+        for policy in ("weighted", "", None, False, ["all-builds"]):
+            with self.subTest(policy=policy):
+                self.mutate("plan.json", lambda p: p.update(test_admission=policy))
+                with self.assertRaisesRegex(ValueError, "unknown test admission"):
+                    self.check()
+
+    def test_admission_policy_matches_explicit_current_job(self):
+        self.assertTrue(phases.analyze(self.root, self.coverage, {"BUSTER_MATRIX_TEST_ADMISSION": ""})["complete"])
+        self.assertTrue(phases.analyze(self.root, self.coverage, {"BUSTER_MATRIX_TEST_ADMISSION": "overlap"})["complete"])
+        with self.assertRaisesRegex(ValueError, "current job mismatch: test admission"):
+            phases.analyze(self.root, self.coverage, {"BUSTER_MATRIX_TEST_ADMISSION": "all-builds"})
+        self.mutate("plan.json", lambda p: p.update(test_admission="all-builds"))
+        self.assertTrue(phases.analyze(self.root, self.coverage, {"BUSTER_MATRIX_TEST_ADMISSION": "all-builds"})["complete"])
+        with self.assertRaisesRegex(ValueError, "current job mismatch: test admission"):
+            phases.analyze(self.root, self.coverage, {"BUSTER_MATRIX_TEST_ADMISSION": "overlap"})
+
+    def test_all_builds_admission_is_windows_grouped_checks_only(self):
+        plan = phases.read(self.root / "plan.json")
+        plan["test_admission"] = "all-builds"
+        for key, value in (("platform", "linux"), ("architecture", "aarch64"), ("shard", "release"),
+                           ("shard", "sanitized-debug"), ("shard", "sanitized-release"), ("shard", "portability")):
+            with self.subTest(key=key, value=value):
+                candidate, coverage = copy.deepcopy(plan), copy.deepcopy(self.coverage)
+                candidate["identity"][key] = coverage["identity"][key] = value
+                with self.assertRaisesRegex(ValueError, "only valid for pooled Windows"):
+                    phases.validate_plan(candidate, coverage, {})
+        plan["scheduler"] = "direct"
+        with self.assertRaisesRegex(ValueError, "only valid for pooled Windows"):
+            phases.validate_plan(plan, self.coverage, {})
+
+    def test_all_builds_admission_waits_for_compile_only_tree(self):
+        self.mutate("plan.json", lambda p: p.update(test_admission="all-builds"))
+        report = self.check()
+        enqueue = next(e for e in report["timeline"] if e["task"] == phases.task_id("tree0", "validation", "Debug") and e["event"] == "enqueue")
+        self.assertEqual(enqueue["time_us"], 180)
+        self.mutate("tree0-validation-Debug.*.start.json", lambda v: v.update(start_us=179))
+        self.mutate("tree0-validation-Debug.*.end.json", lambda v: v.update(start_us=179, child_start_us=179))
+        with self.assertRaisesRegex(ValueError, "dependency overlap"):
+            self.check()
+
+    def test_all_builds_admission_retains_serialized_test_dependency(self):
+        self.mutate("plan.json", lambda p: p.update(test_admission="all-builds"))
+        self.chain(phases.task_id("tree0", "validation", "Debug"))
+        report = self.check()
+        enqueue = next(e for e in report["timeline"] if e["task"] == phases.task_id("tree1", "validation", "Release") and e["event"] == "enqueue")
+        self.assertEqual(enqueue["time_us"], 210)
+        self.assertEqual(report["predictions"]["current_model_us"], 210)
+
+    def test_grouped_checks_and_separate_shards_join_same_rows(self):
+        plan = phases.read(self.root / "plan.json")
+        for row in self.coverage["expected"]:
+            row["owner_shard"] = ("sanitized-debug" if row["configuration"] == "Debug" else "sanitized-release") if row["compiler"] == "clang" else "portability"
+        self.assertEqual(len(phases.validate_plan(plan, self.coverage, {})[0]), 5)
+        for shard, count in (("sanitized-debug", 1), ("sanitized-release", 1), ("portability", 3)):
+            with self.subTest(shard=shard):
+                candidate, coverage = copy.deepcopy(plan), copy.deepcopy(self.coverage)
+                candidate["identity"]["shard"] = coverage["identity"]["shard"] = shard
+                rows = {row["id"] for row in coverage["expected"] if row["owner_shard"] == shard}
+                candidate["trees"] = [tree for tree in candidate["trees"] if set(tree["rows"]) <= rows]
+                trees = {tree["id"] for tree in candidate["trees"]}
+                candidate["tasks"] = [task for task in candidate["tasks"] if task["tree"] in trees or task["tree"] == "matrix"]
+                candidate["outer_jobs"] = count
+                self.assertEqual(len(phases.validate_plan(candidate, coverage, {})[0]), count)
+                candidate["trees"].pop()
+                with self.assertRaisesRegex(ValueError, "uniquely owned/exhaustive|invalid tree/task cardinality"):
+                    phases.validate_plan(candidate, coverage, {})
+
+    def test_unknown_desktop_shard_fails_closed(self):
+        self.mutate("plan.json", lambda p: p["identity"].update(shard="checks-unknown"))
+        self.coverage["identity"]["shard"] = "checks-unknown"
+        with self.assertRaisesRegex(ValueError, "unknown desktop shard"):
+            self.check()
+
+    def test_apple_sanitizer_shards_keep_shared_tree(self):
+        plan = phases.read(self.root / "plan.json")
+        for shard in ("sanitized-debug", "sanitized-release"):
+            with self.subTest(shard=shard):
+                candidate, coverage = copy.deepcopy(plan), copy.deepcopy(self.coverage)
+                candidate["identity"].update(platform="macos", shard=shard)
+                coverage["identity"].update(platform="macos", shard=shard)
+                with self.assertRaisesRegex(ValueError, "Apple sanitizer trees require grouped checks"):
+                    phases.validate_plan(candidate, coverage, {})
+
     def test_direct_and_pooled_same_phase_schema(self):
         pooled = self.check()
         with tempfile.TemporaryDirectory() as temp:
@@ -232,6 +321,7 @@ class PhaseValidationTests(unittest.TestCase):
         report = self.check()
         event = next(e for e in report["timeline"] if e["task"] == phases.task_id("tree1", "validation", "Release") and e["event"] == "enqueue")
         self.assertEqual(event["time_us"], 210)
+        self.assertEqual(report["predictions"]["current_model_us"], 160)
         def early(value):
             value["start_us"] = value["child_start_us"] = 205
         self.mutate("tree1-validation-Release.*.start.json", lambda v: v.update(start_us=205))
@@ -283,12 +373,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
 {
     bool direct = environment_flag_is_on(S8("BUSTER_PHASE_FIXTURE_DIRECT"));
     bool checks = environment_flag_is_on(S8("BUSTER_PHASE_FIXTURE_CHECKS"));
+    String8 shard = os_get_environment_variable(S8("BUSTER_PHASE_FIXTURE_SHARD"));
+    if (!shard.length) { shard = checks ? S8("checks") : S8("release"); }
+    checks = !string_equal(shard, S8("release"));
     bool linux_fixture = environment_flag_is_on(S8("BUSTER_PHASE_FIXTURE_LINUX"));
     MatrixCoverageTarget target = {.platform = direct ? S8("macos") : S8("windows"), .architecture = S8("x86_64"),
                                     .windows = !direct, .apple = direct};
     if (linux_fixture) { target.platform = S8("linux"); target.windows = 0; }
     MatrixCoverageManifest coverage = {0};
-    coverage.lane = matrix_coverage_lane_create(arena, checks ? S8("checks") : S8("release"));
+    coverage.lane = matrix_coverage_lane_create(arena, shard);
     coverage.lane.platform = target.platform;
     coverage.lane.architecture = target.architecture;
     coverage.mode = S8("phase-plan-fixture");
@@ -472,6 +565,55 @@ class NativeObserverTests(unittest.TestCase):
                 self.assertLessEqual(callback["start_us"], callback["end_us"])
                 if not direct:
                     self.assertIn("matrix_phase_run", (root / "matrix.cmake").read_text())
+
+    def test_real_separate_checks_shard_serializers(self):
+        for linux_fixture in (False, True):
+            for shard, count in (("sanitized-debug", 1), ("sanitized-release", 1), ("portability", 2 if linux_fixture else 3)):
+                with self.subTest(linux=linux_fixture, shard=shard):
+                    root = Path(tempfile.mkdtemp(dir=self.root))
+                    env = dict(os.environ, BUSTER_MATRIX_PHASE_OUTPUT=str(root), BUSTER_PHASE_FIXTURE_DIRECT="0",
+                               BUSTER_PHASE_FIXTURE_SHARD=shard, BUSTER_PHASE_FIXTURE_LINUX=str(int(linux_fixture)),
+                               BUSTER_MATRIX_THREADS="4", BUSTER_MATRIX_TEST_ADMISSION="overlap", GITHUB_SHA="a" * 40)
+                    subprocess.run([str(self.driver), "coverage_manifest_self_test"], cwd=ROOT, env=env, check=True, capture_output=True, timeout=30)
+                    plan = phases.read(root / "plan.json")
+                    coverage = phases.read(root / "coverage.json")
+                    trees, tasks = phases.validate_plan(plan, coverage, env)
+                    self.assertEqual(plan["identity"]["shard"], shard)
+                    self.assertEqual(len(trees), count)
+                    validations = [task for task in tasks.values() if task["phase"] == "validation"]
+                    self.assertEqual(len(validations), 0 if shard == "portability" else 1)
+                    if validations:
+                        self.assertEqual(validations[0]["inner_jobs"], 4)
+
+    def test_real_admission_manifests_and_ninja_dependencies(self):
+        for admission in ("overlap", "all-builds"):
+            with self.subTest(admission=admission):
+                root = Path(tempfile.mkdtemp(dir=self.root))
+                env = dict(os.environ, BUSTER_MATRIX_PHASE_OUTPUT=str(root), BUSTER_PHASE_FIXTURE_DIRECT="0",
+                           BUSTER_PHASE_FIXTURE_CHECKS="1", BUSTER_PHASE_FIXTURE_LINUX="0",
+                           BUSTER_MATRIX_THREADS="4", BUSTER_MATRIX_TEST_ADMISSION=admission, GITHUB_SHA="a" * 40)
+                subprocess.run([str(self.driver), "coverage_manifest_self_test"], cwd=ROOT, env=env, check=True, capture_output=True, timeout=30)
+                plan = phases.read(root / "plan.json")
+                coverage = phases.read(root / "coverage.json")
+                trees, tasks = phases.validate_plan(plan, coverage, env)
+                self.assertEqual(plan["test_admission"], admission)
+                manifest = root / "matrix.cmake"
+                self.assertIn("BUSTER_SUPERBUILD_TEST_ADMISSION", manifest.read_text())
+                graph = root / "graph"
+                subprocess.run(["cmake", "-S", str(ROOT / "cmake/superbuild"), "-B", str(graph), "-G", "Ninja",
+                                f"-DBUSTER_SUPERBUILD_MATRIX_FILE={manifest}"], cwd=ROOT, check=True, capture_output=True, timeout=30)
+                tests = [task for task in tasks.values() if task["phase"] == "validation"]
+                self.assertEqual(len(tests), 2)
+                previous = None
+                for task in tests:
+                    index = task["tree"].removeprefix("tree")
+                    target = "buster_test_" + index
+                    query = subprocess.check_output(["ninja", "-C", str(graph), "-t", "query", target], cwd=ROOT, text=True, timeout=30)
+                    names = {line.strip() for line in query.splitlines()}
+                    self.assertEqual("buster_compile" in names, admission == "all-builds")
+                    if previous:
+                        self.assertIn(previous, names)
+                    previous = target
 
     def test_real_success_failure_and_exit_word(self):
         success, record = self.worker("pass")

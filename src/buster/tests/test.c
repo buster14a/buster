@@ -77,6 +77,7 @@
 #include <buster/tests/file_test.h>
 #include <buster/tests/target_test.h>
 #include <buster/tests/truetype_test.h>
+#include <buster/tests/image_test.h>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.h>
 #include <buster/tests/compiler/frontend/c/c_test.h>
 #include <buster/tests/compiler/frontend/c/once_test.h>
@@ -138,6 +139,7 @@
 #include <buster/tests/file_test.c>
 #include <buster/tests/target_test.c>
 #include <buster/tests/truetype_test.c>
+#include <buster/tests/image_test.c>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.c>
 #include <buster/tests/compiler/frontend/c/c_test.c>
 #include <buster/tests/compiler/frontend/c/once_test.c>
@@ -838,6 +840,7 @@ typedef enum TestId
     TEST_ID_FILE,
     TEST_ID_TARGET,
     TEST_ID_TRUETYPE,
+    TEST_ID_IMAGE,
     TEST_ID_C_FRONTEND,
     TEST_ID_C_ONCE,
     TEST_ID_C_TYPE_LAYOUT,
@@ -901,6 +904,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_FILE] = {S8_INITIALIZER("file_tests"), &file_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_TARGET] = {S8_INITIALIZER("target_tests"), &target_tests},
     [TEST_ID_TRUETYPE] = {S8_INITIALIZER("truetype_tests"), &truetype_tests},
+    [TEST_ID_IMAGE] = {S8_INITIALIZER("image_tests"), &image_tests},
     [TEST_ID_METAMORPHIC] = {S8_INITIALIZER("metamorphic_tests"), &metamorphic_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_C_FRONTEND] = {S8_INITIALIZER("c_frontend_tests"), &c_frontend_tests, true},
     [TEST_ID_C_ONCE] = {S8_INITIALIZER("c_once_tests"), &c_once_tests, true},
@@ -2071,8 +2075,9 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         // rather than on first touch; the compiler itself never needs this walk.
         buster_x86_metadata_prewarm_all_forms();
         // The metadata and machine suites exercise x86 emission on every host,
-        // including AArch64 CI. Prepare the exact-plan tables before their lanes.
-        machine_x86_64_exact_prewarm();
+        // including AArch64 CI. Prepare the exact-plan tables, with every shape
+        // resolved, before their lanes.
+        machine_x86_64_exact_prewarm_all_shapes();
         // Every lane in the gang below is an aarch64 suite, and each one queries
         // canonical form validity per encode and per decode.
         buster_aarch64_prewarm();

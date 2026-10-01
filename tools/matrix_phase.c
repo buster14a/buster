@@ -11,7 +11,7 @@ struct MatrixPhaseTree
 typedef struct MatrixPhaseState MatrixPhaseState;
 struct MatrixPhaseState
 {
-    String8 root, driver, identity, scheduler;
+    String8 root, driver, identity, scheduler, test_admission;
     String8List trees, tasks;
     MatrixPhaseTree tree[MATRIX_COVERAGE_MAX_TREES];
     u32 tree_count, task_count, outer_jobs;
@@ -47,7 +47,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_phase_begin(Arena* arena, MatrixCoverageManifest
     {
         make_directory_recursive(arena, root);
         matrix_phase = (MatrixPhaseState){.root = os_path_absolute(arena, root, true), .driver = build_running_driver(arena),
-            .epoch = os_now_microseconds(), .enabled = true, .valid = true, .scheduler = direct ? S8("direct") : S8("pooled"), .outer_jobs = direct ? 1u : 0u};
+            .test_admission = matrix_coverage_test_admission_current(), .epoch = os_now_microseconds(), .enabled = true, .valid = true, .scheduler = direct ? S8("direct") : S8("pooled"), .outer_jobs = direct ? 1u : 0u};
         result = matrix_phase.root.length && !path_exists(arena, path_join(arena, root, S8("plan.json")));
         MatrixCoverageLane lane = coverage->lane;
         // This contract requires a Git tree, never the stage object's commit
@@ -303,8 +303,8 @@ BUSTER_GLOBAL_LOCAL bool matrix_phase_plan(Arena* arena, bool direct)
             }
         }
         String8 json = string_format(arena,
-            S8("{{\"schema\":\"buster-desktop-phases-v1\",\"epoch_us\":{u64},\"identity\":{S8},\"scheduler\":{S8},\"outer_jobs\":{u32},\"logical_cpus\":{u32},\"cpu_budget\":{u64},\"cpu_time\":\"unknown\",\"peak_rss\":\"unknown\",\"trees\":[{S8}],\"tasks\":[{S8}]}}\n"),
-            matrix_phase.epoch, matrix_phase.identity, matrix_coverage_json_escape(arena, matrix_phase.scheduler),
+            S8("{{\"schema\":\"buster-desktop-phases-v1\",\"epoch_us\":{u64},\"identity\":{S8},\"scheduler\":{S8},\"test_admission\":{S8},\"outer_jobs\":{u32},\"logical_cpus\":{u32},\"cpu_budget\":{u64},\"cpu_time\":\"unknown\",\"peak_rss\":\"unknown\",\"trees\":[{S8}],\"tasks\":[{S8}]}}\n"),
+            matrix_phase.epoch, matrix_phase.identity, matrix_coverage_json_escape(arena, matrix_phase.scheduler), matrix_coverage_json_escape(arena, matrix_phase.test_admission),
             matrix_phase.outer_jobs, os_get_logical_thread_count(),
             environment_positive_u64_or(S8("BUSTER_MATRIX_THREADS"), os_get_logical_thread_count()),
             string_join_arena(arena, string8_list_to_slice(arena, matrix_phase.trees), false),

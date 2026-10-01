@@ -5,7 +5,9 @@ name: Native retirement catch-up
 # It runs only trusted main code, writes no generated state and cannot merge:
 # the writer publishes the request through the existing standing grant and the
 # native merge queue admits it. Its only write is an empty commit on the
-# catch-up branch plus the PR that carries it.
+# catch-up branch plus the PR that carries it. It never enables auto-merge:
+# GitHub starts no merge_group workflows for an entry GITHUB_TOKEN enqueued, so
+# the writer enables it with its publication credential after publishing.
 
 on:
   push:

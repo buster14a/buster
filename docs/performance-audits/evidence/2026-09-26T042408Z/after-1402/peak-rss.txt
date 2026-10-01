@@ -1,0 +1,6 @@
+base exit=0 maxrss_kb=1092312
+cand exit=0 maxrss_kb=1093148
+base exit=0 maxrss_kb=1092220
+cand exit=0 maxrss_kb=1093096
+base exit=0 maxrss_kb=1092024
+cand exit=0 maxrss_kb=1093412
