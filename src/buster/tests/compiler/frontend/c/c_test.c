@@ -23450,6 +23450,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pragma_pack_explicit_alignment(UnitTes
                 "PROBE(attribute_only, value)\n"
                 "struct member_attribute_only {{ char c; int value __attribute__((packed, aligned(8))); }};\n"
                 "PROBE(member_attribute_only, value)\n"
+                "struct __attribute__((packed)) attribute_low {{ char c; int value __attribute__((aligned(2))); }}; PROBE(attribute_low, value)\n"
                 "#pragma pack(push, {u32})\n"
                 "struct member_gnu {{ char c; int value __attribute__((aligned(8))); }}; PROBE(member_gnu, value)\n"
                 "struct member_standard {{ char c; _Alignas(8) int value; }}; PROBE(member_standard, value)\n"
@@ -23487,6 +23488,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pragma_pack_explicit_alignment(UnitTes
                 } rows[] = {
                     {S8("attribute_only"), 16, 8, 8, 0, 2, false},
                     {S8("member_attribute_only"), 16, 8, 8, 0, 2, false},
+                    {S8("attribute_low"), 6, 2, 2, 0, 2, false},
                     {S8("member_gnu"), microsoft ? 16 : capped_size, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, 0, 2, false},
                     {S8("member_standard"), microsoft ? 16 : capped_size, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, 0, 2, false},
                     {S8("combined"), microsoft ? 16 : capped_size, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, 0, 2, false},
@@ -23530,20 +23532,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pragma_pack_explicit_alignment(UnitTes
             }
             scratch_end(temporary);
         }
-        TemporalArena temporary = scratch_begin(0, 0);
-        String8 invalid = S8("#pragma pack(push, 1)\nstruct rejected { char c; _Alignas(2) int value; };\n#pragma pack(pop)\n");
-        CPreprocessResult preprocess = {0};
-        CParseResult parse = {0};
-        CIRLowerResult lowered = c_test_lower_source(temporary.arena, invalid, S8("pragma-under-alignment.c"), target, &preprocess, &parse);
-        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-        bool invalid_alignment = false;
-        for (u32 diagnostic = 0; diagnostic < parse.diagnostic_count; diagnostic += 1)
+        String8 invalid_sources[] = {
+            S8("#pragma pack(push, 1)\nstruct rejected { char c; _Alignas(2) int value; };\n#pragma pack(pop)\n"),
+            S8("#pragma pack(push, 2)\nstruct rejected { char c; _Alignas(2) int value; };\n#pragma pack(pop)\n"),
+            S8("struct __attribute__((packed)) rejected { char c; _Alignas(2) int value; };\n"),
+            S8("struct rejected { char c; _Alignas(2) int value __attribute__((packed)); };\n"),
+        };
+        for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_sources); invalid_index += 1)
         {
-            invalid_alignment |= parse.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT;
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, invalid_sources[invalid_index], S8("packed-under-alignment.c"), target, &preprocess, &parse);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1))
+            {
+                BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
+            }
+            BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
+            scratch_end(temporary);
         }
-        BUSTER_TEST(arguments, invalid_alignment);
-        BUSTER_TEST(arguments, lowered.program == 0);
-        scratch_end(temporary);
     }
     return result;
 }

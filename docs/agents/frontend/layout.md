@@ -76,6 +76,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `alignment_count` names, which is why the trailing scan runs immediately
   after the specifier one. GNU `packed` lowers natural member alignment to one
   byte, and an explicit member `aligned` or `_Alignas` can raise it again.
+  Standard `_Alignas` constraints still use the declared type's original
+  natural alignment, so packing cannot legalize a weaker request (#2192).
+  GNU `aligned` may request less than the natural alignment and merges with
+  the packed placement floor.
   `#pragma pack(N)` instead caps that merged member alignment on Itanium and
   AAPCS64 targets (#1244, duplicate #1248). A nonzero bit-field contributes its
   unpacked alignment capped to the pragma ceiling, even with GNU packed. Its

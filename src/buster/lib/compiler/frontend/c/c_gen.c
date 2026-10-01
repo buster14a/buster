@@ -51361,15 +51361,22 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                     // member can be laid out with, so the definition finishes
                     // and the program hears about the attribute it wrote
                     // rather than about a type that never got a layout.
-                    // Almost no member carries a specifier at all, and the
-                    // evaluation answers the alignment it was handed for the
-                    // ones that do not; asking first keeps the call itself off
-                    // the path every other member takes.
+                    // Standard requests are constrained by the declared
+                    // type's natural alignment before packing. GNU aligned
+                    // still merges with the packed floor, so a packed int
+                    // requesting GNU alignment two is placed at two bytes.
                     u32 field_alignment_request = 0;
-                    CIrAlignmentStatus member_status =
-                        member->alignment_count ? c_ir_alignment_evaluate(&constant_builder, member->alignment_start, member->alignment_count, field_alignment,
-                                                                          &field_alignment, &field_alignment_request, &member_rejection)
-                                                : C_IR_ALIGNMENT_RESOLVED;
+                    CIrAlignmentStatus member_status = C_IR_ALIGNMENT_RESOLVED;
+                    if (member->alignment_count)
+                    {
+                        u32 field_alignment_floor = field_alignment;
+                        member_status = c_ir_alignment_evaluate(&constant_builder, member->alignment_start, member->alignment_count, natural_alignment,
+                                                                &field_alignment, &field_alignment_request, &member_rejection);
+                        if (member_status != C_IR_ALIGNMENT_PENDING)
+                        {
+                            field_alignment = BUSTER_MAX(field_alignment_floor, field_alignment_request);
+                        }
+                    }
                     if (member_status == C_IR_ALIGNMENT_PENDING)
                     {
                         fields_resolved = false;
