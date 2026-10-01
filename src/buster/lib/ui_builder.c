@@ -153,7 +153,7 @@ UI_WidgetResult ui_slider(String8 string, f32 value, f32 minimum, f32 maximum)
     ui_set_next_pref_height(ui_text_dim(4.0f, 1.0f));
     ui_set_next_child_layout_axis(AXIS2_X);
     UI_BoxFlags flags = UI_BoxFlag_DrawText | UI_BoxFlag_DrawBackground | UI_BoxFlag_DrawBorder | UI_BoxFlag_DrawHotEffects |
-                        UI_BoxFlag_DrawActiveEffects | UI_BoxFlag_Clip | ui_interactive_widget_flags();
+                        UI_BoxFlag_DrawActiveEffects | UI_BoxFlag_Clip | UI_BoxFlag_OwnsHorizontalArrows | ui_interactive_widget_flags();
     UI_Box* box = ui_widget_box(S8("slider"), string, flags);
     UI_Signal signal = ui_signal_from_box(box);
     UI_WidgetResult result = ui_widget_result(box, signal);
@@ -164,7 +164,9 @@ UI_WidgetResult ui_slider(String8 string, f32 value, f32 minimum, f32 maximum)
         f32 width = box->rect.x1 - box->rect.x0;
         if (width > 0.0f)
         {
-            f32 percentage = BUSTER_CLAMP(0.0f, (float2_element(ui_state_get()->mouse, AXIS2_X) - box->rect.x0) / width, 1.0f);
+            float2 pointer = (signal.f & UI_SignalFlag_LeftClicked) && !ui_dragging(signal) ? signal.left_click_position : ui_state_get()->mouse;
+            f32 pointer_percentage = (float2_element(pointer, AXIS2_X) - box->rect.x0) / width;
+            f32 percentage = BUSTER_CLAMP(0.0f, pointer_percentage, 1.0f);
             result.value_f32 = minimum + span * percentage;
             result.changed = result.value_f32 != value;
         }

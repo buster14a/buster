@@ -34,3 +34,20 @@ to the compiler merely to make this area appear active.
 
 Create a feature issue for a concrete application workflow or component behavior,
 not a speculative checklist claiming that a future editor/viewer already exists.
+
+## Slider input contract
+
+`ui_slider` reserves Left/Right for five-percent value adjustments while focused,
+including focus acquired through Tab or a pointer press. Values clamp to the
+supplied endpoints; Tab and vertical arrows remain focus-navigation inputs.
+`UI_BoxFlag_OwnsHorizontalArrows` gives other value widgets the same ownership
+policy without making them text editors. Disabled or active-focus-disabled
+sliders do not accept keyboard value changes.
+
+A completed slider click reads its own release coordinate from
+`UI_Signal.left_click_position`. Pointer moves later in the same event list
+still update hover state, but do not change that committed value. A slider with
+live left-button capture continues following the current pointer, including
+outside its bounds; an outside release ends capture without reporting a click.
+Registered `ui_tests` cover these rules against the completed hit tree and when
+widgets are rebuilt in another order.

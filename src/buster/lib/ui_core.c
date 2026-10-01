@@ -700,6 +700,7 @@ UI_BoxFlagInfo ui_box_flag_info(u32 bit_index)
         UI_BOX_FLAG_INFO(54, HasFuzzyMatchRanges, Appearance, false);
         UI_BOX_FLAG_INFO(55, RoundChildrenByParent, Appearance, true);
         UI_BOX_FLAG_INFO(56, SquishAnchored, Appearance, false);
+        UI_BOX_FLAG_INFO(57, OwnsHorizontalArrows, Interaction, false);
         case 63:
             result.flag = UI_BoxFlag_Debug;
             result.name = S8("Debug");
@@ -2320,9 +2321,12 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
             UI_BoxFlags axis_flag = 0;
             UI_FocusDirection direction = UI_FocusDirection_LinearForward;
             event->owner_assigned = 1;
-            bool edit_owns_horizontal_arrow = !ui_key_match(provisional_focus_edit, ui_key_zero()) &&
-                                               (event->key == WM_KEY_LEFT || event->key == WM_KEY_RIGHT);
-            if (ui_focus_navigation_event(event, &axis_flag, &direction) && !edit_owns_horizontal_arrow)
+            UI_Box* focused_box = ui_box_from_key(provisional_focus_active);
+            bool widget_owns_horizontal_arrows = focused_box && focused_box->last_touched_build_index == previous_build_index &&
+                                                 ui_box_focusable(focused_box, true) && (focused_box->flags & UI_BoxFlag_OwnsHorizontalArrows);
+            bool owns_horizontal_arrow = (event->key == WM_KEY_LEFT || event->key == WM_KEY_RIGHT) &&
+                                         (!ui_key_match(provisional_focus_edit, ui_key_zero()) || widget_owns_horizontal_arrows);
+            if (ui_focus_navigation_event(event, &axis_flag, &direction) && !owns_horizontal_arrow)
             {
                 UI_Box* candidate = ui_focus_navigation_candidate(provisional_focus_active, axis_flag, direction, previous_build_index, ui_state->previous_root);
                 if (candidate)
@@ -2570,6 +2574,7 @@ UI_Signal ui_signal_from_box(UI_Box* box)
                 {
                     sig.f |= UI_SignalFlag_LeftClicked;
                     sig.clicked_left = 1;
+                    sig.left_click_position = event->pos;
                 }
             }
             ui_eat_event(event);
