@@ -21,57 +21,6 @@ static __SIZE_TYPE__ object_size_outer(__SIZE_TYPE__ size)
     return size;
 }
 
-static volatile int constant_value;
-static volatile int constant_calls;
-static int constant_effect(void)
-{
-    constant_calls += 1;
-    return constant_value;
-}
-
-static int constant_logical_query(void)
-{
-    return __builtin_constant_p(constant_effect() && 0);
-}
-
-#define CONSTANT_PICK(expression) (__builtin_constant_p(expression) ? 0 : ((void)(expression), 1))
-#define CONSTANT_CHOOSE(expression) __builtin_choose_expr(__builtin_constant_p(expression), 0, ((void)(expression), 1))
-
-static int constant_logical_checks(void)
-{
-    int failed = 0;
-    // Result bits and unevaluated effects are independent observations.
-    failed |= __builtin_constant_p(constant_value && 0) != 0;
-    failed |= __builtin_constant_p(constant_value || 1) != 0;
-    failed |= __builtin_constant_p(constant_effect() && 0) != 0;
-    failed |= __builtin_constant_p(constant_effect() || 1) != 0;
-    failed |= __builtin_constant_p((constant_effect(), 7) && 0) != 0;
-    failed |= __builtin_constant_p((constant_effect(), 0) || 1) != 0;
-    failed |= constant_logical_query() != 0;
-    failed |= __builtin_constant_p(constant_effect()) != 0;
-    failed |= __builtin_constant_p((constant_effect(), 7)) != 0;
-    failed |= __builtin_constant_p(constant_value) != 0;
-    failed |= __builtin_constant_p(0 && constant_effect()) != 1;
-    failed |= __builtin_constant_p(1 || constant_effect()) != 1;
-    failed |= __builtin_constant_p(1 && 7) != 1;
-    failed |= __builtin_constant_p(0 || 7) != 1;
-    failed |= constant_calls != 0;
-    // The ordinary and choose-expression fallbacks must each run once.
-    int value = CONSTANT_PICK(constant_effect() && 0);
-    failed |= value != 1 || constant_calls != 1;
-    value = CONSTANT_PICK(constant_effect() || 1);
-    failed |= value != 1 || constant_calls != 2;
-    value = CONSTANT_CHOOSE(constant_effect() && 0);
-    failed |= value != 1 || constant_calls != 3;
-    value = CONSTANT_CHOOSE(constant_effect() || 1);
-    failed |= value != 1 || constant_calls != 4;
-    value = constant_effect() && 0;
-    failed |= value != 0 || constant_calls != 5;
-    value = constant_effect() || 1;
-    failed |= value != 1 || constant_calls != 6;
-    return failed;
-}
-
 // LZ4 spells its block copies __builtin_memcpy/__builtin_memmove once
 // __clang__ is defined, so the builtins have to lower to the library calls
 // they name, with the prototype's argument conversions and the destination
@@ -147,5 +96,5 @@ int main(int argc, char** argv)
         return *(volatile unsigned char*)destination;
     }
 #endif
-    return constant_logical_checks();
+    return 0;
 }

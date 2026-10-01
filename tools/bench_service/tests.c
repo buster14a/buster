@@ -121,7 +121,15 @@ BUSTER_GLOBAL_LOCAL void bq_test_typed_client(void)
              chosen.size == fixed.size && !memcmp(chosen.bytes, fixed.bytes, fixed.size));
     BQ_CHECK(!bq_client_arguments(5, selected, false, &typed, &operation) && !typed.size);
     BQ_CHECK(!bq_client_arguments(4, selected, true, &typed, &operation) && !typed.size);
-    char const* refused_recipes[] = {"zen5-calibration-v1", "native-retirement-performance-v1", "fake-success-v1",
+    /* zen5-calibration-v1 is served: submit-recipe encodes it with the same
+     * fields (one revision named twice), while admission refuses two. */
+    char* zen5_selected[] = {"submit-recipe", "zen5-calibration-v1", gateway[1], gateway[2], gateway[2], 0};
+    BQ_CHECK(bq_client_arguments(5, zen5_selected, true, &chosen, &operation) && operation == BQ_OP_SUBMIT &&
+             chosen.size > 0);
+    zen5_selected[4] = gateway[3];
+    BQ_CHECK(strcmp(gateway[2], gateway[3]) != 0 &&
+             !bq_client_arguments(5, zen5_selected, true, &typed, &operation) && !typed.size);
+    char const* refused_recipes[] = {"native-retirement-performance-v1", "fake-success-v1",
                                      "fake-failure-v1", "Validate-Buster-v1", "validate-buster-v1 ", "",
                                      "../validate-buster-v1", "--recipe=validate-buster-v1"};
     for (u32 i = 0; i < sizeof(refused_recipes) / sizeof(refused_recipes[0]); i += 1)
@@ -168,13 +176,19 @@ BUSTER_GLOBAL_LOCAL void bq_test_typed_client(void)
         bq_packet(&truncated, BQ_OP_RESULT | 0x80000000u, 1, body, length);
         BQ_CHECK(bq_public_response_valid(&typed, &truncated) == (length == 124));
     }
-    u32 invalid_offsets[] = {4, 28, 32, 36, 40, 44, 48, 52, 56, 120, 124, 128, 319, 320, 384, 448};
+    /* Offset 53 is job_count's second byte: 0xff there exceeds any cap below 65,281. */
+    u32 invalid_offsets[] = {4, 28, 32, 36, 40, 44, 48, 53, 56, 120, 124, 128, 319, 320, 384, 448};
     for (u32 i = 0; i < sizeof(invalid_offsets) / sizeof(invalid_offsets[0]); i += 1)
     {
         BqPacket invalid = fixed;
         invalid.bytes[BQ_CONTROL_HEADER + invalid_offsets[i]] = 0xff;
         BQ_CHECK(!bq_public_response_valid(&typed, &invalid));
     }
+    BqPacket counted = fixed;
+    bq_put32(counted.bytes + BQ_CONTROL_HEADER + 52, BQ_JOB_CAP);
+    BQ_CHECK(bq_public_response_valid(&typed, &counted));
+    bq_put32(counted.bytes + BQ_CONTROL_HEADER + 52, BQ_JOB_CAP + 1);
+    BQ_CHECK(!bq_public_response_valid(&typed, &counted));
     BqPacket traversal = fixed;
     memcpy(traversal.bytes + BQ_CONTROL_HEADER + 128, "/../", 4);
     BQ_CHECK(!bq_public_response_valid(&typed, &traversal));
@@ -285,15 +299,21 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
              bq_recipe_blocked(bq_recipe_from_name(fields[2])) &&
              !bq_recipe_admitted(bq_recipe_from_name(fields[2])) &&
              bq_request_make(fields, &malformed) == BQ_BAD_REQUEST);
-    /* zen5-calibration-v1 is registered with a real command and profile but
-     * held until the systemd broker carries its stages: every submission
-     * path refuses it exactly like the blocked retirement descriptor. */
+    /* zen5-calibration-v1 is served now that the systemd broker carries its
+     * stages (zen5_stage.h). Admission accepts one 40-hex revision named
+     * twice and refuses two different sources or a 64-hex identity. */
     fields[2] = S8("zen5-calibration-v1");
     BqRecipeFiles zen5_files;
+    BqRequest zen5_request;
+    fields[3] = fields[4] = S8("1111111111111111111111111111111111111111");
     BQ_CHECK(bq_recipe_from_name(fields[2]) == BQ_RECIPE_ZEN5_CALIBRATION &&
-             bq_recipe_blocked(BQ_RECIPE_ZEN5_CALIBRATION) && !bq_recipe_admitted(BQ_RECIPE_ZEN5_CALIBRATION) &&
-             !bq_recipe_service(BQ_RECIPE_ZEN5_CALIBRATION) && bq_request_make(fields, &malformed) == BQ_BAD_REQUEST &&
-             string_equal(bq_recipe_name(BQ_RECIPE_ZEN5_CALIBRATION), fields[2]));
+             !bq_recipe_blocked(BQ_RECIPE_ZEN5_CALIBRATION) && bq_recipe_admitted(BQ_RECIPE_ZEN5_CALIBRATION) &&
+             bq_recipe_service(BQ_RECIPE_ZEN5_CALIBRATION) && bq_request_make(fields, &zen5_request) == BQ_OK &&
+             bq_recipe_real(&zen5_request) && string_equal(bq_recipe_name(BQ_RECIPE_ZEN5_CALIBRATION), fields[2]));
+    fields[4] = S8("2222222222222222222222222222222222222222");
+    BQ_CHECK(bq_request_make(fields, &malformed) == BQ_BAD_REQUEST);
+    fields[3] = fields[4] = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    BQ_CHECK(bq_request_make(fields, &malformed) == BQ_BAD_REQUEST);
     BQ_CHECK(bq_recipe_files(BQ_RECIPE_ZEN5_CALIBRATION, &zen5_files) &&
              !strcmp(zen5_files.profile, "zen5-calibration-v1.recipe") &&
              !strcmp(zen5_files.command, "bench_service_zen5_recipe") &&
@@ -2034,6 +2054,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_restarts(void)
     }
 }
 
+/* #2114: the cap before the raise, and the minimum #426 window-2 confirmatory
+ * count, which must fit after a queue state already full at the old cap. */
+#define BQ_TEST_PREVIOUS_JOB_CAP 64u
+#define BQ_TEST_WINDOW_JOBS 64u
+
 BUSTER_GLOBAL_LOCAL void bq_test_lifetime_and_logs(void)
 {
     BqFixture fixture;
@@ -2041,12 +2066,33 @@ BUSTER_GLOBAL_LOCAL void bq_test_lifetime_and_logs(void)
     {
         BqQueue* queue = &fixture.queue;
         u64 id = 0;
+        u32 accepted = 0;
+        u32 window = 0;
         for (u32 i = 0; i < BQ_JOB_CAP; i += 1)
         {
             BqRequest request = bq_test_request(i, false);
-            BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK);
+            BqError submitted = bq_submit(queue, &request, &id);
+            BQ_CHECK(submitted == BQ_OK);
             BQ_CHECK(bq_fake_run(queue, &id) == BQ_OK);
+            accepted += submitted == BQ_OK;
+            window += submitted == BQ_OK && i >= BQ_TEST_PREVIOUS_JOB_CAP &&
+                      i < BQ_TEST_PREVIOUS_JOB_CAP + BQ_TEST_WINDOW_JOBS;
+            if (i + 1 == BQ_TEST_PREVIOUS_JOB_CAP)
+            {
+                /* A journal full under the old cap replays unchanged and admits more. */
+                u64 sequence = queue->state.sequence;
+                u32 events = queue->state.event_count;
+                bq_close(queue);
+                BQ_CHECK(bq_open(queue, fixture.path) == BQ_OK && queue->state.job_count == BQ_TEST_PREVIOUS_JOB_CAP &&
+                         queue->state.sequence == sequence && queue->state.event_count == events &&
+                         !bq_pending(&queue->state) && bq_job(&queue->state, 1) != NULL);
+            }
         }
+        BQ_CHECK(accepted == BQ_JOB_CAP && window == BQ_TEST_WINDOW_JOBS);
+        BQ_CHECK(BQ_JOB_CAP >= 4u * (BQ_TEST_PREVIOUS_JOB_CAP + BQ_TEST_WINDOW_JOBS));
+        /* Fake jobs use the fixed phase path; the job cap binds before events. */
+        BQ_CHECK(queue->state.event_count % BQ_JOB_CAP == 0 && queue->state.event_count / BQ_JOB_CAP < 16u &&
+                 queue->state.event_count < BQ_EVENT_CAP);
         BqRequest extra = bq_test_request(BQ_JOB_CAP, false);
         BQ_CHECK(!bq_pending(&queue->state) && queue->state.job_count == BQ_JOB_CAP);
         BQ_CHECK(bq_submit(queue, &extra, &id) == BQ_FULL);
@@ -2282,11 +2328,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     BQ_CHECK(bq_transport_queue_admissible(&incompatible));
 #ifdef __linux__
     BQ_CHECK(strstr(bq_capabilities_v2, "local-recipes=fake-success-v1,fake-failure-v1") != NULL);
-    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1 blocked-recipes=native-retirement-performance-v1") != NULL);
-    /* The held zen5 recipe is not served; capabilities stay byte-identical
-     * because the reply has no room for another name. */
-    BQ_CHECK(strstr(bq_capabilities_v2, "zen5") == NULL);
-    BQ_CHECK(strstr(bq_capabilities_v2, "retirement=blocked") != NULL);
+    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1,zen5-calibration-v1 "
+                                        "blocked-recipes=native-retirement-performance-v1\n") != NULL);
+    /* Served zen5 fits because the redundant profile/retirement words went. */
+    BQ_CHECK(strstr(bq_capabilities_v2, "retirement=blocked") == NULL &&
+             strstr(bq_capabilities_v2, "profile=smoke") == NULL && sizeof(bq_capabilities_v2) - 1 <= BQ_CONTROL_BODY - 4);
     char close_root[BQ_PATH_CAP + 1] = "/tmp/buster-transport-close-XXXXXX";
     bool close_root_ok = bq_test_mkdtemp_physical(close_root, sizeof(close_root));
     BQ_CHECK(close_root_ok);
@@ -3481,16 +3527,18 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_term_grace(void)
     }
 }
 
-BUSTER_GLOBAL_LOCAL void bq_test_worker_child_survives_parent_kill(void)
+/* A live stage unit `stage` (a smoke or zen5_stage.h name) that survives the
+ * outer unit's KILL is found by name, stopped and collected before cleanup. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_child_stage_survives(char const* stage, u32 number)
 {
     BqWorkerFixture fixture;
     if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, true))
     {
-        BqRequest request = bq_test_real_request(141);
+        BqRequest request = bq_test_real_request(number);
         u64 id = 0;
         fixture.fake.child = fixture.fake.observed;
         snprintf(fixture.fake.child.unit, sizeof(fixture.fake.child.unit),
-                 "buster-bench-1-2-throughput.service");
+                 "buster-bench-1-2-%s.service", stage);
         snprintf(fixture.fake.child.cgroup, sizeof(fixture.fake.child.cgroup),
                  "/buster.slice/buster-bench.slice/%s", fixture.fake.child.unit);
         snprintf(fixture.fake.child.invocation_id, sizeof(fixture.fake.child.invocation_id),
@@ -3519,6 +3567,17 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_child_survives_parent_kill(void)
                  !fixture.fake.child.populated && !bq_test_worker_probe_locked(fixture.lease));
         bq_test_worker_end(&fixture);
     }
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_child_survives_parent_kill(void)
+{
+    /* The worker enumerates every stage name the broker can start; the zen5
+     * cases cover the first, a candidate and the last of zen5_stage.h. */
+    bq_test_worker_child_stage_survives("throughput", 141);
+    bq_test_worker_child_stage_survives("zen5-immutable-generate", 142);
+    bq_test_worker_child_stage_survives("zen5-pmu", 143);
+    bq_test_worker_child_stage_survives("zen5-captures", 144);
+    BqWorkerFixture fixture;
     if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
     {
         BqRequest request = bq_test_real_request(150);
@@ -5085,7 +5144,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_cancelled_recovery(u32 mode)
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* const arguments[])
+/* The driver child's exit status, or -1 when it could not start, was killed
+ * by a signal or outlived its 120-second deadline. */
+BUSTER_GLOBAL_LOCAL int bq_test_recipe_driver_status(char const* driver, char* const arguments[])
 {
     pid_t child = driver && driver[0] == '/' ? fork() : -1;
     if (child == 0)
@@ -5094,7 +5155,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* con
         execv(driver, arguments);
         _exit(127);
     }
-    int status = 0;
+    int status = 0, exit_status = -1;
     bool reaped = false, exited = false;
     u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 120000);
     while (child > 0 && !reaped)
@@ -5103,7 +5164,8 @@ BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* con
         if (waited == child)
         {
             reaped = true;
-            exited = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            exited = WIFEXITED(status);
+            if (exited) exit_status = WEXITSTATUS(status);
         }
         else if (waited < 0 && errno != EINTR)
         {
@@ -5123,7 +5185,13 @@ BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* con
             while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
         }
     }
-    return child > 0 && reaped && exited;
+    return exit_status;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_test_recipe_driver_run(char const* driver, char* const arguments[])
+{
+    bool passed = bq_test_recipe_driver_status(driver, arguments) == 0;
+    return passed;
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
@@ -5224,28 +5292,308 @@ BUSTER_GLOBAL_LOCAL void bq_test_recipe_materialized_bridge(char const* driver)
     if (fixture.installed[0]) bq_material_test_end(&fixture);
 }
 
-/* Export content for the held zen5-calibration-v1 recipe: the driver's own
+/* Export for the served zen5-calibration-v1 recipe: the driver's own
  * self-test leaves one successful result tree, which must pass the worker's
- * exhaustive bundle validator (the validator export unpack reuses) with the
- * zen5 recipe files, list every capture/plan/PMU/build record, and reject a
- * changed capture byte. The server export still refuses the job while the
- * recipe is held, because result binding requires a served recipe. */
+ * exhaustive bundle validator with the zen5 recipe files and list every
+ * capture/plan/PMU/build record. The worker's finalization then binds it for
+ * a zen5 job (bq_worker_result_validate), the server's export snapshot
+ * writes it, the client unpack replays it and the replay still binds, and a
+ * changed capture byte is refused. */
+/* Replace the zen5 result manifest's bytes in place, keeping it read-only. */
+BUSTER_GLOBAL_LOCAL bool bq_test_zen5_manifest_write(int directory, char const* bytes, size_t size)
+{
+    bool ok = fchmodat(directory, "zen5-calibration-v1.manifest", 0600, 0) == 0;
+    int descriptor = ok ? openat(directory, "zen5-calibration-v1.manifest", O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && descriptor >= 0 && write(descriptor, bytes, size) == (ssize_t)size && fchmod(descriptor, 0444) == 0;
+    if (descriptor >= 0 && close(descriptor) != 0) ok = false;
+    return ok;
+}
+
+/* A fresh finalization must refuse the manifest with `from` replaced by `to`
+ * (or with `to` appended when `from` is NULL); the original is restored. */
+BUSTER_GLOBAL_LOCAL bool bq_test_zen5_manifest_refused(BqWorkerConfig const* config, BqJob const* job,
+                                                        BqWorkerFinalization const* bound, char const* original,
+                                                        size_t size, char const* from, char const* to)
+{
+    char mutated[8192];
+    char const* at = from ? strstr(original, from) : original + size;
+    size_t prefix = at ? (size_t)(at - original) : 0;
+    size_t skipped = from ? strlen(from) : 0;
+    size_t length = at ? prefix + strlen(to) + (size - prefix - skipped) : 0;
+    bool ok = at != NULL && length < sizeof(mutated);
+    if (ok)
+    {
+        memcpy(mutated, original, prefix);
+        memcpy(mutated + prefix, to, strlen(to));
+        memcpy(mutated + prefix + strlen(to), original + prefix + skipped, size - prefix - skipped);
+    }
+    BqWorkerFinalization fresh = *bound;
+    fresh.result_bound = false;
+    ok = ok && bq_test_zen5_manifest_write(bound->result_directory, mutated, length) &&
+         bq_worker_result_validate(config, job, &fresh) != BQ_OK;
+    ok = bq_test_zen5_manifest_write(bound->result_directory, original, size) && ok;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_zen5_export(char const* root, char const* workspaces, char const* result, int directory)
+{
+    String8 fields[BQ_FIELD_COUNT] = {S8(BQ_EXPORT_PRINCIPAL), S8("zen5-bridge"), S8("zen5-calibration-v1"),
+                                     S8("1111111111111111111111111111111111111111"),
+                                     S8("1111111111111111111111111111111111111111")};
+    BqJob* job = calloc(1, sizeof(BqJob));
+    BQ_CHECK(job != NULL);
+    BqWorkerConfig config = {0};
+    config.workspace_root = string_from_pointer(workspaces);
+    BqWorkerFinalization finalization = {.config = &config, .result_directory = directory};
+    struct stat info = {0};
+    bool ok = job && bq_request_make(fields, &job->request) == BQ_OK && fstat(directory, &info) == 0 &&
+              snprintf(finalization.result_root, sizeof(finalization.result_root), "%s", result) > 0;
+    if (ok)
+    {
+        job->id = 1;
+        job->token = 2;
+        job->phase = BQ_FINISHED;
+        job->outcome = BQ_SUCCEEDED;
+        bq_request_digest(&job->request, (char8*)job->digest);
+        finalization.result_device = info.st_dev;
+        finalization.result_inode = info.st_ino;
+    }
+    BqError validated = ok ? bq_worker_result_validate(&config, job, &finalization) : BQ_IO;
+    if (validated != BQ_OK) fprintf(stderr, "ZEN5_EXPORT validate=%s\n", bq_error_name(validated));
+    ok = ok && validated == BQ_OK && finalization.result_bound;
+    BQ_CHECK(ok);
+    if (ok)
+    {
+        /* Each zen5 binding line is load-bearing: without it, or with an
+         * authorizing line added, finalization refuses the manifest. */
+        char original[8192] = {0};
+        int manifest = openat(directory, "zen5-calibration-v1.manifest", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        ssize_t size = manifest >= 0 ? read(manifest, original, sizeof(original) - 1) : -1;
+        if (manifest >= 0) close(manifest);
+        bool read_ok = size > 0 && (size_t)size < sizeof(original) - 1;
+        BQ_CHECK(read_ok);
+        char const* mutations[][2] = {
+            {"\nab-authorized=false\n", "\nab-authorized=unset\n"},
+            {NULL, "ab-authorized=true\n"},
+            {"\naa-decision=not-evaluated\n", "\naa-decision=evaluated\n"},
+            {"\nimmutable-capture-status=complete\n", "\nimmutable-capture-status=invalid\n"},
+            {"\nsame-root-rebuild-capture-status=complete\n", "\nsame-root-rebuild-capture-status=invalid\n"},
+            {"\ncross-root-capture-status=complete\n", "\ncross-root-capture-status=invalid\n"},
+            {"\nstage=complete\n", "\nstage=captures\n"},
+        };
+        for (u32 index = 0; read_ok && index < BUSTER_ARRAY_LENGTH(mutations); index += 1)
+            BQ_CHECK(bq_test_zen5_manifest_refused(&config, job, &finalization, original, (size_t)size,
+                                                   mutations[index][0], mutations[index][1]));
+        BqWorkerFinalization restored = finalization;
+        restored.result_bound = false;
+        BQ_CHECK(read_ok && bq_worker_result_validate(&config, job, &restored) == BQ_OK &&
+                 !memcmp(restored.result_digest, finalization.result_digest, SHA256_HEX_CAPACITY));
+        job->result_bound = true;
+        snprintf(job->result_root, sizeof(job->result_root), "%s", result);
+        memcpy(job->result_manifest_digest, finalization.result_digest, SHA256_HEX_CAPACITY);
+        memcpy(job->result_bundle_digest, finalization.bundle_digest, SHA256_HEX_CAPACITY);
+        memcpy(job->result_full_digest, finalization.full_digest, SHA256_HEX_CAPACITY);
+        BQ_CHECK(bq_worker_result_binding_validate_at(job, directory) == BQ_OK);
+    }
+    char spool_path[BQ_PATH_CAP + 1] = {0}, archive_path[BQ_PATH_CAP + 1] = {0}, replay[BQ_PATH_CAP + 1] = {0};
+    ok = ok && snprintf(spool_path, sizeof(spool_path), "%s/export.spool", root) > 0 &&
+         snprintf(archive_path, sizeof(archive_path), "%s/export.bq", root) > 0 &&
+         snprintf(replay, sizeof(replay), "%s/replayed", root) > 0;
+    int spool = ok ? open(spool_path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    BqError exported = spool >= 0 ? bq_export_snapshot(job, spool,
+                                                       bq_worker_deadline(bq_worker_monotonic_milliseconds(), 60000)) : BQ_IO;
+    if (exported != BQ_OK) fprintf(stderr, "ZEN5_EXPORT snapshot=%s\n", bq_error_name(exported));
+    ok = ok && exported == BQ_OK;
+    BQ_CHECK(ok);
+    /* The client archive is the receipt followed by the data section. */
+    u8 receipt[BQ_EXPORT_RECEIPT_CAP] = {0};
+    ok = ok && pread(spool, receipt, sizeof(receipt), 0) == (ssize_t)sizeof(receipt);
+    u64 total = ok ? bq_u64(receipt + 24) : 0;
+    u8* data = ok && total > 0 && total <= BQ_EXPORT_TOTAL_CAP ? malloc((size_t)total) : NULL;
+    ok = ok && data && pread(spool, data, (size_t)total, BQ_EXPORT_DATA_OFFSET) == (ssize_t)total;
+    int archive = ok ? open(archive_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    ok = ok && archive >= 0 && write(archive, receipt, sizeof(receipt)) == (ssize_t)sizeof(receipt) &&
+         write(archive, data, (size_t)total) == (ssize_t)total;
+    if (archive >= 0 && close(archive) != 0) ok = false;
+    char digest[SHA256_HEX_CAPACITY] = {0};
+    if (ok) bq_digest(receipt, sizeof(receipt), digest);
+    BqError unpacked = ok ? bq_export_unpack(archive_path, replay, digest) : BQ_IO;
+    if (unpacked != BQ_OK) fprintf(stderr, "ZEN5_EXPORT unpack=%s\n", bq_error_name(unpacked));
+    int replay_root = unpacked == BQ_OK ? open(replay, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    BQ_CHECK(ok && unpacked == BQ_OK && replay_root >= 0 && bq_worker_result_binding_validate_at(job, replay_root) == BQ_OK);
+    printf("BENCH_SERVICE_ZEN5_EXPORT result=%s\n", ok && unpacked == BQ_OK && replay_root >= 0 ? "pass" : "fail");
+    if (replay_root >= 0) close(replay_root);
+    if (spool >= 0) close(spool);
+    free(data);
+    free(job);
+}
+
+/* #2109's A/A evaluator needs two service-authenticated digests for every
+ * zen5 attempt: manifest_sha256 (the RESULT reply's manifest-sha256= and
+ * BQEXP001 offset 112) and profile_sha256 (offset 608). This serves the
+ * driver's zen5 result through a real queue: submit, reserve (job 1, token
+ * 2 as the result tree names), advance to cleaning, then the worker's own
+ * terminal hook validates and journals BQ_RESULT_BIND. The RESULT reply and
+ * the export receipt must carry SHA-256 of the final manifest bytes and of
+ * the compiled zen5 profile, which must equal the manifest's own
+ * profile-sha256= line, as the evaluator cross-checks. */
+BUSTER_GLOBAL_LOCAL void bq_test_zen5_served_binding(char const* root, char const* workspaces, char const* result,
+                                                     int directory)
+{
+    char manifest[8192] = {0};
+    char manifest_digest[SHA256_HEX_CAPACITY] = {0}, profile_digest[SHA256_HEX_CAPACITY] = {0};
+    char manifest_profile[SHA256_HEX_CAPACITY] = {0}, queue_path[BQ_PATH_CAP + 1] = {0};
+    char spool_path[BQ_PATH_CAP + 1] = {0};
+    int manifest_fd = openat(directory, "zen5-calibration-v1.manifest", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    ssize_t manifest_size = manifest_fd >= 0 ? read(manifest_fd, manifest, sizeof(manifest) - 1) : -1;
+    if (manifest_fd >= 0) close(manifest_fd);
+    bool ok = manifest_size > 0 && (size_t)manifest_size < sizeof(manifest) - 1 &&
+              bq_worker_result_digest_line(manifest, "profile-sha256=", manifest_profile);
+    String8 profile = S8(BQ_ZEN5_CALIBRATION_PROFILE);
+    Sha256 hash;
+    sha256_init(&hash);
+    sha256_add(&hash, profile.pointer, profile.length);
+    sha256_finish_hex(&hash, (char8*)profile_digest);
+    if (ok) bq_digest(manifest, (u32)manifest_size, manifest_digest);
+    BQ_CHECK(ok && !memcmp(manifest_profile, profile_digest, 64));
+    ok = ok && snprintf(queue_path, sizeof(queue_path), "%s/served-queue", root) > 0 &&
+         snprintf(spool_path, sizeof(spool_path), "%s/served-export.spool", root) > 0 && mkdir(queue_path, 0700) == 0;
+    BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
+    ok = ok && bq_open(&queue, queue_path) == BQ_OK;
+    BQ_CHECK(ok);
+    String8 fields[BQ_FIELD_COUNT] = {S8(BQ_EXPORT_PRINCIPAL), S8("zen5-served"), S8("zen5-calibration-v1"),
+                                     S8("1111111111111111111111111111111111111111"),
+                                     S8("1111111111111111111111111111111111111111")};
+    BqRequest request = {0};
+    u64 id = 0, token = 0;
+    ok = ok && bq_request_make(fields, &request) == BQ_OK && bq_submit(&queue, &request, &id) == BQ_OK &&
+         bq_reserve(&queue, &id, &token) == BQ_OK && id == 1 && token == 2;
+    for (BqPhase phase = BQ_PREPARING; ok && phase <= BQ_CLEANING; phase = (BqPhase)(phase + 1))
+        ok = bq_real_advance(&queue, bq_job(&queue.state, id), phase,
+                             phase >= BQ_FINALIZING ? BQ_SUCCEEDED : BQ_NO_OUTCOME) == BQ_OK;
+    BQ_CHECK(ok);
+    BqWorkerConfig config = {0};
+    config.workspace_root = string_from_pointer(workspaces);
+    config.production_path = true;
+    BqWorkerFinalization finalization = {.config = &config, .result_directory = directory};
+    struct stat info = {0};
+    ok = ok && fstat(directory, &info) == 0 &&
+         snprintf(finalization.result_root, sizeof(finalization.result_root), "%s", result) > 0;
+    finalization.result_device = info.st_dev;
+    finalization.result_inode = info.st_ino;
+    BqError bound = ok ? bq_worker_before_terminal(&queue, bq_job(&queue.state, id), &finalization) : BQ_IO;
+    if (finalization.masked) sigprocmask(SIG_SETMASK, &finalization.prior_mask, NULL);
+    if (bound != BQ_OK) fprintf(stderr, "ZEN5_SERVED bind=%s\n", bq_error_name(bound));
+    BqJob* job = bq_job(&queue.state, id);
+    ok = ok && bound == BQ_OK && job && job->result_bound && !strcmp(job->result_root, result) &&
+         !memcmp(job->result_manifest_digest, manifest_digest, 64);
+    BQ_CHECK(ok);
+    /* The `gateway result JOB` reply: a control-schema RESULT dispatch. */
+    u8 status_body[8];
+    bq_put64(status_body, id);
+    BqPacket status = {0}, response = {0};
+    bq_packet(&status, BQ_OP_RESULT, 211, status_body, sizeof(status_body));
+    ok = ok && bq_dispatch(&queue, status.bytes, status.size, &response) == BQ_OK &&
+         bq_public_response_valid(&status, &response) && response.size == BQ_CONTROL_CAP;
+    char reply[2048] = {0}, expected_line[96] = {0};
+    FILE* output = ok ? tmpfile() : NULL;
+    size_t reply_size = 0;
+    if (output)
+    {
+        ok = bq_response_write(BQ_OP_RESULT, &response, output) && fflush(output) == 0;
+        rewind(output);
+        reply_size = fread(reply, 1, sizeof(reply) - 1, output);
+        fclose(output);
+    }
+    snprintf(expected_line, sizeof(expected_line), "\nmanifest-sha256=%.64s\n", manifest_digest);
+    BQ_CHECK(ok && reply_size > 0 && strstr(reply, "outcome=succeeded") && strstr(reply, "result-bound=1 ") &&
+             strstr(reply, expected_line));
+    ok = ok && job && bq_real_advance(&queue, job, BQ_FINISHED, BQ_SUCCEEDED) == BQ_OK;
+    job = bq_job(&queue.state, id);
+    int spool = ok ? open(spool_path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    BqError exported = spool >= 0 && job && job->phase == BQ_FINISHED ?
+                       bq_export_snapshot(job, spool, bq_worker_deadline(bq_worker_monotonic_milliseconds(), 60000)) :
+                       BQ_IO;
+    if (exported != BQ_OK) fprintf(stderr, "ZEN5_SERVED export=%s\n", bq_error_name(exported));
+    u8 receipt[BQ_EXPORT_RECEIPT_CAP] = {0};
+    ok = ok && exported == BQ_OK && pread(spool, receipt, sizeof(receipt), 0) == (ssize_t)sizeof(receipt) &&
+         bq_export_receipt_valid(receipt);
+    BQ_CHECK(ok && !memcmp(receipt, "BQEXP001", 8) && bq_u64(receipt + 8) == id && bq_u64(receipt + 16) == token &&
+             !memcmp(receipt + 112, manifest_digest, 64) && !memcmp(receipt + 608, profile_digest, 64) &&
+             !memcmp(receipt + 608, manifest_profile, 64) && !memcmp(receipt + 560, "zen5-calibration-v1", 20));
+    printf("BENCH_SERVICE_ZEN5_SERVED_BINDING result=%s manifest-sha256=%.64s profile-sha256=%.64s\n",
+           ok ? "pass" : "fail", manifest_digest, profile_digest);
+    if (spool >= 0) close(spool);
+    bq_close(&queue);
+}
+
+/* The zen5 recipe self-test's host eligibility, restated here so a skip on a
+ * host that should run it is a failure: a Linux x86-64 build, an x86
+ * /proc/cpuinfo ("cpu family" on its first page) and python3 at /usr/bin or
+ * /usr/local/bin (bench_service_zen5_test_ineligible_reason in
+ * zen5_recipe_test.c). */
+BUSTER_GLOBAL_LOCAL bool bq_test_zen5_host_eligible(void)
+{
+    bool eligible = false;
+#if defined(__linux__) && defined(__x86_64__)
+    char cpuinfo[4096] = {0};
+    int descriptor = open("/proc/cpuinfo", O_RDONLY | O_CLOEXEC);
+    ssize_t count = descriptor >= 0 ? read(descriptor, cpuinfo, sizeof(cpuinfo) - 1) : -1;
+    if (descriptor >= 0) close(descriptor);
+    eligible = count > 0 && strstr(cpuinfo, "cpu family") != NULL &&
+               (access("/usr/bin/python3", X_OK) == 0 || access("/usr/local/bin/python3", X_OK) == 0);
+#endif
+    return eligible;
+}
+
+typedef enum BqZen5BridgeVerdict BqZen5BridgeVerdict;
+enum BqZen5BridgeVerdict
+{
+    BQ_ZEN5_BRIDGE_PASS,
+    BQ_ZEN5_BRIDGE_FAIL,
+    BQ_ZEN5_BRIDGE_SKIP,
+};
+
+/* The child's recorded skip (exit PROCESS_RESULT_NOT_EXISTENT) is accepted
+ * only on an ineligible host; on an eligible host it is a failure, as is any
+ * other nonzero or abnormal exit. */
+BUSTER_GLOBAL_LOCAL BqZen5BridgeVerdict bq_test_zen5_bridge_verdict(bool eligible, int exit_status)
+{
+    BqZen5BridgeVerdict verdict = exit_status == 0 ? BQ_ZEN5_BRIDGE_PASS :
+                                  !eligible && exit_status == (int)PROCESS_RESULT_NOT_EXISTENT ? BQ_ZEN5_BRIDGE_SKIP :
+                                  BQ_ZEN5_BRIDGE_FAIL;
+    return verdict;
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_zen5_recipe_bridge(char const* driver)
 {
-    char root[] = "/tmp/buster-bench-zen5-bridge-XXXXXX";
-    bool ok = driver != NULL && mkdtemp(root) != NULL;
+    BQ_CHECK(bq_test_zen5_bridge_verdict(true, (int)PROCESS_RESULT_NOT_EXISTENT) == BQ_ZEN5_BRIDGE_FAIL &&
+             bq_test_zen5_bridge_verdict(false, (int)PROCESS_RESULT_NOT_EXISTENT) == BQ_ZEN5_BRIDGE_SKIP &&
+             bq_test_zen5_bridge_verdict(false, 1) == BQ_ZEN5_BRIDGE_FAIL &&
+             bq_test_zen5_bridge_verdict(true, -1) == BQ_ZEN5_BRIDGE_FAIL &&
+             bq_test_zen5_bridge_verdict(true, 0) == BQ_ZEN5_BRIDGE_PASS);
+    /* Under TMPDIR (default /tmp), like the child self-test's fixtures. */
+    char const* temporary_root = getenv("TMPDIR");
+    temporary_root = temporary_root && temporary_root[0] == '/' ? temporary_root : "/tmp";
+    char root[BQ_PATH_CAP + 1] = {0};
+    int root_length = snprintf(root, sizeof(root), "%s/buster-bench-zen5-bridge-XXXXXX", temporary_root);
+    bool ok = driver != NULL && root_length > 0 && (u32)root_length < sizeof(root) && mkdtemp(root) != NULL;
     if (!driver) printf("BENCH_SERVICE_ZEN5_RECIPE_BRIDGE result=unavailable\n");
     if (ok)
     {
         char* arguments[] = {(char*)driver, (char*)"bench_service_zen5_recipe_self_test", root, NULL};
-        ok = bq_test_recipe_driver_run(driver, arguments);
-        BQ_CHECK(ok);
+        bool eligible = bq_test_zen5_host_eligible();
+        BqZen5BridgeVerdict verdict = bq_test_zen5_bridge_verdict(eligible, bq_test_recipe_driver_status(driver, arguments));
+        if (verdict == BQ_ZEN5_BRIDGE_SKIP) printf("BENCH_SERVICE_ZEN5_RECIPE_BRIDGE result=skipped-ineligible-host\n");
+        BQ_CHECK(verdict != BQ_ZEN5_BRIDGE_FAIL);
+        ok = verdict == BQ_ZEN5_BRIDGE_PASS;
     }
     char result[BQ_PATH_CAP + 1] = {0};
     int length = ok ? snprintf(result, sizeof(result), "%s/workspaces/results/job-1-attempt-2", root) : -1;
     int directory = length > 0 && (u32)length < sizeof(result) ?
                     open(result, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    if (ok && directory < 0) printf("BENCH_SERVICE_ZEN5_RECIPE_BRIDGE result=unsupported-host\n");
+    /* A passing child must have kept its result tree. */
+    if (ok) BQ_CHECK(directory >= 0);
     if (directory >= 0)
     {
         BqRecipeFiles files;
@@ -5266,11 +5614,16 @@ BUSTER_GLOBAL_LOCAL void bq_test_zen5_recipe_bridge(char const* driver)
                                 " zen5/captures/same-root-rebuild.json\n", " zen5/captures/cross-root.json\n",
                                 " zen5/pmu/zen5-pmu-v1.json\n", " zen5/builds/immutable.json\n",
                                 " zen5/builds/cross-root-B.json\n", " zen5/oracle.record\n", " zen5/recipe.profile\n",
-                                " zen5/logs/immutable-build.log\n", " zen5-calibration-v1.plan.manifest\n"};
+                                " zen5/logs/zen5-immutable-build.log\n", " zen5/pmu/runtime.identity\n",
+                                " zen5-calibration-v1.plan.manifest\n"};
         for (u32 index = 0; bundle_size > 0 && index < BUSTER_ARRAY_LENGTH(listed); index += 1)
             BQ_CHECK(strstr(bundle, listed[index]) != NULL);
         BQ_CHECK(bundle_size > 0 && !strstr(bundle, " zen5-calibration-v1.manifest\n") &&
                  bq_worker_bundle_validate_recipe(directory, &files, bundle_digest, full) == BQ_OK && full[0]);
+        char workspaces[BQ_PATH_CAP + 1] = {0};
+        snprintf(workspaces, sizeof(workspaces), "%s/workspaces", root);
+        bq_test_zen5_export(root, workspaces, result, directory);
+        bq_test_zen5_served_binding(root, workspaces, result, directory);
         int capture = openat(directory, "zen5/captures/immutable.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         BQ_CHECK(capture >= 0 && fchmod(capture, 0600) == 0);
         if (capture >= 0) close(capture);
@@ -5283,8 +5636,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_zen5_recipe_bridge(char const* driver)
         free(bundle);
         close(directory);
     }
-    int temporary = open("/tmp", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    int root_fd = temporary >= 0 && root[strlen(root) - 1] != 'X' ?
+    int temporary = root_length > 0 ? open(temporary_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    int root_fd = temporary >= 0 && root[0] && root[strlen(root) - 1] != 'X' ?
                   openat(temporary, strrchr(root, '/') + 1, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     if (root_fd >= 0)
     {

@@ -2,7 +2,12 @@
 // (model.h owns the record shapes, ir.h the API). ir_construction_record
 // owns optional calling-thread construction diagnostics. The construction
 // functions (ir_program_initialize, ir_program_add_*, ir_module_add_*,
-// ir_function_add_*) are thin capacity-checked appends; the substance here
+// ir_function_add_*) are thin capacity-checked appends. The block-row
+// construction protocol (ir_block_append_instruction and its inline fast path
+// ir_block_commit_trusted in ir_append.h, ir_block_insert_instruction_after,
+// ir_block_retract_tail, ir_block_truncate_after,
+// ir_function_first_open_block) is how producers link rows into blocks,
+// bind result definitions and close blocks. The substance here
 // is what sits between the frontend and the backends: source-map lookup
 // and canonical source recovery for diagnostics, label-provenance
 // propagation for computed goto (ir_label_provenance_*), the per-target
@@ -13,8 +18,9 @@
 // vector semantic classes and exact target/predicate contracts
 // (ir_vector_operation_semantics, ir_simd_operation_shape/supported),
 // shared local promotion (ir_promote_function in ir_promote.c), bounded FAST
-// preparation (ir_prepare_canonical_module in ir_fast.c), immutable CFG
-// publication (ir_function_publish_cfg in
+// preparation (ir_prepare_canonical_module in ir_fast.c), the fixed-width
+// integer semantics every compile-time evaluator shares (ir_integer_* in
+// ir_integer.c), immutable CFG publication (ir_function_publish_cfg in
 // ir_cfg.c), and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
 // selection or Wasm emission so a diagnosed frontend failure cannot leak a
@@ -25,6 +31,8 @@
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/ir/ir_append.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 
 #include <buster/lib/file.h>
@@ -34,6 +42,9 @@
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_published_cfg(IrFunction* function);
 
 #if BUSTER_BENCH_ALLOCATIONS
+// getrusage for the work ledger's per-phase minor-fault sample.
+#include <buster/lib/system_headers.h>
+
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL IrConstructionCounters ir_construction_totals;
 
 void ir_construction_record(IrConstructionCounter counter, u64 amount)
@@ -61,6 +72,124 @@ void ir_construction_record(IrConstructionCounter counter, u64 amount)
 IrConstructionCounters ir_construction_counters(void)
 {
     return ir_construction_totals;
+}
+
+// The work ledger's storage and phase accountant; see work_ledger.h. A phase
+// accumulates the difference between two samples of the same monotonic
+// sources -- the process's minor page faults, which count first touches of
+// pages, and the calling thread's arena request totals -- so a phase's rows
+// sum exactly to the invocation's.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL WorkLedgerCounters work_ledger_totals;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL WorkLedgerPhase work_ledger_current_phase;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL WorkLedgerPhaseTotals work_ledger_phase_start;
+
+BUSTER_GLOBAL_LOCAL void work_ledger_add(u64* value, u64 amount, bool* overflowed)
+{
+    if (amount > UINT64_MAX - *value)
+    {
+        *value = UINT64_MAX;
+        *overflowed = true;
+    }
+    else
+    {
+        *value += amount;
+    }
+}
+
+void work_ledger_record(WorkLedgerCounter counter, u64 amount)
+{
+    if ((u32)counter < WORK_LEDGER_COUNT)
+    {
+        work_ledger_add(work_ledger_totals.values + counter, amount, &work_ledger_totals.overflowed);
+    }
+    else
+    {
+        work_ledger_totals.overflowed = true;
+    }
+}
+
+// Minor faults are process-wide on the platforms that report them; a compile
+// runs its phases on one thread, so the difference is that thread's touches.
+// Windows reports no minor-fault split and records zero.
+BUSTER_GLOBAL_LOCAL WorkLedgerPhaseTotals work_ledger_phase_sample(void)
+{
+    WorkLedgerPhaseTotals sample = {0};
+#if defined(__linux__) || defined(__APPLE__)
+    struct rusage usage;
+    memset(&usage, 0, sizeof(usage));
+    if (getrusage(RUSAGE_SELF, &usage) == 0)
+    {
+        sample.minor_faults = (u64)usage.ru_minflt;
+    }
+#endif
+    ArenaBenchmarkCounters arena = arena_benchmark_counters();
+    sample.arena_calls = arena.calls;
+    sample.arena_bytes = arena.requested_bytes;
+    sample.arena_zero_written = arena.zero_written;
+    return sample;
+}
+
+BUSTER_GLOBAL_LOCAL void work_ledger_phase_close(void)
+{
+    WorkLedgerPhaseTotals sample = work_ledger_phase_sample();
+    WorkLedgerPhaseTotals* phase = work_ledger_totals.phases + work_ledger_current_phase;
+    bool* overflowed = &work_ledger_totals.overflowed;
+    work_ledger_add(&phase->minor_faults, sample.minor_faults - BUSTER_MIN(sample.minor_faults, work_ledger_phase_start.minor_faults), overflowed);
+    work_ledger_add(&phase->arena_calls, sample.arena_calls - BUSTER_MIN(sample.arena_calls, work_ledger_phase_start.arena_calls), overflowed);
+    work_ledger_add(&phase->arena_bytes, sample.arena_bytes - BUSTER_MIN(sample.arena_bytes, work_ledger_phase_start.arena_bytes), overflowed);
+    work_ledger_add(&phase->arena_zero_written,
+                    sample.arena_zero_written - BUSTER_MIN(sample.arena_zero_written, work_ledger_phase_start.arena_zero_written), overflowed);
+    work_ledger_phase_start = sample;
+}
+
+void work_ledger_phase(WorkLedgerPhase phase)
+{
+    if ((u32)phase < WORK_LEDGER_PHASE_COUNT)
+    {
+        work_ledger_phase_close();
+        work_ledger_current_phase = phase;
+        work_ledger_totals.phases[phase].marks += 1;
+    }
+    else
+    {
+        work_ledger_totals.overflowed = true;
+    }
+}
+
+WorkLedgerCounters work_ledger_counters(void)
+{
+    work_ledger_phase_close();
+    return work_ledger_totals;
+}
+
+String8 work_ledger_counter_mechanism(WorkLedgerCounter counter)
+{
+    String8 const mechanisms[] = {
+#define WORK_LEDGER_MECHANISM(id, mechanism, name) S8(#mechanism),
+        WORK_LEDGER_COUNTERS(WORK_LEDGER_MECHANISM)
+#undef WORK_LEDGER_MECHANISM
+    };
+    return (u32)counter < WORK_LEDGER_COUNT ? mechanisms[counter] : S8("invalid");
+}
+
+String8 work_ledger_counter_name(WorkLedgerCounter counter)
+{
+    String8 const names[] = {
+#define WORK_LEDGER_NAME(id, mechanism, name) S8(#name),
+        WORK_LEDGER_COUNTERS(WORK_LEDGER_NAME)
+#undef WORK_LEDGER_NAME
+    };
+    return (u32)counter < WORK_LEDGER_COUNT ? names[counter] : S8("invalid");
+}
+
+String8 work_ledger_phase_name(WorkLedgerPhase phase)
+{
+    String8 const names[] = {
+#define WORK_LEDGER_PHASE_NAME(id, name) S8(#name),
+        WORK_LEDGER_PHASES(WORK_LEDGER_PHASE_NAME)
+#undef WORK_LEDGER_PHASE_NAME
+    };
+    return (u32)phase < WORK_LEDGER_PHASE_COUNT ? names[phase] : S8("invalid");
 }
 
 String8 ir_construction_counter_name(IrConstructionCounter counter)
@@ -4503,6 +4632,184 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
     return result;
 }
 
+String8 ir_commit_refusal_name(IrCommitRefusal refusal)
+{
+    String8 names[] = {S8("accepted"), S8("block"), S8("closed block"), S8("storage"), S8("operand"), S8("target"), S8("result"), S8("position")};
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == IR_COMMIT_REFUSAL_COUNT);
+    String8 result = (u32)refusal < BUSTER_ARRAY_LENGTH(names) ? names[refusal] : S8("invalid");
+    return result;
+}
+
+IrInstructionId ir_block_append_instruction(Arena* arena, IrFunction* function, IrBlockId block, IrInstruction instruction,
+                                            IrSourceRange canonical_source, IrCommitRefusal* refusal_out)
+{
+    // The refusal reads only block states and value rows, which reopening a
+    // published CFG leaves untouched, so a refused row does not reopen it.
+    IrCommitRefusal refusal = arena ? ir_block_commit_refusal(function, block, &instruction) : IR_COMMIT_REFUSED_BLOCK;
+    IrInstructionId result = IR_INSTRUCTION_ID_INVALID;
+    if (refusal == IR_COMMIT_ACCEPTED)
+    {
+        ir_function_invalidate_cfg(function);
+        result = ir_block_commit_accepted(arena, function, block, instruction, canonical_source);
+    }
+    if (refusal_out)
+    {
+        *refusal_out = refusal;
+    }
+    return result;
+}
+
+IrInstructionId ir_block_insert_instruction_after(Arena* arena, IrFunction* function, IrBlockId block, IrInstructionId after,
+                                                  IrInstruction instruction, IrSourceRange canonical_source, IrCommitRefusal* refusal_out)
+{
+    IrCommitRefusal refusal = IR_COMMIT_REFUSED_BLOCK;
+    IrInstructionId result = IR_INSTRUCTION_ID_INVALID;
+    if (arena && function && function->blocks && block.value < function->block_count)
+    {
+        refusal = ir_row_commit_refusal(function, &instruction);
+        // A terminator inserted mid-chain, or any row placed behind one, would
+        // leave a row after a terminator. A closed block still takes rows
+        // ahead of its terminator.
+        if (refusal == IR_COMMIT_ACCEPTED &&
+            (ir_instruction_is_terminator(&instruction) ||
+             (after.value != IR_ID_UNDERLYING_INVALID &&
+              (after.value >= function->instruction_count || ir_instruction_is_terminator(function->instructions + after.value)))))
+        {
+            refusal = IR_COMMIT_REFUSED_POSITION;
+            IR_CONSTRUCTION_RECORD(COMMIT_REFUSALS, 1);
+        }
+        if (refusal == IR_COMMIT_ACCEPTED)
+        {
+            // Reopening a published CFG rebuilds the chains the position names.
+            ir_function_invalidate_cfg(function);
+            IrBlock* target = function->blocks + block.value;
+            instruction.next = after.value != IR_ID_UNDERLYING_INVALID ? function->instructions[after.value].next : target->first_instruction;
+            result = ir_function_add_instruction(arena, function, instruction, canonical_source);
+            if (after.value == IR_ID_UNDERLYING_INVALID)
+            {
+                target->first_instruction = result;
+            }
+            else
+            {
+                function->instructions[after.value].next = result;
+            }
+            if (target->last_instruction.value == after.value)
+            {
+                target->last_instruction = result;
+            }
+            if (instruction.result.value != IR_ID_UNDERLYING_INVALID)
+            {
+                function->values[instruction.result.value].definition = result;
+                IR_CONSTRUCTION_RECORD(COMMIT_RESULT_BINDS, 1);
+            }
+            IR_CONSTRUCTION_RECORD(COMMIT_INSERTIONS, 1);
+        }
+    }
+    if (refusal_out)
+    {
+        *refusal_out = refusal;
+    }
+    return result;
+}
+
+// A retracted row's result goes back to having no definition; the producer
+// owns what happens to the value itself.
+BUSTER_GLOBAL_LOCAL void ir_block_unbind_row(IrFunction* function, u32 row)
+{
+    IrValueId result = function->instructions[row].result;
+    if (result.value < function->value_count && function->values[result.value].definition.value == row)
+    {
+        function->values[result.value].definition = IR_INSTRUCTION_ID_INVALID;
+    }
+}
+
+bool ir_block_retract_tail(IrFunction* function, IrBlockId block, IrInstructionId previous)
+{
+    bool result = false;
+    if (function && !function->published_cfg && function->blocks && block.value < function->block_count && function->instruction_count)
+    {
+        IrBlock* target = function->blocks + block.value;
+        u32 tail = function->instruction_count - 1;
+        // UNREACHABLE closes a block without an edge, so no successor,
+        // predecessor list or block argument can refer to it; retracting it
+        // reopens the block. Every other terminator is final.
+        bool reopens = target->terminated && target->last_instruction.value == tail && function->instructions[tail].opcode == IR_OPCODE_UNREACHABLE &&
+                       function->instructions[tail].target_count == 0;
+        result = (!target->terminated || reopens) && target->last_instruction.value == tail &&
+                 (previous.value == IR_ID_UNDERLYING_INVALID ? target->first_instruction.value == tail
+                                                            : previous.value < tail && function->instructions[previous.value].next.value == tail);
+        if (result)
+        {
+            ir_block_unbind_row(function, tail);
+            if (previous.value == IR_ID_UNDERLYING_INVALID)
+            {
+                target->first_instruction = IR_INSTRUCTION_ID_INVALID;
+            }
+            else
+            {
+                function->instructions[previous.value].next = IR_INSTRUCTION_ID_INVALID;
+            }
+            target->last_instruction = previous;
+            target->terminated = false;
+            function->instruction_count = tail;
+            IR_CONSTRUCTION_RECORD(COMMIT_RETRACTIONS, 1);
+        }
+    }
+    return result;
+}
+
+bool ir_block_truncate_after(IrFunction* function, IrBlockId block, IrInstructionId keep)
+{
+    bool result = false;
+    if (function && !function->published_cfg && function->blocks && block.value < function->block_count && keep.value < function->instruction_count)
+    {
+        IrBlock* target = function->blocks + block.value;
+        u32 count = function->instruction_count;
+        // Rows committed to one block in order form an ascending run, so the
+        // suffix after `keep` is exactly the rows keep + 1 .. count - 1 when
+        // its walk visits that many strictly ascending, in-range ids. Anything
+        // else would leave another block holding a row the truncation frees.
+        u32 expected = keep.value + 1;
+        u32 last = keep.value;
+        bool valid = !target->terminated && !ir_instruction_is_terminator(function->instructions + keep.value);
+        u32 row = function->instructions[keep.value].next.value;
+        while (valid && row != IR_ID_UNDERLYING_INVALID)
+        {
+            valid = row == expected && row < count && !ir_instruction_is_terminator(function->instructions + row);
+            if (valid)
+            {
+                last = row;
+                expected += 1;
+                row = function->instructions[row].next.value;
+            }
+        }
+        result = valid && expected == count && target->last_instruction.value == last;
+        if (result)
+        {
+            for (u32 removed = keep.value + 1; removed < count; removed += 1)
+            {
+                ir_block_unbind_row(function, removed);
+            }
+            function->instructions[keep.value].next = IR_INSTRUCTION_ID_INVALID;
+            target->last_instruction = keep;
+            function->instruction_count = keep.value + 1;
+            IR_CONSTRUCTION_RECORD(COMMIT_TRUNCATED_ROWS, count - keep.value - 1);
+        }
+    }
+    return result;
+}
+
+IrBlockId ir_function_first_open_block(IrFunction const* function)
+{
+    IrBlockId result = IR_BLOCK_ID_INVALID;
+    for (u32 index = 0; function && index < function->block_count && result.value == IR_ID_UNDERLYING_INVALID; index += 1)
+    {
+        IR_CONSTRUCTION_RECORD(COMMIT_FINALIZED_BLOCKS, 1);
+        result.value = function->blocks[index].terminated ? IR_ID_UNDERLYING_INVALID : index;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(IrValidationError error, IrFunction* function, IrBlockId block, IrInstructionId instruction)
 {
     return (IrValidationResult){
@@ -4975,6 +5282,12 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* pr
         {
             result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, value->definition);
         }
+        else if (value->definition.value < function->instruction_count && parameter_definitions[value_index])
+        {
+            // A value has exactly one definition: the row it names cannot
+            // also share it with a block parameter.
+            result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, IR_BLOCK_ID_INVALID, value->definition);
+        }
         else
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_CHECKS, 1);
@@ -5206,9 +5519,14 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     }
     else if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER)
     {
+        // The signed value the sign and magnitude spell must lie in
+        // [-2^(width-1), 2^width): a reader that materializes the magnitude
+        // unreduced (the native emitters do) then sees the same number as one
+        // that reduces it (ir_integer_constant_decode).
         IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
         if (!type || (type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN && type->kind != IR_TYPE_ENUM) ||
-            instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
+            instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
+            (ir_integer_type_width(type) && !ir_integer_constant_canonical(instruction, ir_integer_type_width(type))))
         {
             error = IR_VALIDATION_OPERATION;
         }
@@ -5815,9 +6133,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram*
         }
         else
         {
-            terminated = instruction->opcode == IR_OPCODE_BRANCH || instruction->opcode == IR_OPCODE_BRANCH_IF || instruction->opcode == IR_OPCODE_SWITCH ||
-                         instruction->opcode == IR_OPCODE_INDIRECT_BRANCH || instruction->opcode == IR_OPCODE_RETURN ||
-                         instruction->opcode == IR_OPCODE_UNREACHABLE || (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count != 0);
+            terminated = ir_instruction_is_terminator(instruction);
             instruction_id = ir_block_next_instruction(function, block, instruction_id);
         }
     }
@@ -5981,3 +6297,4 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
 #include <buster/lib/compiler/ir/ir_cfg.c>
 #include <buster/lib/compiler/ir/ir_promote.c>
 #include <buster/lib/compiler/ir/ir_fast.c>
+#include <buster/lib/compiler/ir/ir_integer.c>

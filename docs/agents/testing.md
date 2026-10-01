@@ -18,11 +18,21 @@
   `[N/N] Unit tests (k of M modules selected)`. Without `--module`, every
   module runs, as in CI and `test_all`.
 - The bootstrap wrappers have a controlled platform test at
-  `python3 tests/bootstrap_wrapper_test.py -v`. It supplies a fake TCC and
+  `python3 tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v`. It supplies a fake TCC and
   driver, and covers cold/warm reuse, dependency and compiler invalidation,
   corrupt/incomplete entries, failure propagation, argument forwarding and
-  concurrent immutable publication. CI runs it on every desktop OS/architecture
-  lane before installing optional tools.
+  concurrent immutable publication. Each desktop Release shard owns this suite;
+  the checks shard retains the required lifecycle step without repeating it.
+  Windows runs the same tests through
+  `python tools/bootstrap_wrapper_cases.py --jobs 2`: two independent scenarios
+  at once, with the existing six-writer publication scenario running alone.
+  All within-scenario cache transitions stay ordered. The policy step executes
+  `python3 tools/bootstrap_wrapper_cases_test.py -v` on each Release lane,
+  covering deadlines, launch/startup failures, cancellation, descendant cleanup,
+  failure status and stable diagnostics. See [wrapper CI](../ci-bootstrap-wrapper.md).
+  The whole original suite's obsolete workflow assertions remain tracked by
+  [#1835](https://github.com/buster14a/buster/issues/1835); they are not an executed
+  CI contract.
 - Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
@@ -212,13 +222,26 @@
   raise the deadline; `docs/ci-github-actions.md` records the #685 occurrence.
   The lifecycle helper treats an owned terminated zombie as already stopped,
   not as a signalable emulator; the harness holds a child unreaped to cover
-  this path deterministically. A process-state query that loses the PID after
-  an initial `kill -0` is reconciled with one more liveness probe: confirmed
-  disappearance is stopped while persistent ambiguity remains fail-closed.
-  Once teardown observes a terminal state it is monotonic for that ownership
-  check and is not immediately re-probed. SIGTERM and SIGKILL are followed by
-  bounded stop verification; sending SIGKILL alone is not a failure, but an
-  owned process that remains live after it is.
+  this path deterministically. The numeric PID marker stays compatible with
+  existing callers; its `.identity` sidecar records the launch identity before
+  the PID marker is published. The Linux Android lane compares boot ID and
+  kernel start ticks from `/proc/<pid>/stat`, reading state and identity in one
+  snapshot. The portable/macOS fake-tool path uses `LC_ALL=C ps` start time
+  (one-second resolution) and state. These are checked at start reuse, wait,
+  shutdown and immediately before signals; an identity mismatch is a retired
+  owned process, not a new cleanup target. This is a shell snapshot check, not
+  an atomic pidfd signal operation; the portable timestamp also cannot resolve
+  reuse within the same second. Missing/malformed ownership or an unverifiable
+  live PID fails cleanup without targeting that PID, and retains the record
+  for retry. Once cleanup proves the owned process stopped it removes both
+  records, preventing another invocation from resurrecting the ownership.
+  SIGTERM and SIGKILL retain bounded stop verification; sending SIGKILL alone
+  is not a failure, but a surviving owned process is. `android/run_tests_test.sh`
+  also runs `android/emulator_identity_test.py` for independent identity,
+  malformed-record, unavailable-probe and surviving-process controls. Its real
+  workflow-body fixture simulates PID reuse after the payload observes the
+  original emulator terminal, and requires successful structured cleanup with
+  no adb shutdown or signal to the unrelated replacement.
 
 The private OS resource-failure, flood and process-tree child modes dispatch at
 the start of `library_tests`, before compiler prewarming and other test modules.
@@ -302,12 +325,12 @@ their errors. The registered link tests cover these boundaries and byte-identica
 output relative to an object without the unused marker.
 
 `compiler_driver_test_wide_vector_boundaries` exchanges padded-vector calls
-with the PATH `clang` at `x86-64`, `haswell` and `znver5`. Each row runs only
-when the host CPU can execute it. The Zen 5 row also requires that Clang accept
-`-march=znver5`, which Clang supports from version 19. A single probe compile
-checks this, and an older Clang (Ubuntu 24.04 ships 18) prints
-`PADDED_VECTOR_ZNVER5_ROW status=not-run` with its version line. The row is then
-not run and is not counted as passed.
+with the PATH `clang` at baseline, Haswell and Zen 5. Each row runs only when
+the host CPU can execute it. Buster compiles its half of the Zen 5 row for
+`znver5`, and Clang compiles its half for `x86-64-v4`, which has the same
+64-byte vector ABI. Clang accepts `znver5` only from version 19 (Ubuntu 24.04
+ships 18), but it accepts `x86-64-v4` from version 12, so the row needs no
+host-compiler gate; see the [layout guide](frontend/layout.md).
 
 The native driver's `compiler_discovery_self_test` runs before every combination
 matrix and covers real Clang identity, platform/override selection, and failed
