@@ -55,6 +55,44 @@ class QualificationTests(unittest.TestCase):
                     self.assertEqual(result["initial_queue_seconds"], 10)
                     self.assertEqual(set(result["job_queue_seconds"].values()), {9})
 
+    def test_only_optional_first_attempt_skipped_reuse_has_zero_runner_cost(self):
+        for variant, expected in (("combined-overlap", 21), ("split-overlap", 27)):
+            run = self.run_fixture(variant, reuse=True)
+            run["jobs"][-1].update(conclusion="skipped", created_at=None, started_at=None, completed_at=None, labels=[])
+            with self.subTest(variant=variant), mock.patch.object(github, "measure", return_value=(self.measured(), None)):
+                result = qualification.timing(run, variant)
+                self.assertEqual(result["job_count"], expected + 1)
+                self.assertEqual(result["runner_seconds"], expected * 100)
+                self.assertEqual(result["elapsed_seconds"], 110)
+                self.assertEqual(result["skipped_metadata_jobs"], [github.MAIN_REUSE_JOB])
+                self.assertNotIn(github.MAIN_REUSE_JOB, result["job_queue_seconds"])
+            for change in (dict(run_attempt=2), dict(conclusion="failure"), dict(conclusion="cancelled"), dict(status="in_progress")):
+                invalid = copy.deepcopy(run)
+                invalid["jobs"][-1].update(change)
+                with self.subTest(change=change), mock.patch.object(github, "measure", return_value=(self.measured(), None)), self.assertRaises(ValueError):
+                    qualification.timing(invalid, variant)
+            run["jobs"][0].update(conclusion="skipped")
+            with mock.patch.object(github, "measure", return_value=(self.measured(), None)), self.assertRaises(ValueError):
+                qualification.timing(run, variant)
+
+    def test_skipped_reuse_has_no_assigned_runner_conditions(self):
+        run = self.run_fixture(reuse=True)
+        run["jobs"][-1].update(conclusion="skipped", created_at=None, started_at=None, completed_at=None, labels=[])
+        jobs = {job["name"]: dict(job_id=job["id"], image_os="fixture", image_version="1", runner="synthetic", toolchains={"fixture": "1"}, caches={})
+                for job in run["jobs"] if job["name"] != github.MAIN_REUSE_JOB}
+        value = dict(schema="buster-ci-checks-conditions-v1", run_id=123, jobs=jobs)
+        _, skipped = qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+        _, absent = qualification.conditions(self.root, reference(self.root, "conditions.json", value), self.run_fixture())
+        self.assertEqual(skipped, absent)
+        self.assertNotIn(github.MAIN_REUSE_JOB, skipped)
+        value["jobs"][github.MAIN_REUSE_JOB] = dict(job_id=22, image_os="fixture", image_version="1", runner="synthetic", toolchains={}, caches={})
+        with self.assertRaisesRegex(ValueError, "exact-job"):
+            qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+        del value["jobs"][github.MAIN_REUSE_JOB]
+        del value["jobs"][run["jobs"][0]["name"]]
+        with self.assertRaisesRegex(ValueError, "exact-job"):
+            qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+
     def test_missing_duplicate_failed_or_partial_jobs_never_qualify(self):
         mutations = (lambda r: r["jobs"].pop(), lambda r: r["jobs"].append(r["jobs"][0]),
                      lambda r: r["jobs"][0].update(conclusion="skipped"),
@@ -116,7 +154,13 @@ class QualificationTests(unittest.TestCase):
             return self.observation(item["variant"], item["synthetic_id"])
         with mock.patch.object(qualification, "sample", side_effect=collect):
             report = qualification.qualify(self.campaign())
-        self.assertEqual(report["status"], "accepted")
+        self.assertEqual(report["status"], "pending")
+        self.assertEqual(report["timing_status"], "accepted")
+        self.assertTrue(report["timing_contract_met"])
+        self.assertFalse(report["performance_accepted"])
+        self.assertEqual(report["resource_review"], "pending")
+        self.assertTrue(report["pending_reviews"])
+        self.assertTrue(all(issue["status"] == "pending" for issue in report["issues"].values()))
         self.assertEqual(report["issues"]["2119"]["time_ratio"], .90)
         self.assertEqual(report["issues"]["2120"]["time_ratio"], .85)
         def costly(root, item):
@@ -127,6 +171,9 @@ class QualificationTests(unittest.TestCase):
         with mock.patch.object(qualification, "sample", side_effect=costly):
             report = qualification.qualify(self.campaign())
         self.assertEqual(report["status"], "rejected")
+        self.assertEqual(report["timing_status"], "rejected")
+        self.assertFalse(report["timing_contract_met"])
+        self.assertFalse(report["performance_accepted"])
         self.assertEqual(report["issues"]["2120"]["status"], "rejected")
 
     def test_changed_census_source_images_and_repeated_runs_stay_pending(self):
@@ -156,38 +203,69 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "interrupted publication"):
             qualification.desktop(self.root, item, self.run_fixture(), {}, "combined-overlap")
 
-    def complete_desktop(self):
+    def complete_desktop(self, release=False, direct=False):
         directory = self.root / "matrix-phases"
         directory.mkdir()
-        coverage = phase_tests.fixture(directory)
+        coverage = phase_tests.fixture(directory, direct=direct)
         coverage.update(kind="desktop-matrix-coverage", mode="ci")
         coverage["identity"]["suite"] = "desktop"
         plan = phases.read(directory / "plan.json")
         for row, cap, tree in zip(coverage["expected"], coverage["detected"], plan["trees"]):
             row.update(optimize=row["configuration"] == "Release", execution="runtime" if row["compiler"] == "clang" else "compile-link", exclusion="")
+            if release and row["compiler"] == "clang" and row["configuration"] == "Release":
+                row.update(sanitize=False, unity=True)
+                tree["sanitize"] = 0
             row["owner_shard"] = qualification.coverage_tools._coverage_row_owner(row)
             row["id"] = qualification.coverage_tools._coverage_row_id(coverage["identity"], row)
             cap["id"] = row["id"]
             tree["rows"] = [row["id"]]
+        if release:
+            coverage["identity"]["shard"] = plan["identity"]["shard"] = "release"
+            plan["trees"] = [tree for tree in plan["trees"] if tree["id"] == "tree1"]
+            plan["tasks"] = [task for task in plan["tasks"] if task["tree"] in ("tree1", "matrix")]
+            plan["outer_jobs"] = 1
+            kept = {task["id"] for task in plan["tasks"]}
+            for path in directory.iterdir():
+                if path.name not in ("plan.json", "terminal.json") and path.name.split(".", 1)[0] not in kept:
+                    path.unlink()
         phase_tests.write(directory, "plan.json", plan)
         coverage["policy"] = dict(version=1, row_count=5, required_count=5, excluded_count=0,
                                   fingerprint=qualification.coverage_tools._coverage_policy_fingerprint(coverage["identity"], coverage["expected"]))
-        coverage["executed"] = [dict(lane_id="fixture", status="success", evidence="driver-complete", rows=[r["id"] for r in coverage["expected"]])]
+        selected = qualification.coverage_tools._coverage_selected_ids({r["id"]: r for r in coverage["expected"]}, "release" if release else "checks")
+        coverage["executed"] = [dict(lane_id="fixture", status="success", evidence="driver-complete", rows=sorted(selected))]
         condition = dict(image_os="fixture", image_version="1", runner="synthetic", caches={"BUSTER_CI_ZIG_CACHE_HIT": "false"})
         meta = dict(GITHUB_SHA="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1", ImageOS="fixture", ImageVersion="1", BUSTER_CI_RUNNER="synthetic", BUSTER_CI_ZIG_CACHE_HIT="false")
         summary = phases.analyze(directory, coverage, meta)
         tests = []
-        for i, (row, cap) in enumerate(zip(coverage["expected"][:2], coverage["detected"][:2])):
-            log = self.root / f"test{i}.log"
-            log.write_text("TEST_MODULE_TIMING index=0 module=fixture duration_ns=1 passed=2 failed=0 assertions=2 status=pass\n[2/2] Unit tests\n[1/1] Module tests\n[0/0] External tests\n")
+        pairs = [(row, cap) for row, cap in zip(coverage["expected"], coverage["detected"]) if row["id"] in selected and row["execution"] == "runtime"]
+        for i, (row, cap) in enumerate(pairs):
+            tree = next(t for t in summary["trees"] if row["id"] in t["rows"])
+            event = next(e for e in summary["events"] if e["id"] == phases.task_id(tree["id"], "test", row["configuration"]))
+            sidecar = self.root / "unit-observations" / event["id"]
+            sidecar.mkdir(parents=True)
+            inventory = [dict(index=0, name="compiler_driver_tests", table_audit=False), dict(index=1, name="fixture", table_audit=False), dict(index=2, name="table_audit_fixture", table_audit=True)]
+            lines = [f"CI_UNIT_MODULE_V1 index={r['index']} module={r['name']} table_audit={int(r['table_audit'])} enabled={int(not r['table_audit'])} selected=0 group={'driver' if r['index'] == 0 else 'rest'}" for r in inventory]
+            lines += ["CI_UNIT_BATCH_V1 group=inventory modules=0 modules_passed=0 assertions=0 passed=0 failed=0 external=0 external_passed=0 status=inventory", "[0/0] Unit tests (0 of 3 modules selected)", "[0/0] Module tests", "[0/0] External tests"]
+            inventory_path = sidecar / "inventory.log"
+            inventory_path.write_text("\n".join(lines) + "\n")
+            log = sidecar / "test.log"
+            timing = "TEST_MODULE_TIMING index=0 module=compiler_driver_tests duration_ns=1 passed=1 failed=0 assertions=1 status=pass\nTEST_MODULE_TIMING index=1 module=fixture duration_ns=1 passed=2 failed=0 assertions=2 status=pass\n"
+            if release or direct:
+                timing += "TEST_MODULE_TIMING index=2 module=table_audit_fixture duration_ns=1 passed=1 failed=0 assertions=1 status=pass\n"
+            log.write_text(timing + ("[4/4] Unit tests\n[3/3] Module tests\n" if release or direct else "[3/3] Unit tests\n[2/2] Module tests\n") + "[0/0] External tests\n")
             unit = dict(schema="buster-ci-unit-tests-measure-v1", arm="baseline", mode="serial", exit_code=0, test_workers=1, elapsed_us=20,
-                        inventory=[dict(index=0, name="fixture", table_audit=False)], log=log.name,
+                        inventory=inventory, log=str(log.relative_to(self.root)),
                         identity=dict(source_revision="a" * 40, binary_sha256="e" * 64, runner_image={k: condition[k] for k in ("image_os", "image_version", "runner")},
-                                      platform="windows", architecture="x86_64", configuration=row["configuration"], sanitize=row["sanitize"], fuzz=row["fuzz"], table_audits=False,
+                                      platform="macos" if direct else "windows", architecture="x86_64", configuration=row["configuration"], sanitize=row["sanitize"], fuzz=row["fuzz"], table_audits=release or direct,
                                       toolchain={k: cap[k] for k in qualification.CAP_KEYS}, cpu_budget=4))
-            tests.append(dict(row_id=row["id"], manifest=reference(self.root, f"unit{i}.json", unit), log_sha256=hashlib.sha256(log.read_bytes()).hexdigest()))
+            receipt = {k: event[k] for k in ("id", "epoch_us", "pid", "argv")}
+            receipt.update(schema="buster-desktop-unit-observation-v1", source_revision="a" * 40, run_id="123", run_attempt="1", binary_path=event["argv"][0], binary_sha256="e" * 64,
+                           inventory_file="inventory.log", log_file="test.log", inventory_sha256=hashlib.sha256(inventory_path.read_bytes()).hexdigest(),
+                           log_sha256=hashlib.sha256(log.read_bytes()).hexdigest(), binary_unchanged=True, capture_complete=True, test_result=0)
+            tests.append(dict(row_id=row["id"], manifest=reference(self.root, f"unit{i}.json", unit),
+                              observation=reference(self.root, str((sidecar / "observation.json").relative_to(self.root)), receipt), log_sha256=receipt["log_sha256"]))
         result = dict(success=True, metadata=meta, matrix_phases=summary)
-        item = dict(job="Windows x86-64 checks", phase_directory=directory.name, tests=tests,
+        item = dict(job=("macOS x86-64" if direct else "Windows x86-64") + (" release" if release else " checks"), phase_directory=directory.name, tests=tests,
                     coverage=reference(self.root, "coverage.json", coverage), result=reference(self.root, "result.json", result), phases=reference(self.root, "phases.json", summary))
         return item, coverage, condition
 
@@ -206,11 +284,122 @@ class QualificationTests(unittest.TestCase):
             unit = qualification.record(self.root, test["manifest"])
             unit["identity"]["binary_sha256"] = "f" * 64
             test["manifest"] = reference(self.root, f"unit{i}.json", unit)
+            receipt = qualification.record(self.root, test["observation"])
+            receipt["binary_sha256"] = "f" * 64
+            test["observation"] = reference(self.root, test["observation"]["path"], receipt)
         after = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
         self.assertEqual(before, after)
         self.assertEqual(len(after["census"]), 2)
         item["tests"].pop()
         with self.assertRaisesRegex(ValueError, "runtime assertion census"):
+            qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_native_receipt_identity_completion_binary_and_task_path_are_required(self):
+        item, _, condition = self.complete_desktop()
+        receipt = qualification.record(self.root, item["tests"][0]["observation"])
+        changes = {"schema": "wrong", "id": "foreign-task", "pid": 999, "epoch_us": 2, "argv": ["other-binary"],
+                   "source_revision": "f" * 40, "run_id": "999", "run_attempt": "2", "binary_path": "other-binary",
+                   "binary_sha256": "f" * 64, "binary_unchanged": False, "capture_complete": False, "test_result": 1,
+                   "inventory_file": "other.log", "log_file": "other.log"}
+        for key, value in changes.items():
+            invalid = copy.deepcopy(item)
+            changed = dict(receipt, **{key: value})
+            test = invalid["tests"][0]
+            test["observation"] = reference(self.root, test["observation"]["path"], changed)
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                qualification.desktop(self.root, invalid, self.run_fixture(), condition, "combined-overlap")
+        invalid = copy.deepcopy(item)
+        invalid["tests"][0]["observation"] = reference(self.root, "foreign-observation.json", receipt)
+        with self.assertRaisesRegex(ValueError, "exact native task sidecar"):
+            qualification.desktop(self.root, invalid, self.run_fixture(), condition, "combined-overlap")
+
+    def test_same_bytes_from_another_log_cannot_replace_native_log(self):
+        item, _, condition = self.complete_desktop()
+        test = item["tests"][0]
+        unit = qualification.record(self.root, test["manifest"])
+        original = self.root / unit["log"]
+        substitute = self.root / "substitute.log"
+        substitute.write_bytes(original.read_bytes())
+        unit["log"] = substitute.name
+        test["manifest"] = reference(self.root, test["manifest"]["path"], unit)
+        with self.assertRaisesRegex(ValueError, "native test log"):
+            qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_native_inventory_digest_and_independent_query_are_checked(self):
+        item, _, condition = self.complete_desktop()
+        test = item["tests"][0]
+        receipt = qualification.record(self.root, test["observation"])
+        inventory_path = (self.root / test["observation"]["path"]).parent / "inventory.log"
+        original = inventory_path.read_text()
+        inventory_path.write_text(original.replace("index=2", "index=3"))
+        with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        receipt["inventory_sha256"] = hashlib.sha256(inventory_path.read_bytes()).hexdigest()
+        test["observation"] = reference(self.root, test["observation"]["path"], receipt)
+        with self.assertRaisesRegex(ValueError, "canonical index"):
+            qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        inventory_path.write_text("\n".join(line for line in original.splitlines() if "index=2 " not in line).replace("of 3 modules", "of 2 modules") + "\n")
+        receipt["inventory_sha256"] = hashlib.sha256(inventory_path.read_bytes()).hexdigest()
+        test["observation"] = reference(self.root, test["observation"]["path"], receipt)
+        with self.assertRaisesRegex(ValueError, "independent inventory"):
+            qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_observed_binary_paths_use_original_windows_and_posix_source_roots(self):
+        item, coverage, _ = self.complete_desktop()
+        test = item["tests"][0]
+        manifest_path = qualification.retained(self.root, test["manifest"])
+        unit = qualification.units.validate_sample(manifest_path)
+        receipt = qualification.record(self.root, test["observation"])
+        summary = qualification.record(self.root, item["phases"])
+        original_event = next(e for e in summary["events"] if e["id"] == receipt["id"])
+        cases = (("windows", r"C:\retained\producer\build.c", r"build\tree0\Debug\ide.exe", r"c:\RETAINED\PRODUCER\build\tree0\Debug\ide.exe"),
+                 ("linux", "/retained/producer/build.c", "build/tree0/Debug/ide", "/retained/producer/build/tree0/Debug/ide"))
+        for platform, source, binary, observed in cases:
+            identity = dict(coverage["identity"], platform=platform, source_path=source)
+            event = dict(original_event, argv=[binary, "test"])
+            value = dict(receipt, argv=event["argv"], binary_path=observed)
+            test["observation"] = reference(self.root, test["observation"]["path"], value)
+            with self.subTest(platform=platform):
+                self.assertEqual(qualification.observation(self.root, item, test, unit, manifest_path, event, identity), value)
+            value["binary_path"] = observed.replace("Debug", "Release")
+            test["observation"] = reference(self.root, test["observation"]["path"], value)
+            with self.subTest(wrong_tree=platform), self.assertRaisesRegex(ValueError, "binary/path mismatch"):
+                qualification.observation(self.root, item, test, unit, manifest_path, event, identity)
+
+    def test_canonical_release_executes_audits_after_audit_disabled_inventory_query(self):
+        item, _, condition = self.complete_desktop(release=True)
+        result = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        census = next(iter(result["census"].values()))
+        self.assertEqual(census["skipped_table_audits"], [])
+        self.assertEqual(set(census["modules"]), {"compiler_driver_tests", "fixture", "table_audit_fixture"})
+        self.assertEqual(sum(m["assertions"] for m in census["modules"].values()), 4)
+        test = item["tests"][0]
+        unit = qualification.record(self.root, test["manifest"])
+        unit["identity"]["table_audits"] = False
+        test["manifest"] = reference(self.root, test["manifest"]["path"], unit)
+        log = self.root / unit["log"]
+        log.write_text("\n".join(line for line in log.read_text().splitlines() if "module=table_audit_fixture" not in line).replace("[4/4] Unit", "[3/3] Unit").replace("[3/3] Module", "[2/2] Module") + "\n")
+        receipt = qualification.record(self.root, test["observation"])
+        receipt["log_sha256"] = test["log_sha256"] = hashlib.sha256(log.read_bytes()).hexdigest()
+        test["observation"] = reference(self.root, test["observation"]["path"], receipt)
+        with self.assertRaisesRegex(ValueError, "table audit policy"):
+            qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_direct_runtime_keeps_default_audits_even_without_unity(self):
+        item, _, condition = self.complete_desktop(direct=True)
+        result = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        self.assertTrue(all(not row["unity"] for row in result["rows"]))
+        self.assertTrue(all(not census["skipped_table_audits"] and "table_audit_fixture" in census["modules"] for census in result["census"].values()))
+        test = item["tests"][0]
+        unit = qualification.record(self.root, test["manifest"])
+        unit["identity"]["table_audits"] = False
+        test["manifest"] = reference(self.root, test["manifest"]["path"], unit)
+        log = self.root / unit["log"]
+        log.write_text("\n".join(line for line in log.read_text().splitlines() if "module=table_audit_fixture" not in line).replace("[4/4] Unit", "[3/3] Unit").replace("[3/3] Module", "[2/2] Module") + "\n")
+        receipt = qualification.record(self.root, test["observation"])
+        receipt["log_sha256"] = test["log_sha256"] = hashlib.sha256(log.read_bytes()).hexdigest()
+        test["observation"] = reference(self.root, test["observation"]["path"], receipt)
+        with self.assertRaisesRegex(ValueError, "table audit policy"):
             qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
 
 

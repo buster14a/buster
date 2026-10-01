@@ -139,3 +139,13 @@ a production policy. Qualification uses three complete first attempts per policy
 unchanged source/images/toolchains/cache and census, at least 10% median Windows
 checks improvement, and at most 5% growth in total workflow runner seconds.
 The accepted overlapping policy remains the production default.
+
+The three qualification dispatch refs enable `BUSTER_CI_CHECKS_EVIDENCE=1`
+only in their desktop combination steps. For each runtime task the native
+observer queries the same binary's independent inventory, captures its actual
+test output and verifies the binary hash before and after execution. It retains
+`unit-observations/<task-id>/` beside the phase directory, leaving the strict
+phase journal inventory unchanged. Query failure, output truncation, cleanup
+failure, changed binaries or an existing receipt fail the observed task.
+Ordinary runs keep direct streams. These qualification observations do not
+supply CPU time or peak RSS; positive timing alone cannot accept either issue.
