@@ -21,8 +21,9 @@ static void test_child_exit(TpProcess result, int expected, char const* log, int
     if (result.exit_code != expected || result.timed_out || result.launch_error)
     {
         ++test_failures;
-        fprintf(stderr, "TEST failure %d: child exit_code=%d expected=%d signal=%d timed_out=%d launch_error=%d wall_seconds=%.3f log=%s\n",
-                line, result.exit_code, expected, result.signal_number, result.timed_out, result.launch_error, result.wall_seconds, log);
+        fprintf(stderr, "TEST failure %d: child exit_code=%d expected=%d signal=%d timed_out=%d launch_error=%d launch_stage=%s wall_seconds=%.3f log=%s\n",
+                line, result.exit_code, expected, result.signal_number, result.timed_out, result.launch_error,
+                tp_launch_stage_name(result.launch_stage), result.wall_seconds, log);
         char kept[TP_PATH_CAP], chunk[4096], tail[2048];
         int length = snprintf(kept, sizeof(kept), "%s.line-%d", log, line);
         FILE* input = fopen(log, "rb");
@@ -165,6 +166,7 @@ static int test_child(int argc, char** argv)
     int result = 0;
     if (argc < 3) result = 2;
     else if (!strcmp(argv[2], "fail")) result = 7;
+    else if (!strcmp(argv[2], "exit125")) result = 125;
     else if (!strcmp(argv[2], "throughput")) result = throughput_cli_main(argc - 2, argv + 2);
     else if (!strcmp(argv[2], "throughput-admission-oom"))
     {
@@ -499,6 +501,66 @@ static void test_processes(char const* executable, char const* root)
     for (unsigned i = 0; i < TP_COUNTERS; ++i)
         CHECK(isfinite(quoted.counters[i]) ? quoted.running_fraction[i] >= 0.90 : quoted.counter_errors[i] != 0);
 }
+
+#ifndef _WIN32
+static unsigned test_open_descriptor_count(void)
+{
+    unsigned count = 0;
+    for (int descriptor = 0; descriptor < 256; ++descriptor)
+    {
+        if (fcntl(descriptor, F_GETFD) >= 0) ++count;
+    }
+    return count;
+}
+
+/* The error channel must report preexec failure, survive repeated cleanup,
+ * and remain empty when a successfully launched program itself exits125. */
+static void test_launch_errors(char const* executable, char const* root)
+{
+    char log[TP_PATH_CAP], denied_path[TP_PATH_CAP], format_path[TP_PATH_CAP];
+    int paths_ok = tp_path(log, root, "launch-errors.log") &&
+                   tp_path(denied_path, root, "launch-denied") &&
+                   tp_path(format_path, root, "launch-format");
+    CHECK(paths_ok);
+    if (paths_ok)
+    {
+        CHECK(test_text(root, "launch-denied", "not executable\n") && chmod(denied_path, 0600) == 0);
+        CHECK(test_text(root, "launch-format", "not an executable format\n") && chmod(format_path, 0700) == 0);
+        char* valid[] = {(char*)executable, "child", "exit125", NULL};
+        TpProcess exited = tp_process(valid, NULL, log, 2, -1, 0);
+        CHECK(exited.exit_code == 125 && !exited.signal_number && !exited.timed_out &&
+              !exited.launch_error && exited.launch_stage == TP_LAUNCH_NONE);
+        char* missing[] = {"/definitely/missing/buster-throughput-compiler", NULL};
+        char* denied[] = {denied_path, NULL};
+        char* format[] = {format_path, NULL};
+        char* commands[] = {(char*)executable, "child", "fail", NULL};
+        struct
+        {
+            char** argv;
+            char const* directory;
+            int error;
+            TpLaunchStage stage;
+        } cases[] = {
+            {missing, NULL, ENOENT, TP_LAUNCH_EXEC},
+            {denied, NULL, EACCES, TP_LAUNCH_EXEC},
+            {format, NULL, ENOEXEC, TP_LAUNCH_EXEC},
+            {commands, "/definitely/missing/buster-throughput-directory", ENOENT, TP_LAUNCH_DIRECTORY},
+        };
+        unsigned descriptors = test_open_descriptor_count();
+        for (unsigned round = 0; round < 4; ++round)
+        {
+            for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+            {
+                TpProcess failed = tp_process(cases[i].argv, cases[i].directory, log, 2, -1, 0);
+                CHECK(failed.exit_code == 125 && !failed.signal_number && !failed.timed_out &&
+                      failed.launch_error == cases[i].error && failed.launch_stage == cases[i].stage);
+            }
+        }
+        CHECK(test_open_descriptor_count() == descriptors);
+        puts("THROUGHPUT_LAUNCH_ERRORS cases=4 repetitions=4 valid_exit125=distinct");
+    }
+}
+#endif
 
 /* Exact integer serialization is independent of floating-point summary
  * medians. Zero, UINT64_MAX and unavailable must survive a complete replay. */
@@ -1783,6 +1845,9 @@ int main(int argc, char** argv)
         test_inputs(root);
         test_maximum_jobs(root);
         test_processes(executable, root);
+#ifndef _WIN32
+        test_launch_errors(executable, root);
+#endif
         test_retirement_statistics();
         printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu job=%zu max_jobs=%u run_heap=%zu replay_heap=%zu\n",
                sizeof(TpProcess), sizeof(TpRow), sizeof(TpJob), (unsigned)TP_MAX_JOBS,

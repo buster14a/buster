@@ -70,10 +70,19 @@ The fixtures write fixed paths that the tool refuses to reuse, so `build.c`
 deletes `build/throughput-tool-tests` (or `build/throughput-tool-tests-sanitized`)
 before every self-test run. When you run `throughput-tests OUTPUT_DIRECTORY`
 directly, pass an absent or empty directory. If a child exit-code check fails,
-it prints the exit code, signal, timeout, launch error and wall time, followed by
+it prints the exit code, signal, timeout, launch error, POSIX launch stage and wall time, followed by
 the end of the child's log. It also keeps the whole log as `LOG.line-N` under the
 test root, which the harness artifacts upload. The desktop matrix also retains
 these parent diagnostics and the child-log tail in `combinations.log`.
+
+POSIX launch failures preserve the failing setup/exec stage and errno through
+a small close-on-exec error pipe. Child reporting uses no allocation or buffered
+stdio, and parent reads are nonblocking after the waited child exits. A missing
+executable, denied executable, invalid format or missing working directory now
+reports a launch error; a program that successfully starts and exits125 remains
+a normal child result. The native self-test checks all four refusals, the valid
+exit125 control and repeated descriptor cleanup. This diagnoses a refusal; it
+does not explain an unreproduced transient OS error or retry the invocation.
 
 The POSIX summary-write fixture keeps its real one-byte `RLIMIT_FSIZE` failure
 and three-second child deadline. It restores the saved limit only after
