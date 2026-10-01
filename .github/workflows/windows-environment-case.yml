@@ -50,6 +50,11 @@ jobs:
           & .\tools\ci_vs_dev_shell.ps1 -Arch amd64 `
             -Component Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
             -LlvmBin $env:BUSTER_CI_LLVM_BIN -Require cl, clang -ClangArch x86_64
+          $MsvcLink = (Get-Command link.exe -ErrorAction Stop).Source
+          if (-not $MsvcLink.StartsWith($env:VCToolsInstallDir, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Expected the VS toolchain linker, received $MsvcLink"
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "BUSTER_ENVIRONMENT_CASE_MSVC_LINK=$MsvcLink"
           # Retain SDK/CRT/tool selection for both later native shell controls.
           # Export only the variables needed by tools; never print their values.
           foreach ($Name in @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'WindowsSdkDir', 'WindowsSDKVersion', 'VCToolsInstallDir', 'VSCMD_ARG_TGT_ARCH')) {
@@ -105,7 +110,7 @@ jobs:
           'int environment_case_probe = 7;' | Set-Content -Encoding ascii $Source
           & .\build\Release\ide.exe cc -target x86_64-pc-windows-msvc -c -o $Object $Source
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & link.exe /nologo /dll /noentry /nodefaultlib /incremental:no '/export:environment_case_probe,DATA' "/out:$Library" $Object
+          & $env:BUSTER_ENVIRONMENT_CASE_MSVC_LINK /nologo /dll /noentry /nodefaultlib /incremental:no '/export:environment_case_probe,DATA' "/out:$Library" $Object
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           'CRT_IMPORT_CONTROL shell=powershell allocators=4 exit=0' | Set-Content (Join-Path $Logs 'powershell-crt-result.txt')
 
@@ -133,7 +138,9 @@ jobs:
           build/Release/ide.exe cc -target x86_64-pc-windows-msvc -c -o "$logs/bash-import-control.obj" "$logs/bash-import-control.c"
           object=$(cygpath -w "$logs/bash-import-control.obj")
           library=$(cygpath -w "$logs/bash-import-control.dll")
-          MSYS2_ARG_CONV_EXCL='*' link.exe /nologo /dll /noentry /nodefaultlib /incremental:no \
+          msvc_link=$(cygpath -u "$BUSTER_ENVIRONMENT_CASE_MSVC_LINK")
+          printf '%s\n' "$msvc_link" > "$logs/bash-selected-msvc-link.txt"
+          MSYS2_ARG_CONV_EXCL='*' "$msvc_link" /nologo /dll /noentry /nodefaultlib /incremental:no \
             /export:environment_case_probe,DATA "/out:$library" "$object"
           printf '%s\n' 'CRT_IMPORT_CONTROL shell=bash allocators=4 exit=0' > "$logs/bash-crt-result.txt"
 
