@@ -68,7 +68,7 @@
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
 - Active CI is defined under `.github/workflows/`; the current tree has no
-  Forgejo workflow definitions. The historical source-free broker contract is
+  Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
   runs the combination matrix, execution-mode matrix, Android and iOS on
   GitHub standard runners. Its five desktop lanes cover Linux and Windows at
@@ -118,10 +118,12 @@
   push runs, revalidates exact-key Zig archive caches, and treats UBSan reports
   as failures. Independent later suites run after earlier test failures;
   captured logs and fail-closed summaries remain outside generated build trees.
-  See `docs/ci-github-actions.md` for timing cohorts and exact reproductions. Do not add source mirroring, Actions artifacts/caches,
-  durable GitHub-side credentials, verbose broker logs, or untrusted-PR
-  triggers to the broker; see
-  `docs/ci-github-hosted-runners.md`.
+  See `docs/ci-github-actions.md` for timing cohorts and exact reproductions.
+  The removed Forgejo broker has no current setup or validation commands.
+  Its regression source is preserved as
+  `tests/retired/github_runner_bridge_test.py.txt`, outside Python discovery,
+  with the same dependency-only support identity. It is historical input,
+  not executed bridge coverage; see `docs/ci-github-hosted-runners.md`.
 
 - The workflow-tools aggregate regression executes the actual `CI complete`
   shell body for all 633 shard outcomes. Git Bash on Windows has a 120-second

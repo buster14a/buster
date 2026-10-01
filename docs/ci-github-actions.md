@@ -1,14 +1,12 @@
 # GitHub Actions CI
 
-`.github/workflows/ci.yml` runs the Forgejo matrix's coverage on GitHub's
-**standard** hosted runners. It exists for the migration to GitHub and runs
-beside the Forgejo matrix rather than replacing it while Forgejo is still the
-source of truth.
+`.github/workflows/ci.yml` owns the active GitHub CI matrix on **standard**
+hosted runners. The former Forgejo workflows and source-free broker were
+removed in commit `02c0400a34d04be9e984f29a59291750b3998d3f`; they do not run
+alongside this matrix. See the [broker retirement record](ci-github-hosted-runners.md).
 
-Where Forgejo owns four fixed machines, GitHub hands out the newest image of
-every operating system in both architectures, so this workflow spends that on
-the axis the native runners cannot cover: **every desktop platform is tested on
-x86-64 and on AArch64.**
+Linux and Windows cover x86-64 and AArch64; routine macOS CI covers AArch64.
+The table below lists the active desktop runner labels.
 
 | Runner | Architecture |
 |---|---|
@@ -36,10 +34,9 @@ The required `CI complete` job keeps only the server guard plus `always()`: it
 must fail when the workload jobs are disabled or skipped. Independent required
 checks likewise execute and fail an explicit enablement check instead of skipping.
 
-The first half exists because **Forgejo also reads `.github/workflows`**.
-Without it, Forgejo would schedule this job against `runs-on: ubuntu-26.04`, a
-label no Forgejo runner carries, and it would queue until the workflow timed
-out. On Forgejo the expression is false — or empty, which is also false — so
+The server guard keeps GitHub runner labels from being scheduled by another
+forge that reads `.github/workflows`. On Forgejo the expression is false — or
+empty, which is also false — so
 the job skips and no status context is created.
 
 The second half keeps the workflow inert until the repository variable
