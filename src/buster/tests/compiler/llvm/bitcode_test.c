@@ -1588,6 +1588,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_scalar_abi_wire(UnitTestArg
         for (u32 index = 9; index <= 10; index += 1)
         {
             instructions[index].opcode = IR_OPCODE_CALL;
+            instructions[index].symbol = index == 9 ? (IrSymbolId){.value = 0} : IR_SYMBOL_ID_INVALID;
             instructions[index].canonical_type.value = 1;
             instructions[index].operands = index == 9 ? direct : indirect;
             instructions[index].operand_count = BUSTER_ARRAY_LENGTH(direct);
@@ -1612,8 +1613,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_scalar_abi_wire(UnitTestArg
         options.target_triple = target.triple;
         LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, &module, 1, options);
         LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, &module, 1, options);
-        String8 context = string_format(arena, S8("scalar ABI target={S8} cc={u32} error={S8}: {S8}"), target.triple,
-            target.wire_calling_convention, llvm_bitcode_error_code_name(first.error.code), first.error.message);
+        String8 context = string_format(arena, S8("scalar ABI target={S8} cc={u32} error={S8}: {S8} function={u32} block={u32} instruction={u32}"), target.triple,
+            target.wire_calling_convention, llvm_bitcode_error_code_name(first.error.code), first.error.message,
+            first.error.function.value, first.error.block.value, first.error.instruction.value);
         BUSTER_TEST_RAW(arguments, llvm_bitcode_artifact_is_valid(first) && llvm_bitcode_artifact_is_valid(second), context);
         BUSTER_TEST_RAW(arguments, first.bytes.length && first.bytes.length == second.bytes.length &&
             !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length), context);
