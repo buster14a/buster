@@ -1,0 +1,430 @@
+name: Temporary tree-check registration acceptance
+
+on:
+  push:
+    branches:
+      - codex/1598-tree-check-registration
+    paths:
+      - .github/workflows/1598-tree-check-acceptance.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    env:
+      BUSTER_CI_LLVM_VERSION: 23.1.2
+    steps:
+      - name: Checkout exact candidate
+        timeout-minutes: 5
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Prepare evidence and standard Linux prerequisites
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tree-check-1598"
+          git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/tree-check-1598/checkout.txt"
+          sudo apt-get update 2>&1 | tee "$RUNNER_TEMP/tree-check-1598/apt-update.log"
+          sudo apt-get install --no-install-recommends --yes mold 2>&1 | tee "$RUNNER_TEMP/tree-check-1598/apt-install.log"
+
+      - name: Install repository-pinned Zig prerequisite
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/ci_zig.py --target x86_64-linux --cache-directory "$RUNNER_TEMP/tree-check-zig-archive" \
+            --install-directory "$RUNNER_TEMP/tree-check-zig" 2>&1 | tee "$RUNNER_TEMP/tree-check-1598/zig-install.log"
+
+      - name: Install observed LLVM release
+        timeout-minutes: 15
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 tools/ci_llvm.py --target x86_64-linux --work-directory "$RUNNER_TEMP/tree-check-llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/tree-check-1598/llvm-install.log"
+
+      - name: Actual driver, CLI, graph and direct Release matrix gates
+        timeout-minutes: 65
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' 2>&1 | tee "$RUNNER_TEMP/tree-check-1598/acceptance.log"
+          """Temporary hosted acceptance for #1598; never run locally."""
+          from pathlib import Path
+          import hashlib
+          import json
+          import os
+          import re
+          import shlex
+          import signal
+          import struct
+          import subprocess
+          import time
+          
+          root = Path.cwd()
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'tree-check-1598'
+          evidence.mkdir(parents=True, exist_ok=True)
+          driver = evidence / 'buster-build'
+          records = []
+          failures = []
+          expected_names = ['clang_analyze', 'optnone_audit']
+          overall_deadline = time.monotonic() + 62 * 60
+          expected_sources = {
+              'build.c': 'b9f51401964192e4ef6d6acaf8e5b228cd3eac52',
+              'CMakeLists.txt': '277287ef4f6d3911746dc750c88bd3a34a1e7f7e',
+              'cmake/superbuild/CMakeLists.txt': '1c04e5250530f6e4eded041fc1cb757a7e03daa3',
+              'docs/agents/build.md': '3e13fd8dd28a1d9ff1df67c200d225bcd70766fa',
+          }
+          
+          def record_json():
+              (evidence / 'commands.json').write_text(json.dumps(records, indent=2) + '\n')
+              (evidence / 'assertions.json').write_text(json.dumps(failures, indent=2) + '\n')
+          
+          def check(condition, message):
+              if not condition:
+                  failures.append(message)
+                  record_json()
+                  print('FAIL:', message, flush=True)
+          
+          def terminate_session(session):
+              # Driver children may own separate process groups for their native
+              # deadlines. They still belong to this isolated diagnostic session.
+              members = []
+              for path in Path('/proc').glob('[0-9]*/stat'):
+                  try:
+                      fields = path.read_text().rsplit(')', 1)[1].split()
+                      if int(fields[3]) == session:
+                          members.append(int(path.parent.name))
+                  except (OSError, ValueError, IndexError):
+                      pass
+              for pid in members:
+                  try:
+                      os.kill(pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+              return members
+          
+          def run(label, argv, *, timeout=180, env=None):
+              remaining = int(overall_deadline - time.monotonic())
+              if remaining <= 30:
+                  raise TimeoutError('internal acceptance deadline exhausted before ' + label)
+              timeout = min(timeout, remaining - 30)
+              log = evidence / (label + '.log')
+              effective = dict(os.environ)
+              # Each operation owns fresh idle build directories. Matrix policy is set
+              # only on the one matrix child, never inherited by configure controls.
+              for key in ['BUSTER_MATRIX_DIRECT', 'BUSTER_MATRIX_SHARD', 'BUSTER_MATRIX_PHASE_OUTPUT',
+                          'BUSTER_CI_COVERAGE_OUTPUT', 'BUSTER_TEST_FORCE_ARTIFACT_FANOUT']:
+                  effective.pop(key, None)
+              effective.update(env or {})
+              expired = False
+              terminated_members = []
+              with log.open('wb') as output:
+                  process = subprocess.Popen([str(x) for x in argv], cwd=root, env=effective,
+                                             stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                  try:
+                      status = process.wait(timeout=timeout)
+                  except subprocess.TimeoutExpired:
+                      expired = True
+                      terminated_members = terminate_session(process.pid)
+                      try:
+                          os.killpg(process.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                      status = process.wait(timeout=30)
+              row = {'label': label, 'argv': [str(x) for x in argv], 'cwd': str(root),
+                     'timeout_seconds': timeout, 'timed_out': expired, 'returncode': status,
+                     'terminated_session_pids': terminated_members,
+                     'environment_overrides': env or {}, 'log': log.name,
+                     'log_sha256': hashlib.sha256(log.read_bytes()).hexdigest()}
+              records.append(row)
+              record_json()
+              print(label, 'exit=' + str(status), 'timeout=' + str(expired), flush=True)
+              return row, log.read_text(errors='replace')
+          
+          def success(label, argv, **kwargs):
+              row, text = run(label, argv, **kwargs)
+              if row['returncode'] != 0 or row['timed_out']:
+                  print(text[-16000:], flush=True)
+              check(row['returncode'] == 0 and not row['timed_out'], label + ' must succeed')
+              return text
+          
+          def refusal(label, argv, marker, **kwargs):
+              row, text = run(label, argv, **kwargs)
+              if row['returncode'] != 1 or row['timed_out'] or marker not in text:
+                  print(text[-16000:], flush=True)
+              check(row['returncode'] == 1 and not row['timed_out'] and marker in text,
+                    label + ' must refuse through its own validator diagnostic')
+              return text
+          
+          def validator_refused_normally(events, source):
+              relevant = [event for event in events if event.get('file') == str(source)]
+              invocations = [index for index, event in enumerate(relevant) if event.get('cmd') == 'execute_process' and
+                             event.get('args', [])[:3] == ['COMMAND', str(driver), 'tree_checks_validate']]
+              if len(invocations) != 1:
+                  return False
+              index = invocations[0]
+              return index + 1 < len(relevant) and relevant[index + 1].get('cmd') == 'if' and \
+                  relevant[index + 1].get('args') == ['NOT', '1', 'STREQUAL', '0']
+          
+          def configure_refusal(label, argv, source, marker, **kwargs):
+              # The wrapper exits 1 for child signals/timeouts too. Expanded production
+              # CMake trace retains the actual execute_process result without a shim.
+              trace = evidence / (label + '-cmake-trace.jsonl')
+              text = refusal(label, [*argv, '--trace-expand', '--trace-format=json-v1',
+                                     '--trace-source=' + str(source), '--trace-redirect=' + str(trace)], marker, **kwargs)
+              check('error: tree checks must contain every registered name exactly once' in ' '.join(text.split()),
+                    label + ' must retain the native membership diagnostic')
+              events = [json.loads(line) for line in trace.read_text().splitlines()] if trace.is_file() else []
+              check(validator_refused_normally(events, source), label + ' nested native validator must exit exactly 1')
+          
+          def require_clean():
+              if failures:
+                  raise RuntimeError('; '.join(failures))
+          
+          def source_identity():
+              # The ordinary matrix's existing self-tests use repository-relative build/
+              # intermediates; this is fresh and no generated tree is running yet.
+              (root / 'build').mkdir(exist_ok=True)
+              source = []
+              for name, expected in expected_sources.items():
+                  data = (root / name).read_bytes()
+                  blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+                  source.append({'path': name, 'blob': blob, 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)})
+                  check(blob == expected, 'frozen source identity for ' + name)
+              (evidence / 'source-hashes.json').write_text(json.dumps(source, indent=2) + '\n')
+              success('source-revision', ['git', 'rev-parse', 'HEAD', 'HEAD^{tree}'])
+              success('worktree-before', ['git', 'status', '--porcelain=v1'])
+              require_clean()
+          
+          def bootstrap():
+              for label, argv in [('clang-version', ['clang', '--version']), ('gcc-version', ['gcc', '--version']),
+                                  ('cmake-version', ['cmake', '--version']), ('ninja-version', ['ninja', '--version']),
+                                  ('zig-version', ['zig', 'version']), ('python-version', ['python3', '--version'])]:
+                  success(label, argv)
+              success('bootstrap', ['clang', '-Isrc', '-Wall', '-Werror', '-Wno-unused-function', '-Wno-unused-variable',
+                                    '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', '-g', 'build.c', '-o', driver], timeout=180)
+              require_clean()
+              data = driver.read_bytes()
+              check(data[:4] == b'\x7fELF' and data[4] == 2 and data[5] == 1 and struct.unpack_from('<H', data, 18)[0] == 62,
+                    'native driver must be a host x86-64 ELF')
+              (evidence / 'driver.json').write_text(json.dumps({'path': str(driver), 'bytes': len(data),
+                                                               'sha256': hashlib.sha256(data).hexdigest(), 'elf_machine': 62}, indent=2) + '\n')
+              require_clean()
+          
+          def cli_controls():
+              marker = 'Tree check registration self-test: PASS'
+              for label, argv in [('self-test', ['tree_checks_self_test']),
+                                  ('cli-valid', ['tree_checks_validate', *expected_names]),
+                                  ('cli-reordered', ['tree_checks_validate', *reversed(expected_names)])]:
+                  text = success(label, [driver, *argv])
+                  check(marker in text, label + ' must execute the actual registered self-test')
+              for label, names in [('cli-empty', []), ('cli-missing-optnone', ['clang_analyze']),
+                                   ('cli-missing-analyzer', ['optnone_audit']),
+                                   ('cli-unknown', ['clang_analyze', 'unknown_tree_check']),
+                                   ('cli-duplicate', ['clang_analyze', 'clang_analyze'])]:
+                  refusal(label, [driver, 'tree_checks_validate', *names], 'error: tree checks must contain every registered name exactly once')
+              require_clean()
+          
+          def generate(label, path, override=None, extra=(), negative=False):
+              argv = [driver, 'generate', '--cc', 'clang', '--ci', '--config', 'Release', '--build-directory', path,
+                      '--no-sanitize', '--no-fuzz', '--no-lto', '--linker', 'DEFAULT', '--',
+                      '-DBUSTER_DEBUG_INFO=OFF', '-DBUSTER_DEVELOPER_TARGETS=OFF', *extra]
+              if override is not None:
+                  argv.append('-DBUSTER_TREE_CHECKS=' + override)
+              if negative:
+                  configure_refusal(label, argv, root / 'CMakeLists.txt', 'Invalid build-driver tree checks', timeout=300)
+              else:
+                  text = success(label, argv, timeout=300)
+                  check('Tree check registration self-test: PASS' in text, label + ' must invoke the native host validator')
+          
+          def assert_graph(label, path):
+              text = success(label + '-targets', ['cmake', '--build', path, '--config', 'Release', '--target', 'help'])
+              for name in expected_names:
+                  check(re.search(r'(?m)^' + name + r'(?::[^\n]*)?\s*:', text) is not None or
+                        re.search(r'(?m)^' + name + r':\s', text) is not None, label + ' must expose target ' + name)
+                  commands = success(label + '-' + name, ['ninja', '-C', path, '-f', 'build-Release.ninja', '-t', 'commands', name])
+                  found = False
+                  for line in commands.splitlines():
+                      tokens = shlex.split(line)
+                      if str(driver) in tokens:
+                          at = tokens.index(str(driver))
+                          found = tokens[at:] == [str(driver), name, str(path), '--config', 'Release', '--quiet']
+                  check(found, label + ' must retain the exact host driver/action/directory/configuration command for ' + name)
+          
+          def cmake_controls():
+              native = evidence / 'native-graph'
+              generate('native-generate', native)
+              assert_graph('native', native)
+              for label, override in [('native-missing-optnone', 'clang_analyze'), ('native-missing-analyzer', 'optnone_audit'),
+                                      ('native-unknown', 'clang_analyze;unknown_tree_check'),
+                                      ('native-duplicate', 'clang_analyze;clang_analyze'), ('native-empty', '')]:
+                  generate(label, evidence / label, override, negative=True)
+              cross = evidence / 'cross-graph'
+              emulator = evidence / 'forbid-target-emulator.py'
+              emulator_log = evidence / 'target-emulator-invoked.txt'
+              emulator.write_text('#!/usr/bin/env python3\nfrom pathlib import Path\n'
+                                  + 'Path(' + repr(str(emulator_log)) + ').write_text("target emulator invoked\\n")\n'
+                                  + 'raise SystemExit(97)\n')
+              emulator.chmod(0o755)
+              cross_extra = ['-DCMAKE_SYSTEM_NAME=Linux', '-DCMAKE_SYSTEM_PROCESSOR=aarch64',
+                             '-DCMAKE_C_COMPILER_TARGET=aarch64-unknown-linux-gnu',
+                             '-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY', '-DBUSTER_LINK_LIBC=OFF',
+                             '-DCMAKE_CROSSCOMPILING_EMULATOR=' + str(emulator)]
+              generate('cross-generate', cross, extra=cross_extra)
+              assert_graph('cross', cross)
+              systems = list((cross / 'CMakeFiles').glob('*/CMakeSystem.cmake'))
+              check(bool(systems), 'cross configure must retain system identity')
+              if systems:
+                  system = systems[0].read_text()
+                  check('set(CMAKE_SYSTEM_PROCESSOR "aarch64")' in system and 'set(CMAKE_CROSSCOMPILING "TRUE")' in system,
+                        'cross graph must actually declare an AArch64 cross target')
+              cache = (cross / 'CMakeCache.txt').read_text() if (cross / 'CMakeCache.txt').is_file() else ''
+              check('CMAKE_C_COMPILER_TARGET:UNINITIALIZED=aarch64-unknown-linux-gnu' in cache or
+                    'CMAKE_C_COMPILER_TARGET:STRING=aarch64-unknown-linux-gnu' in cache, 'cross compiler target must be retained')
+              check(str(driver) in cache, 'cross graph must name the recorded host driver')
+              check(not (cross / 'Release' / 'ide').exists(), 'cross configuration must not build or execute a target ide')
+              generate('cross-missing-optnone', evidence / 'cross-missing-optnone', 'clang_analyze', extra=cross_extra, negative=True)
+              generate('cross-missing-analyzer', evidence / 'cross-missing-analyzer', 'optnone_audit', extra=cross_extra, negative=True)
+              check(not emulator_log.exists(), 'cross configuration must not invoke any target execution emulator')
+              require_clean()
+              return native
+          
+          def outer_manifest(path, native, names):
+              # A controlled one-tree fixture exercises the actual outer CMake graph.
+              # Production serialization is independently checked by the ordinary driver
+              # preflight. This fixture does not replace or claim a matrix workload.
+              values = {
+                  'BUSTER_SUPERBUILD_SOURCE_DIR': str(root),
+                  'BUSTER_SUPERBUILD_BUILD_DRIVER': str(driver),
+                  'BUSTER_SUPERBUILD_TREE_COUNT': '1', 'BUSTER_SUPERBUILD_OUTER_JOBS': '1',
+                  'BUSTER_SUPERBUILD_SELF_HOST_ENABLED': '0', 'BUSTER_SUPERBUILD_VERBOSE': 'OFF',
+                  'BUSTER_SUPERBUILD_QUIET': 'OFF', 'BUSTER_SUPERBUILD_TEST_ADMISSION': 'overlap',
+                  'BUSTER_SUPERBUILD_TREE_CHECKS': names,
+                  'BUSTER_SUPERBUILD_TREE_0_BUILD_DIRECTORY': str(native),
+                  'BUSTER_SUPERBUILD_TREE_0_NATIVE_CONFIG': 'Release',
+                  'BUSTER_SUPERBUILD_TREE_0_BUILD_TARGETS': 'ide:Release',
+                  'BUSTER_SUPERBUILD_TREE_0_PARALLEL_JOBS': '1', 'BUSTER_SUPERBUILD_TREE_0_TEST_JOBS': '1',
+                  'BUSTER_SUPERBUILD_TREE_0_TEST_AFTER': '', 'BUSTER_SUPERBUILD_TREE_0_UNITY_ONLY': '1',
+                  'BUSTER_SUPERBUILD_TREE_0_TEST_0_CONFIG': '', 'BUSTER_SUPERBUILD_TREE_0_TEST_0_TARGET': '',
+                  'BUSTER_SUPERBUILD_TREE_0_TEST_1_CONFIG': '', 'BUSTER_SUPERBUILD_TREE_0_TEST_1_TARGET': '',
+                  'BUSTER_SUPERBUILD_TREE_0_ANALYZE_CONFIG': 'Release', 'BUSTER_SUPERBUILD_TREE_0_TABLE_AUDITS': '1',
+                  'BUSTER_SUPERBUILD_TREE_0_BUILD_OBSERVER': '', 'BUSTER_SUPERBUILD_TREE_0_ANALYZE_OBSERVER': '',
+              }
+              path.write_text(''.join('set(' + key + ' [==[' + value + ']==])\n' for key, value in values.items()))
+          
+          def outer_controls(native):
+              manifests = evidence / 'outer-manifests'
+              manifests.mkdir()
+              for label, names in [('outer-valid', 'clang_analyze;optnone_audit'),
+                                   ('outer-missing-optnone', 'clang_analyze'), ('outer-missing-analyzer', 'optnone_audit'),
+                                   ('outer-unknown', 'clang_analyze;unknown_tree_check'),
+                                   ('outer-empty', ''), ('outer-duplicate', 'clang_analyze;clang_analyze')]:
+                  manifest = manifests / (label + '.cmake')
+                  outer_manifest(manifest, native, names)
+                  graph = evidence / label
+                  argv = ['cmake', '--warn-uninitialized', '-Werror=dev', '-S', root / 'cmake' / 'superbuild',
+                          '-B', graph, '-G', 'Ninja', '-DBUSTER_SUPERBUILD_MATRIX_FILE=' + str(manifest)]
+                  if label == 'outer-valid':
+                      text = success(label, argv)
+                      check('Tree check registration self-test: PASS' in text, 'outer graph must invoke the native validator')
+                      commands = success('outer-real-commands', ['ninja', '-C', graph, '-t', 'commands', 'buster_test_0'])
+                      found = False
+                      for line in commands.splitlines():
+                          tokens = shlex.split(line)
+                          if '--build' in tokens and 'clang_analyze' in tokens:
+                              at = tokens.index('--build') - 1
+                              found = at >= 0 and Path(tokens[at]).name == 'cmake' and tokens[at + 1:] == [
+                                  '--build', str(native), '--config', 'Release', '--target', *expected_names]
+                      check(found, 'actual outer Ninja graph must build both registered targets in the canonical tree')
+                  else:
+                      configure_refusal(label, argv, root / 'cmake' / 'superbuild' / 'CMakeLists.txt', 'Invalid superbuild tree checks')
+              require_clean()
+          
+          def canonical_analyzer_completed(plan, receipts, text):
+              if plan.get('scheduler') != 'direct' or plan.get('identity', {}).get('shard') != 'release':
+                  return False
+              tasks = [task for task in plan.get('tasks', []) if len(task.get('argv', [])) == 5 and
+                       task['argv'][:2] == [str(driver), 'clang_analyze'] and task['argv'][3:] == ['--config', 'Release'] and
+                       task.get('phase') == 'post_test' and task.get('configuration') == 'Release']
+              if len(tasks) != 1:
+                  return False
+              task = tasks[0]
+              trees = [tree for tree in plan.get('trees', []) if tree.get('id') == task.get('tree') and
+                       tree.get('build_directory') == task['argv'][2] and tree.get('compiler') == 'clang' and tree.get('sanitize') == 0]
+              if len(trees) != 1:
+                  return False
+              ends = [row for row in receipts if row.get('id') == task.get('id')]
+              if len(ends) != 1:
+                  return False
+              end = ends[0]
+              complete = end.get('epoch_us') == plan.get('epoch_us') and end.get('argv') == task['argv'] and \
+                         end.get('state') == 'success' and end.get('spawned') == 1 and end.get('timed_out') == 0 and \
+                         end.get('result') == 0 and end.get('platform_status') == 0 and \
+                         end.get('termination_requested') == 0 and end.get('forcibly_terminated') == 0
+              production_units = [match.group(1) for match in re.finditer(
+                  r'(?m)^ANALYZE_UNIT shard=[0-9]+ unit=[0-9]+ status=pass elapsed_us=[0-9]+ file=([^\n]+)$', text)]
+              return complete and any(Path(path).resolve() == root / 'src/buster/apps/ide/ide.c' for path in production_units)
+          
+          def direct_matrix():
+              # Exercise the existing canonical Release matrix, including both real
+              # payloads, through its ordinary frontdoor. No policy or workload substitute.
+              text = success('direct-release-matrix', [driver, 'test_all_combinations_ci', '--verbose=1'], timeout=3600,
+                             env={'BUSTER_MATRIX_DIRECT': '1', 'BUSTER_MATRIX_SHARD': 'release',
+                                  'BUSTER_CI_COVERAGE_OUTPUT': str(evidence / 'direct-coverage.json'),
+                                  'BUSTER_MATRIX_PHASE_OUTPUT': str(evidence / 'direct-phases')})
+              check('Tree check registration self-test: PASS' in text, 'ordinary matrix must run registration preflight')
+              phases = evidence / 'direct-phases'
+              plan_path = phases / 'plan.json'
+              plan = json.loads(plan_path.read_text()) if plan_path.is_file() else {}
+              receipts = [json.loads(path.read_text()) for path in phases.glob('*.end.json')]
+              check(canonical_analyzer_completed(plan, receipts, text),
+                    'direct matrix must complete its actual canonical analyzer task and production ide unit')
+              # Passing analyzer fixtures from preflight cannot establish payload execution.
+              absent = dict(plan, tasks=[task for task in plan.get('tasks', []) if task.get('argv', [None, None])[1:2] != ['clang_analyze']])
+              check(not canonical_analyzer_completed(absent, receipts, text), 'missing canonical analyzer task must fail the acceptance predicate')
+              fixture_only = '\n'.join(line for line in text.splitlines() if not line.startswith('ANALYZE_UNIT '))
+              check(not canonical_analyzer_completed(plan, receipts, fixture_only), 'passing preflight aggregates alone must fail the acceptance predicate')
+              check(re.search(r'OPTNONE_AUDIT defined=[1-9][0-9]* [^\n]*optnone_outside_tests=0 result=pass', text) is not None,
+                    'direct matrix must execute successful actual optnone payload')
+              coverage = evidence / 'direct-coverage.json'
+              check(coverage.is_file(), 'direct coverage evidence must exist')
+              if coverage.is_file():
+                  (evidence / 'direct-coverage-sha256.txt').write_text(hashlib.sha256(coverage.read_bytes()).hexdigest() + '\n')
+              require_clean()
+          
+          try:
+              source_identity()
+              bootstrap()
+              cli_controls()
+              native = cmake_controls()
+              outer_controls(native)
+              direct_matrix()
+              (evidence / 'success.json').write_text(json.dumps({'result': 'PASS', 'source': expected_sources,
+                  'scope': 'CLI controls; native/cross/controlled outer real graphs; actual direct canonical Release shard',
+                  'unrun': ['direct sanitizer and portability shards', 'target AArch64 ide execution',
+                            'qualified performance acceptance', 'protected group and main integration']}, indent=2) + '\n')
+              print('ISSUE1598_ACCEPTANCE PASS', flush=True)
+          finally:
+              record_json()
+          PY
+
+      - name: Retain exact acceptance evidence
+        timeout-minutes: 10
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tree-check-registration-${{ github.sha }}
+          path: ${{ runner.temp }}/tree-check-1598
+          if-no-files-found: error
+          retention-days: 7
