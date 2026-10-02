@@ -14366,6 +14366,7 @@ struct CIrLowerBodyState
     u32 label_count;
     u32 index;
     u32 switch_case_count;
+    u32 switch_control_start;
     u32 switch_body_start;
     u32 switch_body_close;
     u32 vla_alignment;
@@ -38983,7 +38984,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 has_range |= switch_cases[case_index].is_range;
             }
             IrBlockId merge = c_ir_block_create(builder);
-            if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || merge.value == IR_ID_UNDERLYING_INVALID)
+            if (!switched_type || merge.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
             }
@@ -39005,10 +39006,21 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 switched_type_id = promoted_type;
                 switched_type = ir_type_from_id(&builder->program->types, switched_type_id);
-                if (!switched_type)
+            }
+            // Bool controls reach the ordinary integer dispatch after promotion.
+            // SWITCH case storage is one u64 per label; a wide control must not
+            // silently lose its high limb even when every label fits u64.
+            if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || switched_type->bit_width > 64)
+            {
+                if (switched_type && switched_type->kind == IR_TYPE_INTEGER && switched_type->bit_width > 64)
                 {
-                    return false;
+                    builder->failure_message = switched_type->is_signed
+                        ? S8("switch controlling type '__int128' is unsupported; integer switch dispatch supports at most 64 bits")
+                        : S8("switch controlling type 'unsigned __int128' is unsupported; integer switch dispatch supports at most 64 bits");
+                    builder->failure_kind_plus_one = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS + 1;
+                    builder->failure_token_index = state->switch_control_start;
                 }
+                return false;
             }
             // Every case label is converted here, plain labels included.  A
             // label is folded in the type it is spelled in, so `case -1` on a
@@ -39658,6 +39670,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     cases[last_ranged_case].content_end = body_close;
                 }
                 state->switch_case_count = case_count;
+                state->switch_control_start = index + 2;
                 state->switch_body_start = body_open + 1;
                 state->switch_body_close = body_close;
                 state->child_source = c_ir_token_source_range(builder, first);
