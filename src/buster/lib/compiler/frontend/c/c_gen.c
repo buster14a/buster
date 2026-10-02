@@ -26632,6 +26632,64 @@ BUSTER_C_INTERNAL bool c_ir_initializer_has_aggregate_child(CIntegerIrBuilder* b
     return result;
 }
 
+// Keep one captured value per initialized subobject. C17 6.7.9p19 makes a
+// later initializer replace an earlier one; their expressions may still be
+// evaluated, so replace only the captured operand after ordinary lowering.
+BUSTER_C_INTERNAL bool c_ir_compound_literal_capture_slot(const IrType* type, IrValueId* operands, u64* fields, bool* initialized,
+                                                         u32 slot_count, u32 field_index, IrValueId value, u32* operand_count)
+{
+    bool valid = type && field_index < slot_count && *operand_count <= slot_count;
+    if (valid && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR))
+    {
+        bool append = !initialized[field_index];
+        valid = !append || *operand_count < slot_count;
+        if (valid)
+        {
+            operands[field_index] = value;
+            *operand_count += append ? 1u : 0u;
+        }
+    }
+    else if (valid)
+    {
+        u32 operand_index = *operand_count;
+        if (type->kind == IR_TYPE_UNION)
+        {
+            operand_index = 0;
+        }
+        else if (initialized[field_index])
+        {
+            for (u32 index = 0; index < *operand_count; index += 1)
+            {
+                if (fields[index] == field_index)
+                {
+                    operand_index = index;
+                    break;
+                }
+            }
+        }
+        valid = operand_index < slot_count &&
+                (type->kind == IR_TYPE_UNION || !initialized[field_index] || operand_index < *operand_count);
+        if (valid)
+        {
+            operands[operand_index] = value;
+            fields[operand_index] = field_index;
+            if (type->kind == IR_TYPE_UNION)
+            {
+                *operand_count = 1;
+            }
+            else
+            {
+                *operand_count += initialized[field_index] ? 0u : 1u;
+            }
+        }
+    }
+    if (valid)
+    {
+        initialized[field_index] = true;
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -26671,17 +26729,14 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             return;
         }
         u32 field_index = frame->as.compound_literal_machine.field_index;
-        if (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR))
+        type = ir_type_from_id(&builder->program->types, type_id);
+        if (!c_ir_compound_literal_capture_slot(type, frame->as.compound_literal_machine.operands, frame->as.compound_literal_machine.fields,
+                                               frame->as.compound_literal_machine.initialized, frame->as.compound_literal_machine.slot_count,
+                                               field_index, value, &frame->as.compound_literal_machine.operand_count))
         {
-            frame->as.compound_literal_machine.operands[field_index] = value;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
-        else
-        {
-            frame->as.compound_literal_machine.operands[frame->as.compound_literal_machine.operand_count] = value;
-            frame->as.compound_literal_machine.fields[frame->as.compound_literal_machine.operand_count] = field_index;
-        }
-        frame->as.compound_literal_machine.initialized[field_index] = true;
-        frame->as.compound_literal_machine.operand_count += 1;
         frame->as.compound_literal_machine.next_field = field_index + 1;
         frame->as.compound_literal_machine.index = frame->as.compound_literal_machine.item_end + 1;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
@@ -26917,7 +26972,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             }
             index += 3;
         }
-        if (field_index >= slot_count || initialized[field_index])
+        if (field_index >= slot_count)
         {
             goto c_ir_compound_literal_failed;
         }
@@ -26986,17 +27041,11 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
                 {
                     goto c_ir_compound_literal_failed;
                 }
-                if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+                type = ir_type_from_id(&builder->program->types, type_id);
+                if (!c_ir_compound_literal_capture_slot(type, operands, fields, initialized, slot_count, field_index, string_value, &operand_count))
                 {
-                    operands[field_index] = string_value;
+                    goto c_ir_compound_literal_failed;
                 }
-                else
-                {
-                    operands[operand_count] = string_value;
-                    fields[operand_count] = field_index;
-                }
-                initialized[field_index] = true;
-                operand_count += 1;
                 next_field = field_index + 1;
                 index = end + 1;
                 continue;

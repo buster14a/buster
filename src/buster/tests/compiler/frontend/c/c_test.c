@@ -12235,6 +12235,114 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_array_element_initializers(U
     return result;
 }
 
+// Runtime compound literals keep the last initializer for each subobject.
+// Earlier overridden effects are intentionally unconstrained (C17 6.7.9p19).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_compound_literal_overrides(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef unsigned long long U64;\ntypedef struct ArenaParams {\n    U64 flags, reserve_size, commit_size;\n    void *optional_backing_buffer;\n    char *allocation_site_file;\n    int allocation_site_line;\n    char *name;\n} ArenaParams;\nstatic int old_effects[5], winning_effects[5], addresses, calls;\nstatic char winning_file[]=\"winner\";\nstatic ArenaParams observed;\nstatic U64 old_value(int slot,U64 value) { old_effects[slot]+=1; return value; }\nstatic char *old_file(void) { old_effects[3]+=1; return \"default\"; }\nstatic int old_line(void) { old_effects[4]+=1; return 11; }\nstatic U64 win_value(int slot,U64 value) { winning_effects[slot]+=1; return value; }\nstatic char *win_file(void) { winning_effects[3]+=1; return winning_file; }\nstatic int win_line(void) { winning_effects[4]+=1; return 237; }\nstatic ArenaParams *remember_address(ArenaParams *value) { addresses+=1; return value; }\nstatic int arena_alloc_(ArenaParams *value) { calls+=1; observed=*value; return 0; }\n#define arena_alloc(...) arena_alloc_(remember_address(&(ArenaParams){ \\\n    .reserve_size=old_value(0,101), .commit_size=old_value(1,103), \\\n    .flags=old_value(2,107), .allocation_site_file=old_file(), \\\n    .allocation_site_line=old_line(), __VA_ARGS__}))\ntypedef union Choice { int first,second; } Choice;\ntypedef struct Bits { unsigned int value:3; unsigned int :2; unsigned int tail:4; } Bits;\ntypedef struct Qualified { volatile int first; int second; } Qualified;\nint main(void)\n{\n    volatile U64 reserve=4096,commit=512,flags=13;\n    int error=arena_alloc(.reserve_size=win_value(0,reserve),\n        .commit_size=win_value(1,commit), .flags=win_value(2,flags),\n        .allocation_site_file=win_file(), .allocation_site_line=win_line());\n    error|=(observed.reserve_size!=reserve || observed.commit_size!=commit ||\n        observed.flags!=flags || observed.allocation_site_file!=winning_file ||\n        observed.allocation_site_line!=237 || observed.optional_backing_buffer ||\n        observed.name)?1:0;\n    error|=(addresses!=1 || calls!=1)?2:0;\n    for (int i=0;i<5;i+=1) error|=winning_effects[i]!=1?4:0;\n    int *values=(int[3]){[1]=31,[0]=17,[1]=47};\n    error|=(values[0]!=17 || values[1]!=47 || values[2]!=0)?8:0;\n    Choice choice=(Choice){.first=3,.second=7,.first=9};\n    error|=choice.first!=9?16:0;\n    Bits bits=(Bits){.value=1,.tail=5,.value=7};\n    error|=(bits.value!=7 || bits.tail!=5)?32:0;\n    Qualified qualified=(Qualified){.first=3,.second=5,.first=7};\n    error|=(qualified.first!=7 || qualified.second!=5)?64:0;\n    return error;\n}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, preprocess);
+            bool parsed_ok = preprocess.diagnostic_count == 0 && parsed.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, parsed_ok, string_format(temporary.arena,
+                S8("compound literal overrides parser target={u32} form={u32}: {S8}"), target_index, form,
+                parsed.diagnostic_count ? parsed.diagnostics[0].message : S8("none")));
+            if (parsed_ok)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("compound-literal-overrides.c"), preprocess, parsed, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, string_format(temporary.arena,
+                    S8("compound literal overrides IR target={u32} form={u32}: {S8}"), target_index, form,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+                if (lowered.diagnostic_count == 0 && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+                {
+                    BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    String8 invalid[] = {
+        S8("struct S { int field; }; int probe(void) { return ((struct S){.field=1,.missing=2}).field; }"),
+        S8("int probe(void) { return ((int[3]){[0]=1,[3]=2})[0]; }"),
+        S8("struct Bits { unsigned int field:3; unsigned int :2; }; int probe(void) { return ((struct Bits){.field=1,.missing=2}).field; }"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Target target = targets[target_index];
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[case_index],
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("compound-literal-override-invalid.c"), preprocess, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified,
+                    string_format(temporary.arena, S8("compound literal override bounds case={u32} target={u32} form={u32}: {S8}"),
+                        case_index, target_index, form, lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+                scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=none")};
+    String8 path = buster_test_temporary_path(arguments->arena, S8("compound-literal-overrides"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("compound-literal-overrides-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+#if BUSTER_CPU_ARCH_X86_64
+                    S8("-mattr=+sse2,+cx16"),
+#endif
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode < 2;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("compound literal overrides mode={S8} form={u32}: {S8}"), modes[mode], form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("compound literal overrides mode={S8} form={u32}: status={u32} timed_out={u32}; exit bits fields=1 address/call=2 winners=4 array=8 union=16 bitfields=32 qualified=64"),
+                                modes[mode], form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // #665: query the real preprocessor with an independent exact-name census.
 // Do not infer support from a prefix or advertise native atomic IR to the
 // Wasm64/eBPF backends, which explicitly reject it.
@@ -33852,6 +33960,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_vector_lane_stores);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_initializer_inferred_bounds);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_array_element_initializers);
+    BUSTER_TEST_FIXTURE(arguments, c_test_runtime_compound_literal_overrides);
     BUSTER_TEST_FIXTURE(arguments, c_test_promoted_offsetof_static_tables);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_expression_brace_elision);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);

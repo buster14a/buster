@@ -49,7 +49,7 @@ jobs:
           cat docs/source-size-baseline.txt
       - name: Configure compiler
         run: |
-          "$RUNNER_TEMP/raddebugger-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/raddebugger-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
       - name: Build trusted compiler
         id: compiler
         run: |
