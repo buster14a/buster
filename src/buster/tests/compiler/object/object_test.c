@@ -850,6 +850,142 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_arena_capacities(UnitTestArgu
     return result;
 }
 
+// Literal words and expected lines are independent of the production decoder.
+// Unsupported distinguishing fields must keep their original four bytes.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_printer_fields(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct ObjectTestAarch64PrinterCase ObjectTestAarch64PrinterCase;
+    struct ObjectTestAarch64PrinterCase
+    {
+        u32 word;
+        String8 line;
+    };
+    ObjectTestAarch64PrinterCase cases[] = {
+        {UINT32_C(0xd503201f), S8("\tnop\n")},
+        {UINT32_C(0xd65f03c0), S8("\tret\n")},
+        {UINT32_C(0xd65f00a0), S8("\tret x5\n")},
+        {UINT32_C(0xd61f00a0), S8("\tbr x5\n")},
+        {UINT32_C(0xd63f00a0), S8("\tblr x5\n")},
+        {UINT32_C(0xd53bd043), S8("\tmrs x3, tpidr_el0\n")},
+        {UINT32_C(0x93407c43), S8("\tsxtw x3, w2\n")},
+        {UINT32_C(0x8a040043), S8("\tand x3, x2, x4\n")},
+        {UINT32_C(0xaa040043), S8("\torr x3, x2, x4\n")},
+        {UINT32_C(0xca040043), S8("\teor x3, x2, x4\n")},
+        {UINT32_C(0xaa0403e3), S8("\tmov x3, x4\n")},
+        {UINT32_C(0x8b040043), S8("\tadd x3, x2, x4\n")},
+        {UINT32_C(0xcb040043), S8("\tsub x3, x2, x4\n")},
+        {UINT32_C(0xeb04005f), S8("\tcmp x2, x4\n")},
+        {UINT32_C(0x91000043), S8("\tadd x3, x2, #0x0\n")},
+        {UINT32_C(0x910003e3), S8("\tadd x3, sp, #0x0\n")},
+        {UINT32_C(0xf100005f), S8("\tcmp x2, #0x0\n")},
+        {UINT32_C(0xd2800023), S8("\tmovz x3, #0x0001\n")},
+        {UINT32_C(0xf2800023), S8("\tmovk x3, #0x0001\n")},
+        {UINT32_C(0x92800023), S8("\tmovn x3, #0x0001\n")},
+        {UINT32_C(0x9ac42043), S8("\tlsl x3, x2, x4\n")},
+        {UINT32_C(0x9b047c43), S8("\tmul x3, x2, x4\n")},
+        {UINT32_C(0x9a9f17e3), S8("\tcset x3, eq\n")},
+        {UINT32_C(0x39000043), S8("\tstrb w3, [x2]\n")},
+        {UINT32_C(0x39400043), S8("\tldrb w3, [x2]\n")},
+        {UINT32_C(0xb9000043), S8("\tstr w3, [x2]\n")},
+        {UINT32_C(0xf9000043), S8("\tstr x3, [x2]\n")},
+        {UINT32_C(0xf9400043), S8("\tldr x3, [x2]\n")},
+        {UINT32_C(0x29001043), S8("\tstp w3, w4, [x2]\n")},
+        {UINT32_C(0xa9001043), S8("\tstp x3, x4, [x2]\n")},
+        {UINT32_C(0xa9401043), S8("\tldp x3, x4, [x2]\n")},
+        {UINT32_C(0x9adf23e3), S8("\tlsl x3, xzr, xzr\n")},
+        {UINT32_C(0x9b1f7fe3), S8("\tmul x3, xzr, xzr\n")},
+        {UINT32_C(0x8b1f03ff), S8("\tadd xzr, xzr, xzr\n")},
+        {UINT32_C(0xd280003f), S8("\tmovz xzr, #0x0001\n")},
+        {UINT32_C(0xa9407fe3), S8("\tldp x3, xzr, [sp]\n")},
+        {UINT32_C(0x93407c5f), S8("\tsxtw xzr, w2\n")},
+        {UINT32_C(0x93407fe3), S8("\tsxtw x3, wzr\n")},
+        {UINT32_C(0xd53bd05f), S8("\tmrs xzr, tpidr_el0\n")},
+        {UINT32_C(0x390003ff), S8("\tstrb wzr, [sp]\n")},
+        {UINT32_C(0x14000000), S8("\tb .Lbuster_0_0\n")},
+        {UINT32_C(0x94000000), S8("\tbl .Lbuster_0_0\n")},
+        {UINT32_C(0x54000000), S8("\tb.eq .Lbuster_0_0\n")},
+        {UINT32_C(0xb4000003), S8("\tcbz x3, .Lbuster_0_0\n")},
+        {UINT32_C(0xb5000003), S8("\tcbnz x3, .Lbuster_0_0\n")},
+        {UINT32_C(0x36000003), S8("\ttbz x3, #0, .Lbuster_0_0\n")},
+        {UINT32_C(0xb7000003), S8("\ttbnz x3, #32, .Lbuster_0_0\n")},
+        {UINT32_C(0x58000003), S8("\tldr x3, .Lbuster_0_0\n")},
+        {UINT32_C(0xd5033bbf), S8("\t.word 0xd5033bbf\n")},
+        {UINT32_C(0xd5033fbf), S8("\t.word 0xd5033fbf\n")},
+        {UINT32_C(0xd5033b9f), S8("\t.word 0xd5033b9f\n")},
+        {UINT32_C(0xd5033fdf), S8("\t.word 0xd5033fdf\n")},
+        {UINT32_C(0xd5033f5f), S8("\t.word 0xd5033f5f\n")},
+        {UINT32_C(0xd503305f), S8("\t.word 0xd503305f\n")},
+        {UINT32_C(0xd51bd040), S8("\t.word 0xd51bd040\n")},
+        {UINT32_C(0xd5300000), S8("\t.word 0xd5300000\n")},
+        {UINT32_C(0x93401c43), S8("\t.word 0x93401c43\n")},
+        {UINT32_C(0x93403c43), S8("\t.word 0x93403c43\n")},
+        {UINT32_C(0x13001c43), S8("\t.word 0x13001c43\n")},
+        {UINT32_C(0x9347fc43), S8("\t.word 0x9347fc43\n")},
+        {UINT32_C(0x93c21c43), S8("\t.word 0x93c21c43\n")},
+        {UINT32_C(0x3d802780), S8("\t.word 0x3d802780\n")},
+        {UINT32_C(0xfd001380), S8("\t.word 0xfd001380\n")},
+        {UINT32_C(0xfd400380), S8("\t.word 0xfd400380\n")},
+        {UINT32_C(0x3dc02783), S8("\t.word 0x3dc02783\n")},
+        {UINT32_C(0x39800843), S8("\t.word 0x39800843\n")},
+        {UINT32_C(0x39c00843), S8("\t.word 0x39c00843\n")},
+        {UINT32_C(0xb9800843), S8("\t.word 0xb9800843\n")},
+        {UINT32_C(0xf9800843), S8("\t.word 0xf9800843\n")},
+        {UINT32_C(0x6d010440), S8("\t.word 0x6d010440\n")},
+        {UINT32_C(0xad010440), S8("\t.word 0xad010440\n")},
+        {UINT32_C(0x69411043), S8("\t.word 0x69411043\n")},
+        {UINT32_C(0xa8011043), S8("\t.word 0xa8011043\n")},
+        {UINT32_C(0xaa441c43), S8("\t.word 0xaa441c43\n")},
+        {UINT32_C(0x8a041c43), S8("\t.word 0x8a041c43\n")},
+        {UINT32_C(0xaa0407e3), S8("\t.word 0xaa0407e3\n")},
+        {UINT32_C(0x8b441c43), S8("\t.word 0x8b441c43\n")},
+        {UINT32_C(0xeb041c5f), S8("\t.word 0xeb041c5f\n")},
+        {UINT32_C(0x91400043), S8("\t.word 0x91400043\n")},
+        {UINT32_C(0x52c00023), S8("\t.word 0x52c00023\n")},
+        {UINT32_C(0x9a9fe7e3), S8("\t.word 0x9a9fe7e3\n")},
+        {UINT32_C(0x9a9ff7e3), S8("\t.word 0x9a9ff7e3\n")},
+        {UINT32_C(0x91800043), S8("\t.word 0x91800043\n")},
+        {UINT32_C(0x0b048043), S8("\t.word 0x0b048043\n")},
+        {UINT32_C(0x72c00023), S8("\t.word 0x72c00023\n")},
+        {UINT32_C(0x12c00023), S8("\t.word 0x12c00023\n")},
+        {UINT32_C(0x18000003), S8("\t.word 0x18000003\n")},
+        {UINT32_C(0x1c000003), S8("\t.word 0x1c000003\n")},
+        {UINT32_C(0x5c000003), S8("\t.word 0x5c000003\n")},
+        {UINT32_C(0x9c000003), S8("\t.word 0x9c000003\n")},
+        {UINT32_C(0x98000003), S8("\t.word 0x98000003\n")},
+        {UINT32_C(0xd8000003), S8("\t.word 0xd8000003\n")},
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            u32 word = cases[index].word;
+            u8 bytes[] = {(u8)word, (u8)(word >> 8), (u8)(word >> 16), (u8)(word >> 24)};
+            ObjectSection section = {.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 4,
+                                     .data = {.pointer = bytes, .length = sizeof(bytes)}};
+            ObjectSymbol symbol = {.name = S8("printer_word"), .section = 0, .size = sizeof(bytes),
+                                   .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+            ObjectFile object = {.target = targets[target], .sections = &section, .section_count = 1,
+                                 .symbols = &symbol, .symbol_count = 1};
+            String8 printed = object_print_assembly(arguments->arena, &object);
+            BUSTER_TEST_RAW(arguments, printed.length != 0 &&
+                object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(printed), cases[index].line),
+                string_format(arguments->arena, S8("AArch64 printer target={u32} word={u32}:\n{S8}"), target, word, printed));
+            BUSTER_TEST(arguments, bytes[0] == (u8)word && bytes[1] == (u8)(word >> 8) &&
+                bytes[2] == (u8)(word >> 16) && bytes[3] == (u8)(word >> 24));
+            arena_set_position(arguments->arena, temporary.position);
+        }
+    }
+    return result;
+}
+
 // Generated printer populations and exact-output oracles. The optional
 // BUSTER_OBJECT_ASSEMBLY_BENCH replay times only object_print_assembly,
 // including index construction and cleanup; ordinary tests never time-gate.
@@ -2386,6 +2522,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_elf_ldst(UnitTestArgument
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    UnitTestResult aarch64_printer = object_test_aarch64_printer_fields(arguments);
+    result.test_count += aarch64_printer.test_count;
+    result.succeeded_test_count += aarch64_printer.succeeded_test_count;
     UnitTestResult executable_sections = object_test_executable_sections(arguments);
     result.test_count += executable_sections.test_count;
     result.succeeded_test_count += executable_sections.succeeded_test_count;
