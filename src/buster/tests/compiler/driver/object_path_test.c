@@ -176,7 +176,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
         };
         String8 root = buster_test_temporary_path(arena, S8("buster-elf-semantic-inputs"), S8(""));
         OsDirectoryCreateResult created = os_make_directory(root);
-        BUSTER_TEST(arguments, !created.error);
+        BUSTER_TEST(arguments, created.error.v == 0);
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
         {
             ElfSemanticCase test = cases[index];
