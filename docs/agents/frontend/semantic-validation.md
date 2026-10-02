@@ -25,12 +25,17 @@ thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
 
-Windows target predefines in `c_source.c` normalize `__inline` and `__forceinline`
-to the function specifier `inline`, without injecting a storage class. UCRT-style
-`static __inline` and `extern __inline` declarations retain their source storage;
-explicit duplicate and conflicting classes remain rejected. The regression checks
-canonical symbol linkage for static, extern, and bare aliases using the existing
-inline lowering policy; it does not add Microsoft COMDAT emission semantics.
+Windows target predefines in `c_source.c` preserve the `__inline` spelling and
+map `__forceinline` to it, without injecting a storage class. The existing needed
+function dependency walk decides which header bodies are reachable; the two late
+body decisions retain those Windows definitions, including transitive UCRT option
+helpers. The existing entity-definition map shares that decision across every
+redeclaration, including later prototypes. Unused header bodies stay omitted.
+Ordinary `inline`, GNU `__inline__`,
+explicit GNU-inline attributes and non-Windows targets retain their rules.
+`static __inline` and `extern __inline` retain source storage; duplicate and
+conflicting classes remain rejected. This bounded compatibility policy does not
+provide full MSVC mixed-spelling synonyms or multi-TU COMDAT coalescing.
 
 `c_type_parse_root_finish` validates restrict applicability on the type rows a
 query appended, after parenthesized function-pointer declarators settle. Direct

@@ -52610,10 +52610,16 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             continue;
         }
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
-        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
+        u32 entity_definition_index = declaration.entity.value < parse.entity_count
+                                          ? entity_function_declarations[declaration.entity.value] : UINT32_MAX;
+        bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&
+                                    (declaration_specifier_sets[entity_definition_index] & C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU)) != 0 &&
+                                    function_needed[entity_definition_index];
+        bool inline_definition = !internal && declaration.entity.value < parse.entity_count &&
+                                 !entity_external_definition[declaration.entity.value] && !microsoft_definition;
         bool unneeded_definition = (internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index];
-        // Without inline substitution, calls and addresses name the single
-        // external definition; this C99 inline-only body supplies none.
+        // Ordinary C99 inline-only bodies supply no external definition.
+        // A needed Windows body governs every shared redeclaration.
         declaration.is_definition &= !inline_definition;
         if (inline_definition)
         {
@@ -52823,7 +52829,13 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             continue;
         }
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
-        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
+        u32 entity_definition_index = declaration.entity.value < parse.entity_count
+                                          ? entity_function_declarations[declaration.entity.value] : UINT32_MAX;
+        bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&
+                                    (declaration_specifier_sets[entity_definition_index] & C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU)) != 0 &&
+                                    function_needed[entity_definition_index];
+        bool inline_definition = !internal && declaration.entity.value < parse.entity_count &&
+                                 !entity_external_definition[declaration.entity.value] && !microsoft_definition;
         if (inline_definition || (internal && !function_needed[declaration_index]))
         {
             continue;

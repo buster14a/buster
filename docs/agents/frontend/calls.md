@@ -326,12 +326,20 @@ same definition decision, preserving real alias definitions; GNU inline-only
 bodies do not mark those symbols defined. Unused bodies retain their existing
 dropped state. No inline optimizer, dependency walk or GNU policy is added.
 
-The registered `c_test_windows_inline_bodies` requires callable needed Windows
-`__inline`/`__forceinline` definitions and transitive header helpers, unchanged
-static/extern storage and function address identity. Later raw-inline prototypes
-must share the retained definition's symbol state. Unused header bodies must
-stay omitted; plain `inline`, GNU `__inline__`, explicit GNU-inline attributes
-and Linux `__inline` retain their existing rules. Original inline sources and
-real Windows `<stdio.h>` formatting run in both frontend forms and all four
-native allocator modes. These requirements are a bounded Windows compatibility
-policy, not complete MSVC synonym behavior or multi-TU COMDAT coalescing.
+Needed Windows `__inline`/`__forceinline` bodies retain callable definitions
+and their shared function identity. The Windows predefines preserve `__inline`
+and map `__forceinline` to that spelling. The existing reachability walk admits
+transitive header helpers; its roots and worklist are unchanged. The existing
+entity-definition map makes every redeclaration share the needed body decision,
+including a later raw-inline prototype. Only the two late registration/body
+predicates exempt those Windows bodies from C99 dropping. Unused header bodies
+remain omitted, so an unused intrinsic header
+cannot introduce an unavailable runtime import. Plain `inline`, GNU `__inline__`,
+explicit GNU-inline attributes and Linux `__inline` retain their existing rules.
+This bounded compatibility policy does not implement full MSVC mixed-spelling
+synonyms or multi-TU COMDAT coalescing.
+
+The registered `c_test_windows_inline_bodies` checks transitive helpers, source
+static/extern storage, function address and local option-word identity, and unused
+nondefinitions. Original inline sources and real Windows `<stdio.h>` formatting
+run in both frontend forms and all four native allocator modes.
