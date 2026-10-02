@@ -1985,10 +1985,10 @@ BUSTER_GLOBAL_LOCAL u64 object_test_random_below(u64* state, u64 bound)
     return bound ? object_test_random(state) % bound : 0;
 }
 
-// The shape of one synthetic object for the ELF64 writer differential. The
+// The shape of one synthetic object for the ELF64 writer readback. The
 // generator keeps every input object_write accepts for ELF -- AArch64
 // instruction relocations sit on words that hold the instruction they
-// require -- so the writers, not the validation, decide the outcome.
+// require -- so the writer, not the validation, decides the outcome.
 typedef struct ObjectTestElfShape ObjectTestElfShape;
 struct ObjectTestElfShape
 {
@@ -2192,7 +2192,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_test_elf_shape_object(Arena* arena, u64 se
     if (shape.unsupported_relocation && symbol_count && sections[OBJECT_SECTION_TEXT].data.length >= 8)
     {
         // A kind object_write accepts for either machine but ELF has no type
-        // for, so the writer's own refusal is what gets compared.
+        // for, so the writer's own refusal is required.
         relocations[relocation_count++] = (ObjectRelocation){
             .section = OBJECT_SECTION_TEXT,
             .kind = shape.aarch64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12,
@@ -2251,45 +2251,388 @@ BUSTER_GLOBAL_LOCAL u32 object_test_elf_section_type_count(ByteSlice image, u32 
     return result;
 }
 
-// Writes `object` with the planned ELF64 writer and with the frozen writer it
-// replaced, and requires identical results: the same error, and on success
-// the same bytes. It also holds the planned writer to its work contract --
-// every image byte stored exactly once, nothing patched, nothing reserved or
-// retained beyond the file, each relocation and symbol read a fixed number of
-// times -- and returns the two ledgers for the caller to compare.
-BUSTER_GLOBAL_LOCAL bool object_test_elf_writers_agree(Arena* arena, ObjectFile* object, ObjectWriteStatistics* planned, ObjectWriteStatistics* reference)
+BUSTER_GLOBAL_LOCAL bool object_test_elf_section_at(ByteSlice bytes, u32 index, ObjectTestElfSection* result, String8* name)
+{
+    bool valid = bytes.pointer && bytes.length >= 64;
+    u64 table = 0;
+    u16 count = 0;
+    u16 strings = 0;
+    *result = (ObjectTestElfSection){.index = UINT32_MAX};
+    *name = (String8){0};
+    if (valid)
+    {
+        memcpy(&table, bytes.pointer + 40, sizeof(table));
+        memcpy(&count, bytes.pointer + 60, sizeof(count));
+        memcpy(&strings, bytes.pointer + 62, sizeof(strings));
+        valid = table <= bytes.length && (u64)count * 64 <= bytes.length - table && strings < count && index < count;
+    }
+    if (valid)
+    {
+        u64 string_header = table + (u64)strings * 64;
+        u64 string_offset = 0;
+        u64 string_size = 0;
+        memcpy(&string_offset, bytes.pointer + string_header + 24, sizeof(string_offset));
+        memcpy(&string_size, bytes.pointer + string_header + 32, sizeof(string_size));
+        u64 header = table + (u64)index * 64;
+        u32 name_offset = 0;
+        memcpy(&name_offset, bytes.pointer + header, sizeof(name_offset));
+        valid = string_offset <= bytes.length && string_size <= bytes.length - string_offset && name_offset < string_size;
+        if (valid)
+        {
+            u64 length = 0;
+            while (length < string_size - name_offset && bytes.pointer[string_offset + name_offset + length]) length += 1;
+            valid = length < string_size - name_offset;
+            if (valid)
+            {
+                *name = (String8){.pointer = (char8*)bytes.pointer + string_offset + name_offset, .length = length};
+                result->index = index;
+                result->header = header;
+                memcpy(&result->type, bytes.pointer + header + 4, sizeof(result->type));
+                memcpy(&result->flags, bytes.pointer + header + 8, sizeof(result->flags));
+                memcpy(&result->offset, bytes.pointer + header + 24, sizeof(result->offset));
+                memcpy(&result->size, bytes.pointer + header + 32, sizeof(result->size));
+                memcpy(&result->link, bytes.pointer + header + 40, sizeof(result->link));
+                memcpy(&result->info, bytes.pointer + header + 44, sizeof(result->info));
+                memcpy(&result->alignment, bytes.pointer + header + 48, sizeof(result->alignment));
+                memcpy(&result->entry_size, bytes.pointer + header + 56, sizeof(result->entry_size));
+            }
+        }
+    }
+    return valid;
+}
+
+// Literal ABI types for the relocation families exercised by the seeded
+// shapes. This decoder does not call the writer's relocation mapping.
+BUSTER_GLOBAL_LOCAL u32 object_test_elf_shape_relocation_type(CpuArch arch, ObjectRelocationKind kind)
+{
+    u32 result = 0;
+    if (arch == CPU_ARCH_X86_64)
+    {
+        switch (kind)
+        {
+        case OBJECT_RELOCATION_ABSOLUTE64: result = 1; break;
+        case OBJECT_RELOCATION_X86_64_PC32: result = 2; break;
+        case OBJECT_RELOCATION_X86_64_PLT32: result = 4; break;
+        case OBJECT_RELOCATION_X86_64_GOTPCREL: result = 9; break;
+        case OBJECT_RELOCATION_ABSOLUTE32: result = 10; break;
+        case OBJECT_RELOCATION_X86_64_ABSOLUTE32S: result = 11; break;
+        case OBJECT_RELOCATION_X86_64_TLSGD: result = 19; break;
+        case OBJECT_RELOCATION_X86_64_GOTTPOFF: result = 22; break;
+        case OBJECT_RELOCATION_X86_64_TPOFF32: result = 23; break;
+        case OBJECT_RELOCATION_X86_64_GOTPCRELX: result = 41; break;
+        case OBJECT_RELOCATION_X86_64_REX_GOTPCRELX: result = 42; break;
+        case OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX: result = 43; break;
+        default: break;
+        }
+    }
+    else
+    {
+        switch (kind)
+        {
+        case OBJECT_RELOCATION_ABSOLUTE64: result = 257; break;
+        case OBJECT_RELOCATION_ABSOLUTE32: result = 258; break;
+        case OBJECT_RELOCATION_AARCH64_PREL32: result = 261; break;
+        case OBJECT_RELOCATION_AARCH64_ELF_PAGE21: result = 275; break;
+        case OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12: result = 277; break;
+        case OBJECT_RELOCATION_AARCH64_JUMP26: result = 282; break;
+        case OBJECT_RELOCATION_AARCH64_CALL26: result = 283; break;
+        case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12: result = 549; break;
+        case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12: result = 551; break;
+        default: break;
+        }
+    }
+    return result;
+}
+
+// Read every retained section, symbol and RELA row back independently. The
+// generated shapes deliberately include arbitrary 64-bit symbol values that
+// need not fit their sections, so public import success is not their oracle.
+// Valid public-import and native-link controls are tested separately above.
+BUSTER_GLOBAL_LOCAL bool object_test_elf_shape_readback(Arena* arena, ObjectFile const* object, ByteSlice image)
+{
+    String8 const canonical[OBJECT_SECTION_COUNT] = {
+        [OBJECT_SECTION_TEXT] = S8_INITIALIZER(".text"),
+        [OBJECT_SECTION_READ_ONLY_DATA] = S8_INITIALIZER(".rodata"),
+        [OBJECT_SECTION_DATA] = S8_INITIALIZER(".data"),
+        [OBJECT_SECTION_ZERO] = S8_INITIALIZER(".bss"),
+        [OBJECT_SECTION_THREAD_LOCAL_DATA] = S8_INITIALIZER(".tdata"),
+        [OBJECT_SECTION_THREAD_LOCAL_ZERO] = S8_INITIALIZER(".tbss"),
+        [OBJECT_SECTION_INIT_ARRAY] = S8_INITIALIZER(".init_array"),
+        [OBJECT_SECTION_FINI_ARRAY] = S8_INITIALIZER(".fini_array"),
+        [OBJECT_SECTION_UNWIND] = S8_INITIALIZER(".eh_frame"),
+        [OBJECT_SECTION_WINDOWS_PDATA] = S8_INITIALIZER(".pdata"),
+        [OBJECT_SECTION_WINDOWS_XDATA] = S8_INITIALIZER(".xdata"),
+        [OBJECT_SECTION_DEBUG_INFO] = S8_INITIALIZER(".debug_info"),
+        [OBJECT_SECTION_DEBUG_ABBREV] = S8_INITIALIZER(".debug_abbrev"),
+        [OBJECT_SECTION_DEBUG_LINE] = S8_INITIALIZER(".debug_line"),
+        [OBJECT_SECTION_DEBUG_STR] = S8_INITIALIZER(".debug_str"),
+        [OBJECT_SECTION_DEBUG_LOC] = S8_INITIALIZER(".debug_loc"),
+        [OBJECT_SECTION_DEBUG_RANGES] = S8_INITIALIZER(".debug_ranges"),
+        [OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS] = S8_INITIALIZER(".debug$S"),
+        [OBJECT_SECTION_DEBUG_CODEVIEW_TYPES] = S8_INITIALIZER(".debug$T"),
+        [OBJECT_SECTION_DEBUG_ADDR] = S8_INITIALIZER(".debug_addr"),
+        [OBJECT_SECTION_DEBUG_STR_OFFSETS] = S8_INITIALIZER(".debug_str_offsets"),
+        [OBJECT_SECTION_DEBUG_LINE_STR] = S8_INITIALIZER(".debug_line_str"),
+        [OBJECT_SECTION_DEBUG_RNGLISTS] = S8_INITIALIZER(".debug_rnglists"),
+        [OBJECT_SECTION_DEBUG_LOCLISTS] = S8_INITIALIZER(".debug_loclists"),
+    };
+    u32 capacity = object->section_count + object_test_priority_groups(object);
+    ObjectSection* expected = arena_allocate(arena, ObjectSection, capacity ? capacity : 1);
+    if (object->section_count) memcpy(expected, object->sections, (u64)object->section_count * sizeof(*expected));
+    u32 expected_count = object->section_count;
+    u32* entry_sections[2] = {0};
+    u64* entry_offsets[2] = {0};
+    u32 entry_counts[2] = {0};
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        u32 kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+        u32* priorities = object->initializer_priorities[slot];
+        if (priorities && kind < object->section_count)
+        {
+            u32 entries = (u32)(object->sections[kind].data.length / 8);
+            entry_counts[slot] = entries;
+            entry_sections[slot] = arena_allocate(arena, u32, entries ? entries : 1);
+            entry_offsets[slot] = arena_allocate(arena, u64, entries ? entries : 1);
+            u32 first = 0;
+            while (first < entries && priorities[first] != 0x10000u)
+            {
+                u32 last = first + 1;
+                while (last < entries && priorities[last] == priorities[first]) last += 1;
+                u32 group = expected_count++;
+                expected[group] = (ObjectSection){
+                    .name = slot ? string_format(arena, S8(".fini_array.{u32:width=[0,5]}"), priorities[first])
+                                 : string_format(arena, S8(".init_array.{u32:width=[0,5]}"), priorities[first]),
+                    .data = {.pointer = object->sections[kind].data.pointer + (u64)first * 8, .length = (u64)(last - first) * 8},
+                    .kind = (ObjectSectionKind)kind,
+                    .alignment = object->sections[kind].alignment,
+                };
+                for (u32 entry = first; entry < last; entry += 1)
+                {
+                    entry_sections[slot][entry] = group;
+                    entry_offsets[slot][entry] = (u64)(entry - first) * 8;
+                }
+                first = last;
+            }
+            for (u32 entry = first; entry < entries; entry += 1)
+            {
+                entry_sections[slot][entry] = kind;
+                entry_offsets[slot][entry] = (u64)(entry - first) * 8;
+            }
+            if (first)
+            {
+                expected[kind].data.pointer += (u64)first * 8;
+                expected[kind].data.length -= (u64)first * 8;
+            }
+        }
+    }
+    u32* indices = arena_allocate(arena, u32, expected_count ? expected_count : 1);
+    u32* relocation_counts = arena_allocate(arena, u32, expected_count ? expected_count : 1);
+    u64* relocation_offsets = arena_allocate(arena, u64, expected_count ? expected_count : 1);
+    memset(indices, 0, (u64)expected_count * sizeof(*indices));
+    memset(relocation_counts, 0, (u64)expected_count * sizeof(*relocation_counts));
+    memset(relocation_offsets, 0, (u64)expected_count * sizeof(*relocation_offsets));
+    ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count ? object->relocation_count : 1);
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        relocations[index] = object->relocations[index];
+        ObjectRelocation* relocation = relocations + index;
+        for (u32 slot = 0; slot < 2; slot += 1)
+        {
+            u32 kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+            if (entry_counts[slot] && relocation->section == kind)
+            {
+                u64 entry = relocation->offset / 8;
+                relocation->section = entry_sections[slot][entry];
+                relocation->offset = entry_offsets[slot][entry] + relocation->offset % 8;
+                break;
+            }
+        }
+        indices[relocation->section] = 1;
+        relocation_counts[relocation->section] += 1;
+    }
+    u32 locals = 0;
+    for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
+    {
+        ObjectSymbol const* source = object->symbols + symbol;
+        locals += source->global ? 0 : 1;
+        if (source->section != OBJECT_SECTION_UNDEFINED) indices[source->section] = 1;
+    }
+    u32 emitted_count = 0;
+    u32 tables = 0;
+    bool result = expected_count == capacity && image.pointer && image.length >= 64 &&
+                  memcmp(image.pointer, "\x7f" "ELF", 4) == 0 && image.pointer[4] == 2 && image.pointer[5] == 1;
+    if (result)
+    {
+        u16 type = 0, machine = 0, header_size = 0, program_count = 0, section_entry_size = 0;
+        u32 version = 0;
+        memcpy(&type, image.pointer + 16, sizeof(type));
+        memcpy(&machine, image.pointer + 18, sizeof(machine));
+        memcpy(&version, image.pointer + 20, sizeof(version));
+        memcpy(&header_size, image.pointer + 52, sizeof(header_size));
+        memcpy(&program_count, image.pointer + 56, sizeof(program_count));
+        memcpy(&section_entry_size, image.pointer + 58, sizeof(section_entry_size));
+        result = type == 1 && machine == (object->target.cpu_arch == CPU_ARCH_X86_64 ? 62 : 183) && version == 1 &&
+                 header_size == 64 && !program_count && section_entry_size == 64;
+    }
+    for (u32 section = 0; section < expected_count; section += 1)
+    {
+        ObjectSection const* source = expected + section;
+        bool placeholder = section < OBJECT_SECTION_COUNT && source->kind == (ObjectSectionKind)section &&
+                           string_equal(source->name, canonical[section]);
+        bool retained = indices[section] || source->data.length || source->virtual_size || !placeholder;
+        indices[section] = retained ? ++emitted_count : 0;
+        tables += relocation_counts[section] ? 1 : 0;
+        if (retained)
+        {
+            ObjectTestElfSection decoded = {0};
+            String8 name = {0};
+            bool valid = object_test_elf_section_at(image, indices[section], &decoded, &name);
+            bool zero_fill = source->kind == OBJECT_SECTION_ZERO || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+            bool tls = source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+            u32 type = zero_fill ? 8 : source->kind == OBJECT_SECTION_UNWIND && object->target.cpu_arch == CPU_ARCH_X86_64 ? 0x70000001
+                                      : source->kind == OBJECT_SECTION_INIT_ARRAY ? (string_starts_with_sequence(source->name, S8(".preinit_array")) ? 16 : 14)
+                                      : source->kind == OBJECT_SECTION_FINI_ARRAY ? 15 : 1;
+            u64 flags = source->kind == OBJECT_SECTION_TEXT ? 6 : tls ? 0x403
+                        : source->kind == OBJECT_SECTION_DATA || zero_fill || source->kind == OBJECT_SECTION_INIT_ARRAY ||
+                                  source->kind == OBJECT_SECTION_FINI_ARRAY ? 3 : source->kind >= OBJECT_SECTION_DEBUG_INFO ? 0 : 2;
+            result = result && valid && string_equal(name, source->name) && decoded.type == type && decoded.flags == flags &&
+                     decoded.size == BUSTER_MAX(source->data.length, source->virtual_size) && decoded.alignment == source->alignment &&
+                     !decoded.link && !decoded.info && !decoded.entry_size && decoded.offset <= image.length &&
+                     (!source->alignment || decoded.offset % source->alignment == 0);
+            if (!zero_fill)
+            {
+                result = result && source->data.length <= image.length - decoded.offset &&
+                         (!source->data.length || memcmp(image.pointer + decoded.offset, source->data.pointer, source->data.length) == 0);
+            }
+        }
+    }
+    u32 symbol_index = emitted_count + tables + 1;
+    ObjectTestElfSection symtab = {0}, strtab = {0}, shstrtab = {0};
+    String8 symbol_name = {0}, string_name = {0}, section_string_name = {0};
+    result = result && object_test_elf_section_at(image, symbol_index, &symtab, &symbol_name) &&
+             object_test_elf_section_at(image, symbol_index + 1, &strtab, &string_name) &&
+             object_test_elf_section_at(image, symbol_index + 2, &shstrtab, &section_string_name) &&
+             string_equal(symbol_name, S8(".symtab")) && string_equal(string_name, S8(".strtab")) &&
+             string_equal(section_string_name, S8(".shstrtab")) && symtab.type == 2 && symtab.link == symbol_index + 1 &&
+             symtab.info == locals + 1 && symtab.entry_size == 24 && symtab.size == ((u64)object->symbol_count + 1) * 24 &&
+             symtab.offset <= image.length && symtab.size <= image.length - symtab.offset && strtab.type == 3 &&
+             strtab.offset <= image.length && strtab.size <= image.length - strtab.offset && shstrtab.type == 3 &&
+             symtab.alignment == 8 && !symtab.flags && strtab.alignment == 1 && !strtab.flags && !strtab.link && !strtab.info &&
+             !strtab.entry_size && shstrtab.alignment == 1 && !shstrtab.flags && !shstrtab.link && !shstrtab.info && !shstrtab.entry_size &&
+             shstrtab.offset <= image.length && shstrtab.size <= image.length - shstrtab.offset && strtab.size &&
+             image.pointer[strtab.offset] == 0;
+    u16 header_count = 0;
+    u16 section_strings = 0;
+    if (image.length >= 64)
+    {
+        memcpy(&header_count, image.pointer + 60, sizeof(header_count));
+        memcpy(&section_strings, image.pointer + 62, sizeof(section_strings));
+    }
+    result = result && header_count == symbol_index + 3 && section_strings == symbol_index + 2;
+    for (u32 byte = 0; result && byte < 24; byte += 1)
+    {
+        result = image.pointer[symtab.offset + byte] == 0;
+    }
+    u32* symbol_indices = arena_allocate(arena, u32, object->symbol_count ? object->symbol_count : 1);
+    u32 local = 1;
+    u32 global = locals + 1;
+    u64 name_offset = 1;
+    for (u32 symbol = 0; result && symbol < object->symbol_count; symbol += 1)
+    {
+        ObjectSymbol const* source = object->symbols + symbol;
+        u32 row = source->global ? global++ : local++;
+        symbol_indices[symbol] = row;
+        u64 offset = symtab.offset + (u64)row * 24;
+        u32 decoded_name = 0;
+        u16 decoded_section = 0;
+        u64 value = 0, size = 0;
+        memcpy(&decoded_name, image.pointer + offset, sizeof(decoded_name));
+        memcpy(&decoded_section, image.pointer + offset + 6, sizeof(decoded_section));
+        memcpy(&value, image.pointer + offset + 8, sizeof(value));
+        memcpy(&size, image.pointer + offset + 16, sizeof(size));
+        bool defined = source->section != OBJECT_SECTION_UNDEFINED;
+        ObjectSectionKind kind = defined ? expected[source->section].kind : OBJECT_SECTION_COUNT;
+        bool tls = defined ? kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO
+                           : source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES;
+        u8 type = tls ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2
+                         : !defined && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN ? 0 : 1;
+        u8 binding = source->global ? (source->weak ? 0x20 : 0x10) : 0;
+        result = decoded_name == name_offset && name_offset < strtab.size && source->name.length < strtab.size - name_offset &&
+                 memcmp(image.pointer + strtab.offset + name_offset, source->name.pointer, source->name.length) == 0 &&
+                 image.pointer[strtab.offset + name_offset + source->name.length] == 0 &&
+                 image.pointer[offset + 4] == (u8)(binding | type) && image.pointer[offset + 5] == (source->hidden ? 2 : 0) &&
+                 decoded_section == (defined ? indices[source->section] : 0) && value == source->value && size == source->size;
+        name_offset += source->name.length + 1;
+    }
+    result = result && name_offset == strtab.size;
+    u32 table = emitted_count + 1;
+    for (u32 section = 0; result && section < expected_count; section += 1)
+    {
+        if (relocation_counts[section])
+        {
+            ObjectTestElfSection rela = {0};
+            String8 name = {0};
+            result = object_test_elf_section_at(image, table++, &rela, &name) && rela.type == 4 && rela.link == symbol_index &&
+                     rela.info == indices[section] && rela.entry_size == 24 && rela.alignment == 8 &&
+                     rela.size == (u64)relocation_counts[section] * 24 && rela.offset <= image.length && rela.size <= image.length - rela.offset &&
+                     name.length == expected[section].name.length + 5 && memcmp(name.pointer, ".rela", 5) == 0 &&
+                     memcmp(name.pointer + 5, expected[section].name.pointer, expected[section].name.length) == 0;
+            relocation_offsets[section] = rela.offset;
+        }
+    }
+    for (u32 index = 0; result && index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation const* relocation = relocations + index;
+        u64 row = relocation_offsets[relocation->section];
+        u64 offset = 0, information = 0, addend = 0;
+        memcpy(&offset, image.pointer + row, sizeof(offset));
+        memcpy(&information, image.pointer + row + 8, sizeof(information));
+        memcpy(&addend, image.pointer + row + 16, sizeof(addend));
+        u32 type = object_test_elf_shape_relocation_type(object->target.cpu_arch, relocation->kind);
+        result = offset == relocation->offset && information == ((u64)symbol_indices[relocation->symbol] << 32 | type) &&
+                 addend == (u64)relocation->addend;
+        relocation_offsets[relocation->section] += 24;
+    }
+    return result;
+}
+
+// Retain the linear work ledger while replacing the obsolete byte oracle
+// with independent semantic readback of the intentionally compacted format.
+BUSTER_GLOBAL_LOCAL bool object_test_elf_writer_readback(Arena* arena, ObjectFile* object, ObjectWriteStatistics* planned)
 {
     TemporalArena scope = arena_begin_temporal(arena);
     ObjectArtifact candidate = object_write(arena, object, OBJECT_FORMAT_ELF64);
-    ByteSlice candidate_bytes = candidate.bytes;
-    ObjectArtifact original = object_test_write_elf64_reference(arena, object);
-    bool result = candidate.error == original.error;
+    ObjectError expected_error = OBJECT_ERROR_NONE;
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        if (!object_test_elf_shape_relocation_type(object->target.cpu_arch, object->relocations[index].kind))
+        {
+            expected_error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        }
+    }
+    bool result = candidate.error == expected_error;
     if (result && candidate.error == OBJECT_ERROR_NONE)
     {
-        u32 groups = object_test_priority_groups(object);
-        u64 split_sections = (u64)object->section_count + groups;
-        u64 relocation_tables = object_test_elf_section_type_count(candidate_bytes, 4);
+        u64 split_sections = (u64)object->section_count + object_test_priority_groups(object);
+        u64 relocation_tables = object_test_elf_section_type_count(candidate.bytes, 4);
         u64 payload = 0;
         for (u32 section = 0; section < object->section_count; section += 1)
         {
             payload += object_section_kind_is_zero_fill(object->sections[section].kind) ? 0 : object->sections[section].data.length;
         }
         ObjectWriteStatistics counted = candidate.statistics;
-        result = candidate_bytes.length == original.bytes.length && candidate_bytes.pointer && original.bytes.pointer &&
-                 memcmp(candidate_bytes.pointer, original.bytes.pointer, candidate_bytes.length) == 0 && counted.output_bytes == candidate_bytes.length &&
+        result = object_test_elf_shape_readback(arena, object, candidate.bytes) && counted.output_bytes == candidate.bytes.length &&
                  counted.image_bytes_stored == counted.output_bytes && counted.image_bytes_patched == 0 &&
                  counted.image_bytes_reserved == counted.output_bytes && counted.retained_bytes == counted.output_bytes &&
                  counted.payload_bytes_copied == payload && counted.relocation_visits == (u64)object->relocation_count * 3 &&
                  counted.symbol_visits == (u64)object->symbol_count * 3 &&
-                 counted.section_visits == object->section_count + split_sections * 4 + relocation_tables * 2 &&
-                 original.statistics.output_bytes == counted.output_bytes && original.statistics.image_bytes_patched > 0;
+                 counted.section_visits == object->section_count + split_sections * 4 + relocation_tables * 2;
     }
     else if (result)
     {
-        result = !candidate_bytes.pointer && !candidate_bytes.length && !candidate.statistics.output_bytes;
+        result = !candidate.bytes.pointer && !candidate.bytes.length && !candidate.statistics.output_bytes;
     }
     *planned = candidate.statistics;
-    *reference = original.statistics;
     arena_set_position(arena, scope.position);
     return result;
 }
@@ -2329,8 +2672,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArgume
         };
         ObjectFile object = object_test_elf_shape_object(temporary.arena, seed, shape);
         ObjectWriteStatistics planned = {0};
-        ObjectWriteStatistics reference = {0};
-        bool case_agrees = object_test_elf_writers_agree(temporary.arena, &object, &planned, &reference);
+        bool case_agrees = object_test_elf_writer_readback(temporary.arena, &object, &planned);
         failing_seed = agree && !case_agrees ? seed : failing_seed;
         agree = agree && case_agrees;
         compared += planned.output_bytes ? 1 : 0;
@@ -2338,7 +2680,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArgume
     }
     if (!agree)
     {
-        arguments->show(arguments, S8("ELF planned/reference writers disagree at seed {u64}\n"), failing_seed);
+        arguments->show(arguments, S8("ELF semantic readback failed at seed {u64}\n"), failing_seed);
     }
     BUSTER_TEST(arguments, agree);
     // Fifteen of the 256 seeds carry a relocation ELF cannot express.
@@ -2346,9 +2688,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArgume
 
     // Adversarial scale: many symbols with long and duplicate names, many
     // relocations across many sections, alignment-heavy layouts and a large
-    // number of priority groups, each checked against the reference and
-    // required to read every relocation and symbol a fixed number of times
-    // while the reference's reads grow with sections times relocations.
+    // number of priority groups, each checked by independent raw readback and
+    // required to read every relocation and symbol a fixed number of times.
     ObjectTestElfShape adversarial[] = {
         {.payload_limit = 4096, .extra_sections = 64, .symbol_count = 20000, .relocation_count = 60000, .name_limit = 48},
         {.payload_limit = 64,
@@ -2365,10 +2706,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArgume
         TemporalArena scope = arena_begin_temporal(temporary.arena);
         ObjectFile object = object_test_elf_shape_object(temporary.arena, 0x5eed0000u + index, adversarial[index]);
         ObjectWriteStatistics planned = {0};
-        ObjectWriteStatistics reference = {0};
-        BUSTER_TEST(arguments, object_test_elf_writers_agree(temporary.arena, &object, &planned, &reference));
-        BUSTER_TEST(arguments, planned.relocation_visits < reference.relocation_visits && planned.image_bytes_stored < reference.image_bytes_stored &&
-                                   planned.image_bytes_reserved < reference.image_bytes_reserved && planned.retained_bytes < reference.retained_bytes);
+        BUSTER_TEST(arguments, object_test_elf_writer_readback(temporary.arena, &object, &planned));
+        BUSTER_TEST(arguments, planned.output_bytes && planned.image_bytes_stored == planned.output_bytes &&
+                                   planned.image_bytes_reserved == planned.output_bytes && planned.retained_bytes == planned.output_bytes);
         arena_set_position(temporary.arena, scope.position);
     }
 
@@ -2403,8 +2743,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArgume
 
 // What ELF cannot state is refused by the plan, before an image exists: a
 // section index at SHN_LORESERVE, a 32-bit string offset that would wrap, a
-// file size that overflows, and a file the arena cannot hold. The frozen
-// writer silently truncated the first two and aborted on the last.
+// file size that overflows, and a file the arena cannot hold.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2433,8 +2772,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
     {
         TemporalArena scope = arena_begin_temporal(temporary.arena);
         ObjectWriteStatistics planned = {0};
-        ObjectWriteStatistics reference = {0};
-        BUSTER_TEST(arguments, object_test_elf_writers_agree(temporary.arena, &many, &planned, &reference));
+        BUSTER_TEST(arguments, object_test_elf_writer_readback(temporary.arena, &many, &planned));
         arena_set_position(temporary.arena, scope.position);
     }
     many.section_count = limit_inputs;
@@ -2445,15 +2783,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
         ObjectArtifact refused = object_write(temporary.arena, &many, OBJECT_FORMAT_ELF64);
         BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && !refused.bytes.pointer && !refused.bytes.length &&
                                    !refused.statistics.image_bytes_reserved && !refused.statistics.retained_bytes);
-        // The reference wrote this one: e_shnum 0xff00 is the reserved value
-        // itself, which readers take as "count in section 0" and find none.
-        ObjectArtifact truncated = object_test_write_elf64_reference(temporary.arena, &many);
-        u16 header_count = 0;
-        if (BUSTER_REQUIRE(arguments, truncated.error == OBJECT_ERROR_NONE && truncated.bytes.length >= 64))
-        {
-            memcpy(&header_count, truncated.bytes.pointer + 60, sizeof(header_count));
-            BUSTER_TEST(arguments, header_count == 0xff00);
-        }
         arena_set_position(temporary.arena, scope.position);
     }
     // A relocation adds its own RELA table, so it moves the limit by one.
@@ -2486,9 +2815,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
         {
             kinds[section] = (ObjectSection){.name = S8(".s"), .kind = (ObjectSectionKind)section, .alignment = 8};
         }
-        // No relocations, but an array for them: the frozen writer copies the
-        // relocation array whenever a group exists, and memcpy may not be
-        // handed a null source even for zero bytes.
         ObjectFile grouped = {.sections = kinds, .section_count = OBJECT_SECTION_COUNT, .relocations = &relocation, .target = target};
         grouped.initializer_priorities[0] = priorities;
         kinds[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){.pointer = array, .length = array_size};
@@ -2496,15 +2822,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
         BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && !refused.bytes.pointer && !refused.statistics.scratch_bytes &&
                                    !refused.statistics.retained_bytes);
         // One group fewer passes the split and fills the last section index,
-        // which the plan refuses; two fewer is written as the reference
-        // writes it, with the largest e_shnum ELF can state.
+        // which the plan refuses; two fewer is written with the largest
+        // e_shnum ELF can state.
         kinds[OBJECT_SECTION_INIT_ARRAY].data.length -= OBJECT_INITIALIZER_ENTRY_SIZE;
         refused = object_write(temporary.arena, &grouped, OBJECT_FORMAT_ELF64);
         BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && refused.statistics.scratch_bytes && !refused.statistics.retained_bytes);
         kinds[OBJECT_SECTION_INIT_ARRAY].data.length -= OBJECT_INITIALIZER_ENTRY_SIZE;
         ObjectWriteStatistics planned = {0};
-        ObjectWriteStatistics reference = {0};
-        BUSTER_TEST(arguments, object_test_elf_writers_agree(temporary.arena, &grouped, &planned, &reference));
+        BUSTER_TEST(arguments, object_test_elf_writer_readback(temporary.arena, &grouped, &planned));
         ObjectArtifact written = object_write(temporary.arena, &grouped, OBJECT_FORMAT_ELF64);
         u16 header_count = 0;
         if (BUSTER_REQUIRE(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length >= 64))
@@ -2515,8 +2840,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
         arena_set_position(temporary.arena, scope.position);
     }
 
-    // String tables: the plan never reads a name's bytes, so lengths no test
-    // could allocate stand in for them. .strtab is a NUL plus name and NUL;
+    // String tables: the plan does not inspect names of nonempty sections,
+    // so lengths no test could allocate stand in for them. .strtab is a NUL
+    // plus name and NUL;
     // every byte of it must be reachable by a 32-bit st_name.
     ObjectSection text = {.name = S8(".text"), .data = {.pointer = &byte, .length = 1}, .kind = OBJECT_SECTION_TEXT, .alignment = 16};
     ObjectSymbol long_symbol = {.name = {.pointer = (char8*)&byte, .length = (u64)UINT32_MAX - 1}, .section = 0, .kind = OBJECT_SYMBOL_FUNCTION};
@@ -2537,8 +2863,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
     names.symbol_count = 1;
 
     // File size: a payload that overflows the offset sum, one whose padding
-    // overflows, and one that sums but that no arena holds. The last is the
-    // case the frozen writer handed to arena_allocate, which aborts.
+    // overflows, and one that sums but that no arena holds.
     ObjectSection overflowing[] = {
         {.name = S8(".text"), .data = {.pointer = &byte, .length = UINT64_MAX - 63}, .kind = OBJECT_SECTION_TEXT, .alignment = 1},
         {.name = S8(".data"), .data = {.pointer = &byte, .length = 1}, .kind = OBJECT_SECTION_DATA, .alignment = 4096},
