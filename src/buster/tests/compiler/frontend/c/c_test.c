@@ -26387,6 +26387,212 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_integer_constants(UnitTestArgume
     return result;
 }
 
+typedef struct CTestFloatLiteralImage CTestFloatLiteralImage;
+struct CTestFloatLiteralImage
+{
+    String8 spelling;
+    u32 single;
+    u64 widened;
+};
+
+// Fixed IEEE images: widening binary32 into binary64 is exact. Decimal and
+// hexadecimal boundary spellings must choose these same source-format bits.
+BUSTER_GLOBAL_LOCAL CTestFloatLiteralImage const c_test_float_literal_images[] = {
+    {S8_INITIALIZER("1e39f"), UINT32_C(0x7f800000), UINT64_C(0x7ff0000000000000)},
+    {S8_INITIALIZER("-1e39f"), UINT32_C(0xff800000), UINT64_C(0xfff0000000000000)},
+    {S8_INITIALIZER("1e-50f"), 0, 0},
+    {S8_INITIALIZER("-1e-50f"), UINT32_C(0x80000000), UINT64_C(0x8000000000000000)},
+    {S8_INITIALIZER("3.4028235e38f"), UINT32_C(0x7f7fffff), UINT64_C(0x47efffffe0000000)},
+    {S8_INITIALIZER("3.4028236e38f"), UINT32_C(0x7f800000), UINT64_C(0x7ff0000000000000)},
+    {S8_INITIALIZER("1.4e-45f"), 1, UINT64_C(0x36a0000000000000)},
+    {S8_INITIALIZER("-1.4e-45f"), UINT32_C(0x80000001), UINT64_C(0xb6a0000000000000)},
+    {S8_INITIALIZER("7e-46f"), 0, 0},
+    {S8_INITIALIZER("-7e-46f"), UINT32_C(0x80000000), UINT64_C(0x8000000000000000)},
+    {S8_INITIALIZER("0x1p-150f"), 0, 0},
+    {S8_INITIALIZER("0x1.000002p-150f"), 1, UINT64_C(0x36a0000000000000)},
+    {S8_INITIALIZER("0x1.ffffffp127f"), UINT32_C(0x7f800000), UINT64_C(0x7ff0000000000000)},
+    {S8_INITIALIZER("0x1.fffffeffffffp127f"), UINT32_C(0x7f7fffff), UINT64_C(0x47efffffe0000000)},
+    {S8_INITIALIZER("1.000000059604644775390625f"), UINT32_C(0x3f800000), UINT64_C(0x3ff0000000000000)},
+    // A bounded mantissa whose approximate accumulator reaches infinity:
+    // 0x1 followed by 256 zero digits, scaled by p-3000, is exactly 2^-1976.
+    {S8_INITIALIZER("0x1"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000" "p-3000f"), 0, 0},
+    {S8_INITIALIZER("-0x1"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000" "p-3000f"), UINT32_C(0x80000000), UINT64_C(0x8000000000000000)},
+    {S8_INITIALIZER("0x1"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000" "p-3000"), 0, 0},
+    {S8_INITIALIZER("-0x1"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000" "p-3000"), UINT32_C(0x80000000), UINT64_C(0x8000000000000000)},
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_literal_initializer_rounding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 names[] = {S8("scalar_f"), S8("scalar_d"), S8("array_f"), S8("array_d")};
+    String8 queries = S8(
+        "_Static_assert(1e39f > 1e300 && -1e39f < -1e300, \"float infinity\");"
+        "_Static_assert(1e-50f == 0.0 && -1e-50f == 0.0, \"float zero\");"
+        "_Static_assert(3.4028235e38f == 0x1.fffffep127 && 3.4028236e38f > 1e300, \"float maximum\");"
+        "_Static_assert(1.4e-45f == 0x1p-149 && 7e-46f == 0.0, \"float subnormal\");"
+        "enum { rounded_zero = 1e-50f == 0.0, rounded_infinity = 1e39f > 1e300 };"
+        "_Static_assert(rounded_zero && rounded_infinity, \"enumerator rounding\");\n");
+    String8 invalid[] = {S8("static int value = (int)1e39f;"), S8("static int value = (int)-1e39f;"),
+        S8("static unsigned __int128 value = (unsigned __int128)1e39f;")};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_test_float_literal_images); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CTestFloatLiteralImage image = c_test_float_literal_images[index];
+                String8 source = string_format(temporary.arena,
+                    S8("float scalar_f = {S8}; double scalar_d = {S8};"
+                       "float array_f[] = {{ {S8} }}; double array_d[] = {{ {S8} }};\n"),
+                    image.spelling, image.spelling, image.spelling, image.spelling);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("float-initializer-images.c"), tokens, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+                bool accepted = tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 &&
+                                lowered.program && lowered.program->module_count && lowered.diagnostic_count == 0;
+                BUSTER_TEST_RAW(arguments, accepted, source);
+                if (BUSTER_REQUIRE(arguments, accepted))
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    for (u32 object = 0; object < BUSTER_ARRAY_LENGTH(names); object += 1)
+                    {
+                        IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, names[object]);
+                        u64 expected = object & 1 ? image.widened : image.single;
+                        u32 width = object & 1 ? 8 : 4;
+                        if (BUSTER_REQUIRE(arguments, global != 0))
+                        {
+                            if (!expected)
+                            {
+                                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO);
+                            }
+                            else if (object < 2)
+                            {
+                                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
+                                BUSTER_TEST_RAW(arguments, global->initializer_bits == expected, image.spelling);
+                            }
+                            else if (BUSTER_REQUIRE(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES &&
+                                        global->bytes.pointer && global->bytes.length == width))
+                            {
+                                u64 actual = 0;
+                                for (u32 byte = 0; byte < width; byte += 1)
+                                {
+                                    actual |= (u64)global->bytes.pointer[byte] << (byte * 8);
+                                }
+                                BUSTER_TEST_RAW(arguments, actual == expected, image.spelling);
+                            }
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+            for (u32 index = 0; index <= BUSTER_ARRAY_LENGTH(invalid); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 source = index ? invalid[index - 1] : queries;
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("float-initializer-queries.c"), tokens, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+                BUSTER_TEST_RAW(arguments, index ? lowered.diagnostic_count != 0 && !lowered.program
+                                               : lowered.diagnostic_count == 0 && lowered.program, source);
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_literal_initializer_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena source_arena = scratch_begin(&arguments->arena, 1);
+    enum { IMAGE_COUNT = BUSTER_ARRAY_LENGTH(c_test_float_literal_images) };
+    String8 spellings[IMAGE_COUNT];
+    String8 singles[IMAGE_COUNT];
+    String8 doubles[IMAGE_COUNT];
+    for (u32 index = 0; index < IMAGE_COUNT; index += 1)
+    {
+        CTestFloatLiteralImage image = c_test_float_literal_images[index];
+        spellings[index] = string_format(source_arena.arena, S8("{S8},"), image.spelling);
+        singles[index] = string_format(source_arena.arena, S8("{u32}u,"), image.single);
+        doubles[index] = string_format(source_arena.arena, S8("{u64}ULL,"), image.widened);
+    }
+    String8 literals = string_join_arena(source_arena.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(spellings), false);
+    String8 fixture = string_format(source_arena.arena,
+        S8("static float gf[] = {{ {S8} }}; static double gd[] = {{ {S8} }};"
+           "static const unsigned ef[] = {{ {S8} }}; static const unsigned long long ed[] = {{ {S8} }};"
+           "int main(void) {{ float lf[] = {{ {S8} }}; double ld[] = {{ {S8} }}; static double sd[] = {{ {S8} }};"
+           " union {{ float value; unsigned bits; }} f; union {{ double value; unsigned long long bits; }} d;"
+           " int failed = 0; for (unsigned i = 0; i < {u32}; i++) {{"
+           " f.value = gf[i]; failed |= f.bits != ef[i]; f.value = lf[i]; failed |= f.bits != ef[i];"
+           " d.value = gd[i]; failed |= d.bits != ed[i]; d.value = ld[i]; failed |= d.bits != ed[i];"
+           " d.value = sd[i]; failed |= d.bits != ed[i]; }} return failed; }}\n"),
+        literals, literals, string_join_arena(source_arena.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(singles), false),
+        string_join_arena(source_arena.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(doubles), false), literals, literals, literals, (u32)IMAGE_COUNT);
+    String8 source = buster_test_temporary_path(arguments->arena, S8("float-literal-initializer"), S8(".c"));
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(fixture))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < 2; frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("float-literal-initializer-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+                    frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    scratch_end(source_arena);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -31154,6 +31360,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
     BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
+    BUSTER_TEST_FIXTURE(arguments, c_test_float_literal_initializer_rounding);
+    BUSTER_TEST_FIXTURE(arguments, c_test_float_literal_initializer_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
     BUSTER_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
