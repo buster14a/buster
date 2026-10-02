@@ -90,6 +90,9 @@ parser/checker controls, complete inventory, repeated manifests, wrong pins,
 dirty/ignored inputs, occupied/aliased outputs and malformed CLI invocations.
 After building Release `ide`, it runs the two real preprocessing tests and
 controls for hidden fixture mutation and compiler launch failure.
+It also compares fifteen first-party macro boundary/stringification controls
+against both compilers. These regression controls are separate from the two
+upstream test identities and never increase the reported upstream coverage.
 
 The existing Python regression-test convention supplies an independent reader
 and process controls, not production orchestration or a new dependency:

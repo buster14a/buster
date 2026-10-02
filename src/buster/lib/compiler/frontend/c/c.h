@@ -425,6 +425,13 @@ struct CPhaseBoundaryMetrics
 // evaluator takes); `c_preprocess_detail` reads those as the all-zero block
 // their inline members used to be.
 typedef struct CPreprocessDetail CPreprocessDetail;
+enum
+{
+    C_OUTPUT_SPACING_UNKNOWN,
+    C_OUTPUT_SPACING_ADJACENT,
+    C_OUTPUT_SPACING_SEPARATED,
+};
+
 struct CPreprocessDetail
 {
     TargetDataLayout data_layout;
@@ -438,6 +445,10 @@ struct CPreprocessDetail
     CSourceFileMetrics* lexed_files;
     CPreprocessedMetrics preprocessed;
     CPhaseBoundaryMetrics boundary;
+    // Optional text-output boundaries, indexed by final token: 0 uses source
+    // columns, 1 means adjacent, 2 means separated. Only expanded lines need
+    // this sidecar; ordinary compilation leaves it null.
+    u8* output_spacing;
 #if BUSTER_INCLUDE_TESTS
     // Actual include-identity table slot examinations for end-to-end scaling
     // fixtures. Tests-disabled builds neither store nor increment this value.
@@ -556,14 +567,16 @@ struct CPreprocessOptions
     // The source has already completed preprocessing. Lexing, symbol
     // interning, source maps, line markers, pragmas and parser-facing token
     // normalization remain active; command macros, ordinary directives and
-    // text macro expansion are not replayed. This consumes a reserved byte so
-    // the public options record keeps its existing size.
+    // text macro expansion are not replayed.
     bool already_preprocessed;
     // No report will read preprocessed.bytes (the driver passes its
     // invocation's omit_spelled_bytes), so the pass over the output stream
     // that sums spelling lengths is skipped and the field stays zero. Every
-    // other metric is still gathered. It takes the last reserved byte.
+    // other metric is still gathered.
     bool omit_spelled_bytes;
+    // Preserve expansion boundary whitespace for a subsequent text printer.
+    // This does not widen CToken or allocate a sidecar in ordinary compilation.
+    bool retain_output_spacing;
     // Optional caller-owned arena for state whose last reader is inside the
     // phase: per-file lexed rows, macro records, include tables and line
     // staging. The phase allocates above the arena's position at entry and

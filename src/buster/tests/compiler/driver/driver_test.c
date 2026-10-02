@@ -359,6 +359,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                                                       .dialect = C_PREPROCESS_DIALECT_C23,
                                                   });
         BUSTER_TEST(arguments, expected.diagnostic_count == 0);
+        BUSTER_TEST(arguments, c_preprocess_detail(expected)->output_spacing == 0);
         String8 stdout_arguments[] = {
             program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), S8("-std=c23"), S8("-x"), S8("c"), source_path,
         };
@@ -390,6 +391,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                 S8(". . . ellipsis_tokens;"),
                 S8("/ / line_comment_tokens;"),
                 S8("/ * block_comment_tokens;"),
+                S8("adjacent_tail: \"tail\";"),
+                S8("spaced_tail: \"tail\" ;"),
+                S8("comment_tail: \"tail\" ;"),
+                S8("nested_tail: \"tail\";"),
+                S8("empty_adjacent: \"tail\";"),
+                S8("empty_spaced: \"tail\" ;"),
+                S8("empty_chain: \"tail\" ;"),
+                S8("compact_tokens: a+b;"),
+                S8("spaced_tokens: a + b;"),
+                S8("empty_leading: before +;"),
+                S8("empty_middle: left +B;"),
+                S8("empty_trailing: left ;"),
+                S8("nested_empty_tail: left;"),
+                S8("stringified_empty: \"a +b\";"),
+                S8("stringified_parameter: \"left +B\";"),
                 S8("_Bool included_flag;"),
                 S8("int main(void)\n{\n"),
             };

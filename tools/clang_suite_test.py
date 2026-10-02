@@ -273,6 +273,38 @@ class ClangSuiteTests(unittest.TestCase):
         self.assertEqual(fields["checkout_status_clean"], "1")
         self.assertEqual(fields["status"], "pass")
 
+    def test_macro_output_boundaries_against_clang(self):
+        self.require_smoke()
+        source = Path(__file__).resolve().parents[1] / "tests/basic_c_preprocess_boundaries.txt"
+        expected = (
+            b'adjacent_tail: "tail";',
+            b'spaced_tail: "tail" ;',
+            b'comment_tail: "tail" ;',
+            b'nested_tail: "tail";',
+            b'empty_adjacent: "tail";',
+            b'empty_spaced: "tail" ;',
+            b'empty_chain: "tail" ;',
+            b'compact_tokens: a+b;',
+            b'spaced_tokens: a + b;',
+            b'empty_leading: before +;',
+            b'empty_middle: left +B;',
+            b'empty_trailing: left ;',
+            b'nested_empty_tail: left;',
+            b'stringified_empty: "a +b";',
+            b'stringified_parameter: "left +B";',
+        )
+        for name, executable, prefix in (("clang", self.clang, []), ("buster", self.ide, ["cc"])):
+            with self.subTest(compiler=name):
+                command = [str(executable), *prefix, "-E", "-std=c23", "-x", "c", str(source)]
+                result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                (self.evidence / f"macro-boundaries.{name}.stdout").write_bytes(result.stdout)
+                (self.evidence / f"macro-boundaries.{name}.stderr").write_bytes(result.stderr)
+                self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+                self.assertLess(len(result.stdout) + len(result.stderr), 1024 * 1024)
+                lines = re.sub(rb"[ \t]+", b" ", result.stdout.replace(b"\r\n", b"\n")).splitlines()
+                for literal in expected:
+                    self.assertEqual(lines.count(literal), 1, f"{name} missing unique {literal!r}: {result.stdout!r}")
+
     def test_hidden_fixture_mutation_rejected(self):
         self.require_smoke()
         relative = "clang/test/Preprocessor/macro_paste_simple.c"

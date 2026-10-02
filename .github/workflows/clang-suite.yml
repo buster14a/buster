@@ -2,10 +2,10 @@ name: Clang suite foundation
 
 on:
   pull_request:
-    paths: ['tools/clang_suite*', 'build.c', 'docs/agents/compatibility/clang-suite.md', '.github/workflows/clang-suite.yml']
+    paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_boundaries*', 'docs/agents/compatibility/clang-suite.md', '.github/workflows/clang-suite.yml']
   push:
     branches: [main]
-    paths: ['tools/clang_suite*', 'build.c', '.github/workflows/clang-suite.yml']
+    paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_boundaries*', '.github/workflows/clang-suite.yml']
   workflow_dispatch:
 
 permissions:
@@ -63,7 +63,8 @@ jobs:
           export BUSTER_CLANG_SUITE_DRIVER="$RUNNER_TEMP/clang-suite-evidence/build-driver"
           export BUSTER_CLANG_SUITE_CHECKOUT="$GITHUB_WORKSPACE/.clang-suite-upstream"
           export BUSTER_CLANG_SUITE_IDE="$GITHUB_WORKSPACE/build/Release/ide"
-          export BUSTER_CLANG_SUITE_CLANG="$(command -v clang)"
+          BUSTER_CLANG_SUITE_CLANG="$(command -v clang)"
+          export BUSTER_CLANG_SUITE_CLANG
           export BUSTER_CLANG_SUITE_RESULTS="$RUNNER_TEMP/clang-suite-evidence"
           python3 tools/clang_suite_test.py -v 2>&1 | tee "$RUNNER_TEMP/clang-suite-evidence/controls.log"
       - name: Retain complete source and assertion evidence
