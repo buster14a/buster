@@ -1038,7 +1038,10 @@ expression-query flag row caches that fact independently of its checking-mode ke
 Update, assignment, address and asm-output consumers reject it without changing the
 CType or adding another type walk. A valid real-of-imaginary complex component
 neighbor still updates its original component, and real-scalar imaginary values
-remain usable as zero-valued expressions.
+remain usable as zero-valued expressions. When composing the modifiability helper
+with #2338's checked leaf-postfix continuation, pass the operand's TYPE nonplace
+projection fact alongside its CType; a scalar type answer alone does not establish
+a place. Capture that fact before any later type or layout query replaces it.
 These paths add no recursive descent, separate pass or retained lookup table.
 
 Raw IR tests cover both direct frontend SSA and its memory-form reference, so scalar
