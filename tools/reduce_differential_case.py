@@ -127,7 +127,7 @@ class Checker:
                         return ("invalid", "%s compilation timed out" % label)
                     if not reference_run_completed(state[1]):
                         return ("ide-crash", "%s compiler status %d" % (label, state[1]))
-                    return ("rejects", normalize_diagnostic(state[2]))
+                    return ("rejects", "%s: %s" % (label, normalize_diagnostic(state[2])))
                 if state[1] == "timeout":
                     return ("behavior", "%s timeout" % label)
                 if isinstance(state[1], int) and not reference_run_completed(state[1]):
@@ -189,7 +189,7 @@ def main():
     print("reducing %s: %s (%s)" % (tag, category, detail))
     # Pin reduction to the one mode that diverged: rejects come from the
     # shared frontend, behavior stays with the mode that showed it.
-    if "ide-canon" in detail:
+    if detail.startswith("ide-canon"):
         ide_modes = ("ide-canon",)
     else:
         ide_modes = ("ide",)

@@ -120,7 +120,11 @@ class DifferentialOracleTests(unittest.TestCase):
                 with self.subTest(index=index, changed=changed):
                     observations = self.observations()
                     observations[index] = replace(observations[index], **changed)
-                    self.assertEqual(harness.classify("control", 7, observations).category, category)
+                    result = harness.classify("control", 7, observations)
+                    self.assertEqual(result.category, category)
+                    if changed.get("run_returncode") == 0xC0000005:
+                        self.assertIn("runtime status 3221225477", result.detail)
+                        self.assertNotIn("signal", result.detail)
 
     def test_both_reference_argv_match_buster_semantic_profile(self):
         modes = harness.modes(SimpleNamespace(cc="reference-compiler", ide="subject-compiler"))
@@ -141,10 +145,12 @@ class DifferentialReducerTests(unittest.TestCase):
         if changed:
             specifications.update(changed)
         calls = []
+        self.compile_commands = []
 
         def compile_one(command, source, binary):
             label = Path(binary).name.removeprefix("candidate.")
             calls.append(label)
+            self.compile_commands.append((label, command))
             return specifications[label][:2]
 
         def run_one(binary):
@@ -207,7 +213,7 @@ class DifferentialReducerTests(unittest.TestCase):
                 self.assertEqual(result[0], category)
                 self.assertIn("clang-O2", calls)
                 if category == "rejects":
-                    self.assertEqual(result[1], "error: original rejection")
+                    self.assertEqual(result[1], "ide: error: original rejection")
 
     def test_compile_timeout_is_not_a_source_rejection(self):
         result, calls = self.observe({"ide": (None, "", None, b"")})
@@ -221,6 +227,22 @@ class DifferentialReducerTests(unittest.TestCase):
             with mock.patch.object(reducer.subprocess, "run",
                                    side_effect=subprocess.TimeoutExpired(["subject-compiler"], 30)):
                 self.assertEqual(checker.compile_one(["subject-compiler"], "input.c", "output"), (None, ""))
+
+    def test_reducer_reference_argv_match_buster_semantic_profile(self):
+        result, _ = self.observe({"ide": (0, "", 37, b"changed\\n")})
+        self.assertEqual(result[0], "behavior")
+        references = [(label, command) for label, command in self.compile_commands
+                      if label.startswith("clang-")]
+        self.assertEqual([label for label, _ in references], ["clang-O0", "clang-O2"])
+        for label, command in references:
+            with self.subTest(label=label):
+                for flag in ("-fwrapv", "-fno-strict-aliasing", "-funsigned-char"):
+                    self.assertIn(flag, command)
+
+    def test_second_subject_rejection_retains_mode_and_diagnostic(self):
+        result, calls = self.observe({"ide-canon": (1, "error: original rejection", None, b"")})
+        self.assertEqual(result, ("rejects", "ide-canon: error: original rejection"))
+        self.assertEqual(calls, ["clang-O0", "ide", "ide-canon", "clang-O2"])
 
     def test_second_subject_mode_obeys_same_reference_gate(self):
         result, calls = self.observe({

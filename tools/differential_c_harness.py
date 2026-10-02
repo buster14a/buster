@@ -1978,7 +1978,7 @@ def classify(family, seed, observations):
             elif ide_observation.behavior_key() != reference.behavior_key():
                 if isinstance(ide_observation.run_returncode, int) and not reference_run_completed(ide_observation.run_returncode):
                     result.category = "run-crash"
-                    result.detail = "%s: binary terminated by signal %d" % (ide_observation.label, -ide_observation.run_returncode)
+                    result.detail = "%s: binary runtime status %d" % (ide_observation.label, ide_observation.run_returncode)
                 else:
                     result.category = "behavior"
                     result.detail = "%s: exit/stdout differ" % ide_observation.label

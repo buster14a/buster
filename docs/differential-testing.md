@@ -544,7 +544,10 @@ status. Reference agreement screens disagreements; it does not certify that
 C execution is defined.
 
 The reducer applies that reference gate before retaining every divergence,
-including candidate rejection and compiler crash. Candidate compilation
+including candidate rejection and compiler crash. Rejection details retain the
+candidate mode so further trials stay on the initially divergent mode. A
+reducer `ok` trial is uninteresting and deliberately leaves O2 unevaluated;
+it is not a four-way equivalence certificate. Candidate compilation
 timeout is inconclusive rather than a source rejection. Review the minimized
 source and original failure independently before making a compiler-defect claim.
 
