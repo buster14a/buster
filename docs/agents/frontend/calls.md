@@ -257,6 +257,15 @@ markers, checks structured diagnostic parity and refused programs, and
 independently validates accepted canonical IR. Local declaration controls
 avoid the separately tracked repeated-linkage restriction (#1562).
 
+`c_test_attribute_call_roles` checks GNU attribute-name/function collisions
+through semantic-only validation, both canonical frontend forms and the
+native driver. Attribute heads designate attributes; calls inside argument
+expressions still require their declared arity. Distinct cleanup callbacks,
+their retained entity identities and one callback per scope exit are checked
+independently, alongside wrong-arity calls, incompatible callbacks and local
+shadowing. The regression keeps explicit returns to isolate this constraint
+from non-void falloff (#1357).
+
 All parameter-list paths share the void and ellipsis constraints. The void
 sentinel is sole, unnamed and unqualified, including through a void typedef;
 ellipsis terminates the list and requires a fixed parameter before C23. C23
