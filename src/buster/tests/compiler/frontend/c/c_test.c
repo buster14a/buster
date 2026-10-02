@@ -30152,20 +30152,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy_runtime(UnitTes
     return result;
 }
 
-// A place is not a scalar value, and an unknown read is not known false.
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-BUSTER_GLOBAL_LOCAL bool c_test_inline_linkage_spawn(UnitTestArguments* arguments, Arena* arena, SliceString8 command, String8 context)
+BUSTER_GLOBAL_LOCAL bool c_test_inline_linkage_spawn(Arena* arena, SliceString8 command)
 {
     bool passed = false;
     ProcessSpawnResult child = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
         (ProcessSpawnOptions){.use_process_environment = true});
-    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+    if (child.handle)
     {
         ProcessWaitResult execution = os_process_wait_deadline(arena, child, 30000000);
         passed = !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS;
-        BUSTER_TEST_RAW(arguments, passed,
-            string_format(arena, S8("{S8}: status={u32} timeout={u32}"),
-                context, execution.platform_status, (u32)execution.timed_out));
     }
     return passed;
 }
@@ -30283,7 +30279,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* 
                 if (linked.error == COMPILER_DRIVER_ERROR_NONE)
                 {
                     String8 run[] = {combined};
-                    c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), context);
+                    BUSTER_TEST_RAW(arguments, c_test_inline_linkage_spawn(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run)), context);
                 }
                 String8 objects[] = {
                     buster_test_temporary_path(temporary.arena, S8("c99-inline-first"), S8(".o")),
@@ -30312,7 +30308,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* 
                     if (separate_link.error == COMPILER_DRIVER_ERROR_NONE)
                     {
                         String8 run[] = {separate};
-                        c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), context);
+                        BUSTER_TEST_RAW(arguments, c_test_inline_linkage_spawn(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run)), context);
                     }
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
                     String8 references[] = {S8("gcc"), S8("clang")};
@@ -30324,10 +30320,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* 
                             String8 output = buster_test_temporary_path(temporary.arena, S8("c99-inline-host-link"), S8(""));
                             String8 host_command[] = {compiler, S8("-O0"), flags[dialect], objects[0], objects[1], S8("-o"), output};
                             String8 host_context = string_format(temporary.arena, S8("{S8} host={S8}"), context, references[reference]);
-                            if (c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_command), host_context))
+                            bool host_linked = c_test_inline_linkage_spawn(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_command));
+                            BUSTER_TEST_RAW(arguments, host_linked, host_context);
+                            if (host_linked)
                             {
                                 String8 run[] = {output};
-                                c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), host_context);
+                                BUSTER_TEST_RAW(arguments, c_test_inline_linkage_spawn(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run)), host_context);
                             }
                         }
                     }
@@ -30351,10 +30349,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* 
                 String8 output = buster_test_temporary_path(temporary.arena, S8("c99-inline-reference"), S8(""));
                 String8 command[] = {compiler, S8("-O0"), flags[dialect], first_path, second_path, S8("-o"), output};
                 String8 context = string_format(temporary.arena, S8("C99 inline reference={S8} {S8}"), references[reference], flags[dialect]);
-                if (c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), context))
+                bool reference_linked = c_test_inline_linkage_spawn(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                BUSTER_TEST_RAW(arguments, reference_linked, context);
+                if (reference_linked)
                 {
                     String8 run[] = {output};
-                    c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), context);
+                    BUSTER_TEST_RAW(arguments, c_test_inline_linkage_spawn(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run)), context);
                 }
             }
             scratch_end(temporary);
@@ -30365,6 +30365,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* 
     return result;
 }
 
+// A place is not a scalar value, and an unknown read is not known false.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
