@@ -6582,8 +6582,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_diagnostic_messages(Unit
                     CParseResult parse = c_parse(temporary.arena, tokens);
                     CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("static-assert-message.c"), tokens, parse,
                         target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
-                    diagnostics = lowered.diagnostics;
-                    diagnostic_count = lowered.diagnostic_count;
+                    if (parse.diagnostic_count)
+                    {
+                        diagnostics = parse.diagnostics;
+                        diagnostic_count = parse.diagnostic_count;
+                        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                    }
+                    else
+                    {
+                        diagnostics = lowered.diagnostics;
+                        diagnostic_count = lowered.diagnostic_count;
+                    }
                     BUSTER_TEST(arguments, lowered.canonical_ir_certified == (cases[case_index].kind == C_DIAGNOSTIC_KIND_COUNT));
                 }
                 else
