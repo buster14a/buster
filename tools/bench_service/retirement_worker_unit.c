@@ -42,10 +42,10 @@
  * consumes a SIGTERM held in that teardown window.
  *
  * The producer exits 0 only after MEASURED was acknowledged and the manifest
- * written. Production A/A admission decides from the pinned #426 policy
- * (retirement_aa_admission.c) over the A/A rows the coordinator attested as
- * AA_MEASURED (#1021); the compiled profile is blocked and pins no policy,
- * so the producer cannot even start. Nothing here is a timing fact.
+ * written. Production A/A admission decides from this job's in-job A/A
+ * (retirement_aa_admission.c: P = 60, U = R, the fixed band) over the A/A
+ * rows the coordinator attested as AA_MEASURED (#1021); the compiled profile
+ * is blocked, so the producer cannot even start. Nothing here is a timing fact.
  */
 #include <poll.h>
 #include <pwd.h>
@@ -88,19 +88,17 @@ typedef struct BqRetirementWorkerUnitSeams
 
 /* Every digest pin a retirement job needs through MEASURED: the ready
  * record's inputs, the reviewed campaign budget and the untimed-command
- * contract (retirement_worker_campaign.c), the composer's adapter and the
- * #511 binding context (retirement_worker_compose.c), and (#426 plan step 6)
- * the A/A policy the production admission requires
- * (retirement_aa_admission.c), so an admitted profile without it, or with it
- * twice, is refused at the completeness gate before any campaign starts. */
+ * contract (retirement_worker_campaign.c), and the composer's adapter and the
+ * #511 binding context (retirement_worker_compose.c). The A/A admission
+ * needs no pin: its gate is this job's in-job A/A with fixed values
+ * (retirement_aa_admission.c), not a separately pinned #426 policy. */
 BUSTER_GLOBAL_LOCAL char const* const bq_retirement_worker_unit_pins[] = {
     "contract-sha256=", "support-declaration-sha256=", "inventory-sha256=", "toolchain-manifest-sha256=",
     "build-driver-sha256=", "reference-template-sha256=", "reference-inventory-sha256=",
     "validator-source-applicability-sha256=", "census-inputs-sha256=", "census-rows-sha256=",
     "census-manifest-sha256=", "validator-report-sha256=", "validator-applicability-sha256=",
     "validator-skips-sha256=", "performance-rows-sha256=", "required-checks-sha256=", "row-plan-sha256=",
-    "campaign-budget-sha256=", "untimed-commands-sha256=", "adapter-sha256=", "binding-context-sha256=",
-    "aa-policy-sha256="};
+    "campaign-budget-sha256=", "untimed-commands-sha256=", "adapter-sha256=", "binding-context-sha256="};
 
 /* The only admitting status line (queue.h); the compiled profile says
  * status=blocked. */

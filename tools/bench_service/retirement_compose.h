@@ -290,7 +290,7 @@ int tp_retirement_compose(TpRetirementComposeRequest const* request, TpRetiremen
 /* The derived #619 statistical family over a layout (the validator's
  * _derive_statistical_family), which the composer writes as the adapter's
  * series and the producer's A/A admission (retirement_aa_admission.c)
- * assesses against the pinned A/A equivalence band. A member is an aggregate
+ * assesses against the fixed in-job A/A equivalence band. A member is an aggregate
  * (kind 0, dimension TP_RETIREMENT_COMPOSE_NONE), a slice (kind 0, one
  * dimension value) or a cell (kind 1, `unit` its cell); `family` is its
  * ordinal among the bootstrap or the cell members. Cells of metric m are,

@@ -5,9 +5,10 @@
  * This header sequences the fixed campaign inside the unit, in the one order
  * the contract allows, and derives the frozen plan and its pre-sample and
  * post-sample context digests from service-authenticated inputs only. It does
- * not admit the recipe: the producer evaluates the pinned #426 A/A policy
- * (retirement_aa_admission.c) over the A/A rows the coordinator attested as
- * AA_MEASURED (#1021), and A/B is entered only through the campaign's
+ * not admit the recipe: the producer evaluates this job's in-job A/A gate
+ * (retirement_aa_admission.c: P = 60, U = R, the fixed equivalence band over
+ * the #619 family per round and pooled) over the A/A rows the coordinator
+ * attested as AA_MEASURED (#1021), and A/B is entered only through the campaign's
  * production transition over that attested digest; the blocked profile never
  * starts a campaign, and only the functional fixture build compiles the
  * receipt stand-in.
@@ -180,13 +181,21 @@ static char const* const bq_retirement_unit_campaign_document_paths[BQ_RETIREMEN
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD "unit-campaign-post-sample.txt"
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_HEADER "BQ-RETIREMENT-UNIT-POST-SAMPLE-V1\n"
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_RECORD_BYTES_MAX 4096u
-/* The #437 A/A admission receipt (the validator's AA_SCHEMA, version 2: the
- * v1 identities plus the pinned #426 policy digest, its current-job
- * equivalence band and the per-job decision; v1 is refused), its decision
- * word and its cap. Only an admission writes a receipt. */
-#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "buster-native-retirement-aa-admission-v2"
-#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION "2"
+/* The #437 A/A admission receipt (the validator's AA_SCHEMA, version 3: the
+ * v1 identities plus the fixed in-job equivalence band, the per-job decision
+ * and the AA_MEASURED phase receipt digest; v1 and v2, which named a pinned
+ * #426 policy digest, are refused), its decision word and its cap. Only an
+ * admission writes a receipt. */
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "buster-native-retirement-aa-admission-v3"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION "3"
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "admitted"
+/* The in-job A/A gate's fixed equivalence band (#881; the validator's
+ * AA_EQUIVALENCE_BAND): every #619 family member's round and pooled bounds
+ * must lie in [lower, upper]. The receipt records these exact strings. */
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND_LOWER "0.98"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND_UPPER "1.02"
+#define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND \
+    "{\"lower\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND_LOWER "\",\"upper\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND_UPPER "\"}"
 #define BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX 4096u
 
 typedef struct BqRetirementUnitCampaignPins
@@ -1934,7 +1943,7 @@ static inline int bq_retirement_unit_campaign_aa_attest(BqRetirementUnitCampaign
     return ok;
 }
 
-/* The A/A admission the service must present: the #426 decision bound to
+/* The A/A admission the service must present: the in-job A/A decision bound to
  * this job's frozen plan, pre-sample context and post-A/A evidence digest,
  * delivered as #1021's one-use capability, with the #437 admission receipt's
  * bytes and digest. */
@@ -1981,11 +1990,11 @@ static inline int bq_retirement_unit_campaign_phase_receipt(BqRetirementUnitCamp
 }
 
 /* The #437 receipt the admission carries: its bytes hash to the recorded
- * digest, and it is this campaign's approved schema (v2), an admitted
- * decision, admitted and native only, on the campaign's CPU and native
- * target, over the family the pre-sample plan named. The policy digest and
- * band it records are the producer's (retirement_aa_admission.c checks them
- * against the profile's aa-policy-sha256= pin before rendering it). Its schema has no field for the post-A/A evidence
+ * digest, and it is this campaign's approved schema (v3), an admitted
+ * decision under the fixed equivalence band, admitted and native only, on the
+ * campaign's CPU and native target, over the family the pre-sample plan
+ * named. The band check itself is the producer's (retirement_aa_admission.c
+ * over the attested A/A rows). Its schema has no field for the post-A/A evidence
  * digest (the validator refuses unknown receipt fields), so the admission
  * capability names that digest and the post-A/A binding document binds this
  * receipt. */
@@ -2012,6 +2021,7 @@ static inline int bq_retirement_unit_campaign_receipt(BqRetirementUnitCampaign c
         bq_retirement_unit_campaign_member(text, length, "version", BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION) &&
         bq_retirement_unit_campaign_member(text, length, "aa_decision",
                                            "\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "\"") &&
+        bq_retirement_unit_campaign_member(text, length, "equivalence_band", BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND) &&
         bq_retirement_unit_campaign_member(text, length, "admitted", "true") &&
         bq_retirement_unit_campaign_member(text, length, "native_only", "true") &&
         bq_retirement_unit_campaign_member(text, length, "native_target", "\"x86_64-unknown-linux-gnu\"") &&
@@ -2027,7 +2037,7 @@ static inline int bq_retirement_unit_campaign_receipt(BqRetirementUnitCampaign c
  * must still be the A/A stage's raw numeric digest, and the transition is
  * the campaign's production one (tp_retirement_campaign_admit_aa), so a
  * production and a fixture admission enter A/B the same way; the producer's
- * #426 policy decision (retirement_aa_admission.c) or, in the fixture build,
+ * in-job A/A decision (retirement_aa_admission.c) or, in the fixture build,
  * its stand-in supplies the receipt. Without an attested AA_MEASURED,
  * production refuses and leaves the attempt awaiting one. Only the
  * functional fixture build admits a BQPHASE1 channel (lane D's own driver

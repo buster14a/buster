@@ -342,8 +342,10 @@ the attempt:
 7. `bq_retirement_unit_campaign_aa_attest` (#1021): AA_MEASURED with the
    A/A stage's raw digest, acknowledged only after the coordinator rehashed
    the published A/A shards; then `bq_retirement_unit_campaign_admit`: the
-   producer decides from the pinned #426 policy over rows hashing to that
-   digest (`retirement_aa_admission.c`, see `RETIREMENT_PREPARATION.md`) and
+   producer decides from the in-job A/A gate (P = 60, U = R, every #619
+   family member per round and pooled inside the fixed band [0.98, 1.02])
+   over rows hashing to that digest (`retirement_aa_admission.c`, see
+   `RETIREMENT_PREPARATION.md`) and
    enters A/B through `tp_retirement_campaign_admit_aa`, which requires the
    attested digest to still be the A/A stage's. Without it production
    refuses and leaves the attempt awaiting authority. Only the functional

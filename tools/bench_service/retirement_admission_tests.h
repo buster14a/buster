@@ -22,10 +22,10 @@
  * of the full pin shape read by bq_installed_recipe (bq_test_retirement_profile_cap);
  * an admitted but incomplete compiled profile refused at `serve`, at submission
  * and before reservation, a complete one served through the exclusive submit
- * only (bq_test_retirement_servable); (#426 plan step 6) an admitted profile
- * without, or with a repeated or malformed, aa-policy-sha256= pin refused at
- * the completeness gate, one with it passing, and the blocked profile
- * unchanged (bq_test_retirement_aa_pin_required);
+ * only (bq_test_retirement_servable); (#881) no A/A policy pin among the
+ * worker-unit pins, an admitted profile of the full pin shape complete and
+ * servable without one, and the blocked profile unchanged
+ * (bq_test_retirement_aa_no_policy_pin);
  * the coordinator's gates refusing an incomplete seam profile while the
  * queue's predicate admits (bq_test_retirement_coordinator_gates).
  */
@@ -403,9 +403,8 @@ BUSTER_GLOBAL_LOCAL bool bq_test_retirement_private_directory(char path[BQ_PATH_
 }
 
 /* An admitted profile of the full pin shape: the compiled descriptive lines,
- * one line per worker-unit pin the compiled profile lacks (aa-policy-sha256=
- * included), lane D's four campaign values in range and status=admitted;
- * about 2.8 KB. */
+ * one line per worker-unit pin the compiled profile lacks, lane D's four
+ * campaign values in range and status=admitted; about 2.7 KB. */
 BUSTER_GLOBAL_LOCAL bool bq_test_retirement_full_profile(char* profile, u32 capacity, u32* used)
 {
     char const* compiled = bq_native_retirement_blocked_profile;
@@ -570,46 +569,38 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_coordinator_gates(void)
 #endif
 
 #ifdef __linux__
-/* (#426 plan step 6) The A/A policy pin is required for a complete
- * (admitted) profile: an admitted profile of the full pin shape without its
- * aa-policy-sha256= line, with it twice or with a malformed digest is
- * incomplete and not servable, refused before any campaign; with it the
- * completeness gate passes. The installed blocked profile is unchanged: still
- * status=blocked, still no policy pin, and servable. */
-BUSTER_GLOBAL_LOCAL void bq_test_retirement_aa_pin_required(void)
+/* (#881) The A/A gate is the in-job A/A alone, so no #426 policy pin is a
+ * worker-unit pin: an admitted profile of the full pin shape, which carries
+ * no aa-policy-sha256= line, is complete and servable, and dropping any one
+ * remaining worker-unit pin still makes it incomplete and not servable. The
+ * installed blocked profile is unchanged: still status=blocked, still no
+ * policy pin, incomplete and servable. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_aa_no_policy_pin(void)
 {
     static char complete[BQ_RECIPE_PROFILE_CAP + 1], changed[BQ_RECIPE_PROFILE_CAP + 1];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bq_retirement_worker_unit_pins); index += 1)
+        BQ_CHECK(!strstr(bq_retirement_worker_unit_pins[index], "aa-policy"));
     u32 used = 0;
     bool built = bq_test_retirement_full_profile(complete, sizeof(complete), &used);
     complete[built ? used : 0] = 0;
-    char const* line = built ? strstr(complete, "\naa-policy-sha256=") : NULL;
-    char const* end = line ? strchr(line + 1, '\n') : NULL;
-    BQ_CHECK(built && line && end && end - line == (ptrdiff_t)(strlen("\naa-policy-sha256=") + 64u));
+    BQ_CHECK(built && !strstr(complete, "aa-policy-sha256="));
     bq_retirement_profile_test_override = (String8){(char8*)complete, used};
     BQ_CHECK(bq_recipe_retirement_admitted() &&
              bq_retirement_profile_complete(bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)) &&
              bq_retirement_compiled_servable());
+    /* Without the last worker-unit pin's line: incomplete. */
+    char key[BQ_RECIPE_PROFILE_LINE_CAP];
+    int key_length = snprintf(key, sizeof(key), "\n%s",
+                              bq_retirement_worker_unit_pins[BUSTER_ARRAY_LENGTH(bq_retirement_worker_unit_pins) - 1]);
+    char const* line = built && key_length > 0 ? strstr(complete, key) : NULL;
+    char const* end = line ? strchr(line + 1, '\n') : NULL;
     u32 prefix = line && end ? (u32)(line - complete) + 1u : 0;
     u32 kept = line && end ? (u32)(end - complete) + 1u : 0;
-    /* Without the line. */
-    int length = built && line && end ? snprintf(changed, sizeof(changed), "%.*s%s", (int)prefix, complete,
-                                                 complete + kept) : -1;
+    int length = line && end ? snprintf(changed, sizeof(changed), "%.*s%s", (int)prefix, complete, complete + kept) :
+                 -1;
     bq_retirement_profile_test_override = length > 0 ? (String8){(char8*)changed, (u64)length} : (String8){0};
     BQ_CHECK(length > 0 && bq_recipe_retirement_admitted() &&
              !bq_retirement_profile_complete(bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)) &&
-             !bq_retirement_compiled_servable());
-    /* Twice. */
-    length = built && line && end ? snprintf(changed, sizeof(changed), "%.*s%s", (int)kept, complete,
-                                             complete + prefix) : -1;
-    bq_retirement_profile_test_override = length > 0 ? (String8){(char8*)changed, (u64)length} : (String8){0};
-    BQ_CHECK(length > 0 && (u32)length == used + (kept - prefix) &&
-             !bq_retirement_profile_complete(bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)) &&
-             !bq_retirement_compiled_servable());
-    /* A digest that is not 64 lowercase hex digits. */
-    memcpy(changed, complete, used + 1u);
-    if (line) changed[prefix + strlen("aa-policy-sha256=")] = 'G';
-    bq_retirement_profile_test_override = (String8){(char8*)changed, used};
-    BQ_CHECK(line && !bq_retirement_profile_complete(bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)) &&
              !bq_retirement_compiled_servable());
     bq_retirement_profile_test_override = (String8){0};
     /* The installed blocked profile, unchanged. */
@@ -632,7 +623,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_retirement_admission(void)
 #ifdef __linux__
     bq_test_retirement_profile_cap();
     bq_test_retirement_servable();
-    bq_test_retirement_aa_pin_required();
+    bq_test_retirement_aa_no_policy_pin();
     bq_test_retirement_coordinator_gates();
 #endif
     bq_test_retirement_admit(false);

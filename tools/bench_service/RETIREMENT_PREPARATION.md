@@ -1251,8 +1251,9 @@ and forks a producer.
 `bq_retirement_profile_complete` accepts the profile. That requires every
 integration pin (`bq_retirement_worker_unit_pins`: the A, toolchain, driver,
 reference-policy, nine census, required-checks, row-plan, campaign-budget,
-untimed-commands, adapter, binding-context and, since #426 plan step 6, the
-A/A policy's `aa-policy-sha256=` digests), lane D's frozen campaign values
+untimed-commands, adapter and binding-context digests; there is no A/A
+policy pin, since the A/A gate is the in-job A/A alone), lane D's frozen
+campaign values
 (`bq_retirement_unit_campaign_pins`: `campaign-seed=`, `campaign-pairs=`,
 `campaign-resamples=` and `campaign-bootstrap-members=`) and exactly one
 status line, which must be exactly
@@ -1392,109 +1393,90 @@ leaves SIGINT and SIGTERM to its caller instead of installing its own
 Everything is released in reverse and, unless the campaign composed, the
 store is aborted: an unfinished campaign never composes.
 
-**Production A/A admission (#426 plan step 6, #1021).**
+**Production A/A admission (#881 in-job gate, #1021).**
 `bq_retirement_aa_admission_decide` (`retirement_aa_admission.c`) decides
-after the A/A stage and before the driver's admission. The decision rules
-were decided by OPUS-CLOUD on #36.
+after the A/A stage and before the driver's admission. The gate values were
+decided on #36; the repository owner then dropped the #426 64-attempt
+eligibility window as a prerequisite (#881). The gate is the per-campaign
+in-job A/A alone: no `buster-zen5-aa-policy-v1` document is installed or
+read, and no `aa-policy-sha256=` pin exists (`BQ_RETIREMENT_PROFILE_PINS`
+21). Each refusal below is `BQ_RECIPE_MISMATCH` and writes no receipt.
 
-1. **The policy.** The #426 decision is the A/A policy document that
-   `tools/zen5_aa_evaluator.py` writes: `buster-zen5-aa-policy-v1`, in its
-   canonical bytes with one trailing line feed. It is installed read-only
-   under `recipes/` as `native-retirement-performance-v1.aa-policy`. The
-   recipe profile's single `aa-policy-sha256=` line is the only source of
-   the expected digest. Each of these refuses with `BQ_RECIPE_MISMATCH` and
-   writes no receipt:
-   - a missing or repeated pin line, or a pin that is not 64 lowercase hex
-     digits;
-   - bytes of another digest;
-   - a `status` other than `eligible`, or a recorded `ab_authorized` other
-     than `false`;
-   - a `current_job_aa` other than `pairs_per_round` 60 and `runtime_rows`
-     `U=R`;
-   - an `equivalence_band` other than `{lower, upper}` decimals in the
-     evaluator's `DECIMAL_RE` form with 0 < lower < 1 < upper.
-
-   An unreadable or unowned file refuses with `BQ_CONFIGURATION_MISMATCH`.
-   The installed blocked profile pins no policy, so it refuses here (and the
-   recipe never reaches this step anyway).
-
-   **The pin is required before any campaign.** `aa-policy-sha256=` is one of
-   the worker-unit pins (`bq_retirement_worker_unit_pins`,
-   `BQ_RETIREMENT_PROFILE_PINS` 22). So `bq_retirement_profile_complete`, and
-   with it `bq_retirement_compiled_servable` and every coordinator gate,
-   refuses an admitted profile that lacks the line, repeats it or spells
-   another digest. That happens at `serve`, at submission and before
-   reservation, never at A/A. The installed `.blocked` profile is unchanged:
-   still `status=blocked`, still no policy pin, and still servable as
-   blocked. The preparation fixture's complete profile pins its test policy
-   digest, which its receipt stand-in also names.
-   `bq_test_retirement_aa_pin_required` covers the refusals, the pass and
-   the unchanged blocked profile. The policy file and its real digest come
-   in the final commit after window 2.
-2. **The band.** The band applies to the current job's A/A rows as #1188
-   specifies. The rows are lane D's finished A/A spool
+1. **The rows.** The rows are lane D's finished A/A spool
    (`bq_retirement_aa_ratios`): the ratio of the candidate slot to the
-   baseline slot, cell-major, per metric. The members are every member of
-   the derived #619 family, which the composer exports for this purpose
+   baseline slot, cell-major, per metric. They count only when their
+   canonical lines hash to the AA_MEASURED digest that the coordinator
+   verified against the published A/A shards and acknowledged (#1021).
+   The spool must have P = 60 pairs per round (`BQ_RETIREMENT_AA_PAIRS`)
+   and runtime rows U = R: the rows carrying runtime pairs are exactly the
+   frozen layout's runtime-eligible timed rows, so their count is the
+   family's runtime cell count. Another row, another runtime flag, an
+   unfinished spool or lines of another digest refuse.
+2. **The band.** The band is fixed at `[0.98, 1.02]`
+   (`BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND_LOWER` and `_UPPER` in
+   `retirement_unit_campaign.h`, read as `BQ_RETIREMENT_AA_LOWER_BOUND` and
+   `_UPPER_BOUND`). It applies to the current job's A/A rows as #1188
+   specifies. The members are every member of the derived #619 family,
+   which the composer exports for this purpose
    (`tp_retirement_compose_family`, `tp_retirement_compose_member_selects`).
    Each member is assessed once by `tp_retirement_assess` with the frozen
    campaign plan: aggregates and slices are bootstrapped with the pinned
    seed and resample count, and cells use exact intervals. In each round
-   and pooled, both bounds must lie in `[lower, upper]`
+   and pooled, both bounds must lie in `[0.98, 1.02]`
    (`bq_retirement_aa_band_check`). A crossing interval is inconclusive, and
    `[0, inf)` (no order statistic meets the tail) is unbounded; either
-   refuses. The plan's pair count must equal the policy's 60, and its member
-   counts must equal the family's. The band's decimals are read as their
-   nearest doubles.
+   refuses. The plan's pair count must be 60, and its member counts must
+   equal the family's.
 3. **The receipt.** Only an admission renders the receipt
    (`bq_retirement_aa_receipt_render`). It is
-   `buster-native-retirement-aa-admission-v2`, version 2, with these fields:
+   `buster-native-retirement-aa-admission-v3`, version 3, with these fields:
    - the v1 identities, taken from the pinned binding context
      (`bq_retirement_aa_identities`: host machine, host profile id and
      version, service id, baseline commit and tree, and the population's
      statistical family, which must be lane D's);
-   - `aa_policy_sha256`;
-   - `equivalence_band`, the band strings exactly as the policy records
-     them;
+   - `equivalence_band`, exactly `{"lower":"0.98","upper":"1.02"}`;
    - `aa_decision` `admitted`;
    - `phase_receipt_sha256` (#1021), the SHA-256 of the coordinator's
      published AA_MEASURED receipt.
 
-   The driver checks the schema, version, decision, CPU, target and family
+   There is no `aa_policy_sha256`. The driver checks the schema, version,
+   decision, fixed band, CPU, target and family
    (`bq_retirement_unit_campaign_receipt`). Lane F's #511 validator requires
-   v2 with exactly these keys: it checks the digest form, the band form and
-   order, and the decision, and it refuses v1.
+   v3 with exactly these keys (`AA_SCHEMA`, `AA_EQUIVALENCE_BAND`): it
+   checks the phase receipt digest form, the exact band strings and the
+   decision, and it refuses v1, v2 and any policy digest field.
 
-The decision is computed only from A/A rows the service attested (#1021,
-[the attested A/A boundary](#coordinator-side-881-pr-4)). The rows come from
-the unit's spool, and they count only when their canonical lines hash to the
-AA_MEASURED digest that the coordinator verified against the published A/A
-shards and acknowledged. An admitted decision enters A/B through the
-campaign's production transition over that digest. A refused one stops with
-`BQ_RECIPE_MISMATCH` and writes no receipt. The receipt also carries
+An admitted decision enters A/B through the campaign's production
+transition over the attested digest. A refused one stops with
+`BQ_RECIPE_MISMATCH` and writes no receipt. The receipt's
 `phase_receipt_sha256`, the digest of the coordinator's `worker-phase-6`
-receipt, and the finalization checks it. Production still never starts: the
-installed profile is blocked and pins no policy.
+receipt, is checked again at finalization. Production still never starts:
+the installed profile is blocked.
 
 The preparation fixture (`BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA`) compiles
 none of `retirement_aa_admission.c`. Its campaign (job 82) takes the full
 attested path: AA_MEASURED through the real coordinator, the
 `worker-phase-6` receipt, and the production transition into A/B. Only the
-policy decision is replaced, by a v2 receipt stand-in
-(`bq_retirement_worker_campaign_fixture_receipt`) whose test policy digest
-and band are not a #426 decision but whose `phase_receipt_sha256` is the
-real receipt's. Lane D's own driver fixture
-(`retirement_unit_campaign_test.h`) runs on a BQPHASE1 channel, which has no
-AA_MEASURED, and keeps the campaign's fixture transition. `bq_test_retirement_aa_admission`
-(`retirement_aa_admission_tests.h`, in the service self-test) covers the
-production layers over synthetic inputs:
-- the policy, in the evaluator's canonical bytes, refused for another digest;
-  for a missing, repeated or malformed pin; for the blocked profile; for each
-  inadmissible field; and without its line feed;
+band decision is replaced, by a v3 receipt stand-in
+(`bq_retirement_worker_campaign_fixture_receipt`) whose identities are test
+data but whose `phase_receipt_sha256` is the real receipt's. Lane D's own
+driver fixture (`retirement_unit_campaign_test.h`) runs on a BQPHASE1
+channel, which has no AA_MEASURED, and keeps the campaign's fixture
+transition; it refuses a receipt recording another band.
+`bq_test_retirement_aa_admission` (`retirement_aa_admission_tests.h`, in the
+service self-test) covers the production layers over synthetic inputs:
+- the fixed gate values (P = 60, band strings equal to the compared bounds);
 - the band, admitted for rows inside it with every member assessed, and
-  refused for an exact cell outside it, a bootstrap aggregate crossing it and
-  a plan of another P;
-- the exact receipt bytes.
+  refused for an exact cell outside it, a bootstrap aggregate crossing its
+  upper bound and a cell whose second round lies under its lower bound;
+- P = 60: a consistent, attested 62-pair spool and a 62-pair plan refused;
+- U = R: an attested spool with a runtime row dropped or added refused;
+- rows not matching the attested AA_MEASURED digest refused;
+- the exact v3 receipt bytes.
+
+`bq_test_retirement_aa_no_policy_pin` checks that no worker-unit pin is an
+A/A policy pin and that an admitted profile of the full pin shape is
+complete without one.
 
 **Composition (PR 3).** After READY, `bq_retirement_worker_compose`
 (`retirement_worker_compose.c`) runs, in order:

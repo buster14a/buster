@@ -36,12 +36,12 @@
  * timing (BQ_RETIREMENT_WORKER_RESULT_ENTRIES: the control files, the phase
  * receipts, the binding and its admission receipt; and the evidence files
  * the pinned binding context names, bq_retirement_worker_evidence_measure). Production A/A
- * admission decides from the pinned #426 policy and this job's A/A intervals
- * over the rows the coordinator attested as AA_MEASURED
+ * admission decides from this job's in-job A/A intervals alone (P = 60,
+ * U = R, the fixed band) over the rows the coordinator attested as AA_MEASURED
  * (bq_retirement_aa_admission_decide, retirement_aa_admission.c, #1021) and
  * enters A/B through the campaign's production transition over that digest;
  * the preparation fixture takes the same attested path with a receipt
- * stand-in for the policy decision
+ * stand-in for the band decision
  * (bq_retirement_worker_campaign_fixture_receipt).
  *
  * Entry point: bq_retirement_worker_campaign_run. Release in reverse on
@@ -915,8 +915,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_measure(Arena* arena, 
 
 #if !defined(BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA)
 /* The production A/A admission decision over the finished A/A stage
- * (retirement_aa_admission.c): the pinned #426 policy, the band over the
- * family's A/A intervals and, on admission, the v2 receipt. */
+ * (retirement_aa_admission.c): the fixed band over the family's in-job A/A
+ * intervals and, on admission, the v3 receipt. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_aa_admission_decide(BqRetirementWorkerCampaign* campaign,
     BqRetirementCampaignUnitStore const* unit, char const phase_receipt_sha256[SHA256_HEX_CAPACITY],
     char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX], u32* receipt_bytes,
@@ -1338,11 +1338,12 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_phase_receipt(int result_root, BqP
  * coordinator attests against the published shards before acknowledging
  * (#1021, bq_retirement_unit_campaign_aa_attest); its published receipt's
  * digest is the admission's phase receipt (bq_retirement_worker_phase_receipt).
- * Production admission then decides from the pinned #426 policy over rows
+ * Production admission then decides from this job's in-job A/A over rows
  * whose canonical lines hash to the attested digest
- * (bq_retirement_aa_admission_decide): a missing pin, another policy, a
- * policy that is not eligible, other rows or A/A intervals outside its band
- * refuse (BQ_RECIPE_MISMATCH, no receipt). An admitted decision enters A/B
+ * (bq_retirement_aa_admission_decide): other rows, a plan of P other than 60,
+ * runtime rows other than U = R or a family member's round or pooled A/A
+ * interval outside the fixed band [0.98, 1.02] refuse (BQ_RECIPE_MISMATCH,
+ * no receipt). An admitted decision enters A/B
  * through the campaign's production transition over the attested digest. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_campaign_stages(BqRetirementWorkerCampaign* campaign,
     BqRetirementCampaignUnitStore const* unit, BqRetirementUnitCampaignDocumentSources const* sources)
