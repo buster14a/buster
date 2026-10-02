@@ -6981,7 +6981,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_tls(UnitTestArgum
                 for (u32 pic = 0; pic < 2; pic += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-native-tls"), S8(".o"));
+                    String8 output = buster_test_temporary_path(temporary.arena, target == 1 && pic ? S8("buster-native-tls-pic-refusal") : S8("buster-native-tls"), S8(".o"));
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
                         pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), S8("-o"), output,
                         S8("tests/basic_c_thread_local_models.c")};
@@ -7353,7 +7353,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
                     for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
                     {
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-f128"), S8(".o"));
+                        String8 output = buster_test_temporary_path(temporary.arena, target < 2 && position ? S8("buster-a64-f128-pic-refusal") : S8("buster-a64-f128"), S8(".o"));
                         String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], image_modes[mode], frontends[frontend], positions[position],
                                              strict, S8("-fverify-codegen"), S8("-o"), output, fixtures[fixture]};
                         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
@@ -7583,7 +7583,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transp
                 for (u32 position = 0; position < BUSTER_ARRAY_LENGTH(positions); position += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-f128-transport"), S8(".o"));
+                    String8 output = buster_test_temporary_path(temporary.arena, target < 2 && position ? S8("buster-a64-f128-transport-pic-refusal") : S8("buster-a64-f128-transport"), S8(".o"));
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], positions[position],
                         S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output,
                         source_path};
@@ -7841,7 +7841,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_binary128_runtime(UnitTe
                 for (u32 position = 0; position < BUSTER_ARRAY_LENGTH(positions); position += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-f128-runtime"), S8(".o"));
+                    String8 output = buster_test_temporary_path(temporary.arena, target < 2 && position ? S8("buster-f128-runtime-pic-refusal") : S8("buster-f128-runtime"), S8(".o"));
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], positions[position],
                         S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
@@ -8708,7 +8708,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_dynamic_calls(Un
                     for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources); fixture += 1)
                     {
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-dynamic-call"), S8(".o"));
+                        String8 output = buster_test_temporary_path(temporary.arena, (target == 0 || target == 3) && pic ? S8("buster-a64-dynamic-call-pic-refusal") : S8("buster-a64-dynamic-call"), S8(".o"));
                         String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], pics[pic],
                             mode ? S8("-fno-machine-fallback") : S8("-fverify-codegen"), S8("-fverify-codegen"), S8("-o"), output, sources[fixture]};
                         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
@@ -16798,7 +16798,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_weak_unwind(UnitTest
                 {
                     TemporalArena row = scratch_begin(&arena, 1);
                     Arena* row_arena = row.arena;
-                    String8 object = buster_test_temporary_path(row_arena, S8("buster-weak-unwind"), S8(".o"));
+                    String8 object = buster_test_temporary_path(row_arena, target_index == 1 && model ? S8("buster-weak-unwind-pic-refusal") : S8("buster-weak-unwind"), S8(".o"));
                     String8 command[] = {S8("-target"),
                                          targets[target_index],
                                          modes[mode],
