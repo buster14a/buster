@@ -871,3 +871,15 @@ The same memory effects and source/destination ownership apply in every allocato
   for nonlocals/disqualified places. Sparse `local_places` sizing and the
   summary-unknown row fallback feed the same state. Store-free locals stay
   in frame slots; resetting store ordinals visits only the sparse local rows.
+
+## System V MEMORY variadic records
+
+The canonical x86-64 emitter reads non-f80 MEMORY-class structs/unions from
+`overflow_arg_area` without consuming GP or FP save slots. It aligns records
+up to sixteen bytes, advances by their size rounded to eight, and copies only
+the exact object bytes through the existing chunk/tail emitter. Wider alignment
+and f80 admission retain their existing boundaries. The registered SysV padding
+fixture covers 17-byte, packed 9-byte and 16-aligned 32-byte records, independent
+`va_copy`, cursor/descriptor observations, significant payload bytes and a read
+after GP exhaustion, in both compiler directions and all allocator/frontend
+combinations.
