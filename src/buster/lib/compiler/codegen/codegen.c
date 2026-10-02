@@ -15379,11 +15379,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (source_integer128 || target_integer128)
                         {
-                            if (source_type->kind != IR_TYPE_INTEGER || target_type->kind != IR_TYPE_INTEGER)
+                            if ((source_type->kind != IR_TYPE_INTEGER &&
+                                 !(source_type->kind == IR_TYPE_BOOLEAN && conversion == IR_CONVERSION_INTEGER_ZERO_EXTEND)) ||
+                                target_type->kind != IR_TYPE_INTEGER)
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
+                            u32 source_bit_width = source_type->kind == IR_TYPE_BOOLEAN ? 8 : source_type->bit_width;
                             c_x64_load(&emitter, 0x85, instruction->operands[0]);
                             if (target_integer128)
                             {
@@ -15396,14 +15399,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     String8 extend_mnemonic = {0};
                                     BusterX86MetadataPhysicalOperand extend_operands[2];
                                     u32 extend_operand_count = 0;
-                                    if (source_type->bit_width == 8 || source_type->bit_width == 16)
+                                    if (source_bit_width == 8 || source_bit_width == 16)
                                     {
                                         extend_mnemonic = S8("MOVSX");
                                         extend_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
-                                        extend_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)source_type->bit_width);
+                                        extend_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)source_bit_width);
                                         extend_operand_count = 2;
                                     }
-                                    else if (source_type->bit_width == 32)
+                                    else if (source_bit_width == 32)
                                     {
                                         extend_mnemonic = S8("MOVSXD");
                                         extend_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
@@ -15421,12 +15424,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     BusterX86MetadataPhysicalOperand zero_extend_operands[2];
                                     u32 zero_extend_operand_count = 0;
-                                    if (source_type->bit_width <= 32)
+                                    if (source_bit_width <= 32)
                                     {
-                                        if (source_type->bit_width < 32)
+                                        if (source_bit_width < 32)
                                         {
                                             zero_extend_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
-                                            zero_extend_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)source_type->bit_width);
+                                            zero_extend_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)source_bit_width);
                                             zero_extend_operand_count = 2;
                                         }
                                         else
@@ -15440,7 +15443,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
                                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
                                     };
-                                    String8 zero_extend_mnemonic = source_type->bit_width < 32 ? S8("MOVZX") : S8("MOV");
+                                    String8 zero_extend_mnemonic = source_bit_width < 32 ? S8("MOVZX") : S8("MOV");
                                     if ((zero_extend_operand_count && !codegen_canonical_x64_metadata_emit(&buffer, zero_extend_mnemonic, zero_extend_operands,
                                                                                                              zero_extend_operand_count)) ||
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), clear_high_operands, 2))
@@ -21777,11 +21780,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (target_integer128)
                         {
-                            if (source_type->kind != IR_TYPE_INTEGER)
+                            if (source_type->kind != IR_TYPE_INTEGER &&
+                                !(source_type->kind == IR_TYPE_BOOLEAN && conversion == IR_CONVERSION_INTEGER_ZERO_EXTEND))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
+                            u32 source_bit_width = source_type->kind == IR_TYPE_BOOLEAN ? 8 : source_type->bit_width;
                             // x9 already holds the source's low eightbyte. A
                             // narrower source is widened in place first, then
                             // the second eightbyte is its sign or zero fill;
@@ -21793,9 +21798,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else if (conversion == IR_CONVERSION_INTEGER_SIGN_EXTEND)
                             {
-                                u32 narrow_sign_extend = source_type->bit_width == 8    ? 0x93401d29
-                                                         : source_type->bit_width == 16 ? 0x93403d29
-                                                         : source_type->bit_width == 32 ? 0x93407d29
+                                u32 narrow_sign_extend = source_bit_width == 8    ? 0x93401d29
+                                                         : source_bit_width == 16 ? 0x93403d29
+                                                         : source_bit_width == 32 ? 0x93407d29
                                                                                         : 0;
                                 if (narrow_sign_extend)
                                 {
@@ -21805,9 +21810,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
-                                u32 narrow_zero_extend = source_type->bit_width == 8    ? 0x53001d29
-                                                         : source_type->bit_width == 16 ? 0x53003d29
-                                                         : source_type->bit_width == 32 ? 0x2a0903e9
+                                u32 narrow_zero_extend = source_bit_width == 8    ? 0x53001d29
+                                                         : source_bit_width == 16 ? 0x53003d29
+                                                         : source_bit_width == 32 ? 0x2a0903e9
                                                                                         : 0;
                                 if (narrow_zero_extend)
                                 {
