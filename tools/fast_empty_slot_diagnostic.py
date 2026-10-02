@@ -40,16 +40,26 @@ def main():
     driver = out / "driver"
     summary = {"baseline": args.baseline, "head": args.head, "acceptance": False, "builds": {}, "workloads": {}}
 
+    def save():
+        (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+
     def run(label, command, timeout=1200, required=True):
         started = time.perf_counter_ns()
         with (out / (label + ".log")).open("wb") as log:
-            process = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=timeout, check=False)
-        record = {"label": label, "command": [str(x) for x in command], "returncode": process.returncode,
+            try:
+                process = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=timeout, check=False)
+                returncode = process.returncode
+            except subprocess.TimeoutExpired:
+                returncode = 124
+            except OSError as error:
+                log.write((repr(error) + "\n").encode())
+                returncode = 125
+        record = {"label": label, "command": [str(x) for x in command], "returncode": returncode,
                   "seconds": (time.perf_counter_ns() - started) / 1e9}
         with (out / "commands.jsonl").open("a") as log:
             log.write(json.dumps(record) + "\n")
         print(json.dumps(record), flush=True)
-        if required and process.returncode:
+        if required and returncode:
             print((out / (label + ".log")).read_text(errors="replace")[-12000:], flush=True)
             raise RuntimeError(label + " failed")
         return record
@@ -66,14 +76,20 @@ def main():
                                  "--linker", "DEFAULT", "--", "-DBUSTER_DEBUG_INFO=OFF"])
         run(label + "-build", [str(driver), "build", "--config", "Release", "-t", "ide"])
         binary = out / (label + "-ide")
-        shutil.copyfile(root / "build/Release/ide", binary)
+        shutil.copy2(root / "build/Release/ide", binary)
         summary["builds"][label] = {"source_revision": revision, "binary_sha256": digest(binary), "instrumented": instrument}
+        save()
         if not instrument:
             run(label + "-self-host", [str(driver), "test_self_host", "--config", "Release"])
         run(label + "-discard-overlay", ["git", "checkout", "--", str(SOURCE)])
         return binary
 
     run("identity", ["bash", "-c", "git rev-parse HEAD 'HEAD^{tree}'; uname -a; lscpu; clang --version; valgrind --version"])
+    copyright = Path("/usr/share/doc/valgrind/copyright")
+    if copyright.is_file():
+        shutil.copyfile(copyright, out / "valgrind-copyright.txt")
+        summary["valgrind_copyright_sha256"] = digest(copyright)
+    save()
     clean = {}
     probes = {}
     for name, revision in (("baseline", args.baseline), ("candidate", args.head)):
@@ -83,6 +99,8 @@ def main():
     shutil.copyfile(clean["candidate"], root / "build/Release/ide")
     run("machine-tests", [str(clean["candidate"]), "test", "--ci=1", "--verbose=1", "--module=machine_tests"])
     run("mode-matrix", [str(driver), "test_mode_matrix", "--config", "Release"])
+    summary["mode_matrix_binary_sha256"] = digest(root / "build/Release/ide")
+    save()
     # Restore a clean build before mode-matrix/self-host consumers can run it.
     # The retained clean binaries above, never the probes, supply all timing.
     small = out / "controls.c"
@@ -123,6 +141,8 @@ def main():
                                 "redundant_sentinel_clear_bytes": sum(4*max(s, 1) for n, s, k in empty),
                                 "empty_machine_rows": sum(n for n, s, k in empty),
                                 "all_placement_machine_rows": sum(row[0] for row in populations)}
+        summary["workloads"][name] = cell
+        save()
         for trial in range(7):
             for variant in (("baseline", "candidate") if trial % 2 == 0 else ("candidate", "baseline")):
                 rss = out / (name + "-" + variant + "-" + str(trial) + ".rss")
@@ -133,23 +153,28 @@ def main():
                 cell["timings"].append({"trial": trial, "variant": variant, **record})
                 if digest(target) != cell["hashes"][variant]:
                     raise RuntimeError("Timing output changed")
+        save()
         if name == "controls":
             run("execute-controls", [str(target)])
         cell["cachegrind"] = {}
         for variant in ("baseline", "candidate"):
             cache = out / (name + "-" + variant + ".cachegrind")
-            run(name + "-" + variant + "-cachegrind", ["valgrind", "--tool=cachegrind", "--cache-sim=yes",
+            cache_run = run(name + "-" + variant + "-cachegrind", ["valgrind", "--tool=cachegrind", "--cache-sim=yes",
                 "--branch-sim=no", "--I1=32768,8,64", "--D1=32768,8,64", "--LL=33554432,16,64",
                 "--cachegrind-out-file=" + str(cache), str(clean[variant]), "cc", "-fregister-allocator=fast",
-                "-fverify-codegen", *flags, "-o", str(target)], timeout=1800)
+                "-fverify-codegen", *flags, "-o", str(target)], timeout=1800, required=False)
+            if cache_run["returncode"]:
+                cell["cachegrind"][variant] = {"unavailable": True, "returncode": cache_run["returncode"],
+                                                "log": name + "-" + variant + "-cachegrind.log"}
+                save()
+                continue
             text = cache.read_text()
             events = re.search(r"^events: (.*)$", text, re.MULTILINE).group(1).split()
             values = list(map(int, re.search(r"^summary: (.*)$", text, re.MULTILINE).group(1).split()))
             cell["cachegrind"][variant] = dict(zip(events, values))
             if digest(target) != cell["hashes"][variant]:
                 raise RuntimeError("Cache simulation changed output")
-        summary["workloads"][name] = cell
-        (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+            save()
         print(json.dumps({"workload": name, "removed_work": cell["removed_work"], "cachegrind": cell["cachegrind"]}), flush=True)
     return 0
 
