@@ -379,9 +379,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_function_seed_index(UnitTestArgume
 BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_type_name_ownership(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    u8 type_name[] = {'N', 'o', 'd', 'e'};
-    u8 overridden_name[] = {'B', 'a', 's', 'e'};
-    u8 declaration_name[] = {'A', 'l', 'i', 'a', 's'};
+    char8 type_name[] = {'N', 'o', 'd', 'e'};
+    char8 overridden_name[] = {'B', 'a', 's', 'e'};
+    char8 declaration_name[] = {'A', 'l', 'i', 'a', 's'};
     IrType types[] = {
         {.name = {.pointer = type_name, .length = sizeof(type_name)}, .id = {.value = 0}, .kind = IR_TYPE_STRUCT},
         {.name = {.pointer = overridden_name, .length = sizeof(overridden_name)}, .id = {.value = 1}, .kind = IR_TYPE_STRUCT},
