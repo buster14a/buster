@@ -14367,7 +14367,7 @@ struct CIrLowerBodyState
     u32 index;
     u32 switch_case_count;
     u32 switch_body_start;
-    u32 switch_body_close;
+    u32 switch_statement_start;
     u32 vla_alignment;
     CIrLowerBodyContinuation continuation;
     u64 temporary_mark;
@@ -39106,7 +39106,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             }
             CIrBodyTask task = *state->current_task;
             tasks[task_count++] = (CIrBodyTask){
-                .start = state->switch_body_close + 1,
+                .start = state->index,
                 .end = task.end,
                 .block = merge,
                 .continuation = task.continuation,
@@ -39116,10 +39116,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
             CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
                                                                                            : C_SCOPE_ID_INVALID;
-            CScopeId switch_scope = c_parse_scope_for_token(&builder->parse, root, state->switch_body_start);
-            CScopeId switch_break_scope = switch_scope.value < builder->parse.scope_count ? builder->parse.scopes[switch_scope.value].parent
-                                                                                             : C_SCOPE_ID_INVALID;
-            u32 switch_break_token = state->switch_body_close + 1;
+            // A switch may have no compound-body scope. Its break target is
+            // outside the controlled statement, within the keyword's scope.
+            CScopeId switch_break_scope = c_parse_scope_for_token(&builder->parse, root, state->switch_statement_start);
+            u32 switch_break_token = state->index;
             if (switch_break_scope.value == C_ID_UNDERLYING_INVALID)
             {
                 return false;
@@ -39453,14 +39453,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 u32 expression_close =
                     c_ir_matching_delimiter_cached(builder, index + 1, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (expression_close == UINT32_MAX || expression_close == index + 2 || expression_close + 1 >= task.end ||
-                    !c_token_is_punctuator(&builder->preprocess.tokens[expression_close + 1], C_PUNCTUATOR_LEFT_BRACE))
+                if (expression_close == UINT32_MAX || expression_close == index + 2 || expression_close + 1 >= task.end)
                 {
                     return false;
                 }
-                u32 body_open = expression_close + 1;
-                u32 body_close = c_ir_matching_delimiter_cached(builder, body_open, task.end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-                if (body_close == UINT32_MAX)
+                u32 body_start = 0;
+                u32 body_close = 0;
+                u32 body_after = 0;
+                if (!c_ir_builder_controlled_body_range(builder, expression_close + 1, task.end, &body_start, &body_close, &body_after))
                 {
                     return false;
                 }
@@ -39472,7 +39472,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 // control statement's substatement owns none, so it neither
                 // closes the previous case's range nor opens one of its own.
                 u32 last_ranged_case = UINT32_MAX;
-                for (u32 scan = body_open + 1; scan < body_close; scan += 1)
+                for (u32 scan = body_start; scan < body_close; scan += 1)
                 {
                     CToken token = builder->preprocess.tokens[scan];
                     if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
@@ -39591,7 +39591,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                     bool in_substatement =
-                        case_count != 0 && (brace_depth != 0 || c_ir_control_substatement_position(&builder->preprocess, body_open + 1, scan));
+                        case_count != 0 && (brace_depth != 0 || c_ir_control_substatement_position(&builder->preprocess, body_start, scan));
                     if (!in_substatement)
                     {
                         if (last_ranged_case != UINT32_MAX)
@@ -39658,10 +39658,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     cases[last_ranged_case].content_end = body_close;
                 }
                 state->switch_case_count = case_count;
-                state->switch_body_start = body_open + 1;
-                state->switch_body_close = body_close;
+                state->switch_body_start = body_start;
+                state->switch_statement_start = index;
                 state->child_source = c_ir_token_source_range(builder, first);
-                c_ir_lower_body_yield(builder, state, task, body_close + 1, C_IR_LOWER_BODY_CONTINUE_SWITCH,
+                c_ir_lower_body_yield(builder, state, task, body_after, C_IR_LOWER_BODY_CONTINUE_SWITCH,
                                       (CIrLowerFrame){
                                           .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                           .as.expression =

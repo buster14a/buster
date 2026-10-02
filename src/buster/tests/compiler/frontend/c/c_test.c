@@ -3333,10 +3333,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
         "static volatile int calls; static int cleaned; static int select_value(void) { calls += 1; return 4; }\n"
         "static void clean_value(int *value) { cleaned += *value; }\n"
         "int matched(int x) { int f = 0; switch (x) case 4: f = 2; return f; }\n"
+        "int constant_body(void) { int f = 0; switch (sizeof(int)) case 4: f = 2; return f; }\n"
         "int default_only(int x) { int f = 0; switch (x) default: f = 2; return f; }\n"
         "int no_label(int x) { int f = 0; switch (x) f = 3; return f; }\n"
         "int empty_body(int x) { int f = 7; switch (x); return f; }\n"
         "int chained(int x) { int f = 0; switch (x) case 1: case 2: f = 3; return f; }\n"
+        "int block_fallthrough(int x) { int f = 0; switch (x) case 1: { f += 1; case 2: f += 2; } return f; }\n"
+        "int range_body(unsigned long long x) { switch (x) case 1 ... 3: return 1; return 0; }\n"
+        "int narrow_body(unsigned char x) { switch (x) case 255: return 1; return 0; }\n"
+        "int wide_body(unsigned long long x) { switch (x) case 4294967296ULL: return 1; return 0; }\n"
         "int nested(int x, int y) { int f = 0; switch (x) default: switch (y) case 2: f = 8; return f; }\n"
         "int adjacent(int x) { int f = 0; switch (x) case 1: f = 3; f += 4; return f; }\n"
         "int break_body(int x) { int f = 0; switch (x) case 1: break; f = 4; return f; }\n"
@@ -3346,14 +3351,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
         "int labelled_if(int x, int condition) { int f = 0; switch (x) case 1: if (condition) f = 4; else f = 6; return f; }\n"
         "int labelled_while(int x) { int f = 0; switch (x) case 1: while (f < 3) f += 1; return f; }\n"
         "int header_once(void) { int f = 0; calls = 0; switch (select_value()) case 4: f = 2; return f == 2 && calls == 1; }\n"
+        "int no_label_once(void) { int f = 0; calls = 0; switch (select_value()) f = 3; return f == 0 && calls == 1; }\n"
         "int cleanup_break(void) { cleaned = 0; { int outer __attribute__((cleanup(clean_value))) = 3; switch (1) case 1: break; if (cleaned != 0) return 99; } return cleaned; }\n"
         "int cleanup_block(void) { cleaned = 0; switch (1) case 1: { int inner __attribute__((cleanup(clean_value))) = 5; break; } return cleaned; }\n"
-        "int main(void) { return matched(4) != 2 || matched(0) != 0 || default_only(0) != 2 || no_label(1) != 0 || empty_body(1) != 7 ||\n"
-        " chained(1) != 3 || chained(2) != 3 || chained(3) != 0 || nested(0, 2) != 8 || nested(0, 3) != 0 ||\n"
+        "int main(void) { return matched(4) != 2 || matched(0) != 0 || constant_body() != 2 || default_only(0) != 2 || default_only(42) != 2 || no_label(1) != 0 || empty_body(1) != 7 ||\n"
+        " chained(1) != 3 || chained(2) != 3 || chained(3) != 0 || block_fallthrough(1) != 3 || block_fallthrough(2) != 2 || block_fallthrough(0) != 0 ||\n"
+        " range_body(1) != 1 || range_body(3) != 1 || range_body(4) != 0 || narrow_body(255) != 1 || narrow_body(0) != 0 ||\n"
+        " wide_body(4294967296ULL) != 1 || wide_body(0) != 0 || nested(0, 2) != 8 || nested(0, 3) != 0 ||\n"
         " adjacent(1) != 7 || adjacent(0) != 4 || break_body(1) != 4 || return_body(1) != 9 || return_body(0) != 1 ||\n"
         " continue_body(1) != 0 || continue_body(0) != 3 || labelled_block(1) != 9 || labelled_block(0) != 0 ||\n"
         " labelled_if(1, 1) != 4 || labelled_if(1, 0) != 6 || labelled_if(0, 0) != 0 || labelled_while(1) != 3 || labelled_while(0) != 0 ||\n"
-        " !header_once() || cleanup_break() != 3 || cleanup_block() != 5; }\n");
+        " !header_once() || !no_label_once() || cleanup_break() != 3 || cleanup_block() != 5; }\n");
     for (u32 target_index = 0; target_index < 6; target_index += 1)
     {
         Target target = target_native;
@@ -3381,6 +3389,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
                 {
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                 }
+                scratch_end(temporary);
+            }
+        }
+    }
+    // The statement-extent repair preserves controlling-type and label constraints.
+    String8 invalid_sources[] = {
+        S8("int f(double x) { switch (x) case 1: return 1; return 0; }"),
+        S8("int f(int *x) { switch (x) case 1: return 1; return 0; }"),
+        S8("int f(__int128 x) { switch (x) case 1: return 1; return 0; }"),
+        S8("int f(int x) { switch (x) case 1: case 1: return 1; return 0; }"),
+        S8("int f(int x) { switch (x) default: default: return 1; return 0; }"),
+        S8("int f(int x) { switch (x) case 1 ... 3: case 3: return 1; return 0; }"),
+        S8("int f(int x) { switch (x) { { case 1: return 1; } } return 0; }"),
+    };
+    for (u32 dialect = 0; dialect < 2; dialect += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, invalid_sources[index], (CPreprocessOptions){
+                    .target = target_native, .data_layout = target_data_layout(target_native),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("unbraced-switch-invalid.c"), tokens, syntax, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                String8 context = string_format(temporary.arena, S8("invalid unbraced switch source={u32} dialect={u32} form={u32}"),
+                    index, dialect, form);
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, context);
                 scratch_end(temporary);
             }
         }
