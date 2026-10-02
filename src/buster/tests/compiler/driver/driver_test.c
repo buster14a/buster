@@ -14468,6 +14468,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_guard(Uni
                 {
                     CIRLowerResult lowered = c_analyze_with_options(arena, S8("literal-guard-reset.c"), tokens, syntax,
                         target.target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    arguments->show(arguments, S8("STATIC-LITERAL-GUARD dialect={u32} form={u32} diagnostics={u32} program={u32} modules={u32} certified={u32}\n"),
+                        dialect, form, (u32)lowered.diagnostic_count, (u32)(lowered.program != 0),
+                        lowered.program ? lowered.program->module_count : 0, (u32)lowered.canonical_ir_certified);
+                    if (lowered.diagnostics)
+                    {
+                        for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                        {
+                            arguments->show(arguments, S8("STATIC-LITERAL-GUARD-DIAGNOSTIC index={u32} line={u32} column={u32} message={S8}\n"),
+                                diagnostic, (u32)lowered.diagnostics[diagnostic].location.line,
+                                (u32)lowered.diagnostics[diagnostic].location.column, lowered.diagnostics[diagnostic].message);
+                        }
+                    }
                     if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1 && lowered.diagnostics &&
                         lowered.program && lowered.program->module_count == 1 && lowered.program->modules))
                     {
@@ -14568,6 +14580,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_guard(Uni
                     CompilerDriverResult rejected = compiler_driver_execute_invocation(arena,
                         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                     BUSTER_TEST(arguments, rejected.error != COMPILER_DRIVER_ERROR_NONE && !rejected.has_object);
+                    arguments->show(arguments, S8("STATIC-LITERAL-GUARD-DRIVER dialect={u32} form={u32} error={u32} object={u32} diagnostic={S8}\n"),
+                        dialect, form, (u32)rejected.error, (u32)rejected.has_object, rejected.diagnostic);
                     BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, refusal) != BUSTER_STRING_NO_MATCH);
                     BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length == 0);
                 }
