@@ -3,7 +3,8 @@ name: RAD Debugger compatibility
 # Correctness diagnostics only; no physical performance runner.
 on:
   push:
-    branches: [codex/2279-raddebugger-compatibility]
+    branches:
+      - "codex/2279-raddebugger-compatibility"
   pull_request:
     paths:
       - build.c
@@ -37,12 +38,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libfreetype6-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev libgl1-mesa-dev libegl1-mesa-dev
+      - name: Verify generated intrinsic metadata
+        run: python3 tools/generate_c_vendor_builtins.py --check
       - name: Hosted bootstrap
         run: |
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/raddebugger-driver"
       - name: Retain generated source-size acknowledgement for review
         run: |
           "$RUNNER_TEMP/raddebugger-driver" source_size --write-baseline
+          cat docs/source-size-baseline.txt
       - name: Configure compiler
         run: |
           "$RUNNER_TEMP/raddebugger-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF

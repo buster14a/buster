@@ -217,3 +217,33 @@ passes oversized sentinel lengths through preprocessing and all lexer entries,
 and checks bounded allocation, structured errors, shared-space exhaustion and
 valid empty/declaration controls. It never allocates or maps a multi-gigabyte
 source to exercise the limit.
+
+## Finite vendor builtin admission
+
+The private `c_vendor_builtin.c/.h` descriptor module pins exact x86
+resource-header spellings and prototype shapes to LLVM 21.1.8. Descriptors
+preserve lane types, vector pointers and pointee qualifiers; admission alone
+does not grant `__has_builtin` or permit a reachable unsupported operation.
+The all-context semantic pass checks arguments and source integer constants,
+including unused inline bodies, globals and unevaluated operands.
+
+Generic operators have their own explicit type-machine stages: bit-cast and
+vector conversion parse their type-name slots, elementwise operators preserve
+narrow integer operands, reductions return a lane, and shuffles retain logical
+output lanes with target-derived rounded storage. Bit-cast preserves complete
+object representations, including arrays. Nondeterministic-value operands are
+unevaluated; the canonical emitter chooses a defined zero of the requested
+scalar/vector type.
+
+`c_vendor_lowering.c`, `c_vendor_sha.c`, `c_vendor_x86_query.c` and
+`c_vendor_generic.c` expand the implemented subset through existing scalar,
+vector, memory, CFG and fixed-register assembly contracts. Reachability uses
+the existing function dependency worklist after semantic validation. A reached
+unsupported intrinsic produces a diagnostic containing its exact name.
+
+Per-call instruction/value/block reservations supplement token-derived body
+capacity. Masked loads reserve their conditional byte accesses and additional
+SSA parameters at their joins for ambient named locals and function
+parameters. Generic lane conversions reserve the existing software floating
+conversion paths. Every sum/product is checked against the canonical row
+limits; unused wrapper bodies receive no expansion reservation.

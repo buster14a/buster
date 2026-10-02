@@ -89,6 +89,7 @@
 #include "c_internal.h"
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
+#include "c_vendor_builtin.c"
 
 #if BUSTER_BENCH_ALLOCATIONS
 // The source-fact census (c_census.h). The fact map holds one u16 per
@@ -4147,6 +4148,8 @@ BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
                 return (CSymbolBuiltin)c_symbol_predefined[index].builtin;
             }
         }
+        if (c_vendor_builtin_spelling(spelling)) return C_SYMBOL_BUILTIN_VENDOR_TARGET;
+        if (c_vendor_generic_builtin(spelling).operation) return C_SYMBOL_BUILTIN_VENDOR_GENERIC;
     }
 
     return C_SYMBOL_BUILTIN_NONE;
@@ -6839,6 +6842,8 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         bool native = cpu_arch == CPU_ARCH_X86_64 || cpu_arch == CPU_ARCH_AARCH64;
         result = (builtin == C_SYMBOL_BUILTIN_ATOMIC && native) ||
                  (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM && native) ||
+                 ((builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) &&
+                  c_semantic_vendor_builtin_supported((Target){.cpu_arch = cpu_arch}, name)) ||
                  (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64));
     }
 

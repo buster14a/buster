@@ -2200,6 +2200,8 @@ struct CIrPreparedCall
     bool builtin_alloca;
     bool builtin_complex;
     bool builtin_integer_transform;
+    bool builtin_vendor_target;
+    bool builtin_vendor_generic;
     bool builtin_strlen;
     bool builtin_clear_cache;
     bool builtin_prefetch;
@@ -14216,6 +14218,7 @@ typedef enum CIrPreparedCallContinuation
     C_IR_PREPARED_CALL_CONTINUATION_UNARY,
     C_IR_PREPARED_CALL_CONTINUATION_TRANSFORM_FIRST,
     C_IR_PREPARED_CALL_CONTINUATION_TRANSFORM_SECOND,
+    C_IR_PREPARED_CALL_CONTINUATION_VENDOR_ARGUMENT,
     C_IR_PREPARED_CALL_CONTINUATION_ALLOCA,
     C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_REAL,
     C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_IMAGINARY,
@@ -18800,6 +18803,105 @@ BUSTER_C_INTERNAL bool c_ir_abstract_pointer_declarator(CIntegerIrBuilder* build
 // identifiers answer with a byte load; only symbol-less tokens
 // (pasted/synthesized) walk the spelling table.  Both the call preparer and
 // the type predictor ask this question and must get the same answer.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments,
+                                                    u32 count, CToken token);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_generic(CIntegerIrBuilder* builder, String8 name, IrTypeId result_type,
+                                                    IrValueId const* arguments, u32 count, CToken token);
+BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type);
+
+BUSTER_C_INTERNAL IrTypeId c_ir_vendor_typed_vector(CIntegerIrBuilder* builder, IrTypeId element, u32 lanes)
+{
+    IrType* scalar = ir_type_from_id(&builder->program->types, element);
+    u64 count = 0, size = 0;
+    u32 alignment = 0;
+    bool valid = scalar && scalar->layout.resolved && scalar->layout.size && lanes &&
+        scalar->layout.size <= UINT32_MAX / lanes &&
+        c_vector_type_layout(builder->target, scalar->layout.size, (u32)(scalar->layout.size * lanes), &count, &size, &alignment);
+    IrTypeId type = IR_TYPE_ID_INVALID;
+    for (u32 index = 0; valid && index < builder->program->types.count && type.value == IR_ID_UNDERLYING_INVALID; index += 1)
+    {
+        IrType* candidate = builder->program->types.types + index;
+        if (candidate->kind == IR_TYPE_VECTOR && candidate->element_type.value == element.value &&
+            candidate->element_count == count && candidate->layout.resolved && candidate->layout.size == size)
+            type = candidate->id;
+    }
+    if (valid && type.value == IR_ID_UNDERLYING_INVALID)
+        type = ir_program_add_type(builder->program, (IrType){
+            .name = S8("GNU vector"), .element_type = element, .return_type = IR_TYPE_ID_INVALID,
+            .layout = {.size = size, .alignment = alignment, .resolved = true},
+            .kind = IR_TYPE_VECTOR, .element_count = count, .bit_width = size <= UINT32_MAX / 8 ? (u32)(size * 8) : 0});
+    return type;
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_vendor_signature_type(CIntegerIrBuilder* builder, CVendorBuiltinType descriptor)
+{
+    IrTypeId type = c_ir_builder_scalar_type(builder, descriptor.kind);
+    if (descriptor.lanes) type = c_ir_vendor_typed_vector(builder, type, descriptor.lanes);
+    if (descriptor.is_volatile) type = c_ir_add_qualified_type(builder->program, type, false, true);
+    for (u32 depth = 0; depth < descriptor.pointer_depth && type.value != IR_ID_UNDERLYING_INVALID; depth += 1)
+        type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
+    return type;
+}
+
+// Queries suspend through the existing query machine when an operand needs a
+// nested answer; they never evaluate the source argument or recurse on input.
+BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 close, IrTypeId* type_out)
+{
+    String8 name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]);
+    CVendorBuiltin signature = {0};
+    CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
+    IrTypeId type = IR_TYPE_ID_INVALID;
+    bool valid = true;
+    if (c_vendor_builtin_lookup(builder->target, name, &signature))
+        type = c_ir_vendor_signature_type(builder, signature.types[0]);
+    else if (generic.operation)
+    {
+        u32 starts[2] = {0}, ends[2] = {0};
+        u32 count = 0;
+        for (u32 argument = start + 2; argument < close;)
+        {
+            u32 limit = c_parse_constraint_expression_end(&builder->parse, builder->preprocess, argument, close);
+            if (count < BUSTER_ARRAY_LENGTH(starts)) { starts[count] = argument; ends[count] = limit; }
+            count += 1;
+            argument = limit + 1;
+        }
+        valid = count >= generic.minimum_arguments && (generic.maximum_arguments == UINT8_MAX || count <= generic.maximum_arguments);
+        if (valid && generic.type_arguments)
+        {
+            u32 selected = generic.type_arguments == 2 ? 1 : 0;
+            valid = c_ir_query_type_name(builder, starts[selected], ends[selected], true, &type);
+        }
+        else if (valid)
+        {
+            valid = c_ir_query_prediction(builder, starts[0], ends[0], &type);
+            if (valid) type = c_ir_sizeof_operand_decay(builder, type);
+            IrType* value = ir_type_from_id(&builder->program->types, type);
+            if (generic.result == C_VENDOR_GENERIC_RESULT_VOID)
+                type = builder->void_type;
+            else if (generic.result == C_VENDOR_GENERIC_RESULT_POINTEE || generic.result == C_VENDOR_GENERIC_RESULT_VECTOR_ELEMENT)
+                type = value && (generic.result == C_VENDOR_GENERIC_RESULT_POINTEE ? value->kind == IR_TYPE_POINTER : value->kind == IR_TYPE_VECTOR)
+                    ? value->element_type : IR_TYPE_ID_INVALID;
+            else if (generic.result == C_VENDOR_GENERIC_RESULT_SHUFFLE && count > 2)
+                type = value && value->kind == IR_TYPE_VECTOR ? c_ir_vendor_typed_vector(builder, value->element_type, count - 2) : IR_TYPE_ID_INVALID;
+        }
+    }
+    else valid = false;
+    if (valid && type.value != IR_ID_UNDERLYING_INVALID) *type_out = type;
+    else valid = false;
+    return valid;
+}
+
+// Root callers enter a strict operand-type query; the attempt above is used
+// only while the query machine owns an active frame and can suspend requests.
+BUSTER_C_INTERNAL bool c_ir_vendor_result_type(CIntegerIrBuilder* builder, u32 start, u32 close, IrTypeId* type_out)
+{
+    CIrQueryFrame result = {0};
+    bool valid = c_ir_query_execute(builder, (CIrQueryFrame){
+        .start = start, .end = close + 1, .kind = C_IR_QUERY_FRAME_OPERAND_TYPE}, &result) && result.success;
+    if (valid) *type_out = result.result_type;
+    return valid;
+}
+
 BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token)
 {
     CSymbolBuiltin result = C_SYMBOL_BUILTIN_NONE;
@@ -18811,9 +18913,11 @@ BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* buil
         {
             result = (CSymbolBuiltin)symbols->builtin_kinds[symbol];
         }
-        else if (!symbol || !symbols)
+        else
         {
-            result = c_symbol_builtin_from_spelling(c_token_spelling(builder->preprocess.spelling_base, token));
+            String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
+            if (!symbol || !symbols || string_starts_with_sequence(name, S8("__builtin_")) || string_equal(name, S8("__rdtsc")))
+                result = c_symbol_builtin_from_spelling(name);
         }
     }
 
@@ -18942,6 +19046,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // are specified through a builtin.
         bool builtin_complex = builtin_kind == C_SYMBOL_BUILTIN_COMPLEX;
         bool builtin_integer_transform = builtin_kind == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM;
+        bool builtin_vendor_target = builtin_kind == C_SYMBOL_BUILTIN_VENDOR_TARGET;
+        bool builtin_vendor_generic = builtin_kind == C_SYMBOL_BUILTIN_VENDOR_GENERIC;
         bool builtin_strlen = builtin_kind == C_SYMBOL_BUILTIN_STRLEN;
         // A prefetch is a hint: lower the address for its side effects and drop
         // the rest.  Claiming it keeps <intrin.h> (and the whole <immintrin.h>
@@ -19149,7 +19255,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         indirect |= callee_start != index || indexed_callee || parenthesized_callee;
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
             (!builtin_identity && !builtin_constant_p && !builtin_choose_expr && !builtin_types_compatible_p && !builtin_object_size &&
-             !builtin_assume_aligned && !builtin_debugtrap && !builtin_spin_pause && !builtin_unreachable && !builtin_frame_address && !builtin_alloca && !builtin_complex && !builtin_integer_transform && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
+             !builtin_assume_aligned && !builtin_debugtrap && !builtin_spin_pause && !builtin_unreachable && !builtin_frame_address && !builtin_alloca && !builtin_complex && !builtin_integer_transform && !builtin_vendor_target && !builtin_vendor_generic && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
              !builtin_va_start && !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
              !builtin_math_link_name.length && builtin_memory == C_IR_MEMORY_BUILTIN_COUNT && builtin_unary == IR_UNARY_COUNT &&
              builtin_simd == C_IR_SIMD_BUILTIN_NONE && builtin_sse2_immediate_shift == C_IR_SSE2_IMMEDIATE_SHIFT_NONE && !indirect &&
@@ -19210,6 +19316,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_alloca = builtin_alloca,
             .builtin_complex = builtin_complex,
             .builtin_integer_transform = builtin_integer_transform,
+            .builtin_vendor_target = builtin_vendor_target,
+            .builtin_vendor_generic = builtin_vendor_generic,
             .builtin_atomic_gnu = atomic_spelling.gnu,
             .builtin_atomic_new_value = atomic_spelling.new_value,
             .builtin_atomic_generic = atomic_spelling.generic,
@@ -19222,7 +19330,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_va_end = builtin_va_end,
             .builtin_va_arg = builtin_va_arg,
             .builtin_generic = builtin_generic,
-            .deferred_calls = builtin_generic || builtin_choose_expr,
+            .deferred_calls = builtin_generic || builtin_choose_expr || builtin_vendor_generic,
             .builtin_atomic = builtin_atomic,
             .builtin_memory = builtin_memory,
             .builtin_math_link_name = builtin_math_link_name,
@@ -19261,7 +19369,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // _Generic and __builtin_choose_expr own their selected expression.
         // Deferred preparation lets that expression prepare its own calls.
         // __builtin_constant_p also discards side effects in its operand.
-        if (builtin_generic || builtin_choose_expr || builtin_object_size || builtin_constant_p)
+        if (builtin_generic || builtin_choose_expr || builtin_object_size || builtin_constant_p || builtin_vendor_generic)
         {
             index = close;
         }
@@ -20990,6 +21098,90 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 selected->result = c_ir_emit_integer_value(builder, 0, false, token);
             }
             selected->argument_count = argument_count;
+            selected->emitted = true;
+            remaining -= 1;
+            continue;
+        }
+        if (selected->builtin_vendor_target || selected->builtin_vendor_generic)
+        {
+            String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
+            if (!c_semantic_vendor_builtin_supported(builder->target, name))
+            {
+                builder->failure_message = string_format(builder->arena, S8("unsupported target builtin '{S8}'"), name);
+                builder->failure_token_index = selected->token_index;
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            }
+            u32 capacity = selected->close_index - selected->open_index;
+            u32* starts = arena_allocate(builder->temporary_arena, u32, capacity);
+            u32* ends = arena_allocate(builder->temporary_arena, u32, capacity);
+            u32 count = 0;
+            if (!c_ir_call_arguments(builder, selected, starts, ends, capacity, &count))
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
+            CVendorBuiltin signature = {0};
+            bool fixed = selected->builtin_vendor_target;
+            if (fixed && (!c_vendor_builtin_lookup(builder->target, name, &signature) || count != signature.parameter_count))
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            if (!fixed && generic.operation == C_VENDOR_GENERIC_SHUFFLE_VECTOR && count == 2)
+            {
+                builder->failure_message = S8("the two-argument __builtin_shufflevector form has no canonical implementation");
+                builder->failure_token_index = selected->token_index;
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            }
+            u32 emitted_count = fixed ? count : generic.operation == C_VENDOR_GENERIC_NONDETERMINISTIC_VALUE ? 0 :
+                generic.type_arguments ? count - 1 : count;
+            if (continuation != C_IR_PREPARED_CALL_CONTINUATION_VENDOR_ARGUMENT)
+            {
+                selected->arguments = arena_allocate(builder->arena, IrValueId, emitted_count);
+                frame->as.prepared_call.state->argument_index = 0;
+            }
+            else
+            {
+                if (!child_success || frame->as.prepared_call.state->argument_index >= emitted_count)
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                u32 argument = frame->as.prepared_call.state->argument_index;
+                IrValueId value = child_value;
+                if (!fixed && generic.operation == C_VENDOR_GENERIC_BIT_CAST && value.value < builder->function->value_count &&
+                    builder->function->values[value.value].category == IR_VALUE_PLACE)
+                    value = c_ir_emit_load_place_raw(builder, value, builder->function->values[value.value].canonical_type,
+                                                     c_ir_token_source_range(builder, token));
+                if (fixed)
+                    value = c_ir_emit_cast(builder, value, c_ir_vendor_signature_type(builder, signature.types[argument + 1]),
+                                           c_ir_token_source_range(builder, token));
+                if (value.value == IR_ID_UNDERLYING_INVALID) return C_IR_PREPARED_CALL_STEP_FAILED;
+                selected->arguments[argument] = value;
+                frame->as.prepared_call.state->argument_index += 1;
+            }
+            while (frame->as.prepared_call.state->argument_index < emitted_count)
+            {
+                u32 argument = frame->as.prepared_call.state->argument_index;
+                u32 written = !fixed && generic.type_arguments == 1 ? argument + 1 : argument;
+                if (!fixed && generic.operation == C_VENDOR_GENERIC_SHUFFLE_VECTOR && argument >= 2)
+                {
+                    u64 selector = 0;
+                    CScopeId scope = c_parse_scope_for_token(&builder->parse, (CScopeId){.value = 0}, starts[written]);
+                    if (!c_semantic_vendor_selector(builder->temporary_arena, &builder->parse, builder->preprocess, scope,
+                                                    starts[written], ends[written], &selector))
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    selected->arguments[argument] = c_ir_emit_integer_value_typed(builder, selector == UINT64_MAX ? 1 : selector,
+                        selector == UINT64_MAX, token, c_ir_builder_scalar_type(builder, C_TYPE_LONG_LONG));
+                    if (selected->arguments[argument].value == IR_ID_UNDERLYING_INVALID)
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    frame->as.prepared_call.state->argument_index += 1;
+                }
+                else
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VENDOR_ARGUMENT,
+                                                                 starts[written], ends[written], false);
+            }
+            IrTypeId type = IR_TYPE_ID_INVALID;
+            if (!c_ir_vendor_result_type(builder, selected->token_index, selected->close_index, &type))
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            selected->result = fixed ? c_ir_emit_vendor_builtin(builder, name, selected->arguments, emitted_count, token) :
+                c_ir_emit_vendor_generic(builder, name, type, selected->arguments, emitted_count, token);
+            if (fixed && selected->result.value != IR_ID_UNDERLYING_INVALID)
+                selected->result = c_ir_emit_cast(builder, selected->result, type, c_ir_token_source_range(builder, token));
+            if (selected->result.value == IR_ID_UNDERLYING_INVALID) return C_IR_PREPARED_CALL_STEP_FAILED;
+            selected->argument_count = count;
             selected->emitted = true;
             remaining -= 1;
             continue;
@@ -27234,6 +27426,16 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
     u32 chain_start = start + 1;
 
+    CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, token);
+    if (builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC)
+    {
+        if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            return false;
+        u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close >= end || !c_ir_vendor_result_type_attempt(builder, start, close, type_out)) return false;
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+    }
+
     if (c_ir_token_builtin_kind(builder, token) == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -27310,12 +27512,35 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     // A local with no lowered storage yet -- one declared inside an unevaluated
     // statement expression -- still has its declared type.
     else if (entity.value < builder->parse.entity_count &&
-             (builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT || builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL))
+             (builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT || builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL ||
+              builder->parse.entities[entity.value].kind == C_ENTITY_PARAMETER))
     {
         CTypeId c_type = builder->parse.entities[entity.value].type;
         if (c_type.value < builder->parse.type_count)
         {
             type = builder->c_type_ir_map[c_type.value];
+            bool parameter = builder->parse.entities[entity.value].kind == C_ENTITY_PARAMETER;
+            CType const* declared = builder->parse.types + c_type.value;
+            if (parameter && declared->kind == C_TYPE_ARRAY)
+            {
+                // Match the callable parameter adjustment, including a VLA
+                // inner dimension that has no canonical fixed-array type.
+                CTypeId element = declared->element_type;
+                CType const* record = c_type_from_id(&builder->parse, element);
+                IrTypeId canonical = record ? builder->c_type_ir_map[element.value] : IR_TYPE_ID_INVALID;
+                while (canonical.value == IR_ID_UNDERLYING_INVALID && record && record->kind == C_TYPE_ARRAY)
+                {
+                    element = record->element_type;
+                    record = c_type_from_id(&builder->parse, element);
+                    canonical = record ? builder->c_type_ir_map[element.value] : IR_TYPE_ID_INVALID;
+                }
+                type = canonical.value != IR_ID_UNDERLYING_INVALID
+                    ? c_ir_add_pointer_type(builder->program, builder->pointer_types, canonical) : IR_TYPE_ID_INVALID;
+            }
+            else if (parameter && (declared->kind == C_TYPE_FUNCTION ||
+                     (declared->kind == C_TYPE_VA_LIST && c_ir_va_list_parameter_decays(builder->target))) &&
+                     type.value != IR_ID_UNDERLYING_INVALID)
+                type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
             // An array object whose type never mapped -- `extern int v[];` --
             // decays the same way under a postfix operator or anywhere in a
             // statement-expression tail; as a bare operand it is the unsized
@@ -30567,6 +30792,11 @@ BUSTER_C_INTERNAL bool c_ir_terminate(CIntegerIrBuilder* builder, IrOpcode opcod
     // The committed terminator closes the block.
     return c_ir_append_instruction(builder, instruction, instruction_source).value != IR_ID_UNDERLYING_INVALID;
 }
+
+#include "c_vendor_lowering.c"
+#include "c_vendor_sha.c"
+#include "c_vendor_x86_query.c"
+#include "c_vendor_generic.c"
 
 BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
 {
@@ -50675,6 +50905,57 @@ BUSTER_GLOBAL_LOCAL void c_ir_row_streams_trim(CIrRowStreams* streams, IrFunctio
     }
 }
 
+typedef struct CIrVendorFunctionBudget CIrVendorFunctionBudget;
+struct CIrVendorFunctionBudget
+{
+    u64 instructions;
+    u64 values;
+    u64 blocks;
+    bool valid;
+};
+
+// Source tokens size the ordinary body. Implemented intrinsic expansions add
+// their own proven rows/blocks. Extra joins may ask SSA to create an incomplete
+// parameter for every ambient named local, including function parameters.
+BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIrBuilder* builder, CDeclaration declaration,
+                                                                     u32 parameter_count, u32 named_local_count)
+{
+    CIrVendorFunctionBudget total = {.valid = true};
+    u32 end = declaration.body_start + declaration.body_token_count;
+    for (u32 index = declaration.token_start; total.valid && index + 1 < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER ||
+            !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
+        String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
+        CVendorBuiltinBudget budget = c_ir_vendor_builtin_budget(name);
+        CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
+        if (generic.operation && c_semantic_vendor_builtin_supported(builder->target, name))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(&builder->parse, builder->preprocess, index + 1);
+            IrTypeId type = IR_TYPE_ID_INVALID;
+            total.valid = close < end && c_ir_vendor_result_type(builder, index, close, &type);
+            IrType* result = total.valid ? ir_type_from_id(&builder->program->types, type) : 0;
+            u64 lanes = result && result->kind == IR_TYPE_VECTOR ? result->element_count : 1;
+            u64 rows = generic.operation == C_VENDOR_GENERIC_BIT_CAST ? 16 :
+                generic.operation == C_VENDOR_GENERIC_NONDETERMINISTIC_VALUE ? 16 : 64 + 16 * lanes;
+            total.valid &= rows <= UINT32_MAX;
+            budget.instructions = budget.values = total.valid ? (u32)rows : 0;
+        }
+        total.instructions += budget.instructions;
+        total.values += budget.values;
+        total.blocks += budget.blocks;
+        total.valid &= total.instructions <= UINT32_MAX && total.values <= UINT32_MAX && total.blocks <= UINT32_MAX;
+    }
+    u64 ambient = (u64)parameter_count + named_local_count;
+    if (total.valid)
+    {
+        total.valid = !ambient || total.blocks <= (UINT32_MAX - total.values) / ambient;
+        if (total.valid) total.values += total.blocks * ambient;
+    }
+    return total;
+}
+
 bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult parse, CIrLowerCapacityPlan* plan_out)
 {
     bool valid = plan_out && !parse.diagnostic_count && preprocess.token_count <= UINT32_MAX;
@@ -52996,14 +53277,26 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     // bodies the loop skips or rejects before placing rows only leave part of
     // the untouched suffix unused.
     CIrRowStreams row_streams = {0};
+    CIrVendorFunctionBudget* vendor_budgets = arena_allocate(temporary_arena, CIrVendorFunctionBudget, parse.declaration_count);
+    memset(vendor_budgets, 0, sizeof(*vendor_budgets) * parse.declaration_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
-        u64 capacity = (u64)declaration.body_token_count * 3 + (u64)signatures[declaration_index].parameter_count * 4 + 16;
-        if (declaration_functions[declaration_index] && declaration.is_definition && capacity <= UINT32_MAX)
+        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
+        bool emitted = declaration_functions[declaration_index] && declaration.is_definition && !declaration.is_gnu_inline_only &&
+            (!(internal || inline_definition) || function_needed[declaration_index]);
+        if (!emitted) continue;
+        CIrVendorFunctionBudget budget = c_ir_vendor_function_budget(&constant_builder, declaration,
+            signatures[declaration_index].parameter_count, declaration_local_counts[declaration_index]);
+        vendor_budgets[declaration_index] = budget;
+        u64 capacity = (u64)declaration.body_token_count * 3 + (u64)signatures[declaration_index].parameter_count * 4 + 16 +
+            BUSTER_MAX(budget.instructions, budget.values);
+        u64 blocks = (u64)declaration.body_token_count + 8 + budget.blocks;
+        if (budget.valid && capacity <= UINT32_MAX && blocks <= UINT32_MAX)
         {
             row_streams.instruction_slots += capacity;
-            row_streams.block_slots += (u64)declaration.body_token_count + 8;
+            row_streams.block_slots += blocks;
         }
     }
     row_streams.blocks = arena_allocate(arena, IrBlock, row_streams.block_slots);
@@ -53101,14 +53394,17 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                                        string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm__"))));
             }
         }
-        u64 lowering_capacity = (u64)declaration.body_token_count * 3 + (u64)signatures[declaration_index].parameter_count * 4 + 16;
+        CIrVendorFunctionBudget vendor_budget = vendor_budgets[declaration_index];
+        u64 lowering_capacity = (u64)declaration.body_token_count * 3 + (u64)signatures[declaration_index].parameter_count * 4 + 16 +
+            BUSTER_MAX(vendor_budget.instructions, vendor_budget.values);
+        u64 block_capacity = (u64)declaration.body_token_count + 8 + vendor_budget.blocks;
         // The frame stack is the one lowering capacity a parameter bound draws
         // on, because the parameter loop runs it on an empty machine: give it
         // the declarator's tokens as well, so a bound that nests deeper than
         // the body is long does not exhaust the stack.  The other consumers of
         // lowering_capacity are per-value arrays the bound does not widen.
         u64 lower_frame_capacity = lowering_capacity + (u64)(declaration.body_start - declaration_start) * 3;
-        if (lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || local_slot_capacity > UINT32_MAX ||
+        if (!vendor_budget.valid || block_capacity > UINT32_MAX || lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || local_slot_capacity > UINT32_MAX ||
             prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX)
         {
             scratch_end(lowering_temporary);
@@ -53121,7 +53417,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             program->rejected_function_count += 1;
             continue;
         }
-        function->block_capacity = declaration.body_token_count + 8;
+        function->block_capacity = (u32)block_capacity;
         function->instruction_capacity = (u32)lowering_capacity;
         function->value_capacity = (u32)lowering_capacity;
         BUSTER_CHECK(function->block_capacity <= row_streams.block_slots - row_streams.block_cursor &&

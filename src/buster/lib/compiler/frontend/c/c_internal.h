@@ -56,6 +56,8 @@
 #define BUSTER_C_DATA static
 #endif
 
+#include "c_vendor_builtin.h"
+
 // The matching-delimiter scan, over the one-byte shape sidecar rather than the
 // token rows.
 //
@@ -674,6 +676,8 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_FIND_FIRST_SET,
     C_SYMBOL_BUILTIN_POPULATION_COUNT,
     C_SYMBOL_BUILTIN_INTEGER_TRANSFORM,
+    C_SYMBOL_BUILTIN_VENDOR_TARGET,
+    C_SYMBOL_BUILTIN_VENDOR_GENERIC,
     C_SYMBOL_BUILTIN_SIMD,
     C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT,
     C_SYMBOL_BUILTIN_FRAME_ADDRESS,
@@ -703,6 +707,11 @@ struct CIntegerTransformBuiltin
 
 BUSTER_C_EXTERN CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, String8 name);
 BUSTER_C_EXTERN u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 count);
+BUSTER_C_EXTERN CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Target target, CVendorBuiltinType descriptor);
+BUSTER_C_EXTERN bool c_semantic_vendor_builtin_supported(Target target, String8 name);
+BUSTER_C_EXTERN u64 c_semantic_vendor_immediate_limit(String8 name, u32 argument);
+BUSTER_C_EXTERN bool c_semantic_vendor_selector(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                               CScopeId scope, u32 start, u32 end, u64* selector);
 
 struct CSymbolTable
 {
@@ -1067,6 +1076,10 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_FALLBACK,
     C_TYPE_PARSE_STAGE_PARAMETERS,
     C_TYPE_PARSE_STAGE_PARAMETER_RESULT,
+    C_TYPE_PARSE_STAGE_VENDOR_VALUE,
+    C_TYPE_PARSE_STAGE_VENDOR_TYPE,
+    C_TYPE_PARSE_STAGE_VENDOR_TYPE_SUFFIX,
+    C_TYPE_PARSE_STAGE_VENDOR_OPERAND,
     C_TYPE_PARSE_STAGE_FINISH,
 } CTypeParseFrameStage;
 

@@ -10910,6 +10910,144 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_transform_builtins(UnitTestArg
     return result;
 }
 
+// Typed vendor declarations must not create a lowering capability or skip
+// validation in unused bodies and unevaluated expressions.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_builtin_admission(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_parts[] = {
+        S8("typedef int I4 __attribute__((vector_size(16)));\ntypedef int I8 __attribute__((vector_size(32)));\ntypedef char C16 __attribute__((vector_size(16)));\ntypedef float F8 __attribute__((vector_size(32)));\ntypedef __typeof__(__builtin_ia32_clui()) VendorVoid;\n_Static_assert(__builtin_types_compatible_p(VendorVoid, void), \"clui result\");\nstatic inline void vendor_unused_clui(void) { __builtin_ia32_clui(); return; }\nstatic inline void vendor_unused_chain(void) { vendor_unused_clui(); return; }\nint vendor_live(void) { return 7; }\n_Static_assert(!__has_builtin(__builtin_ia32_clui), \"admission is not support\");\n_Static_assert(!__has_builtin(__builtin_ia32_clui_typo), \"finite spellings\");\n_Static_assert(__has_builtin(__builtin_ia32_sha1rnds4), \"implemented SHA\");\n_Static_assert(__has_builtin(__builtin_ia32_pshufd), \"implemented shuffle\");\ntypedef __typeof__(__builtin_ia32_sha1msg1((I4){0}, (I4){0})) ShaType;\n_Static_assert(__builtin_types_compatible_p(ShaType, I4), \"SHA typeof\");\n_Static_assert(sizeof(__builtin_ia32_sha1msg1((I4){0}, (I4){0})) == 16, \"SHA sizeof\");\n_Static_assert(_Generic(__builtin_ia32_sha256rnds2((I4){0}, (I4){0}, (I4){0}), I4: 1, default: 0), \"SHA generic\");\n_Static_assert(_Generic(__builtin_ia32_palignr128((C16){0}, (C16){0}, 8), C16: 1, default: 0), \"char vector result\");\n_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_ia32_maskloadps256((const F8*)0, (I8){0})), F8), \"pointer to vector signature\");\n_Static_assert(_Generic(__rdtsc(), unsigned long long: 1, default: 0), \"rdtsc fixed C rank\");\nI4 vendor_sha_zero(I4 a, I4 b) { return __builtin_ia32_sha1rnds4(a, b, 256); }\nI4 vendor_sha_negative_zero(I4 a, I4 b) { return __builtin_ia32_sha1rnds4(a, b, -256); }\n"),
+        S8("typedef __typeof__(__builtin_bit_cast(unsigned int, 0.0f)) BitsType;\n_Static_assert(__builtin_types_compatible_p(BitsType, unsigned int), \"bit cast typeof\");\n_Static_assert(sizeof(__builtin_bit_cast(unsigned int, 0.0f)) == 4, \"bit cast sizeof\");\nunsigned int vendor_bits(float a) { return __builtin_bit_cast(unsigned int, a); }\ntypedef __typeof__(__builtin_shufflevector((I4){0}, (I4){0}, 2, -1, 0)) I3;\n_Static_assert(sizeof(I3) == 16, \"three lanes use four lane storage\");\nI3 vendor_three_result;\nI3 vendor_three(I4 a) { return __builtin_shufflevector(a, a, 2, (__int128)-1, (__int128)0); }\nint vendor_side_effect(void);\nint vendor_nondeterministic(void) { return __builtin_nondeterministic_value(vendor_side_effect()); }\n"),
+    };
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("vendor-builtin-admission.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("target={u32} form={u32}: preprocess={u32} syntax={u32} lowering={u32}; first lowering diagnostic {S8}"),
+                target_index, form, preprocess.diagnostic_count, syntax.diagnostic_count, lowered.diagnostic_count,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("vendor_unused_clui")) == 0);
+                BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("vendor_unused_chain")) == 0);
+                String8 functions[] = {
+                    S8("vendor_live"), S8("vendor_sha_zero"), S8("vendor_sha_negative_zero"),
+                    S8("vendor_bits"), S8("vendor_three"), S8("vendor_nondeterministic"),
+                };
+                for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(functions); function_index += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, functions[function_index]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                }
+                IrGlobal* global = c_test_find_ir_global(module, lowered.program, S8("vendor_three_result"));
+                IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                BUSTER_TEST(arguments, type && type->kind == IR_TYPE_VECTOR && type->element_count == 3 && type->layout.size == 16);
+            }
+            scratch_end(temporary);
+        }
+    }
+    typedef struct CVendorAdmissionNegativeCase CVendorAdmissionNegativeCase;
+    struct CVendorAdmissionNegativeCase
+    {
+        String8 source;
+        String8 message;
+    };
+    CVendorAdmissionNegativeCase invalid[] = {
+        {S8("void f(void) { __builtin_ia32_clui(); return; }"), S8("unsupported target builtin '__builtin_ia32_clui'")},
+        {S8("static inline void helper(void) { __builtin_ia32_clui(); return; } void f(void) { helper(); return; }"), S8("unsupported target builtin '__builtin_ia32_clui'")},
+        {S8("static inline void helper(void) { __builtin_ia32_clui(); return; } void (*hook)(void) = helper;"), S8("unsupported target builtin '__builtin_ia32_clui'")},
+        {S8("static inline void helper(void) { __builtin_ia32_clui_typo(); return; }"), S8("could not lower unbound identifier '__builtin_ia32_clui_typo'")},
+        {S8("static inline void helper(void) { __builtin_ia32_clui(1); return; }"), S8("too many arguments in the call to '__builtin_ia32_clui'")},
+        {S8("I4 f(I4 a) { return __builtin_ia32_sha256rnds2(a, a); }"), S8("too few arguments in the call to '__builtin_ia32_sha256rnds2'")},
+        {S8("I4 f(I4 a) { return __builtin_ia32_sha1msg1((int*)0, a); }"), S8("argument 1 of __builtin_ia32_sha1msg1 has an incompatible type")},
+        {S8("I4 f(I4 a, int n) { return __builtin_ia32_sha1rnds4(a, a, n); }"), S8("argument 3 of __builtin_ia32_sha1rnds4 requires an integer constant")},
+        {S8("I4 f(I4 a) { return __builtin_ia32_sha1rnds4(a, a, 4); }"), S8("argument 3 of __builtin_ia32_sha1rnds4 requires an integer constant in the permitted range")},
+        {S8("_Static_assert(sizeof(__builtin_ia32_sha1rnds4((I4){0}, (I4){0}, 4)) == 16, \"invalid unevaluated immediate\");"), S8("argument 3 of __builtin_ia32_sha1rnds4 requires an integer constant in the permitted range")},
+        {S8("typedef __typeof__(__builtin_ia32_sha1msg1((int*)0, (I4){0})) Bad;"), S8("argument 1 of __builtin_ia32_sha1msg1 has an incompatible type")},
+        {S8("static inline F8 helper(const float *p, I8 mask) { return __builtin_ia32_maskloadps256(p, mask); }"), S8("argument 1 of __builtin_ia32_maskloadps256 has an incompatible type")},
+        {S8("int f(void) { return sizeof(__builtin_bit_cast(unsigned long long, 0.0f)); }"), S8("__builtin_bit_cast requires complete value types with equal storage sizes")},
+        {S8("int f(void) { return sizeof(__builtin_shufflevector((I4){0}, (I4){0}, 8)); }"), S8("__builtin_shufflevector requires integer constant selectors")},
+    };
+    String8 prefix = S8("typedef int I4 __attribute__((vector_size(16)));\n"
+                       "typedef int I8 __attribute__((vector_size(32)));\n"
+                       "typedef float F8 __attribute__((vector_size(32)));\n");
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 test_source = string_format(temporary.arena, S8("{S8}{S8}"), prefix, invalid[index].source);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, test_source,
+                (CPreprocessOptions){.target = targets[0], .data_layout = target_data_layout(targets[0])});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("vendor-builtin-rejection.c"), preprocess, syntax, targets[0],
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, invalid[index].source);
+            bool message_found = false;
+            for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                message_found |= lowered.diagnostics[diagnostic].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                    string_first_sequence(lowered.diagnostics[diagnostic].message, invalid[index].message) != BUSTER_STRING_NO_MATCH;
+            BUSTER_TEST_RAW(arguments, message_found, string_format(temporary.arena,
+                S8("form={u32} {S8}: expected {S8}; first diagnostic {S8}"), form, invalid[index].source, invalid[index].message,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            BUSTER_TEST(arguments, !lowered.canonical_ir_certified && (!lowered.program || lowered.program->rejected_function_count != 0));
+            scratch_end(temporary);
+        }
+    }
+
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 runtime_parts[] = {
+        S8("typedef unsigned int U32;\ntypedef unsigned long long U64;\ntypedef U32 U2[2];\ntypedef int I4 __attribute__((vector_size(16)));\ntypedef float F4 __attribute__((vector_size(16)));\ntypedef char C16 __attribute__((vector_size(16)));\ntypedef char C64 __attribute__((vector_size(64)));\nstatic volatile unsigned int effects;\nint touch(void) { effects += 1; return 5; }\nint main(void) {\n  volatile float one = 1.0f;\n  if (__builtin_bit_cast(U32, one) != 0x3f800000u) return 1;\n  U2 words = {0x11223344u, 0x55667788u};\n  U64 bits = __builtin_bit_cast(U64, words);\n  if (bits != 0x5566778811223344ull) return 2;\n  if (__builtin_bit_cast(U2, bits)[1] != 0x55667788u) return 3;\n  I4 integers = __builtin_convertvector((F4){1.75f, -2.75f, 3.5f, 4.25f}, I4);\n  if (integers[0] != 1 || integers[1] != -2 || integers[2] != 3 || integers[3] != 4) return 4;\n  __typeof__(__builtin_shufflevector(integers, integers, 2, -1, 0)) three =\n    __builtin_shufflevector(integers, integers, 2, (__int128)-1, (__int128)0);\n  if (three[0] != 3 || three[2] != 1 || sizeof(three) != 16) return 5;\n  (void)__builtin_nondeterministic_value(touch());\n  if (effects != 0) return 6;\n  C16 signs = {0};\n  for (int i = 0; i < 16; ++i) signs[i] = (char)(i & 1 ? 128 : 0);\n  if (__builtin_ia32_pmovmskb128(signs) != 0xaaaa) return 7;\n  I4 schedule = __builtin_ia32_sha256msg1((I4){16,32,64,128}, (I4){256,512,1024,2048});\n  if ((U32)schedule[0] != 0x40080014u || (U32)schedule[1] != 0x80100028u ||\n      (U32)schedule[2] != 0x00200051u || (U32)schedule[3] != 0x004000a2u) return 8;\n  char bytes[64];\n  C64 merge = {0};\n  for (int i = 0; i < 64; ++i) { bytes[i] = (char)i; merge[i] = (char)(i + 70); }\n  U32 ambient0=1, ambient1=2, ambient2=3, ambient3=4, ambient4=5, ambient5=6;\n  U32 ambient6=7, ambient7=8, ambient8=9, ambient9=10, ambient10=11, ambient11=12;\n  C64 loaded = __builtin_ia32_loaddquqi512_mask((const C64*)bytes, merge, 0x8000000000000003ull);\n  for (int i = 0; i < 64; ++i) {\n    char expected = i == 0 || i == 1 || i == 63 ? bytes[i] : merge[i];\n    if (loaded[i] != expected) return 9;\n  }\n  if (ambient0+ambient1+ambient2+ambient3+ambient4+ambient5+\n      ambient6+ambient7+ambient8+ambient9+ambient10+ambient11 != 78) return 10;\n  return 0;\n}\n"),
+    };
+    String8 runtime = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(runtime_parts), false);
+    String8 runtime_path = buster_test_temporary_path(arguments->arena, S8("vendor-builtin-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(runtime_path, BUSTER_SLICE_TO_BYTE_SLICE(runtime))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("vendor-builtin-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-mattr=+sse2,+cx16"),
+                S8("-fregister-allocator=mir-stack"), form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
+                S8("-fverify-codegen"), S8("-o"), output, runtime_path};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
 // #665: query the real preprocessor with an independent exact-name census.
 // Do not infer support from a prefix or advertise native atomic IR to the
 // Wasm64/eBPF backends, which explicitly reject it.
@@ -31296,6 +31434,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
     BUSTER_TEST_FIXTURE(arguments, c_test_has_builtin);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_transform_builtins);
+    BUSTER_TEST_FIXTURE(arguments, c_test_vendor_builtin_admission);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);
