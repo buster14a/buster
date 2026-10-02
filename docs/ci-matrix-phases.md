@@ -68,7 +68,11 @@ Ninja holds that slot across them. The self-host consumer is a separate
 competing edge. Its time is retained, not attributed to compiler tests.
 
 For a direct `test_all` command, the nested test observer separates compilation
-before the test from the actual test payload. The enclosing command's measured
+before the actual test child starts from the test payload. Pre-test/build time
+includes the nested observer's recorded admission-to-child-start setup and
+start-record publication; it is not a compiler-only CPU or process-launch
+measurement. The three intervals conserve the enclosing validation child time.
+The enclosing command's measured
 tail after the test, plus explicit native analyzer work, is `post_test`.
 For a pooled test target, any pre-test work is included in build time by the
 same rule. Absent tests are compile-only rows, not fabricated successful tests.
@@ -110,6 +114,11 @@ orders. It reports both current-order modeled makespan and observed pool span.
 Contention, cache effects and runner variability are held fixed; a favorable
 prediction is only grounds for a separately reviewed scheduling candidate.
 Direct sequential trees predict no order-only saving under that model.
+
+Corrected accounting is prospective. Retain historical journals and summaries
+with their original reader revision; a later reader's corrected phase totals
+must not bypass the qualification consumer's exact-summary equality check or
+retrospectively qualify an earlier campaign.
 
 ## Campaign completion
 
