@@ -325,6 +325,15 @@ without facts for identical bitcode and diagnostics.
   `C_DIAGNOSTIC_INVALID_INTEGER_LITERAL`; preprocessing keeps the conditional
   directive diagnostic. `c_test_integer_spelling_consistency` and
   `tests/basic_c_integer_literals.c` cover these contracts (GitHub #148).
+- GNU `__extension__` is an operand marker in typed integer constants, ordinary
+  constant initializers, complex initializers and the x87 literal folder. It
+  preserves the operand's type, value and unary-sign interpretation; it does
+  not admit nonconstant calls, unknown names, missing operands or infix marker
+  placement. Marker runs use the existing iterative scans and depth bounds.
+  `c_test_extension_constants` covers glibc's imaginary-unit macro spelling,
+  nested markers, enum/bound/assertion folds, automatic and static values,
+  independent integer/IEEE/x87 payloads and malformed controls in both frontend
+  forms (GitHub #1267).
 - Enumerator integer evaluation uses the typed semantic constant evaluator
   directly over the original preprocessed token stream. `_Generic` selects its
   association by token range without flattening or copying the translation

@@ -22444,6 +22444,12 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             IR_SEMANTIC_RECORD(PARSE_TYPED_NODES, 1);
             u32 begin = task->start;
             u32 limit = task->end;
+            while (begin < limit && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[begin],
+                                                            C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+            {
+                begin += 1;
+            }
+            task->start = begin;
             if (begin >= limit)
             {
                 last = (CParseConstant){.type = C_TYPE_ID_INVALID};
@@ -22459,6 +22465,10 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             for (u32 cursor = begin; cursor < limit; cursor += 1)
             {
                 CToken token = preprocess.tokens[cursor];
+                if (c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+                {
+                    continue;
+                }
                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
                     c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
                 {
