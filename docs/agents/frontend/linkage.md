@@ -4,6 +4,17 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- **TLS classification consumes canonical keyword spellings.** Preprocessing
+  rewrites C23/GNU23 `thread_local` to `_Thread_local`, including preprocessed
+  input. A remaining raw `thread_local` is an ordinary identifier; its use as
+  an object name, typedef, enumerator or initializer member cannot confer TLS.
+  File-scope semantic entities, canonical symbols and globals recognize only
+  `_Thread_local` and `__thread` for thread storage. Static initializers still
+  reject addresses of genuine TLS objects. `c_test_file_tls_dialect` checks
+  these facts and pointer initializer identity through both frontend forms;
+  `c_test_file_tls_dialect_runtime` checks ordinary object placement, address
+  relocations and execution under every native allocator in C17/GNU17.
+
 - **Windows x64 frame records describe instruction-time RSP.**
   `object_windows_x64_unwind_layout` retains SET_FPREG only when no fixed
   allocation follows frame establishment; its displacement is the action's

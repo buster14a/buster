@@ -360,8 +360,8 @@ struct CParseValidationCapacities
     (C_SYMBOL_WELL_KNOWN_BIT(VOLATILE) | C_SYMBOL_WELL_KNOWN_BIT(VOLATILE_GNU_ALT) | C_SYMBOL_WELL_KNOWN_BIT(INLINE) | \
      C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT) | C_SYMBOL_WELL_KNOWN_BIT(GOTO))
 
-// The two spellings of thread storage a block-scope declaration may carry;
-// the C23 `thread_local` is a file-scope-only addition its one scan adds.
+// Preprocessing canonicalizes C23 `thread_local` to `_Thread_local`.
+// A remaining `thread_local` spelling is an ordinary pre-C23 identifier.
 #define C_PARSE_THREAD_LOCAL_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU))
 
 // The storage-class words the block-scope declaration walk folds into flags
@@ -27894,7 +27894,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                      c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(STATIC));
                 is_thread_local |= token.kind == C_TOKEN_IDENTIFIER &&
                                    c_token_in_well_known_set(preprocess.spelling_base, token,
-                                                             C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
+                                                             C_PARSE_THREAD_LOCAL_KEYWORDS);
             }
         }
         declaration->entity = entity;

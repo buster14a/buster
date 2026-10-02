@@ -52020,12 +52020,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             }
             u64 specifiers = declaration_specifier_sets[declarations_by_entity[bucket_index]] &
                              (C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) |
-                              C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
+                              C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL));
             bool is_extern = (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) != 0;
             bool initialized = c_ir_declaration_initializer_range(preprocess, *declaration, &(u32){0}, &(u32){0});
             internal |= (specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 || declaration->is_constexpr;
-            is_thread_local |= (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) |
-                                              C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23))) != 0;
+            is_thread_local |= (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL))) != 0;
             if (initialized || (!is_extern && !definition))
             {
                 definition = declaration;

@@ -6572,6 +6572,236 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTe
     return result;
 }
 
+// TLS comes from a storage-class specifier, not a pre-C23 identifier's spelling.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_tls_dialect(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
+                                    C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
+    struct
+    {
+        String8 source;
+        String8 name;
+        u32 dialect_mask;
+        bool tls;
+        bool pointer;
+        bool aggregate;
+        bool rejected;
+        bool already_preprocessed;
+    } cases[] = {
+        {S8("enum { thread_local = 7 }; int x = thread_local;"), S8("x"), 3, false, false},
+        {S8("enum { thread_local = 7 }; int x = thread_local; int *p = &x;"), S8("x"), 3, false, true},
+        {S8("enum { ordinary = 7 }; int x = ordinary; int *p = &x;"), S8("x"), 15, false, true},
+        {S8("int thread_local = 7; int *p = &thread_local;"), S8("thread_local"), 3, false, true},
+        {S8("typedef int thread_local; thread_local x = 7; int *p = &x;"), S8("x"), 3, false, true},
+        {S8("struct S { int thread_local; }; struct S x = { .thread_local = 7 }; struct S *p = &x;"),
+         S8("x"), 3, false, true, true},
+        {S8("_Thread_local int x = 7;"), S8("x"), 15, true},
+        {S8("__thread int x = 7;"), S8("x"), 10, true},
+        {S8("thread_local int x = 7;"), S8("x"), 12, true},
+        {S8("thread_local int x = 7;"), S8("x"), 12, true, false, false, false, true},
+        {S8("#define thread_local _Thread_local\nthread_local int x = 7;"), S8("x"), 3, true},
+        {S8("_Thread_local int x = 7; int *p = &x;"), S8("x"), 15, true, true, false, true},
+    };
+    String8 refusal = S8("a static initializer may not take the address of a thread-local object");
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(cases); fixture += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            if (!(cases[fixture].dialect_mask & (1u << dialect))) continue;
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[fixture].source,
+                    (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                        .dialect = dialects[dialect], .already_preprocessed = cases[fixture].already_preprocessed});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[fixture].source);
+                if (!tokens.diagnostic_count && !syntax.diagnostic_count)
+                {
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    BUSTER_TEST_RAW(arguments, semantic.analysis_complete &&
+                        semantic.diagnostic_count == (u64)cases[fixture].rejected, cases[fixture].source);
+                    if (cases[fixture].rejected && semantic.diagnostic_count == 1)
+                    {
+                        BUSTER_TEST(arguments, semantic.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                        BUSTER_TEST(arguments, string_first_sequence(semantic.diagnostics[0].message, refusal) != BUSTER_STRING_NO_MATCH);
+                    }
+                    String8 names[] = {cases[fixture].name, S8("p")};
+                    u32 name_count = cases[fixture].pointer ? 2 : 1;
+                    for (u32 name_index = 0; name_index < name_count; name_index += 1)
+                    {
+                        u32 matches = 0;
+                        for (u32 index = 0; index < semantic.entity_count; index += 1)
+                        {
+                            CEntity* entity = semantic.entities + index;
+                            if (entity->kind == C_ENTITY_OBJECT && string_equal(entity->name, names[name_index]))
+                            {
+                                matches += 1;
+                                BUSTER_TEST(arguments, entity->is_thread_local == (name_index == 0 && cases[fixture].tls));
+                            }
+                        }
+                        BUSTER_TEST_RAW(arguments, matches == 1, names[name_index]);
+                    }
+                    // Use the ordinary semantic producer independently of the
+                    // syntax-only constraint check, including its refusal case.
+                    CParseResult parse = c_parse(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, parse.diagnostic_count == 0, cases[fixture].source);
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("file-tls-dialect.c"), tokens, parse,
+                        target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == (u64)cases[fixture].rejected, cases[fixture].source);
+                    if (cases[fixture].rejected)
+                    {
+                        BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
+                        if (lowered.diagnostic_count == 1)
+                        {
+                            BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                            BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, refusal) != BUSTER_STRING_NO_MATCH);
+                        }
+                    }
+                    else if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+                    {
+                        IrModule* module = lowered.program->modules;
+                        IrGlobal* globals[2] = {0};
+                        BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                        for (u32 name_index = 0; name_index < name_count; name_index += 1)
+                        {
+                            u32 matches = 0;
+                            for (u32 index = 0; index < module->global_count; index += 1)
+                            {
+                                IrGlobal* global = module->globals + index;
+                                IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+                                if (symbol && string_equal(symbol->link_name, names[name_index]))
+                                {
+                                    matches += 1;
+                                    globals[name_index] = global;
+                                    BUSTER_TEST(arguments, symbol->kind == IR_SYMBOL_DATA && symbol->is_definition);
+                                    BUSTER_TEST(arguments, symbol->is_thread_local == (name_index == 0 && cases[fixture].tls));
+                                    BUSTER_TEST(arguments, global->is_thread_local == (name_index == 0 && cases[fixture].tls));
+                                }
+                            }
+                            BUSTER_TEST_RAW(arguments, matches == 1, names[name_index]);
+                        }
+                        if (globals[0] && cases[fixture].aggregate)
+                        {
+                            u32 value = 0;
+                            BUSTER_TEST(arguments, globals[0]->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES &&
+                                globals[0]->bytes.pointer && globals[0]->bytes.length == sizeof(value));
+                            if (globals[0]->bytes.pointer && globals[0]->bytes.length == sizeof(value))
+                                memcpy(&value, globals[0]->bytes.pointer, sizeof(value));
+                            BUSTER_TEST(arguments, value == 7);
+                        }
+                        else if (globals[0])
+                        {
+                            BUSTER_TEST(arguments, globals[0]->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER &&
+                                globals[0]->initializer_bits == 7 && !globals[0]->initializer_is_negative);
+                        }
+                        if (cases[fixture].pointer && globals[0] && globals[1])
+                        {
+                            BUSTER_TEST(arguments, globals[1]->initializer_kind == IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS);
+                            BUSTER_TEST(arguments, globals[1]->initializer_symbol.value == globals[0]->symbol.value &&
+                                globals[1]->initializer_addend == 0);
+                        }
+                    }
+                }
+                if (tokens.recovery)
+                {
+                    arena_destroy(tokens.recovery->spelling_arena, 1);
+                    arena_destroy(tokens.recovery->token_arena, 1);
+                    arena_destroy(tokens.recovery->token_shape_arena, 1);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_tls_dialect_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+                           CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("file-tls-dialect"), S8(".c"));
+    String8 source_text = S8("enum { thread_local = 7 }; int x = thread_local; int *p = &x;\n"
+        "struct S { int thread_local; }; struct S s = { .thread_local = 11 }; struct S *sp = &s;\n"
+        "int main(void) { int bad = x != 7 || *p != 7 || p != &x || sp != &s || sp->thread_local != 11;"
+        " *p = 9; sp->thread_local = 13; return bad || x != 9 || s.thread_local != 13; }\n");
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("file-tls-dialect-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
+                                         S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    BUSTER_TEST(arguments, invocation.register_allocator == expected_modes[mode]);
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("TLS dialect {S8} {S8} {S8}: {S8}"),
+                                      dialects[dialect], modes[mode], frontends[form], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
+                        u32 x = UINT32_MAX;
+                        u32 p = UINT32_MAX;
+                        for (u32 symbol_index = 0; symbol_index < compiled.object.symbol_count; symbol_index += 1)
+                        {
+                            ObjectSymbol* symbol = compiled.object.symbols + symbol_index;
+                            if (string_equal(symbol->name, S8("x"))) x = symbol_index;
+                            if (string_equal(symbol->name, S8("p"))) p = symbol_index;
+                        }
+                        if (BUSTER_REQUIRE(arguments, x < compiled.object.symbol_count && p < compiled.object.symbol_count))
+                        {
+                            BUSTER_TEST(arguments, compiled.object.symbols[x].kind == OBJECT_SYMBOL_DATA);
+                            BUSTER_TEST(arguments, compiled.object.symbols[x].section == OBJECT_SECTION_DATA);
+                            BUSTER_TEST(arguments, compiled.object.symbols[x].thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_NO);
+                            u32 address_relocations = 0;
+                            for (u32 relocation_index = 0; relocation_index < compiled.object.relocation_count; relocation_index += 1)
+                            {
+                                ObjectRelocation* relocation = compiled.object.relocations + relocation_index;
+                                if (relocation->section == compiled.object.symbols[p].section && relocation->offset == compiled.object.symbols[p].value)
+                                {
+                                    address_relocations += 1;
+                                    BUSTER_TEST(arguments, relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 && relocation->symbol == x && relocation->addend == 0);
+                                }
+                            }
+                            BUSTER_TEST(arguments, address_relocations == 1);
+                        }
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("TLS dialect runtime {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                              dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_tls(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -31891,6 +32121,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
 
+    BUSTER_TEST_FIXTURE(arguments, c_test_file_tls_dialect);
+    BUSTER_TEST_FIXTURE(arguments, c_test_file_tls_dialect_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_local_tls);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_invalid_local_static_initializer);
