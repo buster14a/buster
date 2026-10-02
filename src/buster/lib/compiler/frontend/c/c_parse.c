@@ -26160,7 +26160,7 @@ BUSTER_C_SHARED bool c_semantic_vendor_selector(Arena* arena, CParseResult* resu
                                               CScopeId scope, u32 start, u32 end, u64* selector)
 {
     CIntegerConstant constant = c_parse_type_integer_constant(arena, preprocess, result, scope, start, end);
-    bool valid = constant.valid && !constant.high && (!constant.is_negative || constant.magnitude == 1);
+    bool valid = constant.valid && !constant.magnitude_high && (!constant.is_negative || constant.magnitude == 1);
     if (valid) *selector = constant.is_negative ? UINT64_MAX : constant.magnitude;
     return valid;
 }
@@ -26376,7 +26376,7 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
                 {
                     u32 limit = c_parse_constraint_expression_end(result, preprocess, argument, close);
                     CIntegerConstant selector = c_parse_type_integer_constant(machine->scratch_arena, preprocess, result, scope, argument, limit);
-                    bool permitted = selector.valid && !selector.high &&
+                    bool permitted = selector.valid && !selector.magnitude_high &&
                         (selector.is_negative ? selector.magnitude == 1 : selector.magnitude < 2 * lanes);
                     if (!permitted)
                     {
