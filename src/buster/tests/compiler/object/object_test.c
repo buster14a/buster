@@ -921,7 +921,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_index_order(UnitTestArgu
                           "\t.quad \"external\"\n\t.type second, @object\nsecond:\n\t.quad \"first\" + 3\n"
                           "\t.type end, @object\nend:\n\t.size end, 0\n\t.size second, 8\n\t.size first, 8\n\t.size alias, 8\n"
                           "\t.section .rodata\n\t.type empty, @object\nempty:\n\t.size empty, 0\n"
-                          "\t.section .bss,\"aw\",@nobits\n\t.type zero, @object\nzero:\n\t.zero 3\n\t.size zero, 3\n");
+                          "\t.section .bss,\"aw\",@nobits\n\t.type zero, @object\nzero:\n\t.zero 3\n\t.size zero, 3\n"
+                          "\t.section .note.GNU-stack,\"\",@progbits\n");
     BUSTER_TEST(arguments, object_assembly_test_index_queries(arguments->arena, &object));
     String8 assembly = object_print_assembly(arguments->arena, &object);
     BUSTER_STRING_TEST(arguments, assembly, expected);
@@ -950,6 +951,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_index_order(UnitTestArgu
         BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(assembly), label));
     }
     object.symbol_count = 0;
+    BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object),
+                       S8("\t.intel_syntax noprefix\n\t.section .note.GNU-stack,\"\",@progbits\n"));
+    object.requires_executable_stack = true;
+    BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object),
+                       S8("\t.intel_syntax noprefix\n\t.section .note.GNU-stack,\"x\",@progbits\n"));
+    object.requires_executable_stack = false;
+    object.target.os = OPERATING_SYSTEM_WINDOWS;
     BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object), S8("\t.intel_syntax noprefix\n"));
     // Literal targets are deliberately queried backward, forward, then
     // backward again while preparing the AArch64 section's internal labels.
@@ -965,7 +973,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_index_order(UnitTestArgu
                           .relocations = literal_relocations, .relocation_count = BUSTER_ARRAY_LENGTH(literal_relocations)};
     expected = S8("\t.extern external\n\t.text\n.Lbuster_0_0:\n\t.quad external\n"
                   "\tldr x0, .Lbuster_0_0\n\tldr x1, .Lbuster_0_16\n.Lbuster_0_16:\n\t.quad external + 7\n"
-                  "\tldr x2, .Lbuster_0_16\n");
+                  "\tldr x2, .Lbuster_0_16\n\t.section .note.GNU-stack,\"\",@progbits\n");
     BUSTER_TEST(arguments, object_assembly_test_index_queries(arguments->arena, &object));
     BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object), expected);
     literal_relocations[0].offset = 24;
