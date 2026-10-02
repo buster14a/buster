@@ -14218,13 +14218,14 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_compile_capture(Arena* arena, String8 compi
     String8 include_local = string_format(arena, S8("-I{S8}/local"), source_directory);
     String8 source = path_join(arena, source_directory, target.source);
     String8 metrics = string_format(arena, S8("-fsource-metrics={S8}.metrics"), prefix);
+    String8 allocator = target.register_allocator.length ? target.register_allocator : S8("fast");
+    String8 allocator_flag = buster ? string_format(arena, S8("-fregister-allocator={S8}"), allocator) : (String8){0};
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, compiler);
     if (buster)
     {
         os_argument_builder_append(&builder, S8("cc"));
-        String8 allocator = target.register_allocator.length ? target.register_allocator : S8("fast");
-        os_argument_builder_append(&builder, string_format(arena, S8("-fregister-allocator={S8}"), allocator));
+        os_argument_builder_append(&builder, allocator_flag);
         if (target.frontend_memory)
         {
             os_argument_builder_append(&builder, S8("-fno-frontend-ssa"));

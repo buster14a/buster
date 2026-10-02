@@ -19715,7 +19715,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_large_buffers(UnitTestAr
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CTestLargeConstantCase test = cases[case_index];
         String8 source = string_format(temporary.arena,
-            S8("void ordinary(int); _Alignas(8) int retained; int probe_function(void) { int probe = {S8}; return probe; }"), test.expression);
+            S8("void ordinary(int); _Alignas(8) int retained; int probe_function(void) {{ int probe = {S8}; return probe; }}"), test.expression);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
             (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
