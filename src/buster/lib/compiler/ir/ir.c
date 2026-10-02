@@ -3270,7 +3270,7 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
 {
     IrType* root = ir_type_from_id(&program->types, root_type);
     bool result;
-    if (!root || !root->layout.resolved || !root->layout.size || root->layout.size > 16)
+    if (!root || !root->layout.resolved || root->layout.size > 16)
     {
         result = false;
     }
@@ -5868,10 +5868,15 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     else if (instruction->opcode == IR_OPCODE_AGGREGATE)
     {
         IrType* aggregate = ir_type_from_id(&program->types, instruction->canonical_type);
+        // A zero-size record is one semantic value regardless of how many
+        // zero-size fields spell it. Its canonical constructor therefore has
+        // no operands, just as it has no object bytes to load or store.
+        bool complete = aggregate && aggregate->layout.resolved && !aggregate->layout.size && !instruction->operand_count;
+        complete |= aggregate && (aggregate->kind == IR_TYPE_UNION ? instruction->operand_count <= 1
+                                                                    : instruction->operand_count == aggregate->field_count);
         bool valid = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
                      instruction->operand_count == instruction->immediate_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-                     function->values[instruction->result.value].category == IR_VALUE_VALUE &&
-                     (aggregate->kind == IR_TYPE_UNION ? instruction->operand_count <= 1 : instruction->operand_count == aggregate->field_count);
+                     function->values[instruction->result.value].category == IR_VALUE_VALUE && complete;
         for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
         {
             u64 field_index = instruction->immediates[operand_index];

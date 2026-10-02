@@ -6298,6 +6298,173 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_padding_eightbytes(
     return result;
 }
 
+// GNU empty records have no SysV register, stack, or hidden-result transport.
+// Exchange them with the host in both directions at the last-register and
+// exhausted-register boundaries, and exercise zero-byte member copies.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_empty_aggregates(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#include <stdarg.h>\n"
+        "typedef struct {} Empty;\n"
+        "typedef struct { Empty member; } EmptyBox;\n"
+        "typedef struct { long long first; Empty empty; long long second; } Mixed;\n"
+        "#ifdef SYSV_EMPTY_HOST\n"
+        "#define EMPTY(name) host_##name\n"
+        "#else\n"
+        "#define EMPTY(name) name\n"
+        "#endif\n"
+        "typedef long long EmptyBoundary(long long, long long, long long, long long, long long, Empty, long long);\n"
+        "typedef long long EmptyExhausted(long long, long long, long long, long long, long long, long long, Empty, long long);\n"
+        "typedef Empty EmptyResult(long long, long long, long long, long long, long long, long long);\n"
+        "typedef long long EmptyMembers(long long);\n"
+        "typedef long long EmptyVariadic(long long, ...);\n"
+        "volatile long long EMPTY(empty_seen);\n"
+        "long long EMPTY(empty_boundary)(long long a, long long b, long long c, long long d, long long e, Empty empty, long long tail)\n"
+        "{ (void)empty; return a + b + c + d + e + tail; }\n"
+        "long long EMPTY(empty_exhausted)(long long a, long long b, long long c, long long d, long long e, long long f, Empty empty, long long tail)\n"
+        "{ (void)empty; return a + b + c + d + e + f + tail; }\n"
+        "Empty EMPTY(empty_result)(long long a, long long b, long long c, long long d, long long e, long long f)\n"
+        "{ EMPTY(empty_seen) = a + b + c + d + e + f; return (Empty){}; }\n"
+        "long long EMPTY(empty_members)(long long value)\n"
+        "{ Mixed left = {value, {}, value + 1}; Mixed right = left; Empty local = right.empty; right.empty = local; EmptyBox box = {}; EmptyBox copy = box; copy.member = box.member; Empty* address = &local; Empty* parenthesized = &(*address); (*parenthesized) = *( &(Empty){} ); return right.first + right.second + sizeof(copy) + (address != parenthesized); }\n"
+        "long long EMPTY(empty_variadic)(long long marker, ...)\n"
+        "{ va_list ap; va_start(ap, marker); long long total = marker; total += va_arg(ap, long long); total += va_arg(ap, long long); total += va_arg(ap, long long); total += va_arg(ap, long long); total += va_arg(ap, long long); Empty empty = va_arg(ap, Empty); long long tail = va_arg(ap, long long); va_end(ap); return total + tail + sizeof(empty); }\n"
+        "int EMPTY(empty_calls)(EmptyBoundary* boundary, EmptyExhausted* exhausted, EmptyResult* returning, EmptyMembers* members, EmptyVariadic* variadic,\n"
+        "                       volatile long long* seen)\n"
+        "{\n"
+        "    Empty empty = {};\n"
+        "    int bad = boundary(1, 2, 3, 4, 5, empty, 42) != 57;\n"
+        "    bad |= (exhausted(1, 2, 3, 4, 5, 6, empty, 42) != 63) << 1;\n"
+        "    *seen = 0;\n"
+        "    empty = returning(1, 2, 3, 4, 5, 6);\n"
+        "    bad |= (*seen != 21) << 2;\n"
+        "    bad |= (members(100) != 201) << 3;\n"
+        "    bad |= (variadic(1, 2ll, 3ll, 4ll, 5ll, 6ll, empty, 42ll) != 63) << 4;\n"
+        "    return bad + (int)sizeof(empty);\n"
+        "}\n"
+        "#ifdef SYSV_EMPTY_HOST\n"
+        "long long empty_boundary(long long, long long, long long, long long, long long, Empty, long long);\n"
+        "long long empty_exhausted(long long, long long, long long, long long, long long, long long, Empty, long long);\n"
+        "Empty empty_result(long long, long long, long long, long long, long long, long long);\n"
+        "long long empty_members(long long);\n"
+        "long long empty_variadic(long long, ...);\n"
+        "int empty_calls(EmptyBoundary*, EmptyExhausted*, EmptyResult*, EmptyMembers*, EmptyVariadic*, volatile long long*);\n"
+        "extern volatile long long empty_seen;\n"
+        "int main(void)\n"
+        "{\n"
+        "    int first = host_empty_calls(empty_boundary, empty_exhausted, empty_result, empty_members, empty_variadic, &empty_seen);\n"
+        "    int second = empty_calls(host_empty_boundary, host_empty_exhausted, host_empty_result, host_empty_members, host_empty_variadic, &host_empty_seen);\n"
+        "    return first ? first : (second ? 128 | second : 0);\n"
+        "}\n"
+        "#endif\n");
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-sysv-empty-aggregates"), S8(".c"));
+    bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, source_written);
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 host_compilers[2] = {S8(BUSTER_HOST_C_COMPILER)};
+    String8 host_argument = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    String8 host_prefixes[2] = {S8("buster-sysv-empty-aggregates-host"), S8("buster-sysv-empty-aggregates-gcc")};
+    String8 host_objects[2] = {0};
+    bool host_compiled[2] = {0};
+    u32 host_compiler_count = 1;
+#if BUSTER_LINUX
+    String8 gcc = executable_resolve_in_path(arguments->arena, S8("gcc"));
+    if (gcc.length && !string_equal(gcc, host_compilers[0]))
+    {
+        host_compilers[host_compiler_count++] = gcc;
+    }
+#endif
+    for (u32 reference = 0; reference < host_compiler_count; reference += 1)
+    {
+        host_objects[reference] = buster_test_temporary_path(arguments->arena, host_prefixes[reference], S8(".o"));
+        String8 host_command[14];
+        u32 host_count = 0;
+        host_command[host_count++] = host_compilers[reference];
+        if (reference == 0 && host_argument.length) { host_command[host_count++] = host_argument; }
+        host_command[host_count++] = S8("-std=gnu17");
+        host_command[host_count++] = S8("-O0");
+        host_command[host_count++] = S8("-fno-inline");
+        host_command[host_count++] = S8("-DSYSV_EMPTY_HOST=1");
+        host_command[host_count++] = S8("-c");
+        host_command[host_count++] = source_path;
+        host_command[host_count++] = S8("-o");
+        host_command[host_count++] = host_objects[reference];
+        ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        host_compiled[reference] = source_written && host_spawn.handle &&
+                                  os_process_wait_deadline(arguments->arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST_RAW(arguments, host_compiled[reference], host_compilers[reference]);
+    }
+#endif
+    for (u32 target = 0; source_written && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 pic = 0; pic < 2; pic += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-sysv-empty-aggregates"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-std=gnu17"), S8("-target"), targets[target], S8("-march=baseline"),
+                        modes[mode], frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), source_path, S8("-o"), object};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 6 && compiled.codegen_statistics.fallback_function_count == 0);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                    for (u32 reference = 0; reference < host_compiler_count; reference += 1)
+                    {
+                        if (host_compiled[reference] && compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                            ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
+                        {
+                            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-sysv-empty-aggregates-run"), S8(""));
+                            String8 link_command[10];
+                            u32 link_count = 0;
+                            link_command[link_count++] = host_compilers[reference];
+                            if (reference == 0 && host_argument.length) { link_command[link_count++] = host_argument; }
+#if BUSTER_LINUX
+                            link_command[link_count++] = S8("-no-pie");
+#endif
+                            link_command[link_count++] = object;
+                            link_command[link_count++] = host_objects[reference];
+                            link_command[link_count++] = S8("-o");
+                            link_command[link_count++] = executable;
+                            ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                            bool link_ok = linked.handle && os_process_wait_deadline(temporary.arena, linked, 30000000).result == PROCESS_RESULT_SUCCESS;
+                            BUSTER_TEST_RAW(arguments, link_ok, host_compilers[reference]);
+                            if (link_ok)
+                            {
+                                String8 run_command[] = {executable};
+                                ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command),
+                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                                if (BUSTER_REQUIRE(arguments, run.handle != 0))
+                                {
+                                    ProcessWaitResult waited = os_process_wait_deadline(temporary.arena, run, 30000000);
+                                    String8 context = string_format(temporary.arena,
+                                        S8("SysV empty aggregate: {S8} {S8} PIC={u32} reference={S8}; status={u32} timeout={u32}; exit bits: boundary=1 exhausted=2 result=4 members=8 variadic=16 Buster-caller=128"),
+                                        modes[mode], frontends[frontend], pic, host_compilers[reference], waited.platform_status, (u32)waited.timed_out);
+                                    BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS, context);
+                                }
+                            }
+                        }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_aligned_calls(UnitTestArguments* arguments)
 {
@@ -15981,6 +16148,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_va_list);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_named_f80_varargs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_padding_eightbytes);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_empty_aggregates);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_indirect_variadic);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_aligned_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_large_frame);

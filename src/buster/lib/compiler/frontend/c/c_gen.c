@@ -1507,7 +1507,10 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
                                  !(type->layout.size & (type->layout.size - 1))));
         }
     }
-    return type->kind != IR_TYPE_FUNCTION && vector_supported && (type->kind != IR_TYPE_VA_LIST || type->layout.size <= 32) && abi.part_count;
+    bool empty_system_v_aggregate = convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && !type->layout.size &&
+                                    (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && !abi.part_count && !abi.indirect && !abi.memory;
+    return type->kind != IR_TYPE_FUNCTION && vector_supported && (type->kind != IR_TYPE_VA_LIST || type->layout.size <= 32) &&
+           (abi.part_count || empty_system_v_aggregate);
 }
 
 BUSTER_C_INTERNAL bool c_ir_signature_body_supported(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId return_type,
@@ -6999,7 +7002,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerI
 {
     CIrSsaLocal* direct = local->direct_ssa ? c_ir_ssa_place_local(builder, local->place) : 0;
     IrValueId result = direct ? c_ir_ssa_read(builder, direct, c_ir_token_source_range(builder, token), true)
-                             : c_ir_emit_memory_load(builder, local, token);
+                              : c_ir_emit_memory_load(builder, local, token);
     c_ir_vla_loaded_shape(builder, result, local->place);
     return result;
 }
@@ -7256,7 +7259,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder,
 {
     CIrSsaLocal* local = c_ir_ssa_place_local(builder, place);
     IrValueId result = local && local->type.value == type.value ? c_ir_ssa_read(builder, local, source, false)
-                                                            : c_ir_emit_memory_load_place_raw(builder, place, type, source);
+                                                               : c_ir_emit_memory_load_place_raw(builder, place, type, source);
     c_ir_vla_loaded_shape(builder, result, place);
     return result;
 }
@@ -8600,6 +8603,8 @@ BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValue
     {
         return false;
     }
+    bool empty_aggregate = !atomic && qualified_place_type && qualified_place_type->layout.resolved && !qualified_place_type->layout.size &&
+                           (qualified_place_type->kind == IR_TYPE_STRUCT || qualified_place_type->kind == IR_TYPE_UNION);
     if (atomic && !builder->preparing_calls && c_ir_wide_atomic_runtime_required(builder, type))
     {
         return c_ir_emit_wide_atomic_runtime_store(builder, place, type, value, source, IR_MEMORY_ORDER_SEQUENTIAL);
@@ -8670,7 +8675,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValue
         c_ir_ssa_event(builder, (u32)(local - builder->direct_ssa->locals), IR_OPCODE_STORE, value, source);
         builder->direct_ssa->statistics.writes += 1;
     }
-    else
+    else if (!empty_aggregate)
     {
         IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
         operands[0] = place;
