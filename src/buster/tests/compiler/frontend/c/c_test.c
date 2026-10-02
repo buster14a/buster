@@ -30808,10 +30808,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
     {
         String8 source;
         String8 type;
+        u32 column;
     };
     CTestWideSwitchRejection rejections[] = {
-        {S8("int reject(__int128 value) { switch (value) { case 1: return 1; default: return 3; } }\n"), S8("__int128")},
-        {S8("int reject(unsigned __int128 value) { switch (value) { case 1: return 1; default: return 3; } }\n"), S8("unsigned __int128")},
+        {S8("int reject(__int128 value) { switch (value) { case 1: return 1; default: return 3; } }\n"), S8("__int128"), 38},
+        {S8("int reject(unsigned __int128 value) { switch (value) { case 1: return 1; default: return 3; } }\n"), S8("unsigned __int128"), 47},
     };
     for (u32 target_index = 0; target_index < 6; target_index += 1)
     {
@@ -30865,10 +30866,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
                 CIRLowerResult wide = c_lower_to_ir_with_options(temporary.arena, S8("switch-wide-rejection.c"), wide_tokens, wide_parse, target,
                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
                 BUSTER_TEST(arguments, !wide_tokens.diagnostic_count && !wide_parse.diagnostic_count);
+                BUSTER_TEST(arguments, !wide.canonical_ir_certified);
                 if (BUSTER_REQUIRE(arguments, wide.diagnostic_count == 1 && wide.diagnostics != 0))
                 {
                     CDiagnostic diagnostic = wide.diagnostics[0];
                     BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                    BUSTER_TEST(arguments, diagnostic.location.line == 1 && diagnostic.location.column == rejections[index].column &&
+                                           diagnostic.location.offset == rejections[index].column - 1);
                     BUSTER_STRING_TEST(arguments, diagnostic.message, string_format(temporary.arena,
                         S8("in function 'reject': switch controlling type '{S8}' is unsupported; integer switch dispatch supports at most 64 bits"),
                         rejections[index].type));
