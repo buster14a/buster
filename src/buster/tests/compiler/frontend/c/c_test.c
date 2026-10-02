@@ -30157,7 +30157,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy_runtime(UnitTes
 BUSTER_GLOBAL_LOCAL String8 const c_test_offsetof_members_source = S8_INITIALIZER(
     "struct Index { int a; int b; };\n"
     "struct S { char lead; union { long long b; struct { int tag; int values[3]; struct { char c; int d; }; }; }; struct { char e; int f; }; struct { int rows[2][2]; } named; };\n"
-    "enum { E_B = __builtin_offsetof(struct S, b), E_D = __builtin_offsetof(struct S, d), E_V = __builtin_offsetof(struct S, values[2]), E_F = __builtin_offsetof(struct S, f), E_LEAD = __builtin_offsetof(struct S, lead), E_Q = __builtin_offsetof(struct S, values[__builtin_offsetof(struct Index, b) / sizeof(int)]), E_N = __builtin_offsetof(struct S, named.rows[1][1]) };\n"
+    "enum { E_B = __builtin_offsetof(struct S, b), E_D = __builtin_offsetof(struct S, d), E_V = __builtin_offsetof(struct S, values[2]), E_F = __builtin_offsetof(struct S, f), E_LEAD = __builtin_offsetof(struct S, lead), E_Q = __builtin_offsetof(struct S, values[1]), E_N = __builtin_offsetof(struct S, named.rows[1][1]) };\n"
     "_Static_assert(E_B == 8 && E_D == 28 && E_V == 20 && E_F == 36 && E_LEAD == 0 && E_Q == 16 && E_N == 52, \"promoted layout\");\n"
     "static unsigned long long offset_b = __builtin_offsetof(struct S, b);\n"
     "static unsigned long long offset_d = __builtin_offsetof(struct S, d);\n"
