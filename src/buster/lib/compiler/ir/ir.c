@@ -5434,6 +5434,67 @@ BUSTER_GLOBAL_LOCAL bool ir_place_narrow_bit_field_access(IrProgram* program, Ir
 // The per-opcode obligations: operand counts and types, immediates, targets and
 // result shape. Every fault here names the instruction the caller is holding, so
 // only the kind comes back.
+// Switch case keys name integer bit patterns. Keep the caller's case order;
+// monotonic keys need no copy, while unordered keys use bounded scratch radix.
+BUSTER_GLOBAL_LOCAL bool ir_canonical_switch_keys_unique(IrProgram* program, IrInstruction* instruction, u32 bit_width)
+{
+    u32 count = instruction->immediate_count;
+    u64 mask = bit_width > 0 && bit_width < 64 ? (UINT64_C(1) << bit_width) - 1 : UINT64_MAX;
+    u64 previous = count ? instruction->immediates[0] & mask : 0;
+    u64 largest = previous;
+    bool ascending = true;
+    bool descending = true;
+    bool unique = true;
+    for (u32 index = 1; index < count && unique; index += 1)
+    {
+        u64 key = instruction->immediates[index] & mask;
+        ascending &= key > previous;
+        descending &= key < previous;
+        unique = key != previous;
+        largest = BUSTER_MAX(largest, key);
+        previous = key;
+    }
+    if (unique && !ascending && !descending)
+    {
+        TemporalArena temporary = scratch_begin(&program->arena, 1);
+        u64* source = arena_allocate(temporary.arena, u64, count);
+        u64* destination = arena_allocate(temporary.arena, u64, count);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            source[index] = instruction->immediates[index] & mask;
+        }
+        enum { IR_SWITCH_RADIX_BITS = 8, IR_SWITCH_RADIX_BUCKETS = 1 << IR_SWITCH_RADIX_BITS };
+        for (u32 shift = 0; shift < 64 && (largest >> shift) != 0; shift += IR_SWITCH_RADIX_BITS)
+        {
+            u32 offsets[IR_SWITCH_RADIX_BUCKETS] = {0};
+            for (u32 index = 0; index < count; index += 1)
+            {
+                offsets[(source[index] >> shift) & (IR_SWITCH_RADIX_BUCKETS - 1)] += 1;
+            }
+            u32 offset = 0;
+            for (u32 bucket = 0; bucket < IR_SWITCH_RADIX_BUCKETS; bucket += 1)
+            {
+                u32 population = offsets[bucket];
+                offsets[bucket] = offset;
+                offset += population;
+            }
+            for (u32 index = 0; index < count; index += 1)
+            {
+                destination[offsets[(source[index] >> shift) & (IR_SWITCH_RADIX_BUCKETS - 1)]++] = source[index];
+            }
+            u64* swap = source;
+            source = destination;
+            destination = swap;
+        }
+        for (u32 index = 1; index < count && unique; index += 1)
+        {
+            unique = source[index] != source[index - 1];
+        }
+        scratch_end(temporary);
+    }
+    return unique;
+}
+
 BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgram* program, IrFunction* function, IrType* signature,
                                                                         IrInstruction* instruction)
 {
@@ -6070,7 +6131,8 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         {
             valid_targets = instruction->targets[target_index].value < function->block_count;
         }
-        if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || !valid_targets || instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || !valid_targets || instruction->result.value != IR_ID_UNDERLYING_INVALID ||
+            !ir_canonical_switch_keys_unique(program, instruction, switched_type->bit_width))
         {
             error = IR_VALIDATION_BRANCH_TARGET;
         }
