@@ -44,6 +44,37 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.
+- **`tools/uarch_lab.py`** is the micro-architecture lab: one command that
+  says *where* (symbol, line, instruction), *when* (compiler phase, time in the
+  run), *what* and *how many* for time, instructions/IPC, branch misses,
+  L1I/L1D/TLB misses, top-down metric groups and page faults (with the faulting
+  data address and its mapping) over the stage-1 self-host compile, pinned to
+  one CPU. Its steps are `env`, `timed` (N `perf stat` runs, byte-compared
+  outputs, min/median/MAD, drift, IPC, effective clock, ns/byte and
+  instructions/token from `-fsource-metrics`), `topdown` (`perf stat -r 3 -M`
+  per discovered metric group, one group per invocation), `timeline`
+  (`perf stat -I 20` intervals split across phases, CSV and SVG/HTML chart),
+  `sampling` (`perf record --call-graph fp` per event, every page fault,
+  annotate and srcline listings), `ibs` (`--sudo` only: IBS op/fetch and
+  `perf mem` on the pinned CPU, the compiler itself run unprivileged) and
+  `micro` (`ide bench`, with the predictor-learning caveat). Every raw file stays
+  in the output directory, failed or unsupported counters render as NA, and
+  `report DIR` re-renders `report.md`, whose first section lists the hottest
+  functions per event, top fault sites, the dominant top-down category and the
+  slowest phase as pointers to the raw files:
+
+  ```sh
+  python3 tools/uarch_lab.py run --ide build/Release/ide --repo-root . \
+      --cpu 2 --output /tmp/lab --runs 30 [--sudo] [--skip STEP...]
+  python3 tools/uarch_lab.py report /tmp/lab
+  python3 -B tools/uarch_lab_test.py
+  ```
+
+  The phase breakdown needs a binary that accepts `-fmetrics-out=` and writes
+  a measured `CC_METRICS_INPUT` record (currently the #923 fold, not main); the
+  lab probes for it and otherwise reports the phase sections as NA. Phase
+  boundaries come from the compiler's own clock, which starts after argument
+  parsing, so the report states how much of the run lies outside it.
 - Native-backend retirement has a separate maintainer-approved
   [performance contract](../native-retirement-performance-contract.md). Its
   tighter budgets, immutable #508 binding, dedicated-host admission and

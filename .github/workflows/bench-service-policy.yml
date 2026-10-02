@@ -48,6 +48,8 @@ jobs:
           python3 -B tools/zen5_aa_noise.py --self-test
           python3 -B tools/zen5_build_control.py --self-test
           python3 -B tools/zen5_aa_evaluator.py --self-test
+      - name: Replay micro-architecture lab formats
+        run: python3 -B tools/uarch_lab_test.py
       - name: Exercise atomic exclusive admission
         shell: bash
         run: |
