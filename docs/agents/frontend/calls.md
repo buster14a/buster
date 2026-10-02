@@ -321,5 +321,7 @@ and runs independent host-built versions of the same source recipe.
 The existing per-entity declaration scan decides whether a body supplies an
 external definition. A referenced C99 inline-only body retains a canonical
 external declaration and emits no body; calls and addresses bind to the
-external definition from another unit. Unused bodies retain their existing
+external definition from another unit. Pre-created function symbols take the
+same definition decision, preserving real alias definitions; GNU inline-only
+bodies do not mark those symbols defined. Unused bodies retain their existing
 dropped state. No inline optimizer, dependency walk or GNU policy is added.

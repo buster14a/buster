@@ -52164,7 +52164,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             {
                 first = declaration;
             }
-            if (declaration->is_definition)
+            if (declaration->is_definition && !declaration->is_gnu_inline_only)
             {
                 definition = declaration;
             }
@@ -52213,7 +52213,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             {
                 first = declaration;
             }
-            if (declaration->is_definition)
+            if (declaration->is_definition && !declaration->is_gnu_inline_only)
             {
                 definition = declaration;
             }
@@ -52615,6 +52615,16 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         // Without inline substitution, calls and addresses name the single
         // external definition; this C99 inline-only body supplies none.
         declaration.is_definition &= !inline_definition;
+        if (inline_definition)
+        {
+            // Global initializers needed this symbol before the body decision.
+            // Reconcile its definition flag while retaining genuine aliases.
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, entity_symbols[declaration.entity.value]);
+            if (symbol)
+            {
+                symbol->is_definition = entity_alias_targets[declaration.entity.value].value < parse.entity_count;
+            }
+        }
         // Every declaration of an entity shares one IrFunction: the first
         // earlier declaration of the entity that took a row names it. Search
         // the entity's own declarations rather than the name index, whose
