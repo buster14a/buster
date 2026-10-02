@@ -11096,7 +11096,7 @@ BUSTER_GLOBAL_LOCAL IrInstruction compiler_driver_test_wasm_bit_count_row(IrOpco
                            .next = IR_INSTRUCTION_ID_INVALID, .result = result, .opcode = (u8)opcode,
                            .conversion_operation = IR_CONVERSION_COUNT, .unary_operation = IR_UNARY_COUNT,
                            .binary_operation = IR_BINARY_COUNT, .memory_order = IR_MEMORY_ORDER_COUNT,
-                           .failure_memory_order = IR_MEMORY_ORDER_COUNT, .atomic_operation = IR_ATOMIC_COMPILER_DRIVER_WASM_BIT_COUNT_OPERATION_COUNT};
+                           .failure_memory_order = IR_MEMORY_ORDER_COUNT, .atomic_operation = IR_ATOMIC_OPERATION_COUNT};
 }
 
 BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_bit_count_program(Arena* arena, Target target, u32 const* widths, u32 width_count, bool* committed_out)
