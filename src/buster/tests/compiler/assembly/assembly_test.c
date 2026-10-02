@@ -2799,11 +2799,444 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_suffix_aliases(UnitTestArgu
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target arm_targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_IOS},
+    };
+    struct AssemblyImmediateCase
+    {
+        String8 source;
+        u32 word;
+    };
+    struct AssemblyImmediateCase const cases[] = {
+        {S8("add x0, x0, #1"), 0x91000400},
+        {S8("add x0, x0, 1"), 0x91000400},
+        {S8("sub w1, w2, #4"), 0x51001041},
+        {S8("add x0, sp, #16"), 0x910043e0},
+        {S8("mov x8, #93"), 0xd2800ba8},
+        {S8("mov x8, 93"), 0xd2800ba8},
+        {S8("mov w0, #0"), 0x52800000},
+        {S8("mov w0, #65535"), 0x529fffe0},
+        {S8("mov x0, #65535"), 0xd29fffe0},
+        {S8("movz x0, #5"), 0xd28000a0},
+        {S8("cmp x0, #3"), 0xf1000c1f},
+        {S8("ldr x0, [x1, #8]"), 0xf9400420},
+        {S8("add x0, x1, x2"), 0x8b020020},
+        {S8("mov x0, x1"), 0xaa0103e0},
+        {S8("add x3, x4, w5, uxtw #2"), 0x8b254883},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(arm_targets); target_index += 1)
+    {
+        Target target = arm_targets[target_index];
+        String8 separator = target_index >= 2 ? S8("%%") : S8(";");
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            u8 expected[8];
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                expected[byte] = (u8)(cases[index].word >> (8 * byte));
+                expected[byte + 4] = (u8)(0xd65f03c0u >> (8 * byte));
+            }
+            AssemblyEncodeResult instruction = assembly_encode(arguments->arena, cases[index].source,
+                (AssemblyEncodeOptions){.target = target});
+            BUSTER_TEST_RAW(arguments, !instruction.diagnostic_count && !instruction.relocation_count &&
+                assembly_test_bytes_equal(instruction.bytes, expected, 4), cases[index].source);
+            String8 source = string_format(arguments->arena, S8(".text\nf: {S8}{S8} ret\n"), cases[index].source, separator);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+            BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && unit.section_count == 1 &&
+                assembly_test_bytes_equal(unit.sections[0].data, expected, sizeof(expected)), source);
+        }
+        // Post-index is outside the current scalar-memory grammar. Retaining
+        // its immediate must refuse the complete form, never erase writeback.
+        AssemblyUnitResult refused = assembly_unit_encode(arguments->arena, S8(".text\nldr x1, [x2], #8\n"),
+            (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, refused.diagnostic_count == 1);
+        String8 invalid_moves[] = {S8("mov sp,#1"), S8("mov x0,#-1"), S8("mov x0,#65536"),
+                                  S8("mov x0,missing"), S8("mov x0,#1,"), S8("mov x0,#1,x1")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_moves); index += 1)
+        {
+            AssemblyEncodeResult invalid_move = assembly_encode(arguments->arena, invalid_moves[index],
+                (AssemblyEncodeOptions){.target = target});
+            BUSTER_TEST_RAW(arguments, invalid_move.diagnostic_count == 1 && !invalid_move.bytes.length, invalid_moves[index]);
+        }
+        AssemblyEncodeResult symbolic = assembly_encode(arguments->arena, S8("add x0, x0, unresolved"),
+            (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, symbolic.diagnostic_count == 1 && !symbolic.symbol_count && !symbolic.bytes.length);
+        AssemblyUnitResult comment = assembly_unit_encode(arguments->arena,
+            target_index >= 2 ? S8(".text\nnop; ret /* unmatched quote \"\nret\n")
+                              : S8(".text\nnop // ret; /* unmatched quote \"\nret\n"),
+            (AssemblyEncodeOptions){.target = target});
+        u8 const nop_ret[] = {0x1f, 0x20, 0x03, 0xd5, 0xc0, 0x03, 0x5f, 0xd6};
+        BUSTER_TEST(arguments, !comment.diagnostic_count && comment.section_count == 1 &&
+            assembly_test_bytes_equal(comment.sections[0].data, nop_ret, sizeof(nop_ret)));
+        String8 invalid = string_format(arguments->arena, S8(".text\nnop{S8} bogus\n"), separator);
+        AssemblyUnitResult diagnostic = assembly_unit_encode(arguments->arena, invalid, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, diagnostic.diagnostic_count == 1);
+        if (diagnostic.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, diagnostic.diagnostics[0].line == 2 && diagnostic.diagnostics[0].column == (target_index >= 2 ? 7u : 6u));
+        }
+        char8 many[256];
+        u64 length = 0;
+        for (u32 index = 0; index < 40; index += 1)
+        {
+            memcpy(many + length, "nop", 3);
+            length += 3;
+            memcpy(many + length, separator.pointer, separator.length);
+            length += separator.length;
+        }
+        String8 many_source = string_format(arguments->arena, S8(".text\n{S8}"), (String8){.pointer = many, .length = length});
+        AssemblyUnitResult population = assembly_unit_encode(arguments->arena, many_source, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, !population.diagnostic_count && population.section_count == 1 && population.sections[0].data.length == 160);
+        if (!population.diagnostic_count && population.section_count == 1 && population.sections[0].data.length == 160)
+        {
+            for (u32 index = 0; index < 40; index += 1)
+            {
+                BUSTER_TEST(arguments, !memcmp(population.sections[0].data.pointer + index * 4, nop_ret, 4));
+            }
+        }
+        String8 quoted_source = S8(".data\n.ascii \"#;/*keep*/ //%%\", \"\\\"#;/*q*/\"\n"
+                                  "/* comment\n; # %% */ .byte 7\n");
+        String8 quoted_expected = S8("#;/*keep*/ //%%\"#;/*q*/\007");
+        AssemblyUnitResult quoted = assembly_unit_encode(arguments->arena, quoted_source, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, !quoted.diagnostic_count && quoted.section_count == 1 &&
+            assembly_test_bytes_equal(quoted.sections[0].data, (u8 const*)quoted_expected.pointer, (u32)quoted_expected.length));
+    }
+    Target x86_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(x86_targets); target_index += 1)
+    {
+        Target target = x86_targets[target_index];
+        AssemblyUnitResult intel = assembly_unit_encode(arguments->arena, S8(".text\nnop; ret # ignored\n"),
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 const intel_expected[] = {0x90, 0xc3};
+        BUSTER_TEST(arguments, !intel.diagnostic_count && intel.section_count == 1 &&
+            assembly_test_bytes_equal(intel.sections[0].data, intel_expected, sizeof(intel_expected)));
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena,
+            S8(".text\nxor %eax, %eax; inc %eax; ret # ; inc %eax /* \"\n"),
+            (AssemblyEncodeOptions){.target = target});
+        u8 const expected[] = {0x31, 0xc0, 0xff, 0xc0, 0xc3};
+        BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count == 1 &&
+            assembly_test_bytes_equal(unit.sections[0].data, expected, sizeof(expected)));
+        AssemblyUnitResult labels = assembly_unit_encode(arguments->arena,
+            S8(".text\n1: nop; loop 1b; jmp 1f; 1: nop; loop 1b; ret\n"),
+            (AssemblyEncodeOptions){.target = target});
+        u8 const label_bytes[] = {0x90, 0xe2, 0xfd, 0xe9, 0, 0, 0, 0, 0x90, 0xe2, 0xfd, 0xc3};
+        BUSTER_TEST(arguments, !labels.diagnostic_count && !labels.symbol_count && !labels.relocation_count &&
+            labels.section_count == 1 && assembly_test_bytes_equal(labels.sections[0].data, label_bytes, sizeof(label_bytes)));
+        AssemblyUnitResult diagnostic = assembly_unit_encode(arguments->arena, S8(".text\nnop; bogus\n"),
+            (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, diagnostic.diagnostic_count == 1);
+        if (diagnostic.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, diagnostic.diagnostics[0].line == 2 && diagnostic.diagnostics[0].column == 6);
+        }
+        AssemblyUnitResult quoted = assembly_unit_encode(arguments->arena, S8(".data\n.ascii \"#;/*keep*/ //%%\"\n"),
+            (AssemblyEncodeOptions){.target = target});
+        String8 quoted_expected = S8("#;/*keep*/ //%%");
+        BUSTER_TEST(arguments, !quoted.diagnostic_count && quoted.section_count == 1 &&
+            assembly_test_bytes_equal(quoted.sections[0].data, (u8 const*)quoted_expected.pointer, (u32)quoted_expected.length));
+        String8 escaped_sources[] = {
+            S8(".data\n.ascii \"\\\\\", \"x\"\n"),
+            S8(".data\n.ascii \"\\\\\\\"\", \"x\"\n"),
+        };
+        String8 escaped_expected[] = {S8("\\x"), S8("\\\"x")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(escaped_sources); index += 1)
+        {
+            AssemblyUnitResult escaped = assembly_unit_encode(arguments->arena, escaped_sources[index],
+                (AssemblyEncodeOptions){.target = target});
+            BUSTER_TEST(arguments, !escaped.diagnostic_count && escaped.section_count == 1 &&
+                assembly_test_bytes_equal(escaped.sections[0].data, (u8 const*)escaped_expected[index].pointer, (u32)escaped_expected[index].length));
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_aarch64_exclusive_pairs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_IOS},
+    };
+    typedef struct AssemblyExclusivePairCase AssemblyExclusivePairCase;
+    struct AssemblyExclusivePairCase
+    {
+        String8 source;
+        u32 word;
+    };
+    // Independent LLVM memory controls and architectural register fields.
+    AssemblyExclusivePairCase const cases[] = {
+        {S8("ldxp w9,w14,[x10]"), 0x887f3949},
+        {S8("ldxp x9,x14,[x10]"), 0xc87f3949},
+        {S8("ldaxp w9,w14,[x10]"), 0x887fb949},
+        {S8("ldaxp x9,x14,[x10]"), 0xc87fb949},
+        {S8("stxp w13,w11,w12,[x10]"), 0x882d314b},
+        {S8("stxp w13,x11,x12,[x10]"), 0xc82d314b},
+        {S8("stlxp w13,w11,w12,[x10]"), 0x882db14b},
+        {S8("stlxp w13,x11,x12,[x10]"), 0xc82db14b},
+        {S8("ldaxp xzr,x14,[sp,#0]"), 0xc87fbbff},
+        {S8("ldxp w9,wzr,[sp]"), 0x887f7fe9},
+        {S8("stlxp wzr,x11,x12,[sp,#0]"), 0xc83fb3eb},
+        {S8("stxp w13,xzr,x12,[sp]"), 0xc82d33ff},
+        {S8("LDXP X9,X14,[SP,0]"), 0xc87f3be9},
+        {S8("stxp w13,x11,x11,[x10]"), 0xc82d2d4b},
+    };
+    String8 refused[] = {
+        S8("ldxp w9,x14,[x10]"),
+        S8("ldaxp sp,x14,[x10]"),
+        S8("ldxp x9,x14,[w10]"),
+        S8("ldaxp x9,x14,[xzr]"),
+        S8("stxp x13,x11,x12,[x10]"),
+        S8("stlxp wsp,x11,x12,[x10]"),
+        S8("stxp w11,x11,x12,[x10]"),
+        S8("stlxp w12,x11,x12,[x10]"),
+        S8("stxp w10,x11,x12,[x10]"),
+        S8("stlxp wzr,xzr,x12,[sp]"),
+        S8("ldxp x9,x14,[x10,#8]"),
+        S8("ldaxp x9,x14,[x10,missing]"),
+        S8("stxp w13,x11,x12,[x10,x0]"),
+        S8("stlxp w13,x11,x12,[x10,#0]!"),
+        S8("ldxp x9,x14,[x10],#0"),
+        S8("ldaxp x9,x14,[x10,]"),
+        S8("stxp w13,x11,x12,[x10],"),
+        S8("stlxp w13,x11,[x10]"),
+        S8("ldxp x9,x14,[x10],x0"),
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            u8 expected[8];
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                expected[byte] = (u8)(cases[index].word >> (byte * 8));
+                expected[byte + 4] = (u8)(0xd65f03c0u >> (byte * 8));
+            }
+            AssemblyEncodeResult instruction = assembly_encode(arguments->arena, cases[index].source,
+                (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST_RAW(arguments, !instruction.diagnostic_count && !instruction.relocation_count &&
+                assembly_test_bytes_equal(instruction.bytes, expected, 4), cases[index].source);
+            String8 source = string_format(arguments->arena, S8(".text\n{S8}\nret\n"), cases[index].source);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && unit.section_count == 1 &&
+                assembly_test_bytes_equal(unit.sections[0].data, expected, sizeof(expected)), source);
+        }
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+        {
+            AssemblyEncodeResult instruction = assembly_encode(arguments->arena, refused[index],
+                (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST_RAW(arguments, instruction.diagnostic_count == 1 && !instruction.bytes.length, refused[index]);
+            if (instruction.diagnostic_count == 1)
+            {
+                BUSTER_TEST(arguments, instruction.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                    instruction.diagnostics[0].line == 1 && instruction.diagnostics[0].column == 1);
+            }
+            String8 source = string_format(arguments->arena, S8(".text\n{S8}\n"), refused[index]);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST_RAW(arguments, unit.diagnostic_count == 1, source);
+            if (unit.diagnostic_count == 1)
+            {
+                BUSTER_TEST(arguments, unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                    unit.diagnostics[0].line == 2 && unit.diagnostics[0].column == 1);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_control_labels(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_IOS},
+    };
+    struct AssemblyControlCase
+    {
+        String8 instruction;
+        AssemblyRelocationKind kind;
+        s64 minimum;
+        s64 maximum;
+        u32 minimum_word;
+        u32 maximum_word;
+        u32 forward_word;
+    };
+    // Independent architectural bit fields; valid edges need no large section.
+    struct AssemblyControlCase const cases[] = {
+        {S8("b"), ASSEMBLY_RELOCATION_AARCH64_BRANCH26, -134217728, 134217724, 0x16000000, 0x15ffffff, 0x14000001},
+        {S8("bl"), ASSEMBLY_RELOCATION_AARCH64_CALL26, -134217728, 134217724, 0x96000000, 0x95ffffff, 0x94000001},
+        {S8("b.eq"), ASSEMBLY_RELOCATION_AARCH64_CONDBR19, -1048576, 1048572, 0x54800000, 0x547fffe0, 0x54000020},
+        {S8("cbz w3,"), ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19, -1048576, 1048572, 0x34800003, 0x347fffe3, 0x34000023},
+        {S8("cbnz x4,"), ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19, -1048576, 1048572, 0xb5800004, 0xb57fffe4, 0xb5000024},
+        {S8("tbz w5,#3,"), ASSEMBLY_RELOCATION_AARCH64_TESTBR14, -32768, 32764, 0x361c0005, 0x361bffe5, 0x36180025},
+        {S8("tbnz x6,#63,"), ASSEMBLY_RELOCATION_AARCH64_TESTBR14, -32768, 32764, 0xb7fc0006, 0xb7fbffe6, 0xb7f80026},
+    };
+    String8 bindings[] = {S8(""), S8(".globl chosen\n"), S8(".globl chosen\n.hidden chosen\n"),
+                          S8(".weak chosen\n"), S8(".weak chosen\n.hidden chosen\n")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        String8 separator = target_index >= 2 ? S8("%%") : S8(";");
+        String8 source = S8(".text\nstart: b end\nbl start\nb.ne end\ncbz w3,end\ncbnz x4,start\n"
+                            "tbz w5,#3,end\ntbnz x6,#63,start\nend: ret\n");
+        u32 const words[] = {0x14000007, 0x97ffffff, 0x540000a1, 0x34000083,
+                             0xb5ffff84, 0x36180045, 0xb7ffff46, 0xd65f03c0};
+        u8 expected[sizeof(words)];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(words); index += 1)
+        {
+            for (u32 byte = 0; byte < 4; byte += 1) expected[index * 4 + byte] = (u8)(words[index] >> (byte * 8));
+        }
+        AssemblyUnitResult local = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST_RAW(arguments, !local.diagnostic_count && !local.relocation_count && local.section_count == 1 &&
+            assembly_test_bytes_equal(local.sections[0].data, expected, sizeof(expected)), source);
+        source = string_format(arguments->arena, S8(".text\n1: cbz x0,1f{S8} tbz w1,#4,1b{S8} 1: bl 1b\n"), separator, separator);
+        u8 const numeric_bytes[] = {0x40, 0, 0, 0xb4, 0xe1, 0xff, 0x27, 0x36, 0, 0, 0, 0x94};
+        AssemblyUnitResult numeric = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST_RAW(arguments, !numeric.diagnostic_count && !numeric.symbol_count && !numeric.relocation_count &&
+            numeric.section_count == 1 && assembly_test_bytes_equal(numeric.sections[0].data, numeric_bytes, sizeof(numeric_bytes)), source);
+        u8 const private_bytes[] = {0x20, 0, 0, 0xb4, 0xc0, 3, 0x5f, 0xd6};
+        AssemblyUnitResult private_spelling = assembly_unit_encode(arguments->arena,
+            S8(".text\ncbz x0,.Lbuster.inline.asm.chosen\n.Lbuster.inline.asm.chosen: ret\n"),
+            (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, !private_spelling.diagnostic_count && !private_spelling.relocation_count &&
+            private_spelling.section_count == 1 &&
+            assembly_test_bytes_equal(private_spelling.sections[0].data, private_bytes, sizeof(private_bytes)));
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            s64 displacements[] = {cases[index].minimum, cases[index].maximum, cases[index].minimum - 4,
+                                   cases[index].maximum + 4, 2, INT64_MIN, INT64_MAX};
+            for (u32 edge = 0; edge < BUSTER_ARRAY_LENGTH(displacements); edge += 1)
+            {
+                source = string_format(arguments->arena, S8(".text\nanchor: {S8} anchor+{s64}\n"),
+                    cases[index].instruction, displacements[edge]);
+                AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+                if (edge < 2)
+                {
+                    u32 word = edge ? cases[index].maximum_word : cases[index].minimum_word;
+                    u8 edge_bytes[4];
+                    for (u32 byte = 0; byte < 4; byte += 1) edge_bytes[byte] = (u8)(word >> (byte * 8));
+                    BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && unit.section_count == 1 &&
+                        assembly_test_bytes_equal(unit.sections[0].data, edge_bytes, sizeof(edge_bytes)), source);
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, unit.diagnostic_count == 1, source);
+                    if (unit.diagnostic_count == 1)
+                    {
+                        BUSTER_TEST(arguments, unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE &&
+                            unit.diagnostics[0].line == 2 && unit.diagnostics[0].column == 1);
+                    }
+                }
+            }
+            for (u32 binding = 0; binding < BUSTER_ARRAY_LENGTH(bindings); binding += 1)
+            {
+                // Late directives must affect the same final binding decision.
+                for (u32 late = 0; late < 2; late += 1)
+                {
+                    source = string_format(arguments->arena, S8(".text\n{S8}{S8} chosen\nchosen: ret\n{S8}"),
+                        late ? S8("") : bindings[binding], cases[index].instruction, late ? bindings[binding] : S8(""));
+                    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+                    bool replaceable = binding >= 3 || (binding == 1 && target_index == 0);
+                    if (replaceable && index >= 2)
+                    {
+                        BUSTER_TEST_RAW(arguments, unit.diagnostic_count == 1, source);
+                        if (unit.diagnostic_count == 1)
+                        {
+                            BUSTER_TEST(arguments, unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+                        }
+                    }
+                    else if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.section_count == 1 &&
+                        unit.relocation_count == (replaceable ? 1u : 0u)))
+                    {
+                        if (replaceable)
+                        {
+                            AssemblyUnitRelocation relocation = unit.relocations[0];
+                            BUSTER_TEST(arguments, relocation.kind == cases[index].kind && relocation.offset == 0 &&
+                                relocation.addend == 0 && relocation.symbol < unit.symbol_count &&
+                                string_equal(unit.symbols[relocation.symbol].name, S8("chosen")));
+                        }
+                        else
+                        {
+                            u8 binding_bytes[8];
+                            for (u32 byte = 0; byte < 4; byte += 1)
+                            {
+                                binding_bytes[byte] = (u8)(cases[index].forward_word >> (byte * 8));
+                                binding_bytes[byte + 4] = (u8)(0xd65f03c0u >> (byte * 8));
+                            }
+                            BUSTER_TEST(arguments, assembly_test_bytes_equal(unit.sections[0].data, binding_bytes, sizeof(binding_bytes)));
+                        }
+                    }
+                }
+            }
+            String8 destinations[] = {S8(""), S8(".data\nchosen: .word 0\n")};
+            for (u32 destination = 0; destination < BUSTER_ARRAY_LENGTH(destinations); destination += 1)
+            {
+                source = string_format(arguments->arena, S8(".text\n{S8} chosen\n{S8}"),
+                    cases[index].instruction, destinations[destination]);
+                AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+                if (index >= 2)
+                {
+                    BUSTER_TEST_RAW(arguments, unit.diagnostic_count == 1, source);
+                    if (unit.diagnostic_count == 1)
+                    {
+                        BUSTER_TEST(arguments, unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                            unit.diagnostics[0].line == 2 && unit.diagnostics[0].column == 1);
+                    }
+                }
+                else if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.relocation_count == 1))
+                {
+                    BUSTER_TEST(arguments, unit.relocations[0].kind == cases[index].kind &&
+                        unit.relocations[0].symbol < unit.symbol_count &&
+                        unit.symbols[unit.relocations[0].symbol].defined == (destination != 0));
+                }
+            }
+        }
+        AssemblyUnitResult unaligned = assembly_unit_encode(arguments->arena, S8(".text\n.byte 0\nanchor: b anchor\n"),
+            (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, unaligned.diagnostic_count == 1 &&
+            unaligned.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE &&
+            unaligned.diagnostics[0].line == 3 && unaligned.diagnostics[0].column == 1);
+        source = string_format(arguments->arena, S8(".text\nb local\nlocal: bl external{S8} cbz x0,missing\n"), separator);
+        AssemblyUnitResult compacted = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST_RAW(arguments, compacted.diagnostic_count == 1, source);
+        if (compacted.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, compacted.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                compacted.diagnostics[0].line == 3 && compacted.diagnostics[0].column == (target_index >= 2 ? 22u : 21u));
+        }
+        AssemblyEncodeResult ordinary = assembly_encode(arguments->arena, S8("cbz x0,chosen"),
+            (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, ordinary.diagnostic_count == 1 && !ordinary.bytes.length);
+        AssemblyEncodeResult fragment = assembly_encode(arguments->arena, S8("cbz x0,chosen"),
+            (AssemblyEncodeOptions){.target = target, .unit_control_relocations = true});
+        BUSTER_TEST(arguments, !fragment.diagnostic_count && fragment.bytes.length == 4 &&
+            fragment.relocation_count == 1 && fragment.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19);
+    }
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_control_labels);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
     UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
     result.succeeded_test_count += suffix_aliases.succeeded_test_count;
     result.test_count += suffix_aliases.test_count;
