@@ -218,3 +218,17 @@ large translation units and the compiler unity source. Then run the complete
 suite, sanitized suite and byte-identical self-host fixed point. Record compiler
 identities, input identities, actual results and limits in a new performance
 audit; do not substitute cross-path agreement for a baseline comparison.
+
+The final member check defers failed bound classifications until its live
+member walk has materialized nested aggregate definitions. It retries only failed
+candidates and visits physical members appended by retries, until neither member
+rows nor unique completed source-backed aggregate definitions grow. A lazy scratch
+bitset keyed by definition tokens includes GNU empty records; qualified copies
+and temporary type-only derivations do not count as progress. It then reports
+VM members, so a valid deeply nested sizeof
+bound does not become a runtime bound merely because its first layout query
+could not yet resolve a copied type name. Pending rows are sparse scratch data,
+released after validation; completed definitions reuse their source identity.
+The multidimensional constant/runtime pair pins a later array derivation that
+first materializes a member during retry, including its exact source diagnostic.
+A GNU17-only empty-record dimension pins completion without member-row growth.

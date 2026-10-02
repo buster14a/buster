@@ -4885,6 +4885,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArgument
         {S8("int f(int n) {\n(void)sizeof(struct {\n    int a[n];\n});\nreturn 0;\n}\n"), 3, 9},
         {S8("int f(int n) {\nstruct S {\n    int a[n], b;\n} x, y;\nreturn 0;\n}\n"), 3, 9},
         {S8("int n;\nstruct S {\n    char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct {\n        int (*p)[n];\n    })]; })]; })];\n};\nint f(void) { return 0; }\n"), 4, 15},
+        {S8("int n;\nstruct S {\n    char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct {\n        int (*p)[3];\n    })]; })][sizeof(struct {\n        int (*q)[n];\n    })]; })];\n};\nint f(void) { return 0; }\n"), 6, 15},
     };
     String8 accepted[] = {
         S8("enum { N = 3 }; struct S { int a[N]; char b[sizeof(int) * 2]; }; int f(void) { return sizeof(struct S); }"),
@@ -4896,7 +4897,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArgument
         S8("int n; int f(void) { enum { n = 3 }; struct S { int a[n]; }; return sizeof(struct S); }"),
         S8("enum { N = 3 }; typedef int A[N]; int f(int N) { struct S { A a; }; return sizeof(struct S); }"),
         S8("enum { n = 3 }; struct S { char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct { int (*p)[n]; })]; })]; })]; }; int f(void) { return sizeof(struct S); }"),
+        S8("enum { n = 3 }; struct S { char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct { int (*p)[3]; })]; })][sizeof(struct { int (*q)[n]; })]; })]; }; int f(void) { return sizeof(struct S); }"),
     };
+    String8 gnu_empty = S8("enum { n = 3 }; struct S { char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct { int (*p)[n]; })]; })][sizeof(struct {}) + 1]; })]; }; int f(void) { return sizeof(struct S); }");
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
     for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
     {
@@ -4932,17 +4935,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArgument
                 }
                 scratch_end(temporary);
             }
-            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(accepted); case_index += 1)
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(accepted) + 1; case_index += 1)
             {
+                if (case_index == BUSTER_ARRAY_LENGTH(accepted) && dialects[dialect_index] != C_PREPROCESS_DIALECT_GNU17)
+                {
+                    continue;
+                }
+                String8 accepted_source = case_index < BUSTER_ARRAY_LENGTH(accepted) ? accepted[case_index] : gnu_empty;
                 TemporalArena temporary = scratch_begin(0, 0);
-                CPreprocessResult tokens = c_preprocess(temporary.arena, accepted[case_index],
+                CPreprocessResult tokens = c_preprocess(temporary.arena, accepted_source,
                     (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect_index]});
                 CParserResult syntax = c_parse_ast(temporary.arena, tokens);
                 CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
-                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && semantic.diagnostic_count == 0, accepted[case_index]);
+                for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                {
+                    CDiagnostic diagnostic = semantic.diagnostics[index];
+                    arguments->show(arguments, S8("constant-member.c:{u32}:{u32}: {S8}\n"),
+                                    diagnostic.location.line, diagnostic.location.column, diagnostic.message);
+                }
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && semantic.diagnostic_count == 0, accepted_source);
                 CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("constant-member.c"), tokens, syntax, target_native,
                                                                  (CIRLowerOptions){.disable_direct_ssa = form != 0});
-                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, accepted[case_index]);
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, accepted_source);
                 if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
                 {
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
