@@ -41,6 +41,8 @@ struct CIrExt80Big
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL bool c_test_ir_query_buffer_budget(void);
+BUSTER_F_DECL void c_test_ir_initializer_context_fail_next(bool commit);
+BUSTER_F_DECL bool c_test_ir_initializer_context_buffer_budget(void);
 BUSTER_F_DECL IrValueId c_test_ir_member_place(Arena* arena, Arena* temporary_arena, IrProgram* program,
                                                IrFunction* function, IrValueId operand, String8 member, CPunctuator access,
                                                String8* failure_message);

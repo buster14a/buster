@@ -306,3 +306,24 @@ The exact `__builtin_ia32_tzcnt_u32` and `__builtin_ia32_tzcnt_u64` spellings
 return their unsigned operand width for zero. The canonical count receives a
 nonzero guarded value; each source operand is evaluated once and requires no
 BMI instruction support.
+
+Runtime compound literals keep one captured operand per selected member or
+array element. A later designator replaces the earlier captured value within
+the existing slot capacities. Source expressions follow ordinary lowering;
+regressions leave effects of overridden initializers unconstrained.
+
+Translation-unit IR queries retain all five complete append-buffer capacities
+in a private arena sized with checked alignment and allocation arithmetic.
+`c_lower_to_ir_run` releases that arena after every lowering-core result.
+Reservation or initial-commit failure produces a structured diagnostic before
+persistent IR tables are initialized. The ownership regression checks failure,
+recovery, scratch preservation, canonical IR and retained aggregate bytes.
+
+Constant initializers also own their fixed context array in a checked private
+arena. The existing `UINT32_MAX / sizeof(context)` ceiling is retained, and the
+wrapper destroys the reservation after every core result. Dynamic frame and
+range work continues to use task scratch and its existing rewind boundary.
+
+Unbound declaration prefixes use the token's lexical scope to recognize local
+typedefs, including macro-expanded `for` initializers. Existing bound entities
+remain authoritative, so a local object can shadow a typedef spelling.

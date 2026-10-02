@@ -329,7 +329,7 @@ store width remain unchanged. Memory, vector, x87 and flag operands cannot use
 this view.
 
 LLVM 21's balanced RBX/CPUID template has a finite protected contract: four
-unsigned 32-bit outputs in A/R/C/D, a tied leaf and optional tied count, with no
+32-bit integer outputs in A/R/C/D, a tied leaf and optional tied count, with no
 clobbers or branch targets. Native register allocation reserves RBX before
 choosing the generic swap register. Both swaps use full 64-bit registers while
 the four C outputs retain four-byte stores. Other literal register use remains

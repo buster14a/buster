@@ -3,7 +3,9 @@
 // IrProgram from the preprocessed token stream and the parser's entities,
 // scopes, and types, lowering every function body and global initializer.
 // c_ir_lower_capacity_plan owns the non-mutating count/overflow check before
-// the program arena is touched. c_lower_to_ir_run owns the private, checked
+// the program arena is touched. c_ir_constant_initializer_bytes owns the
+// checked fixed context array while its dynamic work remains in task scratch.
+// c_lower_to_ir_run owns the private, checked
 // CIrQueryMachine buffer arena and releases it after every core result. The
 // remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
@@ -43204,7 +43206,7 @@ BUSTER_C_INTERNAL IrField* c_ir_constant_initializer_field_at(CIntegerIrBuilder*
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
                                                          IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity);
 
-BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, u32 start, u32 end, IrTypeId root_type,
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, Arena* context_arena, u32 start, u32 end, IrTypeId root_type,
                                                               u8* bytes, u64 byte_count, IrGlobalRelocation* relocations, u32* relocation_count,
                                                               u32 relocation_capacity);
 
@@ -45816,11 +45818,49 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_begin(CIntegerIrBuilder
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, u32 start, u32 end, IrTypeId root_type,
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_buffer_size(u64 capacity, u64* reserved_size_out)
+{
+    u64 size = arena_minimum_position;
+    bool valid = reserved_size_out && capacity <= UINT32_MAX / sizeof(CIrConstantInitializerContext) &&
+        c_type_parse_buffer_size_add(&size, capacity, sizeof(CIrConstantInitializerContext),
+                                      BUSTER_ALIGN_OF(CIrConstantInitializerContext)) &&
+        size <= ARENA_MAX_RESERVATION - (BUSTER_KB(64) - 1);
+    if (valid)
+    {
+        *reserved_size_out = (size + BUSTER_KB(64) - 1) & ~(BUSTER_KB(64) - 1);
+    }
+    return valid;
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_test_initializer_context_failure;
+
+void c_test_ir_initializer_context_fail_next(bool commit)
+{
+    c_test_initializer_context_failure = commit ? 2 : 1;
+    return;
+}
+
+bool c_test_ir_initializer_context_buffer_budget(void)
+{
+    u64 capacity = UINT32_MAX / sizeof(CIrConstantInitializerContext);
+    u64 size = 0;
+    bool valid = c_ir_constant_initializer_context_buffer_size(capacity, &size) &&
+                 size <= ARENA_MAX_RESERVATION && (size & (BUSTER_KB(64) - 1)) == 0 &&
+                 size >= arena_minimum_position + capacity * sizeof(CIrConstantInitializerContext);
+    u64 accepted = size;
+    valid = valid && !c_ir_constant_initializer_context_buffer_size(capacity + 1, &size) && size == accepted &&
+            !c_ir_constant_initializer_context_buffer_size(UINT64_MAX, &size) && size == accepted &&
+            !c_ir_constant_initializer_context_buffer_size(2, 0);
+    return valid;
+}
+#endif
+
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, Arena* context_arena, u32 start, u32 end, IrTypeId root_type,
                                                               u8* bytes, u64 byte_count, IrGlobalRelocation* relocations, u32* relocation_count,
                                                               u32 relocation_capacity)
 {
-    if (!builder || !task_arena || start >= end || end - start > UINT32_MAX - 2)
+    if (!builder || !task_arena || !context_arena || start >= end || end - start > UINT32_MAX - 2)
     {
         return false;
     }
@@ -45830,7 +45870,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
         return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
     }
     u32 context_capacity = (u32)context_capacity_u64;
-    CIrConstantInitializerContext* contexts = arena_allocate(task_arena, CIrConstantInitializerContext, context_capacity);
+    CIrConstantInitializerContext* contexts = arena_allocate(context_arena, CIrConstantInitializerContext, context_capacity);
     if (!contexts || !c_ir_constant_initializer_context_begin(builder, task_arena, start, end, root_type, bytes, byte_count, relocations,
                                                                relocation_count, relocation_capacity, contexts))
     {
@@ -45931,14 +45971,48 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
                                                          IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity)
 {
-    if (!builder || !builder->scratch_arena)
+    bool result = false;
+    if (builder && builder->scratch_arena && start < end && end - start <= UINT32_MAX - 2)
     {
-        return false;
+        u64 context_capacity = (u64)end - start + 2;
+        u64 reserved_size;
+        if (c_ir_constant_initializer_context_buffer_size(context_capacity, &reserved_size))
+        {
+            // Full-span context slots can exceed shared scratch before the
+            // first initializer runs. Only this fixed array lives privately;
+            // frames and materialized range work retain their task arena.
+#if BUSTER_INCLUDE_TESTS
+            if (c_test_initializer_context_failure)
+            {
+                if (c_test_initializer_context_failure == 2) arena_test_fail_next_commit();
+                else arena_test_fail_next_reserve();
+                c_test_initializer_context_failure = 0;
+            }
+#endif
+            Arena* context_arena = arena_create((ArenaCreation){
+                .reserved_size = reserved_size,
+                .granularity = BUSTER_KB(64),
+                .initial_size = BUSTER_MIN(reserved_size, BUSTER_KB(256)),
+                .flags = {.no_pool = 1},
+            });
+            if (context_arena)
+            {
+                TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
+                result = c_ir_constant_initializer_bytes_core(builder, temporary.arena, context_arena, start, end, root_type, bytes, byte_count,
+                                                               relocations, relocation_count, relocation_capacity);
+                scratch_end(temporary);
+                arena_destroy(context_arena, 1);
+            }
+            else
+            {
+                result = c_ir_constant_initializer_fail(builder, S8("could not allocate constant initializer contexts"), start);
+            }
+        }
+        else
+        {
+            result = c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
+        }
     }
-    TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
-    bool result = c_ir_constant_initializer_bytes_core(builder, temporary.arena, start, end, root_type, bytes, byte_count, relocations,
-                                                       relocation_count, relocation_capacity);
-    scratch_end(temporary);
     return result;
 }
 

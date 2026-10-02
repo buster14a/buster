@@ -111,6 +111,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_query_buffer_owner(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_initializer_context_buffer_owner(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, c_test_ir_initializer_context_buffer_budget());
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena,
+        S8("static int retained[1] = {sizeof(int) + 3}; int read_retained(void) { return retained[0]; }"),
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    if (BUSTER_REQUIRE(arguments, !preprocess.diagnostic_count && !parse.diagnostic_count))
+    {
+        ThreadContext* context = thread_context_selected();
+        for (u32 failure = 0; failure < 2; failure += 1)
+        {
+            u64 scratch_positions[SCRATCH_ARENA_COUNT];
+            for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+                scratch_positions[index] = context->arenas[index]->position;
+            // The query owner is created first. Arm the context boundary so
+            // this fault reaches the second owner's actual arena_create.
+            c_test_ir_initializer_context_fail_next(failure != 0);
+            CIRLowerResult rejected = c_lower_to_ir_with_options(temporary.arena, S8("initializer-context-owner.c"), preprocess, parse,
+                target_native, (CIRLowerOptions){0});
+            BUSTER_TEST(arguments, rejected.program && !rejected.canonical_ir_certified);
+            if (BUSTER_REQUIRE(arguments, rejected.diagnostic_count == 1 && rejected.diagnostics))
+            {
+                BUSTER_STRING_TEST(arguments, rejected.diagnostics[0].message, S8("C IR lowering: could not allocate constant initializer contexts"));
+                BUSTER_TEST(arguments, rejected.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            }
+            for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+                if (context->arenas[index] != temporary.arena)
+                    BUSTER_TEST(arguments, context->arenas[index]->position == scratch_positions[index]);
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                CIRLowerResult recovered = c_lower_to_ir_with_options(temporary.arena, S8("initializer-context-owner.c"), preprocess, parse,
+                    target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, recovered.program && !recovered.diagnostic_count && recovered.canonical_ir_certified &&
+                                                   recovered.program->module_count == 1))
+                {
+                    IrModule* module = recovered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(recovered.program, module).error == IR_VALIDATION_NONE);
+                    // The context and query arenas have already been unmapped.
+                    // Returned aggregate bytes must remain owned by the module.
+                    if (BUSTER_REQUIRE(arguments, module->global_count == 1 && module->globals[0].bytes.pointer &&
+                                                       module->globals[0].bytes.length == sizeof(u32)))
+                    {
+                        u32 value;
+                        memcpy(&value, module->globals[0].bytes.pointer, sizeof(value));
+                        BUSTER_TEST(arguments, value == 7);
+                    }
+                    for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+                        if (context->arenas[index] != temporary.arena)
+                            BUSTER_TEST(arguments, context->arenas[index]->position == scratch_positions[index]);
+                }
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_typedef_for_declaration(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -34074,6 +34134,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_type_identity_authority);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_query_buffer_owner);
+    BUSTER_TEST_FIXTURE(arguments, c_test_ir_initializer_context_buffer_owner);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);

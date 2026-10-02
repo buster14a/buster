@@ -985,7 +985,7 @@ bool codegen_inline_assembly_protected_cpuid(IrProgram* program, IrFunction* fun
         valid = valid && value.value < function->value_count;
         IrType* type = valid ? ir_type_from_id(&program->types, function->values[value.value].canonical_type) : 0;
         valid = valid && type && type->kind == IR_TYPE_INTEGER && type->layout.resolved && type->layout.size == 4 &&
-                type->bit_width == 32 && (index >= 4 || !type->is_signed);
+                type->bit_width == 32;
     }
     return valid;
 }

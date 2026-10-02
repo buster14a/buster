@@ -129,6 +129,13 @@ With a configured tree and a trusted Release compiler, run:
 ./build.sh test_raddebugger --config Release /absolute/path/to/raddebugger
 ```
 
+The hosted workflow invokes that same action through its immutable bootstrap
+driver, from the Buster repository root:
+
+```sh
+"$RUNNER_TEMP/raddebugger-driver" test_raddebugger --config Release "$GITHUB_WORKSPACE/external/raddebugger"
+```
+
 The GitHub-hosted `RAD Debugger compatibility` workflow installs the upstream
 platform development libraries, builds the trusted compiler, runs its self-host
 fixed point and input controls, and retains the compatibility artifacts even
@@ -137,12 +144,13 @@ when an application compilation fails.
 The `test_raddebugger` build-driver action attempts the pinned `raddbg`,
 `raddbg_non_graphical`, `radbin`, and `torture` C unity targets with Buster
 and an independent Clang oracle, preserving the original source tree.
-It uses the native fast mode for diagnosis. Both compiler attempts must use
-the same inputs, target, definitions, and system headers. Buster spells the
-baseline x86-64/CX16/SSE2 target as `-mcpu=baseline -mattr=+cx16,+sse2`;
-Clang uses `-march=x86-64 -mcx16 -msse2`. Following a
-successful C compilation, separately attributed Clang assembly builds
-BLAKE3 and the host linker attempts the executable.
+The four upstream targets use native `-fregister-allocator=fast` and the
+default frontend SSA path. Both compiler attempts use the same source,
+target, definitions, and system headers. Buster spells the baseline
+x86-64/CX16/SSE2 target as `-mcpu=baseline -mattr=+cx16,+sse2`;
+Clang uses `-march=x86-64 -mcx16 -msse2`. Separately attributed host
+Clang assembly produces the unchanged BLAKE3 objects. Successful C objects
+are passed to the host Clang linker with those assembly inputs.
 
 Artifacts belong to an isolated `build/raddebugger-<pid>-<time>` directory.
 `summary.tsv` records outcomes; command, stdout, stderr, and process-status
@@ -150,6 +158,28 @@ artifacts preserve individual steps. Retain compiler revisions and
 object/binary identities alongside those outcomes. An oracle-only success
 or a Buster diagnostic inventory is progress toward compatibility, not a
 passing Buster application build.
+
+`intrinsic-summary.tsv` records first-party header, scalar/vector,
+unsupported-operation, guarded XGETBV and SHA witnesses. The SHA fixture
+runs in the default FAST/SSA mode and three separately named diagnostic modes:
+MIR_STACK, NONE, and FAST with `-fno-frontend-ssa`. The diagnostic modes
+also request `-fverify-codegen`; they retain the same source and independent
+Clang oracle. Their success cannot replace a failing default result.
+Advanced Clang runtime witnesses require the corresponding CPU and OS state;
+an unavailable reference is recorded as `hardware-pending`.
+
+When both compilers link a matching `raddbg` or `radbin` executable,
+`runtime-summary.tsv` records a paired, deterministic ELF-note dump. The
+full graphical `raddbg` binary uses its `--bin` path. Each result must
+match the independently specified note output, empty stderr, and zero exit
+status. Runtime environments omit `DISPLAY` and `WAYLAND_DISPLAY`.
+This checks binary loading without establishing GUI or debugger behavior.
+
+Tool children have a 600-second deadline; headless runtime children have a
+60-second deadline. Capture is limited to 16 MiB per stdout/stderr stream.
+Timeout, capture failure, truncated output, or process-cleanup failure cannot
+be credited as a successful step. Ordinary probe or Buster target failures
+still retain the independent Clang diagnostics.
 
 The harness's `--self-test` mode uses isolated Git fixtures to exercise
 pristine-input acceptance and wrong-revision, tracked-dirty, untracked,
