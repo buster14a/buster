@@ -11308,7 +11308,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_bit_counts(UnitTest
                                        first.stats.defined_function_count == program.modules->function_count);
                 String8 output = buster_test_temporary_path(arena, S8("buster-wasm-bit-counts"), S8(".wasm"));
                 String8 script_path = buster_test_temporary_path(arena, S8("buster-wasm-bit-counts"), S8(".cjs"));
-                String8 script = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(script_parts));
+                String8 script = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(script_parts), false);
                 bool written = file_write(output, first.bytes) && file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
                 BUSTER_TEST(arguments, written);
                 ByteSlice emitted = file_read(arena, output, (FileReadOptions){0});
@@ -11330,7 +11330,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_bit_counts(UnitTest
                         if (index) width_parts[part_count++] = S8(",");
                         width_parts[part_count++] = string_format(arena, S8("{u32}"), widths[index]);
                     }
-                    String8 width_list = string_join_arena(arena, (SliceString8){width_parts, part_count});
+                    String8 width_list = string_join_arena(arena, (SliceString8){width_parts, part_count}, false);
                     String8 command[] = {node, script_path, output, (String8){hash_bytes, 64}, width_list,
                         string_format(arena, S8("{u32}"), expected_checks),
                         string_format(arena, S8("{u32}"), (u32)options.pointer_size)};
