@@ -45591,8 +45591,14 @@ BUSTER_C_INTERNAL CIrConstantValue c_ir_static_compound_literal_object(CIntegerI
     bool valid = literal && literal->layout.resolved && !builder->function && !previous;
     if (builder->function)
     {
-        c_ir_constant_initializer_fail(builder,
-            S8("a compound literal inside a function body has automatic storage duration, so its address is not a constant expression"), type_start - 1);
+        // A general operand query can be a benign __builtin_constant_p probe.
+        // Decline it without poisoning later runtime lowering. The legacy
+        // static-initializer shortcut retains its named storage-duration error.
+        if (!guarded)
+        {
+            c_ir_constant_initializer_fail(builder,
+                S8("a compound literal inside a function body has automatic storage duration, so its address is not a constant expression"), type_start - 1);
+        }
     }
     else if (previous)
     {

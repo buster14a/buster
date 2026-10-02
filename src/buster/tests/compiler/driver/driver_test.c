@@ -14427,6 +14427,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_guard(Uni
         "unsigned short *Utf = (unsigned short[]){u\"AB\"} + 1;\n"
         "char *Trailing = (char[]){\"hi\",} + 1;\n"
         "const char *(*PointerArray)[1] = (&(const char *[]){\"ABC\"}) + 0;\n"
+        "static int literal_probe_half(void)\n"
+        "{\n"
+        "    int constant = __builtin_constant_p(&(int[]){17,23} + 1);\n"
+        "    volatile float input = 1.5f;\n"
+        "    _Float16 half = (_Float16)input;\n"
+        "    int *automatic = (int[]){17,23,31} + 1;\n"
+        "    return constant == 0 && (float)half == 1.5f && automatic[0] == 23 && automatic[1] == 31;\n"
+        "}\n"
         "int main(void) { return 0; }\n");
     String8 refusal = S8("nested compound literal objects in a general static address expression are not supported");
     TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
@@ -14451,6 +14459,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_guard(Uni
                         lowered.program && lowered.program->module_count == 1 && lowered.program->modules))
                     {
                         BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
+                        BUSTER_TEST(arguments, !lowered.program->rejected_function_count && !lowered.program->modules->rejected_function_count);
+                        bool probe_lowered = false;
+                        if (BUSTER_REQUIRE(arguments, !lowered.program->modules->function_count || lowered.program->modules->functions))
+                        {
+                            for (u32 index = 0; index < lowered.program->modules->function_count; index += 1)
+                            {
+                                IrFunction* function = lowered.program->modules->functions + index;
+                                if (string_equal(function->name, S8("literal_probe_half")))
+                                {
+                                    probe_lowered = function->state == IR_FUNCTION_LOWERED;
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, probe_lowered);
                         BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, refusal) != BUSTER_STRING_NO_MATCH);
                         BUSTER_TEST(arguments, lowered.diagnostics[0].location.line == 2 && lowered.diagnostics[0].location.column == 54);
                         IrProgram* program = lowered.program;
@@ -14551,14 +14573,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
 #if (BUSTER_LINUX || BUSTER_WINDOWS || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     Arena* arena = temporary.arena;
-    String8 source = S8("int name_identity(void)\n"
+    String8 source_parts[] = {
+        S8("int name_identity(void)\n"
         "{\n"
         "    static const char *first = __func__;\n"
         "    static const char *second = __func__ + 1;\n"
         "    const char *runtime = __func__;\n"
         "    return first == runtime && second == runtime + 1;\n"
+        "}\n"),
+#if BUSTER_LINUX
+        S8("static int literal_probe_half(void)\n"
+        "{\n"
+        "    int constant = __builtin_constant_p(&(int[]){17,23} + 1);\n"
+        "    volatile float input = 1.5f;\n"
+        "    _Float16 half = (_Float16)input;\n"
+        "    int *automatic = (int[]){17,23,31} + 1;\n"
+        "    return constant == 0 && (float)half == 1.5f && automatic[0] == 23 && automatic[1] == 31;\n"
         "}\n"
-        "int main(void) { return name_identity() != 1 || name_identity() != 1; }\n");
+        "int main(void) { return name_identity() != 1 || name_identity() != 1 || literal_probe_half() != 1; }\n"),
+#else
+        S8("int main(void) { return name_identity() != 1 || name_identity() != 1; }\n"),
+#endif
+    };
+    String8 source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
     String8 input = buster_test_temporary_path(arena, S8("buster-function-literal-identity"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
@@ -14616,7 +14653,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
                                 compiled = waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
-                                    !waited.output_truncated && !waited.process_tree_cleanup_failed;
+                                    !waited.output_truncated && !waited.process_tree_cleanup_failed &&
+                                    !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
                                 BUSTER_TEST_RAW(arguments, compiled, string_format(arena, S8("{S8}: {S8}"), context,
                                     BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR])));
                             }
@@ -14631,6 +14669,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
                                 bool correct = waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
                                     !waited.output_truncated && !waited.process_tree_cleanup_failed &&
+                                    !waited.process_group_reservation_retained && !waited.process_group_ownership_lost &&
                                     !waited.streams[STANDARD_STREAM_OUTPUT].length && !waited.streams[STANDARD_STREAM_ERROR].length;
                                 BUSTER_TEST_RAW(arguments, correct, context);
                                 if (correct)
@@ -14640,7 +14679,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
                                 }
                             }
                         }
-                        os_file_delete(output);
+                        BUSTER_TEST(arguments, os_file_delete(output));
                     }
                 }
             }
@@ -14648,7 +14687,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
         ByteSlice after = file_read(arena, input, (FileReadOptions){0});
         BUSTER_TEST(arguments, after.length == source.length && after.pointer && !memcmp(after.pointer, source.pointer, source.length));
     }
-    os_file_delete(input);
+    BUSTER_TEST(arguments, os_file_delete(input));
     scratch_end(temporary);
 #else
     BUSTER_UNUSED(arguments);

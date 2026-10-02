@@ -490,6 +490,11 @@ without facts for identical bitcode and diagnostics.
   and runtime `__func__` pointers twice under both forms/four allocators/O0/O2
   and independent Linux GCC/Clang runs. The original 22 payload/addend sources
   and shared 4554-byte native/reference program remain unchanged.
+  General function-body operand queries decline automatic compound objects
+  without leaving initializer failure state in benign `__builtin_constant_p`
+  probes. The same-function probe followed by a dynamic binary16 conversion
+  and an ordinary automatic compound-array use is checked in canonical
+  lowering and the Linux native/reference identity cells.
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
