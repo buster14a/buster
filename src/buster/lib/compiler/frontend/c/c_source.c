@@ -61,6 +61,8 @@
 //   c_pp_parenthesis_depth                     shape sidecar, and what the
 //                                              driver's per-line scans read
 //                                              instead of walking token rows
+//   c_preprocess_directive_line_end             comment-aware directive ends
+//   c_frame_wrap_conditional_tokens             conditional whitespace and sites
 //   c_integer_operation,                       C integer operators over the
 //   c_integer_constant_binary/unary            shared ir_integer_* semantics:
 //                                              one operation table for runtime
@@ -7278,6 +7280,55 @@ BUSTER_C_INTERNAL u64 c_preprocess_line_end(CLexResult lex, u64 token_index)
     return token_index;
 }
 
+// A block comment becomes one space. Its retained physical newline rows
+// therefore do not end a directive. Start at the first physical line end,
+// then inspect only comment gaps on any continuation; token spelling bytes
+// (including literal comment delimiters) are never scanned as comments.
+BUSTER_C_INTERNAL u64 c_preprocess_directive_line_end(CLexResult lex, u64 token_index)
+{
+    bool comment_open = false;
+    u64 gap_start = token_index ? (u64)lex.tokens[token_index - 1].offset +
+                                     c_token_length(lex.spelling_base, lex.tokens[token_index - 1])
+                               : 0;
+    while (token_index < lex.token_count && lex.tokens[token_index].kind != C_TOKEN_END_OF_FILE)
+    {
+        CToken current = lex.tokens[token_index];
+        bool line_comment = false;
+        for (u64 byte_index = gap_start; byte_index < current.offset; byte_index += 1)
+        {
+            char8 byte = lex.spelling_base[byte_index];
+            if (comment_open)
+            {
+                if (byte == '*' && byte_index + 1 < current.offset && lex.spelling_base[byte_index + 1] == '/')
+                {
+                    comment_open = false;
+                    byte_index += 1;
+                }
+            }
+            else if (!line_comment && byte == '/' && byte_index + 1 < current.offset)
+            {
+                if (lex.spelling_base[byte_index + 1] == '*')
+                {
+                    comment_open = true;
+                    byte_index += 1;
+                }
+                else if (lex.spelling_base[byte_index + 1] == '/')
+                {
+                    line_comment = true;
+                    byte_index += 1;
+                }
+            }
+        }
+        if (current.kind == C_TOKEN_NEWLINE && !comment_open)
+        {
+            break;
+        }
+        gap_start = (u64)current.offset + c_token_length(lex.spelling_base, current);
+        token_index += 1;
+    }
+    return token_index;
+}
+
 // The per-64-token class projection of one lexed run, built once when the run
 // becomes a source frame and read by every per-line scan of the driver below.
 //
@@ -7421,7 +7472,10 @@ bool c_test_pp_class_masks_agree(Arena* arena, String8 source)
         {
             result = false;
         }
-        if (c_pp_line_end_masked(&masks, lex.token_count, token_index) != c_preprocess_line_end(lex, token_index))
+        u64 masked_end = c_pp_line_end_masked(&masks, lex.token_count, token_index);
+        u64 row_end = c_preprocess_line_end(lex, token_index);
+        if (masked_end != row_end ||
+            c_preprocess_directive_line_end(lex, masked_end) != c_preprocess_directive_line_end(lex, row_end))
         {
             result = false;
         }
@@ -8224,6 +8278,38 @@ BUSTER_C_INTERNAL CPpToken* c_frame_wrap_tokens(Arena* arena, CPpStampTable* sta
     return wrapped;
 }
 
+// Conditional ranges may cross physical lines inside a block comment.
+// Drop those whitespace rows before defined/feature/macro processing, and
+// start a new location stamp for the first real token on each physical line.
+BUSTER_C_INTERNAL CPpToken* c_frame_wrap_conditional_tokens(Arena* arena, CPpStampTable* stamps, CPreprocessSourceFrame* frame,
+                                                           u64 start, u64 end, u32* token_count)
+{
+    CPpToken* wrapped = arena_allocate(arena, CPpToken, end - start);
+    stamps->count = 0;
+    u32 stamp = 0;
+    u32 count = 0;
+    bool line_start = true;
+    for (u64 index = start; index < end; index += 1)
+    {
+        CToken token = frame->lex.tokens[index];
+        if (token.kind == C_TOKEN_NEWLINE)
+        {
+            line_start = true;
+        }
+        else
+        {
+            if (line_start)
+            {
+                stamp = c_pp_stamp_push(stamps, c_preprocess_logical_location(frame, c_lex_token_location(&frame->lex, token)));
+                line_start = false;
+            }
+            wrapped[count++] = (CPpToken){.token = token, .stamp = stamp & C_PP_STAMP_MASK};
+        }
+    }
+    *token_count = count;
+    return wrapped;
+}
+
 typedef enum CPreprocessConditionalDirective
 {
     C_PREPROCESS_CONDITIONAL_IF,
@@ -8287,9 +8373,10 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
         {
             if (active)
             {
+                u32 expression_count = 0;
+                CPpToken* expression = c_frame_wrap_conditional_tokens(arena, stamps, source_frame, token_index, line_end, &expression_count);
                 valid = c_conditional_evaluate(arena, space, symbol_table, first_macro, stamps,
-                                               c_frame_wrap_tokens(arena, stamps, source_frame, token_index, line_end),
-                                               (u32)(line_end - token_index), expansion_limit, result, options, source_frame->path,
+                                               expression, expression_count, expansion_limit, result, options, source_frame->path,
                                                source_frame->include_origin, &condition_value);
             }
         }
@@ -8352,9 +8439,10 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
             bool valid = true;
             if (evaluate)
             {
+                u32 expression_count = 0;
+                CPpToken* expression = c_frame_wrap_conditional_tokens(arena, stamps, source_frame, token_index, line_end, &expression_count);
                 valid = c_conditional_evaluate(arena, space, symbol_table, first_macro, stamps,
-                                               c_frame_wrap_tokens(arena, stamps, source_frame, token_index, line_end),
-                                               (u32)(line_end - token_index), expansion_limit, result, options, source_frame->path,
+                                               expression, expression_count, expansion_limit, result, options, source_frame->path,
                                                source_frame->include_origin, &condition_value);
             }
             if (!valid)
@@ -9283,55 +9371,7 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
         valid = valid && command_name_valid;
     }
     u64 replacement_start = *token_index;
-    // A block comment is one space, so a newline inside one does not end the
-    // definition: CPython's FutureObj_HEAD writes a comment spanning lines
-    // between its spliced ones, and the bit-fields after it vanished from
-    // the struct.  The comment leaves no token, so the gap bytes between
-    // tokens carry the state -- an unclosed /* before a newline token marks
-    // it interior, and the interior newlines are dropped from the recorded
-    // replacement so expansion and spacing read past them.
-    {
-        bool comment_open = false;
-        u64 gap_start = replacement_start ? (u64)lex.tokens[replacement_start - 1].offset +
-                                                c_token_length(lex.spelling_base, lex.tokens[replacement_start - 1])
-                                          : 0;
-        while (*token_index < lex.token_count && lex.tokens[*token_index].kind != C_TOKEN_END_OF_FILE)
-        {
-            CToken current = lex.tokens[*token_index];
-            bool line_comment = false;
-            for (u64 byte_index = gap_start; byte_index < current.offset; byte_index += 1)
-            {
-                char8 byte = lex.spelling_base[byte_index];
-                if (comment_open)
-                {
-                    if (byte == '*' && byte_index + 1 < current.offset && lex.spelling_base[byte_index + 1] == '/')
-                    {
-                        comment_open = false;
-                        byte_index += 1;
-                    }
-                }
-                else if (!line_comment && byte == '/' && byte_index + 1 < current.offset)
-                {
-                    if (lex.spelling_base[byte_index + 1] == '*')
-                    {
-                        comment_open = true;
-                        byte_index += 1;
-                    }
-                    else if (lex.spelling_base[byte_index + 1] == '/')
-                    {
-                        line_comment = true;
-                        byte_index += 1;
-                    }
-                }
-            }
-            if (current.kind == C_TOKEN_NEWLINE && !comment_open)
-            {
-                break;
-            }
-            gap_start = (u64)current.offset + c_token_length(lex.spelling_base, current);
-            *token_index += 1;
-        }
-    }
+    *token_index = c_preprocess_directive_line_end(lex, c_preprocess_line_end(lex, replacement_start));
     if (!valid)
     {
         String8 message = command_name_valid ? S8("invalid function-like macro parameter list") : S8("invalid macro name after '#define'");
@@ -10583,6 +10623,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 bool is_error = c_token_spelling_equal(base, directive, S8("error"));
                 bool is_warning = c_token_spelling_equal(base, directive, S8("warning"));
                 CPreprocessConditionalDirective conditional_directive = c_preprocess_conditional_directive_kind(base, directive);
+                if (is_if || is_elif)
+                {
+                    line_end = c_preprocess_directive_line_end(lex, line_end);
+                }
                 // Any directive at the frame's top level other than the
                 // conditionals themselves sits outside a candidate include
                 // guard, so the file cannot be guard-shaped.
@@ -10601,11 +10645,13 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 {
                     c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
                                                        directive, token_index, line_end, expansion_limit, &result, options, &conditional);
+                    token_index = line_end;
                 }
                 else if (is_elif)
                 {
                     c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
                                                        directive, token_index, line_end, expansion_limit, &result, options, &conditional);
+                    token_index = line_end;
                 }
                 else if (is_else)
                 {
@@ -10982,6 +11028,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 directive_index += 1;
                 u64 directive_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, directive_index)
                                                : c_preprocess_line_end(lex, directive_index);
+                if (directive_kind == C_PREPROCESS_CONDITIONAL_IF || directive_kind == C_PREPROCESS_CONDITIONAL_ELIF)
+                {
+                    directive_end = c_preprocess_directive_line_end(lex, directive_end);
+                }
                 first_macro->builtin_token_offset = directive.offset;
                 c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, directive_kind, directive,
                                                    directive_index, directive_end, expansion_limit, &result, options, &conditional);
