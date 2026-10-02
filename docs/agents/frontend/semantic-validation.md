@@ -19,6 +19,27 @@ and floating representation; they are not canonical values or instructions.
 
 ## Declaration constraints
 
+Before C23, a `for` initializer declaration may introduce only automatic or
+register objects (C17 6.8.5p3 and WG14 DR277). The local declaration binder
+uses its for-initializer context to reject typedefs, static/extern/thread-local
+objects, function declarations, and tags or enumerators introduced by direct
+aggregate specifiers. References to existing tags and typedefs remain valid,
+as do automatic function pointers. C23 removes this contextual restriction.
+The diagnostic belongs to the declaration's first specifier; binding continues
+so uses of the rejected declaration do not create secondary name diagnostics.
+Initializer-nested expression declarations retain their separate context.
+`c_test_for_declaration_constraints` freezes rejection/acceptance on both sides
+of the C17/GNU17 versus C23/GNU23 boundary, through semantics-only analysis and
+both canonical frontend forms on three target layouts.
+
+The binder and canonical body lowerer find `for` header separators only outside
+parentheses, brackets and braces. Member-declaration semicolons in a direct
+aggregate definition or initializer compound literal therefore stay inside the
+first clause. Anonymous aggregate objects remain valid before C23; a named
+aggregate definition still follows the contextual tag rule above. The same
+regression pins acceptance and canonical validity of these clauses through
+both frontend forms.
+
 Declaration-specifier parsing rejects repeated or conflicting storage classes
 before publishing an entity. `c_parse_storage_classes_valid` normalizes GNU
 thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
