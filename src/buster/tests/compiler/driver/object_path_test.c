@@ -24,7 +24,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_object_path_test_change_directory(Strin
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_object_path_test_file_exists(String8 path)
 {
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){0});
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){ .read = 1 }, (OsFileCreateMode){0}, (OsFileShareFlags){0});
     bool result = file != 0;
     if (file)
     {

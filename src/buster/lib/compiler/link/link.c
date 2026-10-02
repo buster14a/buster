@@ -3557,7 +3557,7 @@ void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
 
 BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes, OsError* error)
 {
-    FilePublishResult published = file_publish_checked(path, bytes, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
+    FilePublishResult published = file_publish_checked(path, bytes, (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXECUTABLE}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     *error = published.error;
     return published.status == FILE_PUBLISH_PUBLISHED;
 }
