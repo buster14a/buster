@@ -180,3 +180,36 @@ the independently compiled observer reads only live elements. The 1024-iteration
 The test module also checks that a later unsupported operation cannot replace
 an existing output. When Clang is available, the fixture is consumed and run
 at both `-O0` and `-O2` for both frontend modes.
+
+## Lifecycle registration regression
+
+The registered `llvm_bitcode_test_lifecycle` fixture preserves the C frontend's
+canonical `IrModule.initializers` boundary across both frontend forms and six
+Linux, Windows and macOS target rows. It checks callback symbols, definition
+linkage, priorities and constructor/destructor kinds before asking the direct
+serializer for deterministic bytes. Removing registrations must restore the
+zero-registration control; changing priority or kind must change the bytes.
+Malformed callback symbols and priorities must fail without publishing bytes.
+The canonical native default-priority sentinel must encode identically to the
+explicit LLVM default priority 65535.
+
+On native Linux x86-64 and AArch64, the fixture requires Clang and GCC. Original
+inline C units and a separately compiled observer provide reference output at
+`-O0` and `-O2`; Clang also consumes the Buster-produced bitcode in both frontend
+forms at those optimization levels. The two-translation-unit case contains
+only static callback definitions and an external observer declaration. Unique
+priorities require increasing constructor order and decreasing destructor
+order, with exactly one default callback of each kind. Constructor-only,
+destructor-only, default-only, explicit-65535 and no-registration controls
+avoid equal-priority ordering assumptions. The observer returns normally from
+`main`, so its captured fixed bytes include destructor output after `main`.
+A normal exit with missing callbacks still fails the byte oracle. Compile/run
+children have 30-second deadlines, and source and emitted bytes remain checked
+against their original inputs after consumption. Other hosts retain the
+canonical target checks and report native execution as unsupported.
+
+This is a regression boundary for the missing lifecycle records tracked by
+[#1336](https://github.com/buster14a/buster/issues/1336); recording a fixture does
+not establish successful lifecycle emission. The LLVM contract is
+[`llvm.global_ctors` and `llvm.global_dtors`](https://llvm.org/docs/LangRef.html#the-llvm-global-ctors-global-variable):
+appending arrays of priority, function pointer and associated-data pointer.
