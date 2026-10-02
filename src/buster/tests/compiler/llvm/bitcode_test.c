@@ -417,20 +417,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle_consumer(UnitTest
     command[command_count++] = observer;
     command[command_count++] = S8("-o");
     command[command_count++] = executable;
-    ProcessSpawnOptions options = {.use_process_environment = true, .search_path = true,
+    ProcessSpawnOptions options = {.use_process_environment = true, .search_path = true, .new_process_group = true,
         .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
     ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = command_count},
         (SliceString8){0}, (SliceString8){0}, options);
     if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
     {
         ProcessWaitResult compiled = os_process_wait_deadline(arena, spawned, 30000000);
-        if (compiled.result != PROCESS_RESULT_SUCCESS)
+        bool compile_success = compiled.result == PROCESS_RESULT_SUCCESS && !compiled.timed_out &&
+            !compiled.capture_failed && !compiled.output_truncated && !compiled.process_tree_cleanup_failed;
+        if (!compile_success)
         {
             ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
             arguments->show(arguments, S8("LLVM lifecycle compile {S8} {S8} {S8}: {S8}\n"), fixture, producer, optimization,
                 (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
         }
-        if (BUSTER_REQUIRE(arguments, compiled.result == PROCESS_RESULT_SUCCESS))
+        if (BUSTER_REQUIRE(arguments, compile_success))
         {
             String8 run[] = {executable};
             ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
@@ -770,8 +772,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
                                 ByteSlice after = file_read(arena, outputs[unit], (FileReadOptions){0});
                                 BUSTER_TEST(arguments, after.length == artifacts[unit].bytes.length && after.pointer &&
                                     !memcmp(after.pointer, artifacts[unit].bytes.pointer, after.length));
-                                os_file_delete(outputs[unit]);
                             }
+                        }
+                    }
+                    for (u32 unit = 0; unit < 2; unit += 1)
+                    {
+                        if (outputs[unit].length)
+                        {
+                            os_file_delete(outputs[unit]);
                         }
                     }
                 }
