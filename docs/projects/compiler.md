@@ -34,6 +34,14 @@ and applicable self-host/target gates. Keep source revision, configuration,
 commands, actual results and unavailable execution legs on the relevant PR or
 evidence report; this catalogue does not turn historical passes into current ones.
 
+The canonical DWARF v4 writer measures the location lists reached through
+function scopes before allocating their storage. It preserves unavailable gaps,
+empty lists and repeated scope references, and refuses location expressions or
+`.debug_loc` offsets that exceed the format's two-byte and four-byte fields. The existing
+[DWARF tests](../../src/buster/tests/compiler/dwarf/dwarf_test.c) cover the encoded
+model boundaries; external DWARF consumers and debugger observations remain
+separate validation gates.
+
 [#309](https://github.com/buster14a/buster/issues/309) owns the specialized backend
 capability/conformance catalogue. Extend that work rather than implementing a
 second matrix here. Implementation, evidence and advertised support are separate.
