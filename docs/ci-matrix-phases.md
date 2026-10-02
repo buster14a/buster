@@ -67,13 +67,14 @@ commands for a shared multi-config tree retain one pool-edge identity because
 Ninja holds that slot across them. The self-host consumer is a separate
 competing edge. Its time is retained, not attributed to compiler tests.
 
-For a direct `test_all` command, the nested test observer separates compilation
-before the actual test child starts from the test payload. Pre-test/build time
-includes the nested observer's recorded admission-to-child-start setup and
-start-record publication; it is not a compiler-only CPU or process-launch
-measurement. The three intervals conserve the enclosing validation child time.
-The enclosing command's measured
-tail after the test, plus explicit native analyzer work, is `post_test`.
+For a direct `test_all` command, pre-test/build time ends at the nested
+observer's recorded `child_start_us` boundary, sampled immediately before
+`os_process_spawn`; the test interval retains the existing spawn/wait duration.
+Pre-test/build time includes nested observer setup and start-record publication,
+so pre-test, test and post-test durations sum to the enclosing validation child
+interval. This is not a compiler-only CPU or process-launch measurement.
+The enclosing command's measured tail after the test, plus explicit native
+analyzer work, is `post_test`.
 For a pooled test target, any pre-test work is included in build time by the
 same rule. Absent tests are compile-only rows, not fabricated successful tests.
 
