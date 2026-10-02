@@ -11,11 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: cf9ead61485111571a1de7f8ac2e4f4b6eebb825
+          ref: 68b604d56a74c876a106cb580ee38893c39cb644
           persist-credentials: false
       - name: Verify exact source and independent tool identities
         run: |
-          test "$(git rev-parse HEAD)" = "cf9ead61485111571a1de7f8ac2e4f4b6eebb825"
+          test "$(git rev-parse HEAD)" = "68b604d56a74c876a106cb580ee38893c39cb644"
           git rev-parse HEAD
           as --version
           clang --version
