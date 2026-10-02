@@ -436,6 +436,10 @@ without facts for identical bitcode and diagnostics.
   alignment aliases preserve their value and the access type; changed width,
   signedness, integer rank, kind or pointer pointee identity stays unknown. Displaced accesses
   also stay unknown rather than borrowing the whole initializer's value.
+  Static scalar materialization requires a concrete converted pointer, integer
+  or floating constant. A successful cast may carry UNKNOWN for a runtime
+  value; that carrier supplies no initializer bytes or relocation. Array-lvalue
+  pointer decay remains with the existing cast path.
   The same fixture preserves direct, same-type, typedef and aligned reads, rejects the
   static cast/offset neighbors, and pins conservative unevaluated predicate
   answers with no loads or effects (#1566).
