@@ -25509,6 +25509,27 @@ BUSTER_C_INTERNAL bool c_ir_postfix_update_at(CIntegerIrBuilder* builder, u32 in
                                c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_MINUS_MINUS));
 }
 
+// A vector lane subscript needs the preceding vector's original storage.
+// Plain grouping preserves that place; pending value operations must run
+// before an outer suffix and therefore require the ordinary vector load.
+BUSTER_C_INTERNAL bool c_ir_subscript_place_follows(CIntegerIrBuilder* builder, u32 index, u32 end,
+                                                   CConditionalOperator const* operations, u32 operation_count)
+{
+    u32 suffix = index + 1;
+    bool grouping = true;
+    while (grouping && suffix < end && c_token_is_punctuator(&builder->preprocess.tokens[suffix], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        grouping = operation_count && operations[operation_count - 1] == C_CONDITIONAL_OPEN;
+        if (grouping)
+        {
+            operation_count -= 1;
+            suffix += 1;
+        }
+    }
+    bool result = grouping && suffix < end && c_token_is_punctuator(&builder->preprocess.tokens[suffix], C_PUNCTUATOR_LEFT_BRACKET);
+    return result;
+}
+
 // Aggregate operands are captured values, while volatile qualifiers belong to
 // their destination places. If a conversion retained the unqualified value,
 // initialize explicit storage through the ordinary qualified STORE contract.
@@ -30535,8 +30556,10 @@ c_ir_expression_core_loop:
                 IrTypeId element_type = builder->function->values[place.value].canonical_type;
                 IrType* element = ir_type_from_id(&builder->program->types, element_type);
                 bool postfix_update = c_ir_postfix_update_at(builder, prepared->close_index, end);
+                bool vector_subscript = element && element->kind == IR_TYPE_VECTOR &&
+                                        c_ir_subscript_place_follows(builder, prepared->close_index, end, operations, operation_count);
                 IrValueId indexed_value = builder->function->values[place.value].category != IR_VALUE_PLACE ? place
-                                          : element && element->kind == IR_TYPE_ARRAY         ? place
+                                          : element && (element->kind == IR_TYPE_ARRAY || vector_subscript) ? place
                                           : element && element->is_atomic && postfix_update ? place
                                                                                             : c_ir_emit_expression_place_value(builder, place, element_type, source);
                 if (postfix_update)
@@ -30597,8 +30620,10 @@ c_ir_expression_core_loop:
             IrTypeId element_type = builder->function->values[place.value].canonical_type;
             IrType* element = ir_type_from_id(&builder->program->types, element_type);
             bool postfix_update = c_ir_postfix_update_at(builder, index, end);
+            bool vector_subscript = element && element->kind == IR_TYPE_VECTOR &&
+                                    c_ir_subscript_place_follows(builder, index, end, operations, operation_count);
             IrValueId indexed_value = builder->function->values[place.value].category != IR_VALUE_PLACE ? place
-                                          : element && element->kind == IR_TYPE_ARRAY         ? place
+                                          : element && (element->kind == IR_TYPE_ARRAY || vector_subscript) ? place
                                       : element && element->is_atomic && postfix_update ? place
                                                                                         : c_ir_emit_expression_place_value(builder, place, element_type, source);
             if (postfix_update)

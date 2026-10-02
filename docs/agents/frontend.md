@@ -239,7 +239,9 @@ scalar/vector type.
 `c_vendor_generic.c` and `c_vendor_sse2_shift.c` expand the implemented subset through existing scalar,
 vector, memory, CFG and fixed-register assembly contracts. Reachability uses
 the existing function dependency worklist after semantic validation. A reached
-unsupported intrinsic produces a diagnostic containing its exact name.
+unsupported intrinsic produces a diagnostic containing its exact name. Vector
+signature validation checks object layout; target ABI transport limits apply
+when a reachable definition or call is lowered, after unused wrappers are pruned.
 
 Per-call instruction/value/block reservations supplement token-derived body
 capacity. Masked loads reserve their conditional byte accesses and additional
@@ -271,3 +273,9 @@ and its signature takes no arguments in evaluated, unused and unevaluated
 contexts. Its existing float counterpart is `__builtin_inff()`; admission
 and availability use the fixed math spelling census, without vendor metadata
 changes or a runtime library import.
+
+Nested vector lane subscripts retain the original vector storage, including
+plain parenthesized groups. Standalone vector reads still produce copied values.
+The registered runtime fixture checks local arrays, globals, member arrays,
+pointer bases, evaluation counts, neighboring guards and captured values across
+allocator and frontend memory modes.

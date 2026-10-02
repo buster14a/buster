@@ -11483,6 +11483,182 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_infinity(UnitTestArguments* ar
     return result;
 }
 
+// Stores through nested vector subscripts must update the original object.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_vector_lane_stores(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef int Lane4 __attribute__((vector_size(16)));\ntypedef struct VectorBox { int before; Lane4 rows[2]; int after; } VectorBox;\nstatic Lane4 global_rows[2] = {{11,12,13,14},{15,16,17,18}};\nstatic int base_calls, row_calls, lane_calls;\nstatic Lane4 *effect_base(void) { base_calls += 1; return global_rows; }\nstatic int effect_row(void) { row_calls += 1; return 1; }\nstatic int effect_lane(void) { lane_calls += 1; return 2; }\nstatic int check_rows(Lane4 *rows, int first, int changed)\n{\n    int error = 0;\n    for (int row = 0; row < 2; row += 1)\n        for (int lane = 0; lane < 4; lane += 1)\n        {\n            int expected = first + row * 4 + lane;\n            if (row == 1 && lane == 2) expected = changed;\n            if (rows[row][lane] != expected) error = 1;\n        }\n    return error;\n}\nint main(void)\n{\n    Lane4 local_rows[2] = {{1,2,3,4},{5,6,7,8}};\n    VectorBox box = {91,{{21,22,23,24},{25,26,27,28}},92};\n    Lane4 pointer_rows[2] = {{31,32,33,34},{35,36,37,38}};\n    Lane4 *pointer = pointer_rows;\n    volatile int row = 1;\n    volatile int lane = 2;\n    Lane4 captured = local_rows[row];\n    int error = 0;\n    local_rows[row][lane] = 70;\n    (local_rows[row])[lane] += 3;\n    error |= check_rows(local_rows, 1, 73) ? 1 : 0;\n    global_rows[row][lane] = 170;\n    global_rows[row][lane] -= 7;\n    (effect_base()[effect_row()])[effect_lane()] += 9;\n    error |= check_rows(global_rows, 11, 172) ? 2 : 0;\n    error |= (base_calls != 1 || row_calls != 1 || lane_calls != 1) ? 4 : 0;\n    box.rows[row][lane] = 270;\n    box.rows[row ? 1 : 0][lane] += 4;\n    error |= check_rows(box.rows, 21, 274) ? 8 : 0;\n    error |= (box.before != 91 || box.after != 92) ? 16 : 0;\n    pointer[row][lane] = 370;\n    ((pointer[row]))[lane] *= 2;\n    error |= check_rows(pointer_rows, 31, 740) ? 32 : 0;\n    for (int index = 0; index < 4; index += 1)\n        error |= captured[index] != 5 + index ? 64 : 0;\n    return error;\n}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("nested-vector-lanes.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("nested vector target={u32} form={u32}: first diagnostic {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("main")) != 0);
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=none")};
+    String8 path = buster_test_temporary_path(arguments->arena, S8("nested-vector-lanes"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("nested-vector-lanes-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+#if BUSTER_CPU_ARCH_X86_64
+                    S8("-mattr=+sse2,+cx16"),
+#endif
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                // NONE is the explicitly selected canonical reference path.
+                // Machine modes must compile every function without fallback.
+                invocation.reject_machine_fallback = mode < 2;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("nested vector mode={S8} form={u32}: {S8}"), modes[mode], form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena,
+                                S8("nested vector mode={S8} form={u32}: status={u32} timed_out={u32}; exit bits local=1 global=2 effects=4 member=8 guards=16 pointer=32 capture=64"),
+                                modes[mode], form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
+
+// Typed unused definitions need no ABI transport; reachable definitions and
+// calls still obey the unchanged canonical signature gates.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unused_wide_vector_signatures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef int Tile __attribute__((vector_size(1024),aligned(64)));\ntypedef int TileAligned __attribute__((vector_size(1024),aligned(1024)));\ntypedef struct TileBox { const unsigned short row,col; Tile tile; } TileBox;\n_Static_assert(sizeof(Tile)==1024,\"tile storage\");\n_Static_assert(_Alignof(Tile)==64,\"tile alignment\");\n_Static_assert(sizeof(TileAligned)==1024 && _Alignof(TileAligned)==1024,\"explicit tile alignment\");\n_Static_assert(sizeof(TileBox)==1088 && _Alignof(TileBox)==64,\"tile record layout\");\nstatic inline Tile unused_identity(Tile value) { return value; }\n#if defined(__x86_64__)\nstatic __inline__ Tile __attribute__((always_inline,nodebug,target(\"amx-tile\")))\nunused_load(unsigned short m,unsigned short n,const void *base,__SIZE_TYPE__ stride)\n{ return __builtin_ia32_tileloadd64_internal(m,n,base,stride); }\n__attribute__((always_inline,nodebug,target(\"amx-tile\")))\nstatic __inline__ void unused_outer(TileBox *dst,const void *base,__SIZE_TYPE__ stride)\n{ dst->tile=unused_load(dst->row,dst->col,base,stride); }\n_Static_assert(sizeof(__builtin_ia32_tileloadd64_internal(1,1,(const void*)0,(__SIZE_TYPE__)0))==1024,\"typed tile result\");\n#if __has_builtin(__builtin_ia32_tileloadd64_internal)\n#error admission must not advertise AMX lowering\n#endif\n#endif\nint live(void) { return 0; }\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("unused-wide-vector.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("unused wide vector target={u32} form={u32}: {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("live")) != 0);
+                BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("unused_identity")) == 0);
+                BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("unused_load")) == 0);
+                BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("unused_outer")) == 0);
+            }
+            scratch_end(temporary);
+        }
+    }
+    typedef struct CTestWideVectorInvalid CTestWideVectorInvalid;
+    struct CTestWideVectorInvalid
+    {
+        String8 source, name, message;
+        CDiagnosticKind category;
+        bool linux_only, x86_only;
+    };
+    CTestWideVectorInvalid invalid[] = {
+        {S8("typedef int Tile __attribute__((vector_size(1024),aligned(64))); Tile wide_body(Tile value) { return value; }"), S8("wide_body"), S8("parameter or return value types"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, true, false},
+        {S8("typedef int Tile __attribute__((vector_size(1024),aligned(64))); static inline Tile wide_direct(Tile value) { return value; } void caller(Tile *value) { *value=wide_direct(*value); }"), S8("wide_direct"), S8("parameter or return value types"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, true, false},
+        {S8("typedef int Tile __attribute__((vector_size(1024),aligned(64))); extern Tile (*wide_indirect)(void); void caller(Tile *value) { *value=wide_indirect(); }"), S8("<function pointer>"), S8("parameter or return value types"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, true, false},
+        {S8("typedef int Tile __attribute__((vector_size(1024),aligned(64))); static Tile wide_address(Tile value) { return value; } Tile (*kept)(Tile)=wide_address; int live(void) { return 0; }"), S8("wide_address"), S8("parameter or return value types"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, true, false},
+        {S8("void direct_tile(void) { (void)__builtin_ia32_tileloadd64_internal(1,1,(const void*)0,(__SIZE_TYPE__)0); }"), S8("__builtin_ia32_tileloadd64_internal"), S8("unsupported target builtin"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, false, true},
+        {S8("typedef int Tile __attribute__((vector_size(1024),aligned(64))); static inline Tile bad_arity(void) { return __builtin_ia32_tileloadd64_internal(1,1,(const void*)0); } int live(void) { return 0; }"), S8("__builtin_ia32_tileloadd64_internal"), S8("too few arguments"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, false, true},
+        {S8("typedef int Tile __attribute__((vector_size(1024),aligned(64))); static inline Tile bad_type(void) { return __builtin_ia32_tileloadd64_internal(1,1,(const void*)0,(void*)0); } int live(void) { return 0; }"), S8("__builtin_ia32_tileloadd64_internal"), S8("incompatible type"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, false, true},
+        {S8("typedef int Tile __attribute__((vector_size(1024),aligned(64))); int bad_alignment __attribute__((aligned(3))); static inline Tile unused(Tile value) { return value; }"), S8(""), S8("power of two"), C_DIAGNOSTIC_INVALID_ALIGNMENT, false, false},
+        {S8("static inline void bad_bound(int value[*]) { (void)value; } int live(void) { return 0; }"), S8(""), S8("star array bound is only allowed"), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, false, false},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+        {
+            CTestWideVectorInvalid test = invalid[index];
+            if ((test.linux_only && target.os != OPERATING_SYSTEM_LINUX) ||
+                (test.x86_only && target.cpu_arch != CPU_ARCH_X86_64)) continue;
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, test.source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("wide-vector-rejected.c"), preprocess, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, test.source);
+                bool found = false;
+                for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                {
+                    String8 message = lowered.diagnostics[diagnostic].message;
+                    found |= lowered.diagnostics[diagnostic].kind == test.category &&
+                        (!test.name.length || string_first_sequence(message, test.name) != BUSTER_STRING_NO_MATCH) &&
+                        string_first_sequence(message, test.message) != BUSTER_STRING_NO_MATCH;
+                }
+                BUSTER_TEST_RAW(arguments, found, string_format(temporary.arena,
+                    S8("wide vector target={u32} case={u32} form={u32}: {S8}"), target_index, index, form,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+                BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, !lowered.program || lowered.program->rejected_function_count != 0);
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+
 // #665: query the real preprocessor with an independent exact-name census.
 // Do not infer support from a prefix or advertise native atomic IR to the
 // Wasm64/eBPF backends, which explicitly reject it.
@@ -32017,6 +32193,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_vendor_sse2_shift_counts);
     BUSTER_TEST_FIXTURE(arguments, c_test_gnu_void_return);
     BUSTER_TEST_FIXTURE(arguments, c_test_builtin_infinity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_unused_wide_vector_signatures);
+    BUSTER_TEST_FIXTURE(arguments, c_test_nested_vector_lane_stores);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);

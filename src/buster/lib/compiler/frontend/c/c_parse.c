@@ -25500,9 +25500,7 @@ BUSTER_C_INTERNAL void c_parse_validate_signature(CTypeParseMachine* machine, CP
             u64 size = 0;
             u32 alignment = 0;
             valid &= c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment);
-            bool padded = value.vector_byte_size && value.vector_byte_size < size;
-            valid &= padded ? preprocess.target.cpu_arch == CPU_ARCH_X86_64 || preprocess.target.cpu_arch == CPU_ARCH_AARCH64
-                            : size <= 64 || ir_abi_convention_for_target(preprocess.target) == IR_ABI_CONVENTION_WIN64_X86_64;
+            // ABI transport limits are checked by lowering after unused definitions are pruned.
         }
     }
     arena_set_position(machine->scratch_arena, mark);
