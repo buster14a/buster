@@ -281,3 +281,26 @@ allocators and both frontend SSA forms on eligible hosts. Semantic checks
 for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
+
+## Non-void closing-brace return edge
+
+C 6.9.1p12 makes a non-void closing-brace falloff undefined when the caller
+uses its result. A discarded result retains the return edge and all earlier
+side effects. It does not justify UNREACHABLE. Explicit returns, void returns,
+main's implicit zero and actual noreturn effects have their separate contracts.
+
+`c_test_nonvoid_falloff` checks typed canonical RETURN/no-UNREACHABLE for
+integer, pointer, floating and small/4-KiB aggregate results, plus the explicit
+return, void and noreturn neighbors, across six target layouts, GNU17/GNU23
+and both frontend forms. Separate caller/callee sources exercise sixteen
+independently selected runtime paths through combined and separately linked
+objects in all four native allocators. VLA repetition, GNU cleanup, indirect,
+void-cast and comma-discard calls keep their observable scope effects. Main
+falls off only after checking the exact effects, so its defined zero is also
+exercised. Bare/incompatible returns and wrong arity remain refused. No runtime
+oracle uses an unspecified fallen-off result.
+
+This regression is published before the bounded lowering repair. Its hosted
+baseline must retain the existing control-flow fixture's historical
+UNREACHABLE expectation; the production candidate will replace that false
+contract after the failed baseline is recorded.
