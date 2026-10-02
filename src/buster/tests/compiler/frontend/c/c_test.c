@@ -15691,12 +15691,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             "static volatile int calls;\n"
             "static struct S2 *next(void) { calls += 1; return &s2; }\n"
             "static struct S2 *pick(int value) { calls += value; return &s2; }\n"
+            "static struct S2 *cursor = &s2;\n"
             "enum {\n"
             "    E_X = __alignof__(s2.x), E_Y = _Alignof(s2.y), E_PACKED = __alignof__(p.i),\n"
             "    E_MEMBER_PACKED = __alignof__(mp.i), E_REQUEST = __alignof__(rp.i), E_RAISED = __alignof__(raised.i),\n"
             "    E_NESTED = __alignof__(outer.inner.x), E_PROMOTED = __alignof__(promoted.x), E_ARRAY = __alignof__(array_member.values),\n"
             "    E_UNION = __alignof__(au.x), E_ADDRESS = __alignof__((&au)->x), E_CONST = __alignof__(groups[0].x),\n"
             "    E_EXPRESSION = __alignof__(request_expression.x), E_CAST = __alignof__(cast_request.x), E_CHAIN = __alignof__(chained.x),\n"
+            "    E_PREFIX = __alignof__((++cursor)->x), E_POSTFIX = __alignof__((cursor++)->x),\n"
+            "    E_CAST_UPDATE = __alignof__(((struct S2 *)cursor++)->x),\n"
+            "    E_CAST_DEREF = __alignof__((*(struct S2 *)cursor++).x),\n"
+            "    E_SIZEOF_UPDATE = __alignof__(((struct S2 *)(sizeof cursor++))->x),\n"
+            "    E_ALIGNOF_UPDATE = __alignof__(((struct S2 *)(_Alignof cursor++))->x),\n"
             "    E_PRAGMA = __alignof__(pragma_object.requested)\n"
             "};\n"
         ),
@@ -15707,6 +15713,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             "_Static_assert(__alignof__(g1) == 64 && __alignof__(g2) == 128 && E_X == 16 && E_Y == 32 && E_PACKED == 1, \"original queries\");\n"
             "_Static_assert(E_MEMBER_PACKED == 1 && E_REQUEST == 2 && E_RAISED == 8 && E_NESTED == 8 && E_PROMOTED == 16, \"packing and declaring owner\");\n"
             "_Static_assert(E_ARRAY == 16 && E_UNION == 16 && E_ADDRESS == 16 && E_CONST == 16 && E_EXPRESSION == 8 && E_CAST == 8 && E_CHAIN == 16, \"typed and const member queries\");\n"
+            "_Static_assert(E_PREFIX == 16 && E_POSTFIX == 16, \"unevaluated pointer updates\");\n"
+            "_Static_assert(__alignof__((0, cursor++)->x) == 16 && __alignof__(((struct S2 *)cursor++)->x) == 16 && E_CAST_UPDATE == 16, \"comma and cast pointer updates\");\n"
+            "_Static_assert(__alignof__((*(struct S2 *)cursor++).x) == 16 && E_CAST_DEREF == 16, \"cast under dereference\");\n"
+            "_Static_assert(__alignof__(((struct S2 *)(sizeof cursor++))->x) == 16 && E_SIZEOF_UPDATE == 16, \"sizeof pointer update\");\n"
+            "_Static_assert(__alignof__(((struct S2 *)(_Alignof cursor++))->x) == 16 && E_ALIGNOF_UPDATE == 16, \"alignof pointer update\");\n"
+            "_Static_assert(__alignof__((__extension__ cursor++)->x) == 16, \"extension pointer update\");\n"
+            "_Static_assert(__alignof__(((struct S2 *)__real__ sizeof cursor++)->x) == 16 && __alignof__(((struct S2 *)__imag__ sizeof cursor++)->x) == 16, \"real imaginary sizeof operands\");\n"
             "_Static_assert(E_PRAGMA == PRAGMA_REQUEST && __alignof__(pragma_object.plain) == 1, \"pragma target rules\");\n"
             "_Static_assert(__alignof__(int) == 4 && _Alignof(short) == 2 && __alignof__(incidental.c) == 1, \"type and incidental alignment\");\n"
             "_Static_assert(sizeof s2.x == 4, \"sizeof direct member\");\n"
@@ -15726,6 +15739,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             "    _Static_assert(__alignof__(local.x) == 32 && __alignof__(request_expression.x) == 8, \"declaration scopes\");\n"
             "    return __alignof__(local.x) != 32 || __alignof__(request_expression.x) != 8;\n"
             "}\n"
+        ),
+        S8(
             "int main(void) {\n"
             "    _Alignas(32) int loc = 0; s2.x = 1;\n"
             "    int failed = __alignof__(g1) != 64 || __alignof__(g2) != 128 || __alignof__(s2.x) != 16 ||\n"
@@ -15738,7 +15753,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             "    failed |= __alignof__(pragma_object.requested) != PRAGMA_REQUEST || __alignof__(pragma_object.plain) != 1;\n"
             "    failed |= __alignof__(derived) != 16 || sizeof member_bound != 16 || __alignof__(incidental.c) != 1;\n"
             "    failed |= __alignof__(++s2.x) != 4 || __alignof__(((struct S2){.x = ++calls}).x) != 16 || __alignof__(next()->x) != 16 || __alignof__(pick(++calls)->x) != 16;\n"
-            "    failed |= s2.x != 1 || calls != 0 || scope_control() != 0; return failed;\n"
+            "    failed |= __alignof__((++cursor)->x) != 16 || __alignof__((cursor++)->x) != 16;\n"
+            "    failed |= __alignof__((0, cursor++)->x) != 16 || __alignof__(((struct S2 *)cursor++)->x) != 16;\n"
+            "    failed |= __alignof__((*(struct S2 *)cursor++).x) != 16;\n"
+            "    failed |= __alignof__(((struct S2 *)(sizeof cursor++))->x) != 16;\n"
+            "    failed |= __alignof__(((struct S2 *)(_Alignof cursor++))->x) != 16;\n"
+            "    failed |= __alignof__((__extension__ cursor++)->x) != 16;\n"
+            "    failed |= __alignof__(((struct S2 *)__real__ sizeof cursor++)->x) != 16 || __alignof__(((struct S2 *)__imag__ sizeof cursor++)->x) != 16;\n"
+            "    failed |= s2.x != 1 || calls != 0 || cursor != &s2 || scope_control() != 0; return failed;\n"
             "}\n"
         )
     };
@@ -15754,6 +15776,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
         {S8("E_REQUEST"), 2}, {S8("E_RAISED"), 8}, {S8("E_NESTED"), 8}, {S8("E_PROMOTED"), 16},
         {S8("E_ARRAY"), 16}, {S8("E_UNION"), 16}, {S8("E_ADDRESS"), 16}, {S8("E_CONST"), 16},
         {S8("E_EXPRESSION"), 8}, {S8("E_CAST"), 8}, {S8("E_CHAIN"), 16},
+        {S8("E_PREFIX"), 16}, {S8("E_POSTFIX"), 16}, {S8("E_CAST_UPDATE"), 16}, {S8("E_CAST_DEREF"), 16},
+        {S8("E_SIZEOF_UPDATE"), 16}, {S8("E_ALIGNOF_UPDATE"), 16},
     };
     for (u32 target_index = 0; target_index < 6; target_index += 1)
     {
@@ -15903,6 +15927,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
            "_Static_assert(__alignof__((s++).x) == 16, \"aggregate update is invalid\");"),
         S8("struct S { int x __attribute__((aligned(16))); } s;"
            "enum { E = __alignof__((s++).x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "_Static_assert(__alignof__((0, s++).x) == 16, \"aggregate update is invalid\");"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "enum { E = __alignof__((0, s++).x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); };"
+           "_Static_assert(__alignof__((((struct S){0})++).x) == 16, \"aggregate update is invalid\");"),
+        S8("struct S { int x __attribute__((aligned(16))); };"
+           "enum { E = __alignof__((((struct S){0})++).x) };"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
     {

@@ -441,6 +441,15 @@ and qualified-array traversal may append temporary pointer/qualified types, so
 they must never run against the published canonical type-map input. Only the
 final alignment number escapes. Unevaluated named calls pass the existing
 argument-count checker against the private model before that number is exported.
+The prefix TYPE query checks expression constraints before the direct fallback;
+an explicit refusal cannot be rescued by that fallback. Checked postfix updates
+run as an expression-leaf continuation after existing cast/primary parsing.
+Binary, unary, cast and sizeof/alignof priorities stay with their existing
+frames; GNU real/imaginary prefixes split before the leaf and extension prefixes
+are stripped by the existing task normalization. The continuation types
+the isolated operand and uses the existing modifiable-place/type check without
+evaluating it. Valid pointer updates remain unevaluated; aggregate updates are
+refused. The unchecked TYPE path retains its existing leaf.
 The query bypasses committed type-layout rows
 to visit the selected placement; its alignment requests use the protected typed
 integer query in their original source scopes. Other layout solves retain their

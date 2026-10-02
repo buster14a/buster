@@ -11646,8 +11646,35 @@ BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, C
     c_type_parse_frame_complete(machine, (CTypeId){.value = frame->alignment_count}, frame->alignment_start, true);
 }
 
+// The leaf has already separated prefix operators and casts. This
+// continuation types the actual postfix operand without evaluating it.
+BUSTER_C_INTERNAL void c_type_parse_postfix_update_push(CTypeParseMachine* machine, CTypeParseFrame* frame)
+{
+    frame->stage = C_TYPE_PARSE_STAGE_POSTFIX;
+    if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+        .result = frame->result, .preprocess = frame->preprocess, .arena = frame->arena, .scope = frame->scope,
+        .start = frame->start, .end = frame->end - 1, .kind = C_TYPE_PARSE_FRAME_SIZEOF}))
+    {
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+    }
+    return;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
+    if (frame->stage == C_TYPE_PARSE_STAGE_POSTFIX)
+    {
+        CTypeId type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
+        bool valid = type.value < frame->result->type_count;
+        if (valid && !machine->expression_constraint.length &&
+            !c_parse_update_operand_modifiable(frame->result, *frame->preprocess, frame->start, frame->end - 1, type))
+        {
+            machine->expression_constraint = S8("increment or decrement operand is not a modifiable place");
+            machine->expression_constraint_token = frame->start;
+        }
+        c_type_parse_frame_complete(machine, type, frame->end, valid);
+        return;
+    }
     if (frame->stage == C_TYPE_PARSE_STAGE_FINISH)
     {
         CTypeId source = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
@@ -11666,6 +11693,10 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
         c_type_parse_frame_complete(machine, frame->type, frame->end, true);
         return;
     }
+    bool postfix_update = machine->validate_expression_constraints && frame->start + 1 < frame->end &&
+        !c_token_in_well_known_set(frame->preprocess->spelling_base, frame->preprocess->tokens[frame->start], C_PARSE_SIZEOF_KEYWORDS) &&
+        (c_token_is_punctuator(&frame->preprocess->tokens[frame->end - 1], C_PUNCTUATOR_PLUS_PLUS) ||
+         c_token_is_punctuator(&frame->preprocess->tokens[frame->end - 1], C_PUNCTUATOR_MINUS_MINUS));
     if (frame->stage == C_TYPE_PARSE_STAGE_CHILD || frame->stage == C_TYPE_PARSE_STAGE_FALLBACK)
     {
         CTypeId type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
@@ -11694,6 +11725,13 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
             u32 initializer = frame->close + 1;
             if (initializer < frame->end && c_token_is_punctuator(&frame->preprocess->tokens[initializer], C_PUNCTUATOR_LEFT_BRACE))
             {
+                // A compound literal is a primary operand, not a cast's
+                // unary operand. Check its update through the same leaf.
+                if (postfix_update)
+                {
+                    c_type_parse_postfix_update_push(machine, frame);
+                    return;
+                }
                 u32 close = c_parse_matching_delimiter_indexed(frame->result, *frame->preprocess, initializer);
                 if (close < frame->end)
                 {
@@ -11734,6 +11772,11 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
             }
             return;
         }
+    }
+    if (postfix_update)
+    {
+        c_type_parse_postfix_update_push(machine, frame);
+        return;
     }
     CTypeId type = c_parse_expression_leaf_without_cast(frame->arena, *frame->preprocess, frame->result, frame->scope, frame->start, frame->end);
     c_type_parse_frame_complete(machine, type, frame->end, type.value != C_ID_UNDERLYING_INVALID);
@@ -23092,12 +23135,18 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
             if (member_alignment)
             {
                 CTypeId aggregate = C_TYPE_ID_INVALID;
-                bool valid = c_parse_direct_expression_type(arena, preprocess, &query, scope, start, end - 2, &aggregate);
-                if (!valid)
+                // A type-only direct reader can retain an invalid update's
+                // type. Check the private prefix before its member supplies
+                // an alignment, and never rescue an explicit refusal.
+                query_machine.validate_expression_constraints = true;
+                query_machine.expression_constraint = (String8){0};
+                bool valid = c_parse_expression_type_query(&query_machine, arena, preprocess, &query, scope, start, end - 2, &aggregate);
+                query_machine.validate_expression_constraints = false;
+                if (!valid && !query_machine.failed && !query_machine.expression_constraint.length)
                 {
-                    valid = c_parse_expression_type_query(&query_machine, arena, preprocess, &query, scope, start, end - 2, &aggregate);
+                    valid = c_parse_direct_expression_type(arena, preprocess, &query, scope, start, end - 2, &aggregate);
                 }
-                valid &= aggregate.value < query.type_count;
+                valid &= !query_machine.expression_constraint.length && aggregate.value < query.type_count;
                 if (valid && c_token_is_punctuator(&preprocess.tokens[end - 2], C_PUNCTUATOR_ARROW))
                 {
                     CType pointer = query.types[aggregate.value];

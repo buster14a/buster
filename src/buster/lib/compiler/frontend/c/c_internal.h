@@ -1051,6 +1051,7 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_PARAMETERS,
     C_TYPE_PARSE_STAGE_PARAMETER_RESULT,
     C_TYPE_PARSE_STAGE_FINISH,
+    C_TYPE_PARSE_STAGE_POSTFIX,
 } CTypeParseFrameStage;
 
 struct CTypeMutation
