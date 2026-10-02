@@ -31,6 +31,7 @@
 //   assembly_x86_vector_form ..                    x86 form classification
 //   assembly_x86_instruction_size                  and instruction sizing/
 //                                                  encoding
+//   assembly_aarch64_exclusive_pair_instruction_parse typed memory-owner adapter
 //   assembly_x86_metadata_*                        metadata-driven selection
 //                                                  and emission
 //   assembly_instruction_parse,                    statement recognition and
@@ -42,6 +43,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_memory_semantics.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 #include <buster/lib/compiler/assembly/aarch64_system_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_system_registers.h>
@@ -478,6 +480,7 @@ typedef enum AssemblyEncodingKind
     ASSEMBLY_ENCODING_AARCH64_M1_GPR,
     ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER,
     ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY,
+    ASSEMBLY_ENCODING_AARCH64_EXCLUSIVE_PAIR,
     ASSEMBLY_ENCODING_AARCH64_CONTROL,
     ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS,
     ASSEMBLY_ENCODING_AARCH64_SYSTEM_REGISTER,
@@ -778,6 +781,22 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_memory_mnemonic(String8 mnemoni
         }
     }
     return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_exclusive_pair_mnemonic(String8 mnemonic, String8* canonical, bool* store)
+{
+    String8 name = {0};
+    bool write = false;
+    if (assembly_word_equal(mnemonic, S8("ldxp"))) name = S8("LDXP");
+    else if (assembly_word_equal(mnemonic, S8("ldaxp"))) name = S8("LDAXP");
+    else if (assembly_word_equal(mnemonic, S8("stxp"))) { name = S8("STXP"); write = true; }
+    else if (assembly_word_equal(mnemonic, S8("stlxp"))) { name = S8("STLXP"); write = true; }
+    if (name.length)
+    {
+        if (canonical) *canonical = name;
+        if (store) *store = write;
+    }
+    return name.length != 0;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_gpr_register_parse(String8 text, AssemblyRegister* result)
@@ -4065,6 +4084,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
             *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .operand_count = 2,
                                                 .encoding_kind = ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY};
         }
+        else if (assembly_aarch64_exclusive_pair_mnemonic(mnemonic, 0, 0))
+        {
+            *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT,
+                                                .encoding_kind = ASSEMBLY_ENCODING_AARCH64_EXCLUSIVE_PAIR};
+        }
         else if (assembly_word_equal(mnemonic, S8("mov")))
         {
             *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .operand_count = 2,
@@ -5532,6 +5556,111 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_memory_instruction_parse(Assemb
             .kind = ASSEMBLY_OPERAND_MEMORY,
         };
         instruction->operand_count = 2;
+        instruction->size = 4;
+    }
+    return valid;
+}
+
+// Pair-exclusive source roles are projected into the existing typed memory
+// owner. Its VM and canonical decoder retain encoding/target authority.
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_exclusive_pair_instruction_parse(AssemblyBuilder* builder, String8 mnemonic,
+                                                                            String8 operands_text,
+                                                                            AssemblyInstruction* instruction)
+{
+    String8 canonical = {0};
+    bool store = false;
+    bool valid = builder && instruction && assembly_aarch64_exclusive_pair_mnemonic(mnemonic, &canonical, &store);
+    String8 trimmed = assembly_trim(operands_text);
+    valid = valid && trimmed.length && trimmed.pointer[trimmed.length - 1] != ',';
+    String8 operands[4] = {0};
+    u32 operand_count = 0;
+    u64 cursor = 0;
+    while (valid && cursor < operands_text.length)
+    {
+        valid = operand_count < BUSTER_ARRAY_LENGTH(operands) &&
+                assembly_operand_split_next(operands_text, &cursor, operands + operand_count) == ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+        operand_count += valid;
+    }
+    u32 expected_count = store ? 4u : 3u;
+    valid = valid && operand_count == expected_count;
+    AssemblyRegister registers[4] = {0};
+    for (u32 index = 0; valid && index + 1 < expected_count; index += 1)
+    {
+        valid = assembly_aarch64_gpr_register_parse(operands[index], registers + index) && !registers[index].stack_pointer;
+    }
+    u32 first_data = store ? 1u : 0u;
+    valid = valid && registers[first_data].width == registers[first_data + 1].width &&
+            (registers[first_data].width == 32 || registers[first_data].width == 64) &&
+            (!store || registers[0].width == 32);
+
+    String8 memory = valid ? assembly_trim(operands[expected_count - 1]) : (String8){0};
+    valid = valid && memory.length >= 3 && memory.pointer[0] == '[' && memory.pointer[memory.length - 1] == ']';
+    String8 contents = valid ? assembly_trim(string_slice(memory, 1, memory.length - 1)) : (String8){0};
+    valid = valid && contents.length && contents.pointer[contents.length - 1] != ',';
+    String8 memory_operands[2] = {0};
+    u32 memory_operand_count = 0;
+    cursor = 0;
+    while (valid && cursor < contents.length)
+    {
+        valid = memory_operand_count < BUSTER_ARRAY_LENGTH(memory_operands) &&
+                assembly_operand_split_next(contents, &cursor, memory_operands + memory_operand_count) == ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+        memory_operand_count += valid;
+    }
+    valid = valid && memory_operand_count >= 1 && memory_operand_count <= 2;
+    AssemblyRegister base = {0};
+    if (valid)
+    {
+        valid = assembly_aarch64_gpr_register_parse(memory_operands[0], &base) && base.width == 64 &&
+                (base.index != 31 || base.stack_pointer);
+    }
+    if (valid && memory_operand_count == 2)
+    {
+        u64 offset = 0;
+        valid = assembly_aarch64_scalar_constant(builder, memory_operands[1], &offset) && offset == 0;
+    }
+    // WZR status and SP base are distinct roles despite sharing number 31.
+    // Status/data overlap is rejected in the same way as LLVM's STXP parser.
+    if (valid && store)
+    {
+        valid = registers[0].index != registers[1].index && registers[0].index != registers[2].index &&
+                (base.stack_pointer || registers[0].index != base.index);
+    }
+    registers[expected_count - 1] = base;
+    u32 matched = 0;
+    u32 word = 0;
+    u32 form_id = 0;
+    for (u32 ordinal = 0; valid && buster_a64_semantic_find_mnemonic(canonical, ordinal, &form_id); ordinal += 1)
+    {
+        BusterA64SemanticForm form = {0};
+        BusterA64MemoryRowInfo row = {0};
+        u32 row_index = 0;
+        if (!buster_a64_semantic_form(form_id, &form) ||
+            form.owner != BUSTER_A64_SEMANTIC_OWNER_MEMORY || form.kind != BUSTER_A64_SEMANTIC_FORM_CANONICAL ||
+            !buster_a64_memory_find_source_digest(form.source_digest, &row_index) || !buster_a64_memory_row(row_index, &row) ||
+            !row.candidate || row.family != BUSTER_A64_MEMORY_FAMILY_EXCLUSIVE ||
+            row.address_mode != BUSTER_A64_MEMORY_ADDRESS_BASE || row.operand_count != expected_count)
+        {
+            continue;
+        }
+        BusterA64MemoryInstruction candidate = {.row_index = row_index, .operand_count = (u8)expected_count};
+        for (u32 index = 0; index < expected_count; index += 1)
+        {
+            AssemblyRegister reg = registers[index];
+            candidate.operands[index] = buster_a64_memory_value_gpr(reg.index, (u8)reg.width, reg.stack_pointer,
+                reg.index == 31 && !reg.stack_pointer);
+        }
+        u32 candidate_word = 0;
+        if (buster_a64_memory_encode(builder->target, &candidate, &candidate_word) == BUSTER_A64_MEMORY_STATUS_OK)
+        {
+            word = candidate_word;
+            matched += 1;
+        }
+    }
+    valid = valid && matched == 1;
+    if (valid)
+    {
+        instruction->fixed_word = word;
+        instruction->operand_count = (u8)expected_count;
         instruction->size = 4;
     }
     return valid;
@@ -7815,6 +7944,19 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
     bool system_register_handled = false;
     bool move_immediate_handled = instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS &&
         assembly_aarch64_move_immediate_parse(builder, operands, &instruction, line, column);
+    if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_EXCLUSIVE_PAIR)
+    {
+        system_register_handled = true;
+        if (!assembly_aarch64_exclusive_pair_instruction_parse(builder, mnemonic, operands, &instruction))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column,
+                                (u32)mnemonic.length, S8("invalid AArch64 pair-exclusive operands"));
+        }
+        else
+        {
+            builder->instructions[builder->instruction_count++] = instruction;
+        }
+    }
     if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_SYSTEM_REGISTER)
     {
         system_register_handled = true;
@@ -12023,7 +12165,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             }
             continue;
         }
-        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_FIXED_WORD)
+        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_FIXED_WORD ||
+            instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_EXCLUSIVE_PAIR)
         {
             assembly_emit_u32(builder, instruction->fixed_word);
             continue;

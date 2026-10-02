@@ -2961,6 +2961,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArgumen
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_aarch64_exclusive_pairs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_IOS},
+    };
+    typedef struct AssemblyExclusivePairCase AssemblyExclusivePairCase;
+    struct AssemblyExclusivePairCase
+    {
+        String8 source;
+        u32 word;
+    };
+    // Independent LLVM memory controls and architectural register fields.
+    AssemblyExclusivePairCase const cases[] = {
+        {S8("ldxp w9,w14,[x10]"), 0x887f3949},
+        {S8("ldxp x9,x14,[x10]"), 0xc87f3949},
+        {S8("ldaxp w9,w14,[x10]"), 0x887fb949},
+        {S8("ldaxp x9,x14,[x10]"), 0xc87fb949},
+        {S8("stxp w13,w11,w12,[x10]"), 0x882d314b},
+        {S8("stxp w13,x11,x12,[x10]"), 0xc82d314b},
+        {S8("stlxp w13,w11,w12,[x10]"), 0x882db14b},
+        {S8("stlxp w13,x11,x12,[x10]"), 0xc82db14b},
+        {S8("ldaxp xzr,x14,[sp,#0]"), 0xc87fbbff},
+        {S8("ldxp w9,wzr,[sp]"), 0x887f7fe9},
+        {S8("stlxp wzr,x11,x12,[sp,#0]"), 0xc83fb3eb},
+        {S8("stxp w13,xzr,x12,[sp]"), 0xc82d33ff},
+        {S8("LDXP X9,X14,[SP,0]"), 0xc87f3be9},
+        {S8("stxp w13,x11,x11,[x10]"), 0xc82d2d4b},
+    };
+    String8 refused[] = {
+        S8("ldxp w9,x14,[x10]"),
+        S8("ldaxp sp,x14,[x10]"),
+        S8("ldxp x9,x14,[w10]"),
+        S8("ldaxp x9,x14,[xzr]"),
+        S8("stxp x13,x11,x12,[x10]"),
+        S8("stlxp wsp,x11,x12,[x10]"),
+        S8("stxp w11,x11,x12,[x10]"),
+        S8("stlxp w12,x11,x12,[x10]"),
+        S8("stxp w10,x11,x12,[x10]"),
+        S8("stlxp wzr,xzr,x12,[sp]"),
+        S8("ldxp x9,x14,[x10,#8]"),
+        S8("ldaxp x9,x14,[x10,missing]"),
+        S8("stxp w13,x11,x12,[x10,x0]"),
+        S8("stlxp w13,x11,x12,[x10,#0]!"),
+        S8("ldxp x9,x14,[x10],#0"),
+        S8("ldaxp x9,x14,[x10,]"),
+        S8("stxp w13,x11,x12,[x10],"),
+        S8("stlxp w13,x11,[x10]"),
+        S8("ldxp x9,x14,[x10],x0"),
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            u8 expected[8];
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                expected[byte] = (u8)(cases[index].word >> (byte * 8));
+                expected[byte + 4] = (u8)(0xd65f03c0u >> (byte * 8));
+            }
+            AssemblyEncodeResult instruction = assembly_encode(arguments->arena, cases[index].source,
+                (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST_RAW(arguments, !instruction.diagnostic_count && !instruction.relocation_count &&
+                assembly_test_bytes_equal(instruction.bytes, expected, 4), cases[index].source);
+            String8 source = string_format(arguments->arena, S8(".text\n{S8}\nret\n"), cases[index].source);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && unit.section_count == 1 &&
+                assembly_test_bytes_equal(unit.sections[0].data, expected, sizeof(expected)), source);
+        }
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+        {
+            AssemblyEncodeResult instruction = assembly_encode(arguments->arena, refused[index],
+                (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST_RAW(arguments, instruction.diagnostic_count == 1 && !instruction.bytes.length, refused[index]);
+            if (instruction.diagnostic_count == 1)
+            {
+                BUSTER_TEST(arguments, instruction.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                    instruction.diagnostics[0].line == 1 && instruction.diagnostics[0].column == 1);
+            }
+            String8 source = string_format(arguments->arena, S8(".text\n{S8}\n"), refused[index]);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST_RAW(arguments, unit.diagnostic_count == 1, source);
+            if (unit.diagnostic_count == 1)
+            {
+                BUSTER_TEST(arguments, unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                    unit.diagnostics[0].line == 2 && unit.diagnostics[0].column == 1);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_control_labels(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3141,6 +3236,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_control_labels);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
     UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
     result.succeeded_test_count += suffix_aliases.succeeded_test_count;
     result.test_count += suffix_aliases.test_count;

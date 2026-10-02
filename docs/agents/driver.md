@@ -265,6 +265,13 @@ constant operands accept an optional `#` through the existing constant parser.
 `mov wN, constant` and `mov xN, constant` accept an unsigned sixteen-bit
 constant through the scalar `movz` form; register aliases keep their existing
 operand rules.
+Pair-exclusive `ldxp`/`ldaxp` and `stxp`/`stlxp` spellings project matching W/X
+data registers, W store status and an X/SP base into the existing typed AArch64
+memory semantic encoder. Data/status ZR roles are retained; store status cannot
+overlap either data register or a non-SP base. The optional address offset must
+be zero. Nonzero/symbolic offsets, mismatched widths, and writeback are source
+operand diagnostics. No pair instruction words or generated identities are
+duplicated in the source adapter.
 Unsupported post-index memory operands are refused with their full spelling,
 so their writeback cannot silently disappear during comment handling.
 
