@@ -11787,6 +11787,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_expression_brace_elision(Uni
 }
 
 
+// Read the parser's published bounds directly, independently of IR lowering.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_initializer_inferred_bounds(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef union Vec2 { struct { short x,y; }; short e[2]; } Vec2;\ntypedef union Range { struct { Vec2 min,max; }; Vec2 e[2]; } Range;\nint bound_probe(Vec2 min,Vec2 max)\n{\n    Range inferred[]={min,max,max,min};\n    const Vec2 const_min=min;\n    volatile Vec2 volatile_max=max;\n    Range qualified[]={const_min,volatile_max,volatile_max,const_min};\n    Range compounds[]={(Vec2){{1,2}},(Vec2){{3,4}},(Vec2){{5,6}},(Vec2){{7,8}}};\n    return 0;\n}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 names[] = {S8("inferred"), S8("qualified"), S8("compounds")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = targets[target_index];
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, parsed.diagnostic_count == 0,
+            string_format(temporary.arena, S8("aggregate inferred bounds target={u32}: {S8}"),
+                target_index, parsed.diagnostic_count ? parsed.diagnostics[0].message : S8("none")));
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+        {
+            bool found = false;
+            for (u32 entity_index = 0; entity_index < parsed.entity_count; entity_index += 1)
+            {
+                CEntity entity = parsed.entities[entity_index];
+                if (entity.kind != C_ENTITY_LOCAL || !string_equal(entity.name, names[name_index]))
+                {
+                    continue;
+                }
+                found = true;
+                if (BUSTER_REQUIRE(arguments, entity.type.value < parsed.type_count))
+                {
+                    CType array = parsed.types[entity.type.value];
+                    BUSTER_TEST(arguments, array.kind == C_TYPE_ARRAY);
+                    if (BUSTER_REQUIRE(arguments, array.kind == C_TYPE_ARRAY && array.array_bound < parsed.array_bound_count))
+                    {
+                        CArrayBound bound = parsed.array_bounds[array.array_bound];
+                        BUSTER_TEST(arguments, bound.has_inferred_count);
+                        BUSTER_TEST_RAW(arguments, bound.inferred_count == 2,
+                            string_format(temporary.arena,
+                                S8("aggregate inferred bounds target={u32} local={S8}: expected 2, got {u64}"),
+                                target_index, names[name_index], bound.inferred_count));
+                    }
+                }
+            }
+            BUSTER_TEST_RAW(arguments, found, names[name_index]);
+        }
+        scratch_end(temporary);
+    }
+    String8 tag_sources[] = {
+        S8("typedef union Vec2 { struct { short x,y; }; short e[2]; } Vec2; typedef union Other { struct { short x,y; }; short e[2]; } Other; typedef union Range { struct { Vec2 min,max; }; Vec2 e[2]; } Range; int tag_probe(Vec2 wrong,Vec2 right) { Range inferred[]={wrong,right}; return 0; }\n"),
+        S8("typedef union Vec2 { struct { short x,y; }; short e[2]; } Vec2; typedef union Other { struct { short x,y; }; short e[2]; } Other; typedef union Range { struct { Vec2 min,max; }; Vec2 e[2]; } Range; int tag_probe(Other wrong,Vec2 right) { Range inferred[]={wrong,right}; return 0; }\n"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(tag_sources); invalid_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, tag_sources[invalid_index],
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CParseResult parsed = c_analyze_semantics(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+            BUSTER_TEST_RAW(arguments, invalid_index ? parsed.diagnostic_count != 0 : parsed.diagnostic_count == 0,
+                S8("Inferred aggregate arrays preserve union tag identity."));
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // #665: query the real preprocessor with an independent exact-name census.
 // Do not infer support from a prefix or advertise native atomic IR to the
 // Wasm64/eBPF backends, which explicitly reject it.
@@ -32323,6 +32399,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_builtin_infinity);
     BUSTER_TEST_FIXTURE(arguments, c_test_unused_wide_vector_signatures);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_vector_lane_stores);
+    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_initializer_inferred_bounds);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_expression_brace_elision);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);

@@ -1,6 +1,6 @@
 schema buster-source-size-baseline-v1
-commit 8ed186f2261a28a6fad26b80909d273622beef4d
-production 212 17597367
+commit a272a06db12262e65a8b5d6274bab42e475f4a8c
+production 212 17603827
 build 326 8657470
 tests 791 17662890
 generated 48 51984056

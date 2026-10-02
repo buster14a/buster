@@ -8516,17 +8516,29 @@ BUSTER_C_SHARED bool c_initializer_has_top_level_comma(CToken* tokens, u32 start
     return false;
 }
 
+// An aggregate expression initializes the current subobject whole only when
+// its type is compatible. Otherwise brace elision must descend through the
+// enclosing record. Preserve the existing whole-array admission separately.
 BUSTER_C_INTERNAL bool c_parse_initializer_value_is_aggregate_expression(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
-                                                                           CParseResult* result, CScopeId scope, u32 start, u32 end)
+                                                                           CParseResult* result, CScopeId scope, u32 start, u32 end,
+                                                                           CTypeId object_type)
 {
     CTypeId expression_type = C_TYPE_ID_INVALID;
-    if (!c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &expression_type) ||
-        expression_type.value >= result->type_count)
+    bool consumes_whole = false;
+    if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &expression_type) &&
+        expression_type.value < result->type_count && object_type.value < result->type_count)
     {
-        return false;
+        // The query can grow the type table; fetch both kinds afterward.
+        CTypeKind expression_kind = result->types[expression_type.value].kind;
+        CTypeKind object_kind = result->types[object_type.value].kind;
+        bool aggregate = expression_kind == C_TYPE_ARRAY || expression_kind == C_TYPE_VECTOR ||
+                         expression_kind == C_TYPE_STRUCT || expression_kind == C_TYPE_UNION;
+        consumes_whole = aggregate && (object_kind == C_TYPE_ARRAY ||
+            c_parse_types_compatible(machine->scratch_arena, result, preprocess,
+                                     c_parse_unqualified_type(result, object_type),
+                                     c_parse_unqualified_type(result, expression_type)));
     }
-    CTypeKind kind = result->types[expression_type.value].kind;
-    return kind == C_TYPE_ARRAY || kind == C_TYPE_VECTOR || kind == C_TYPE_STRUCT || kind == C_TYPE_UNION;
+    return consumes_whole;
 }
 
 BUSTER_C_INTERNAL bool c_parse_initializer_string_element_compatible(CPreprocessResult preprocess, CParseResult* result, CTypeId element_type,
@@ -8756,7 +8768,8 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             continue;
         }
         if (aggregate && !c_ir_tokens_are_string_literals(preprocess, designator.value_start, frame->limit) &&
-            !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end))
+            !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end,
+                                                              designator.value_type))
         {
             if (frame_count + designator.continuation_count >= capacity)
             {

@@ -25942,42 +25942,9 @@ BUSTER_C_INTERNAL bool c_ir_nested_initializer_field_cursors(CIntegerIrBuilder* 
     return result;
 }
 
-// Preserve the failing initializer subobject before the body reports its
-// enclosing local. Existing expression and IR-construction reasons take priority.
-BUSTER_C_INTERNAL void c_ir_nested_initializer_failure(CIntegerIrBuilder* builder, CIrNestedCompoundLiteralState* state,
-                                                      String8 reason, u32 token_index, u32 selected_index,
-                                                      IrTypeId child_type, IrTypeId expression_type, IrValueId value)
-{
-    if (!builder->failure_message.length)
-    {
-        IrType* task = ir_type_from_id(&builder->program->types, state->task.type);
-        IrType* child = ir_type_from_id(&builder->program->types, child_type);
-        IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
-        IrTypeId actual_type = value.value < builder->function->value_count ? builder->function->values[value.value].canonical_type
-                                                                          : IR_TYPE_ID_INVALID;
-        IrType* actual = ir_type_from_id(&builder->program->types, actual_type);
-        builder->failure_message = string_format(
-            builder->arena,
-            S8("nested aggregate initializer {S8}: task '{S8}' type {u32} kind {u32}, selected {u32}, child '{S8}' type {u32} kind {u32}, expression '{S8}' type {u32} kind {u32}, value '{S8}' type {u32} kind {u32}, cursors {u32}, item token {u32}"),
-            reason, task && task->name.length ? task->name : S8("<unnamed>"), state->task.type.value, task ? (u32)task->kind : UINT32_MAX,
-            selected_index, child && child->name.length ? child->name : S8("<unnamed>"), child_type.value, child ? (u32)child->kind : UINT32_MAX,
-            expression && expression->name.length ? expression->name : S8("<unnamed>"), expression_type.value,
-            expression ? (u32)expression->kind : UINT32_MAX,
-            actual && actual->name.length ? actual->name : S8("<unnamed>"), actual_type.value, actual ? (u32)actual->kind : UINT32_MAX,
-            state->cursor_count, token_index);
-        builder->failure_token_index = token_index < builder->preprocess.token_count ? token_index : state->root_open;
-    }
-    return;
-}
-
 BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
-    String8 failure_reason = S8("failed to select a subobject");
-    u32 failure_token = frame->as.nested_compound_literal.state->item_start;
-    u32 failure_selected = frame->as.nested_compound_literal.state->selected_index;
-    IrTypeId failure_type = IR_TYPE_ID_INVALID;
-    IrTypeId failure_expression_type = IR_TYPE_ID_INVALID;
     if (frame->stage == C_IR_LOWER_STAGE_CHILD)
     {
         bool stored = machine->child_result.success &&
@@ -25986,11 +25953,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                                             frame->as.nested_compound_literal.state->source);
         if (!stored)
         {
-            c_ir_nested_initializer_failure(builder, frame->as.nested_compound_literal.state,
-                                            machine->child_result.success ? S8("could not store expression") : S8("could not lower expression"),
-                                            frame->as.nested_compound_literal.state->item_start,
-                                            frame->as.nested_compound_literal.state->selected_index,
-                                            frame->as.nested_compound_literal.state->child_type, IR_TYPE_ID_INVALID, machine->child_result.value);
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -26089,7 +26051,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     }
                     if (!zeroed)
                     {
-                        failure_reason = S8("could not zero a nested subobject");
                         goto c_ir_nested_compound_failed;
                     }
                 }
@@ -26109,18 +26070,12 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         if (!type || (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION) ||
             task.open >= task.close)
         {
-            c_ir_nested_initializer_failure(builder, frame->as.nested_compound_literal.state, S8("has an invalid brace-list type or range"),
-                                            frame->as.nested_compound_literal.state->item_start, frame->as.nested_compound_literal.state->selected_index,
-                                            task.type, IR_TYPE_ID_INVALID, IR_VALUE_ID_INVALID);
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
         u32 next_index = frame->as.nested_compound_literal.state->next_index;
         u32 item_start = frame->as.nested_compound_literal.state->item_start;
         u32 index = frame->as.nested_compound_literal.state->index;
-        failure_type = task.type;
-        failure_token = item_start;
-        failure_selected = next_index;
         // A brace-wrapped string initializer fills the whole character array
         // subobject -- `struct { char n[4]; int v; } t = { {"zw"}, 9 }`.  The
         // item walk below would otherwise take the literal as element zero
@@ -26145,7 +26100,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     !c_ir_emit_store_place(builder, task.place, task.type, string_value,
                                            c_ir_token_source_range(builder, builder->preprocess.tokens[index])))
                 {
-                    failure_reason = S8("could not store a brace-wrapped string");
                     goto c_ir_nested_compound_failed;
                 }
                 frame->as.nested_compound_literal.state->task_active = false;
@@ -26196,12 +26150,10 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 {
                     break;
                 }
-                failure_reason = S8("contains an empty item");
                 goto c_ir_nested_compound_failed;
             }
             u32 selected_index = next_index;
             u32 value_start = item_start;
-            failure_token = item_start;
             u32 nested_designator_start = UINT32_MAX;
             u32 designator_equals = UINT32_MAX;
             CToken promoted_member = {0};
@@ -26223,7 +26175,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     {
                         builder->failure_message = S8("range designators are only supported for static aggregate initializers");
                     }
-                    failure_reason = S8("has an unsupported array designator");
                     goto c_ir_nested_compound_failed;
                 }
                 CToken designator = builder->preprocess.tokens[item_start + 1];
@@ -26231,7 +26182,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 {
                     if (!c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, designator), &designated))
                     {
-                        failure_reason = S8("has an invalid numeric array designator");
                         goto c_ir_nested_compound_failed;
                     }
                 }
@@ -26241,14 +26191,12 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     if (entity.value >= builder->parse.entity_count || builder->parse.entities[entity.value].kind != C_ENTITY_ENUMERATOR ||
                         builder->parse.entities[entity.value].constant_is_negative)
                     {
-                        failure_reason = S8("has an invalid enumerator array designator");
                         goto c_ir_nested_compound_failed;
                     }
                     designated = builder->parse.entities[entity.value].constant_value;
                 }
                 if (designated > UINT32_MAX)
                 {
-                    failure_reason = S8("has an oversized array designator");
                     goto c_ir_nested_compound_failed;
                 }
                 selected_index = (u32)designated;
@@ -26256,7 +26204,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 designator_equals = c_ir_designator_chain_end(builder, nested_designator_start, index);
                 if (designator_equals >= index || !c_token_is_punctuator(&builder->preprocess.tokens[designator_equals], C_PUNCTUATOR_ASSIGN))
                 {
-                    failure_reason = S8("has no assignment after an array designator");
                     goto c_ir_nested_compound_failed;
                 }
                 value_start = designator_equals + 1;
@@ -26265,7 +26212,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             {
                 if (item_start + 2 >= index || builder->preprocess.tokens[item_start + 1].kind != C_TOKEN_IDENTIFIER)
                 {
-                    failure_reason = S8("has an invalid member designator");
                     goto c_ir_nested_compound_failed;
                 }
                 selected_index = type->field_count;
@@ -26287,7 +26233,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 designator_equals = c_ir_designator_chain_end(builder, nested_designator_start, index);
                 if (designator_equals >= index || !c_token_is_punctuator(&builder->preprocess.tokens[designator_equals], C_PUNCTUATOR_ASSIGN))
                 {
-                    failure_reason = S8("has no assignment after a member designator");
                     goto c_ir_nested_compound_failed;
                 }
                 value_start = designator_equals + 1;
@@ -26301,7 +26246,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     IrType* cursor_type = ir_type_from_id(&builder->program->types, cursor->type);
                     if (!cursor_type)
                     {
-                        failure_reason = S8("has an invalid cursor type");
                         goto c_ir_nested_compound_failed;
                     }
                     u32 candidate = cursor->next_index;
@@ -26326,22 +26270,17 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 }
                 if (!cursor_item)
                 {
-                    failure_reason = S8("has no remaining subobject");
                     goto c_ir_nested_compound_failed;
                 }
             }
-            failure_selected = selected_index;
-            failure_token = value_start;
             u64 child_count = (owner_type->kind == IR_TYPE_ARRAY || owner_type->kind == IR_TYPE_VECTOR) ? owner_type->element_count : owner_type->field_count;
             if ((!promoted_designator && selected_index >= child_count) || value_start >= index)
             {
-                failure_reason = S8("has an out-of-range or empty subobject");
                 goto c_ir_nested_compound_failed;
             }
             IrTypeId child_type = promoted_designator                                                    ? IR_TYPE_ID_INVALID
                                   : (owner_type->kind == IR_TYPE_ARRAY || owner_type->kind == IR_TYPE_VECTOR) ? owner_type->element_type
                                                                                                             : owner_type->fields[selected_index].type;
-            failure_type = child_type;
             IrValueId child_place = IR_VALUE_ID_INVALID;
             IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[value_start]);
             if (promoted_designator)
@@ -26370,7 +26309,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             }
             if (child_place.value == IR_ID_UNDERLYING_INVALID)
             {
-                failure_reason = S8("could not form the selected subobject place");
                 goto c_ir_nested_compound_failed;
             }
             if (!cursor_item)
@@ -26380,7 +26318,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 {
                     if (frame->as.nested_compound_literal.state->cursor_count >= frame->as.nested_compound_literal.state->cursor_capacity)
                     {
-                        failure_reason = S8("exhausted array-designator cursor storage");
                         goto c_ir_nested_compound_failed;
                     }
                     frame->as.nested_compound_literal.state->cursors[frame->as.nested_compound_literal.state->cursor_count++] =
@@ -26388,7 +26325,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 }
                 else if (!c_ir_nested_initializer_field_cursors(builder, frame->as.nested_compound_literal.state, task.place, child_place))
                 {
-                    failure_reason = S8("could not retain field-designator cursors");
                     goto c_ir_nested_compound_failed;
                 }
             }
@@ -26403,7 +26339,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                         !c_ir_integer_constant_evaluate(builder->arena, builder, designator + 1, subscript_close, &subscript_value) ||
                         subscript_value > UINT32_MAX)
                     {
-                        failure_reason = S8("has an invalid nested array designator");
                         goto c_ir_nested_compound_failed;
                     }
                     IrType* container = ir_type_from_id(&builder->program->types, child_type);
@@ -26411,7 +26346,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                         subscript_value >= container->element_count ||
                         frame->as.nested_compound_literal.state->cursor_count >= frame->as.nested_compound_literal.state->cursor_capacity)
                     {
-                        failure_reason = S8("has an out-of-range nested array designator");
                         goto c_ir_nested_compound_failed;
                     }
                     frame->as.nested_compound_literal.state->cursors[frame->as.nested_compound_literal.state->cursor_count++] =
@@ -26428,14 +26362,12 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     if (child_place.value >= builder->function->value_count ||
                         !c_ir_nested_initializer_field_cursors(builder, frame->as.nested_compound_literal.state, parent_place, child_place))
                     {
-                        failure_reason = S8("could not form a nested member place");
                         goto c_ir_nested_compound_failed;
                     }
                     designator += 2;
                 }
                 if (child_place.value >= builder->function->value_count)
                 {
-                    failure_reason = S8("could not resolve a designated subobject type");
                     goto c_ir_nested_compound_failed;
                 }
                 child_type = builder->function->values[child_place.value].canonical_type;
@@ -26455,7 +26387,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             }
             IrTypeId value_type = IR_TYPE_ID_INVALID;
             bool value_is_aggregate = c_ir_initializer_value_is_aggregate_expression(builder, initializer_scope, value_start, index, &value_type);
-            failure_expression_type = value_type;
             // Either prediction can grow the type table.
             type = ir_type_from_id(&builder->program->types, task.type);
             child = ir_type_from_id(&builder->program->types, child_type);
@@ -26509,10 +26440,8 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 whole_value = value_is_aggregate && child &&
                               (child->kind == IR_TYPE_ARRAY || c_ir_initializer_aggregate_types_compatible(builder, value_type, child_type));
             }
-            failure_type = child_type;
             if (child_place.value == IR_ID_UNDERLYING_INVALID)
             {
-                failure_reason = S8("could not descend to a compatible subobject");
                 goto c_ir_nested_compound_failed;
             }
             bool nested = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) &&
@@ -26525,7 +26454,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 if (string_value.value == IR_ID_UNDERLYING_INVALID ||
                     !c_ir_emit_store_place(builder, child_place, child_type, string_value, source))
                 {
-                    failure_reason = S8("could not store a string subobject");
                     goto c_ir_nested_compound_failed;
                 }
             }
@@ -26533,7 +26461,6 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             {
                 if (frame->as.nested_compound_literal.state->task_count > frame->as.nested_compound_literal.state->capacity - 2)
                 {
-                    failure_reason = S8("exhausted brace-list task storage");
                     goto c_ir_nested_compound_failed;
                 }
                 // Suspend the parent before lowering this brace list. Its later
@@ -26610,18 +26537,10 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         IrValueId result = c_ir_emit_load_place(builder, frame->as.nested_compound_literal.state->root_place,
                                                 frame->as.nested_compound_literal.state->root_type,
                                                 c_ir_token_source_range(builder, root_token));
-        if (result.value == IR_ID_UNDERLYING_INVALID)
-        {
-            c_ir_nested_initializer_failure(builder, frame->as.nested_compound_literal.state, S8("could not load its completed value"),
-                                            frame->as.nested_compound_literal.state->root_open, 0,
-                                            frame->as.nested_compound_literal.state->root_type, IR_TYPE_ID_INVALID, result);
-        }
         c_ir_lower_frame_finish(builder, result.value != IR_ID_UNDERLYING_INVALID, result);
         return;
     }
 c_ir_nested_compound_failed:
-    c_ir_nested_initializer_failure(builder, frame->as.nested_compound_literal.state, failure_reason, failure_token, failure_selected,
-                                    failure_type, failure_expression_type, IR_VALUE_ID_INVALID);
     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
 }
 
