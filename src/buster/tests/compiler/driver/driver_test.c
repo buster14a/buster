@@ -14263,13 +14263,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
             .use_process_environment = true, .new_process_group = true, .search_path = true,
         };
-        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        bool process_admission = true;
+        for (u32 dialect = 0; process_admission && dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
         {
-            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            for (u32 form = 0; process_admission && form < BUSTER_ARRAY_LENGTH(forms); form += 1)
             {
-                for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                for (u32 mode = 0; process_admission && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
                 {
-                    for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                    for (u32 optimization = 0; process_admission && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
                     {
                         String8 context = string_format(arena, S8("static-literal native dialect={S8} form={S8} mode={S8} optimization={S8}"),
                                                         dialects[dialect], forms[form], modes[mode], optimizations[optimization]);
@@ -14297,11 +14298,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                             if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
+                                process_admission = process_admission && !waited.process_tree_cleanup_failed &&
+                                    !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
                                 String8 diagnostic = string_format(arena, S8("{S8}: result={u32} status={u32} timeout={u32} stderr={S8}"),
                                     context, (u32)waited.result, waited.platform_status, (u32)waited.timed_out,
                                     BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
                                 BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out &&
-                                                waited.platform_status == 0, diagnostic);
+                                                waited.platform_status == 0 && !waited.capture_failed && !waited.output_truncated &&
+                                                process_admission, diagnostic);
                                 BUSTER_TEST_RAW(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
                                 arguments->show(arguments, S8("STATIC-LITERAL native dialect={S8} form={S8} mode={S8} optimization={S8} status={u32} timeout={u32}\n"),
@@ -14318,7 +14322,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
 #if BUSTER_LINUX
         String8 compilers[] = { executable_resolve_in_path(arena, S8("gcc")), executable_resolve_in_path(arena, S8("clang")) };
         String8 reference_dialects[] = { S8("-std=gnu17"), S8("-std=gnu2x") };
-        for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+        for (u32 compiler = 0; process_admission && compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
         {
             bool available = compilers[compiler].length != 0;
             BUSTER_TEST_RAW(arguments, available, compiler ? S8("Clang static-literal reference is required") : S8("GCC static-literal reference is required"));
@@ -14330,9 +14334,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                 if (BUSTER_REQUIRE(arguments, version_spawn.handle != 0))
                 {
                     ProcessWaitResult version = os_process_wait_deadline(arena, version_spawn, 30000000);
+                    process_admission = process_admission && !version.process_tree_cleanup_failed &&
+                        !version.process_group_reservation_retained && !version.process_group_ownership_lost;
                     String8 text = BYTE_SLICE_TO_STRING(8, version.streams[STANDARD_STREAM_OUTPUT]);
                     bool is_clang = string_first_sequence(text, S8("clang")) != BUSTER_STRING_NO_MATCH;
-                    available = version.result == PROCESS_RESULT_SUCCESS && !version.timed_out && is_clang == (compiler != 0);
+                    available = version.result == PROCESS_RESULT_SUCCESS && !version.timed_out && !version.capture_failed &&
+                        !version.output_truncated && process_admission && is_clang == (compiler != 0);
                     BUSTER_TEST_RAW(arguments, available, text);
                     arguments->show(arguments, S8("STATIC-LITERAL reference compiler={S8} version={S8}\n"), compilers[compiler], text);
                 }
@@ -14341,9 +14348,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                     available = false;
                 }
             }
-            for (u32 dialect = 0; available && dialect < BUSTER_ARRAY_LENGTH(reference_dialects); dialect += 1)
+            for (u32 dialect = 0; process_admission && available && dialect < BUSTER_ARRAY_LENGTH(reference_dialects); dialect += 1)
             {
-                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                for (u32 optimization = 0; process_admission && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
                 {
                     String8 context = string_format(arena, S8("static-literal reference compiler={S8} dialect={S8} optimization={S8}"),
                                                     compilers[compiler], reference_dialects[dialect], optimizations[optimization]);
@@ -14356,7 +14363,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                     if (BUSTER_REQUIRE(arguments, compile_spawn.handle != 0))
                     {
                         ProcessWaitResult compiled = os_process_wait_deadline(arena, compile_spawn, 30000000);
-                        bool success = compiled.result == PROCESS_RESULT_SUCCESS && !compiled.timed_out && compiled.platform_status == 0;
+                        process_admission = process_admission && !compiled.process_tree_cleanup_failed &&
+                            !compiled.process_group_reservation_retained && !compiled.process_group_ownership_lost;
+                        bool success = compiled.result == PROCESS_RESULT_SUCCESS && !compiled.timed_out && compiled.platform_status == 0 &&
+                            !compiled.capture_failed && !compiled.output_truncated && process_admission;
                         BUSTER_TEST_RAW(arguments, success, string_format(arena, S8("{S8}: {S8}"), context,
                                         BYTE_SLICE_TO_STRING(8, compiled.streams[STANDARD_STREAM_ERROR])));
                         if (success)
@@ -14367,11 +14377,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                             if (BUSTER_REQUIRE(arguments, run_spawn.handle != 0))
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, run_spawn, 30000000);
+                                process_admission = process_admission && !waited.process_tree_cleanup_failed &&
+                                    !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
                                 String8 diagnostic = string_format(arena, S8("{S8}: result={u32} status={u32} timeout={u32} stderr={S8}"),
                                     context, (u32)waited.result, waited.platform_status, (u32)waited.timed_out,
                                     BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
                                 BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out &&
-                                                waited.platform_status == 0, diagnostic);
+                                                waited.platform_status == 0 && !waited.capture_failed && !waited.output_truncated &&
+                                                process_admission, diagnostic);
                                 BUSTER_TEST_RAW(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
                                 arguments->show(arguments, S8("STATIC-LITERAL reference dialect={S8} optimization={S8} status={u32} timeout={u32}\n"),
@@ -14610,7 +14623,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
         };
         ProcessSpawnOptions capture = {.use_process_environment = true, .new_process_group = true, .search_path = true,
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
-        for (u32 producer = 0; producer < BUSTER_ARRAY_LENGTH(compilers); producer += 1)
+        bool process_admission = true;
+        for (u32 producer = 0; process_admission && producer < BUSTER_ARRAY_LENGTH(compilers); producer += 1)
         {
             if (producer && !BUSTER_REQUIRE(arguments, compilers[producer].length != 0))
             {
@@ -14618,11 +14632,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
             }
             u32 form_count = producer ? 1 : BUSTER_ARRAY_LENGTH(forms);
             u32 mode_count = producer ? 1 : BUSTER_ARRAY_LENGTH(modes);
-            for (u32 form = 0; form < form_count; form += 1)
+            for (u32 form = 0; process_admission && form < form_count; form += 1)
             {
-                for (u32 mode = 0; mode < mode_count; mode += 1)
+                for (u32 mode = 0; process_admission && mode < mode_count; mode += 1)
                 {
-                    for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                    for (u32 optimization = 0; process_admission && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
                     {
                         String8 output = buster_test_temporary_path(arena, S8("buster-function-literal-identity"),
 #if BUSTER_WINDOWS
@@ -14652,6 +14666,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
                             if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
+                                process_admission = process_admission && !waited.process_tree_cleanup_failed &&
+                                    !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
                                 compiled = waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
                                     !waited.output_truncated && !waited.process_tree_cleanup_failed &&
                                     !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
@@ -14659,7 +14675,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
                                     BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR])));
                             }
                         }
-                        if (compiled)
+                        if (compiled && process_admission)
                         {
                             String8 run[] = {output};
                             ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
@@ -14667,6 +14683,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
                             if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
+                                process_admission = process_admission && !waited.process_tree_cleanup_failed &&
+                                    !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
                                 bool correct = waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
                                     !waited.output_truncated && !waited.process_tree_cleanup_failed &&
                                     !waited.process_group_reservation_retained && !waited.process_group_ownership_lost &&
