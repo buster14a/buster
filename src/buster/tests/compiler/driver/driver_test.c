@@ -13,6 +13,9 @@
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
 // the optional independent Clang cross-assembly observer.
+// compiler_driver_test_static_literal_addresses checks original literal bytes
+// and serialized static relocations; static_literal_native observes their
+// pointees and mutable-object identity against native compiler references.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -13759,6 +13762,642 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_declarator_trailing_toke
     return result;
 }
 
+// #1268: literal operands must keep their storage, element stride and signed
+// offset through static folding. Every isolated source has a fixed byte image;
+// no compiler helper produces the expected payload or relocation coordinate.
+typedef struct CompilerDriverStaticLiteralAddressCase CompilerDriverStaticLiteralAddressCase;
+struct CompilerDriverStaticLiteralAddressCase
+{
+    String8 name;
+    String8 source;
+    u8 payload[32];
+    u32 payload_length;
+    s64 addend;
+    bool read_only;
+    bool local_static;
+};
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_static_literal_relocation(
+    ObjectFile* object, CompilerDriverStaticLiteralAddressCase const* expected)
+{
+    u32 matches = 0;
+    if (object && object->error == OBJECT_ERROR_NONE && object->sections && object->symbols && object->relocations)
+    {
+        for (u32 pointer_index = 0; pointer_index < object->symbol_count; pointer_index += 1)
+        {
+            ObjectSymbol* pointer = object->symbols + pointer_index;
+            bool pointer_name = expected->local_static || string_equal(pointer->name, S8("P"));
+            if (pointer_name && pointer->kind == OBJECT_SYMBOL_DATA && pointer->size == 8 && pointer->section < object->section_count)
+            {
+                for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+                {
+                    ObjectRelocation* relocation = object->relocations + relocation_index;
+                    if (relocation->section == pointer->section && relocation->offset == pointer->value &&
+                        relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 && relocation->symbol < object->symbol_count &&
+                        relocation->addend >= 0)
+                    {
+                        ObjectSymbol* target = object->symbols + relocation->symbol;
+                        if (target->section < object->section_count && target->value <= UINT64_MAX - (u64)relocation->addend)
+                        {
+                            ObjectSection* section = object->sections + target->section;
+                            u64 coordinate = target->value + (u64)relocation->addend;
+                            // ELF may use a section anchor instead of the literal symbol.
+                            // Resolve S+A first, then check the entire original object image.
+                            if (coordinate >= (u64)expected->addend)
+                            {
+                                u64 base = coordinate - (u64)expected->addend;
+                                ObjectSectionKind kind = expected->read_only ? OBJECT_SECTION_READ_ONLY_DATA : OBJECT_SECTION_DATA;
+                                if (section->kind == kind && base <= section->data.length &&
+                                    expected->payload_length <= section->data.length - base &&
+                                    memcmp(section->data.pointer + base, expected->payload, expected->payload_length) == 0)
+                                {
+                                    matches += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    bool result = matches == 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_addresses(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CompilerDriverStaticLiteralAddressCase cases[] = {
+        { S8("string_whole"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = \"abc\";\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'a' || observed[1] != 'b';\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 0, true, false },
+        { S8("string_add"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = \"abc\" + 1;\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 1, true, false },
+        { S8("integer_add_string"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = 1 + \"abc\";\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 1, true, false },
+        { S8("string_subtract_negative"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = \"abc\" - -1;\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 1, true, false },
+        { S8("string_address_subscript"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = &\"abc\"[2];\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'c' || observed[1] != 0;\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 2, true, false },
+        { S8("string_signed_subscript"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = &(\"abc\" + 3)[-2L];\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 1, true, false },
+        { S8("string_concatenation"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = \"ab\" \"cd\" + (1 + 1);\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'c' || observed[1] != 'd';\n"
+            "}\n"), { 97, 98, 99, 100, 0 }, 5, 2, true, false },
+        { S8("string_pointer_cast"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = (const char *)(const void *)\"abc\" + 1;\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 1, true, false },
+        { S8("string_conditional"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = 0 ? \"x\" : \"abc\";\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'a' || observed[1] != 'b';\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 0, true, false },
+        { S8("string_conditional_add"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = (1 ? \"abc\" : \"x\") + 1;\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 1, true, false },
+        { S8("string_null_conditional"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P = 0 ? (const char *)0 : \"abc\" + 2;\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P; return observed[0] != 'c' || observed[1] != 0;\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 2, true, false },
+        { S8("string_utf16_stride"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const unsigned short *P = u\"abc\" + 1;\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile unsigned short *observed = P; return observed[0] != 98 || observed[1] != 99;\n"
+            "}\n"), { 97, 0, 98, 0, 99, 0, 0, 0 }, 8, 2, true, false },
+        { S8("string_utf32_stride"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const unsigned int *P = U\"abc\" + 1;\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile unsigned int *observed = P; return observed[0] != 98 || observed[1] != 99;\n"
+            "}\n"), { 97, 0, 0, 0, 98, 0, 0, 0, 99, 0, 0, 0, 0, 0, 0, 0 }, 16, 4, true, false },
+        { S8("string_aggregate_pointer"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "struct LiteralHolder P = { \"abc\" + 1 };\n"
+            "int main(void)\n"
+            "{\n"
+            "    const volatile char *observed = P.value; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"), { 97, 98, 99, 0 }, 4, 1, true, false },
+        { S8("compound_char_whole"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "char *P = (char[]){ \"hi\" };\n"
+            "int main(void)\n"
+            "{\n"
+            "    volatile char *observed = P; return observed[0] != 'h' || observed[1] != 'i';\n"
+            "}\n"), { 104, 105, 0 }, 3, 0, false, false },
+        { S8("compound_integer_add"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "int *P = (int[]){ 17, 23, 31 } + 1;\n"
+            "int main(void)\n"
+            "{\n"
+            "    volatile int *observed = P; return observed[0] != 23 || observed[1] != 31;\n"
+            "}\n"), { 17, 0, 0, 0, 23, 0, 0, 0, 31, 0, 0, 0 }, 12, 4, false, false },
+        { S8("compound_address_subscript"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "int *P = &(int[]){ 17, 23, 31 }[1];\n"
+            "int main(void)\n"
+            "{\n"
+            "    volatile int *observed = P; return observed[0] != 23 || observed[1] != 31;\n"
+            "}\n"), { 17, 0, 0, 0, 23, 0, 0, 0, 31, 0, 0, 0 }, 12, 4, false, false },
+        { S8("compound_signed_arithmetic"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "int *P = ((int[]){ 17, 23, 31 } + 2) - 1L;\n"
+            "int main(void)\n"
+            "{\n"
+            "    volatile int *observed = P; return observed[0] != 23 || observed[1] != 31;\n"
+            "}\n"), { 17, 0, 0, 0, 23, 0, 0, 0, 31, 0, 0, 0 }, 12, 4, false, false },
+        { S8("compound_member_array"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "char *P = (struct LiteralRecord){ 17, { 'A', 'B', 'C', 0 } }.bytes + 1;\n"
+            "int main(void)\n"
+            "{\n"
+            "    volatile char *observed = P; return observed[0] != 'B' || observed[1] != 'C';\n"
+            "}\n"), { 17, 0, 0, 0, 65, 66, 67, 0 }, 8, 5, false, false },
+        { S8("compound_cast_scaling"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "char *P = (char *)&(struct LiteralRecord){ 17, { 'A', 'B', 'C', 0 } } + 4;\n"
+            "int main(void)\n"
+            "{\n"
+            "    volatile char *observed = P; return observed[0] != 'A' || observed[1] != 'B';\n"
+            "}\n"), { 17, 0, 0, 0, 65, 66, 67, 0 }, 8, 4, false, false },
+        { S8("compound_conditional"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "int *P = 0 ? (int[]){ 9, 8, 7 } : (int[]){ 17, 23, 31 } + 1;\n"
+            "int main(void)\n"
+            "{\n"
+            "    volatile int *observed = P; return observed[0] != 23 || observed[1] != 31;\n"
+            "}\n"), { 17, 0, 0, 0, 23, 0, 0, 0, 31, 0, 0, 0 }, 12, 4, false, false },
+        { S8("function_name_static"), S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "int main(void)\n"
+            "{\n"
+            "    static const char *P = __func__ + 1;\n"
+            "    const volatile char *observed = P; return observed[0] != 'a' || observed[1] != 'i';\n"
+            "}\n"), { 109, 97, 105, 110, 0 }, 5, 1, true, true },
+    };
+    String8 forms[] = { S8("-ffrontend-ssa"), S8("-fno-frontend-ssa") };
+    String8 dialects[] = { S8("-std=c17"), S8("-std=gnu17") };
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                CompilerDriverStaticLiteralAddressCase* expected = cases + row;
+                String8 context = string_format(arena, S8("static-literal row={S8} dialect={S8} form={S8}"),
+                                                expected->name, dialects[dialect], forms[form]);
+                String8 name = string_format(arena, S8("buster-static-literal-{u32}-{u32}-{u32}"), dialect, form, row);
+                String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+                String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(expected->source))))
+                {
+                    String8 command[] = { S8("-c"), S8("-g0"), dialects[dialect], S8("-target"), S8("x86_64-linux"),
+                        forms[form], S8("-fregister-allocator=none"), S8("-fverify-codegen"), S8("-fmachine-fallback"),
+                        S8("-o"), output, input };
+                    CompilerDriverResult built = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object,
+                                    string_format(arena, S8("{S8}: {S8}"), context, built.diagnostic));
+                    if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object)
+                    {
+                        BUSTER_TEST_RAW(arguments, compiler_driver_test_static_literal_relocation(&built.object, expected), context);
+                        FileMapRead map = file_map_read(arena, output, (FileReadOptions){0});
+                        if (BUSTER_REQUIRE(arguments, map.bytes.length != 0))
+                        {
+                            Sha256 hash;
+                            char8 digest[SHA256_HEX_CAPACITY];
+                            sha256_init(&hash);
+                            sha256_add(&hash, map.bytes.pointer, map.bytes.length);
+                            sha256_finish_hex(&hash, digest);
+                            ObjectFile serialized = object_read(arena, map.bytes, built.object.target);
+                            BUSTER_TEST_RAW(arguments, serialized.error == OBJECT_ERROR_NONE, context);
+                            BUSTER_TEST_RAW(arguments, compiler_driver_test_static_literal_relocation(&serialized, expected), context);
+                            ByteSlice reread = file_read(arena, output, (FileReadOptions){0});
+                            BUSTER_TEST_RAW(arguments, reread.length == map.bytes.length &&
+                                            memcmp(reread.pointer, map.bytes.pointer, map.bytes.length) == 0, context);
+                            printf("STATIC-LITERAL object row=%.*s dialect=%.*s form=%.*s sha256=%s payload=%u addend=%lld\n",
+                                   (int)expected->name.length, (char const*)expected->name.pointer,
+                                   (int)dialects[dialect].length, (char const*)dialects[dialect].pointer,
+                                   (int)forms[form].length, (char const*)forms[form].pointer,
+                                   (char const*)digest, expected->payload_length, (long long)expected->addend);
+                            file_map_unmap(map);
+                        }
+                        BUSTER_TEST(arguments, os_file_delete(output));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(input));
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    String8 rejected[] = {
+        S8("int n; const char *P = \"abc\" + n;\n"),
+        S8("int main(void) { static int *P = (int[]){17,23,31} + 1; return P[0]; }\n"),
+        S8("int main(void) { static int *P = &(int[]){17,23,31}[1]; return P[0]; }\n"),
+        S8("int *P = (int *)16 + 1;\n"),
+        S8("int arr[8]; int *P = &(arr + 3)[18446744073709551615ULL];\n"),
+    };
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 name = string_format(arena, S8("buster-static-literal-refusal-{u32}-{u32}"), form, row);
+            String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+            String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(rejected[row]))))
+            {
+                String8 command[] = { S8("-c"), S8("-std=gnu17"), forms[form], S8("-o"), output, input };
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && !refused.has_object, rejected[row]);
+                BUSTER_TEST_RAW(arguments, refused.diagnostic.length != 0, rejected[row]);
+                BUSTER_TEST_RAW(arguments, file_read(arena, output, (FileReadOptions){0}).length == 0, rejected[row]);
+                BUSTER_TEST(arguments, os_file_delete(input));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// Read every folded pointer through volatile objects, then mutate one of two
+// separate mutable compound literals. Buster and the references receive the
+// exact same source bytes; optional string pooling is never an identity oracle.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_LINUX || BUSTER_WINDOWS || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source_parts[] = {
+        S8(
+            "struct LiteralRecord { int head; char bytes[4]; };\n"
+            "struct LiteralHolder { const char *value; };\n"
+            "const char *P_0 = \"abc\";\n"
+            "const char *P_1 = \"abc\" + 1;\n"
+            "const char *P_2 = 1 + \"abc\";\n"
+            "const char *P_3 = \"abc\" - -1;\n"
+            "const char *P_4 = &\"abc\"[2];\n"
+            "const char *P_5 = &(\"abc\" + 3)[-2L];\n"
+            "const char *P_6 = \"ab\" \"cd\" + (1 + 1);\n"
+            "const char *P_7 = (const char *)(const void *)\"abc\" + 1;\n"
+            "const char *P_8 = 0 ? \"x\" : \"abc\";\n"
+            "const char *P_9 = (1 ? \"abc\" : \"x\") + 1;\n"
+            "const char *P_10 = 0 ? (const char *)0 : \"abc\" + 2;\n"
+            "const unsigned short *P_11 = u\"abc\" + 1;\n"
+            "const unsigned int *P_12 = U\"abc\" + 1;\n"
+            "struct LiteralHolder P_13 = { \"abc\" + 1 };\n"
+            "char *P_14 = (char[]){ \"hi\" };\n"
+            "int *P_15 = (int[]){ 17, 23, 31 } + 1;\n"
+            "int *P_16 = &(int[]){ 17, 23, 31 }[1];\n"
+            "int *P_17 = ((int[]){ 17, 23, 31 } + 2) - 1L;\n"
+            "char *P_18 = (struct LiteralRecord){ 17, { 'A', 'B', 'C', 0 } }.bytes + 1;\n"
+            "char *P_19 = (char *)&(struct LiteralRecord){ 17, { 'A', 'B', 'C', 0 } } + 4;\n"
+            "int *P_20 = 0 ? (int[]){ 9, 8, 7 } : (int[]){ 17, 23, 31 } + 1;\n"
+            "int *identity_a = (int[]){ 17, 23, 31 } + 1;\n"
+            "int *identity_b = (int[]){ 17, 23, 31 } + 1;\n"
+            "static int check_0(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_0; return observed[0] != 'a' || observed[1] != 'b';\n"
+            "}\n"
+            "static int check_1(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_1; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"
+            "static int check_2(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_2; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"
+            "static int check_3(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_3; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"
+            "static int check_4(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_4; return observed[0] != 'c' || observed[1] != 0;\n"
+            "}\n"
+            "static int check_5(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_5; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"
+            "static int check_6(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_6; return observed[0] != 'c' || observed[1] != 'd';\n"
+            "}\n"
+            "static int check_7(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_7; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"
+            "static int check_8(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_8; return observed[0] != 'a' || observed[1] != 'b';\n"
+            "}\n"
+            "static int check_9(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_9; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"
+            "static int check_10(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_10; return observed[0] != 'c' || observed[1] != 0;\n"
+            "}\n"),
+        S8(
+            "static int check_11(void)\n"
+            "{\n"
+            "    const volatile unsigned short *observed = P_11; return observed[0] != 98 || observed[1] != 99;\n"
+            "}\n"
+            "static int check_12(void)\n"
+            "{\n"
+            "    const volatile unsigned int *observed = P_12; return observed[0] != 98 || observed[1] != 99;\n"
+            "}\n"
+            "static int check_13(void)\n"
+            "{\n"
+            "    const volatile char *observed = P_13.value; return observed[0] != 'b' || observed[1] != 'c';\n"
+            "}\n"
+            "static int check_14(void)\n"
+            "{\n"
+            "    volatile char *observed = P_14; return observed[0] != 'h' || observed[1] != 'i';\n"
+            "}\n"
+            "static int check_15(void)\n"
+            "{\n"
+            "    volatile int *observed = P_15; return observed[0] != 23 || observed[1] != 31;\n"
+            "}\n"
+            "static int check_16(void)\n"
+            "{\n"
+            "    volatile int *observed = P_16; return observed[0] != 23 || observed[1] != 31;\n"
+            "}\n"
+            "static int check_17(void)\n"
+            "{\n"
+            "    volatile int *observed = P_17; return observed[0] != 23 || observed[1] != 31;\n"
+            "}\n"
+            "static int check_18(void)\n"
+            "{\n"
+            "    volatile char *observed = P_18; return observed[0] != 'B' || observed[1] != 'C';\n"
+            "}\n"
+            "static int check_19(void)\n"
+            "{\n"
+            "    volatile char *observed = P_19; return observed[0] != 'A' || observed[1] != 'B';\n"
+            "}\n"
+            "static int check_20(void)\n"
+            "{\n"
+            "    volatile int *observed = P_20; return observed[0] != 23 || observed[1] != 31;\n"
+            "}\n"
+            "int main(void)\n"
+            "{\n"
+            "    static const char *function_name = __func__ + 1;\n"
+            "    const volatile char *observed_function_name = function_name;\n"
+            "    volatile int *observed_a = identity_a;\n"
+            "    volatile int *observed_b = identity_b;\n"
+            "    int failed = observed_function_name[0] != 'a' || observed_function_name[1] != 'i';\n"
+            "    failed += check_0();\n"
+            "    failed += check_1();\n"
+            "    failed += check_2();\n"
+            "    failed += check_3();\n"
+            "    failed += check_4();\n"
+            "    failed += check_5();\n"
+            "    failed += check_6();\n"
+            "    failed += check_7();\n"
+            "    failed += check_8();\n"
+            "    failed += check_9();\n"
+            "    failed += check_10();\n"
+            "    failed += check_11();\n"
+            "    failed += check_12();\n"
+            "    failed += check_13();\n"
+            "    failed += check_14();\n"
+            "    failed += check_15();\n"
+            "    failed += check_16();\n"
+            "    failed += check_17();\n"
+            "    failed += check_18();\n"
+            "    failed += check_19();\n"
+            "    failed += check_20();\n"
+            "    failed += identity_a == identity_b;\n"
+            "    observed_a[0] = 99;\n"
+            "    failed += observed_b[0] != 23 || observed_b[1] != 31;\n"
+            "    return failed;\n"
+            "}\n")
+    };
+    String8 source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+    String8 input = buster_test_temporary_path(arena, S8("buster-static-literal-native"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 forms[] = { S8("-ffrontend-ssa"), S8("-fno-frontend-ssa") };
+        String8 dialects[] = { S8("-std=c17"), S8("-std=gnu17") };
+        String8 optimizations[] = { S8("-O0"), S8("-O2") };
+        String8 modes[] = { S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality") };
+        ProcessSpawnOptions capture = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true, .new_process_group = true, .search_path = true,
+        };
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                {
+                    for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                    {
+                        String8 context = string_format(arena, S8("static-literal native dialect={S8} form={S8} mode={S8} optimization={S8}"),
+                                                        dialects[dialect], forms[form], modes[mode], optimizations[optimization]);
+                        String8 name = string_format(arena, S8("buster-static-literal-native-{u32}-{u32}-{u32}-{u32}"),
+                                                     dialect, form, mode, optimization);
+                        String8 output = buster_test_temporary_path(arena, name,
+#if BUSTER_WINDOWS
+                                                                   S8(".exe")
+#else
+                                                                   S8(".out")
+#endif
+                                                                   );
+                        String8 command[] = { S8("-g0"), dialects[dialect], forms[form], modes[mode], optimizations[optimization],
+                            S8("-fverify-codegen"), mode ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                            S8("-o"), output, input };
+                        CompilerDriverResult linked = compiler_driver_execute_invocation(
+                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                        BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE,
+                                        string_format(arena, S8("{S8}: {S8}"), context, linked.diagnostic));
+                        if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 run_arguments[] = { output };
+                            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments),
+                                                                        (SliceString8){0}, (SliceString8){0}, capture);
+                            if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+                            {
+                                ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
+                                String8 diagnostic = string_format(arena, S8("{S8}: result={u32} status={u32} timeout={u32} stderr={S8}"),
+                                    context, (u32)waited.result, waited.platform_status, (u32)waited.timed_out,
+                                    BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+                                BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out &&
+                                                waited.platform_status == 0, diagnostic);
+                                BUSTER_TEST_RAW(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
+                                                waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
+                                printf("STATIC-LITERAL native dialect=%.*s form=%.*s mode=%.*s optimization=%.*s status=%u timeout=%u\n",
+                                       (int)dialects[dialect].length, (char const*)dialects[dialect].pointer,
+                                       (int)forms[form].length, (char const*)forms[form].pointer,
+                                       (int)modes[mode].length, (char const*)modes[mode].pointer,
+                                       (int)optimizations[optimization].length, (char const*)optimizations[optimization].pointer,
+                                       waited.platform_status, (u32)waited.timed_out);
+                            }
+                            BUSTER_TEST(arguments, os_file_delete(output));
+                        }
+                    }
+                }
+            }
+        }
+#if BUSTER_LINUX
+        String8 compilers[] = { executable_resolve_in_path(arena, S8("gcc")), executable_resolve_in_path(arena, S8("clang")) };
+        String8 reference_dialects[] = { S8("-std=gnu17"), S8("-std=gnu2x") };
+        for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+        {
+            bool available = compilers[compiler].length != 0;
+            BUSTER_TEST_RAW(arguments, available, compiler ? S8("Clang static-literal reference is required") : S8("GCC static-literal reference is required"));
+            if (available)
+            {
+                String8 version_arguments[] = { compilers[compiler], S8("--version") };
+                ProcessSpawnResult version_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(version_arguments),
+                                                                    (SliceString8){0}, (SliceString8){0}, capture);
+                if (BUSTER_REQUIRE(arguments, version_spawn.handle != 0))
+                {
+                    ProcessWaitResult version = os_process_wait_deadline(arena, version_spawn, 30000000);
+                    String8 text = BYTE_SLICE_TO_STRING(8, version.streams[STANDARD_STREAM_OUTPUT]);
+                    bool is_clang = string_first_sequence(text, S8("clang")) != BUSTER_STRING_NO_MATCH;
+                    available = version.result == PROCESS_RESULT_SUCCESS && !version.timed_out && is_clang == (compiler != 0);
+                    BUSTER_TEST_RAW(arguments, available, text);
+                    printf("STATIC-LITERAL reference compiler=%.*s version=%.*s\n",
+                           (int)compilers[compiler].length, (char const*)compilers[compiler].pointer,
+                           (int)text.length, (char const*)text.pointer);
+                }
+                else
+                {
+                    available = false;
+                }
+            }
+            for (u32 dialect = 0; available && dialect < BUSTER_ARRAY_LENGTH(reference_dialects); dialect += 1)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    String8 context = string_format(arena, S8("static-literal reference compiler={S8} dialect={S8} optimization={S8}"),
+                                                    compilers[compiler], reference_dialects[dialect], optimizations[optimization]);
+                    String8 name = string_format(arena, S8("buster-static-literal-reference-{u32}-{u32}-{u32}"), compiler, dialect, optimization);
+                    String8 output = buster_test_temporary_path(arena, name, S8(".out"));
+                    String8 command[] = { compilers[compiler], reference_dialects[dialect], optimizations[optimization],
+                                          S8("-o"), output, input };
+                    ProcessSpawnResult compile_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                                                                        (SliceString8){0}, (SliceString8){0}, capture);
+                    if (BUSTER_REQUIRE(arguments, compile_spawn.handle != 0))
+                    {
+                        ProcessWaitResult compiled = os_process_wait_deadline(arena, compile_spawn, 30000000);
+                        bool success = compiled.result == PROCESS_RESULT_SUCCESS && !compiled.timed_out && compiled.platform_status == 0;
+                        BUSTER_TEST_RAW(arguments, success, string_format(arena, S8("{S8}: {S8}"), context,
+                                        BYTE_SLICE_TO_STRING(8, compiled.streams[STANDARD_STREAM_ERROR])));
+                        if (success)
+                        {
+                            String8 run_arguments[] = { output };
+                            ProcessSpawnResult run_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments),
+                                                                            (SliceString8){0}, (SliceString8){0}, capture);
+                            if (BUSTER_REQUIRE(arguments, run_spawn.handle != 0))
+                            {
+                                ProcessWaitResult waited = os_process_wait_deadline(arena, run_spawn, 30000000);
+                                String8 diagnostic = string_format(arena, S8("{S8}: result={u32} status={u32} timeout={u32} stderr={S8}"),
+                                    context, (u32)waited.result, waited.platform_status, (u32)waited.timed_out,
+                                    BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+                                BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out &&
+                                                waited.platform_status == 0, diagnostic);
+                                BUSTER_TEST_RAW(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
+                                                waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
+                                printf("STATIC-LITERAL reference dialect=%.*s optimization=%.*s status=%u timeout=%u\n",
+                                       (int)reference_dialects[dialect].length, (char const*)reference_dialects[dialect].pointer,
+                                       (int)optimizations[optimization].length, (char const*)optimizations[optimization].pointer,
+                                       waited.platform_status, (u32)waited.timed_out);
+                            }
+                            BUSTER_TEST(arguments, os_file_delete(output));
+                        }
+                    }
+                }
+            }
+        }
+#endif
+        ByteSlice original = file_read(arena, input, (FileReadOptions){0});
+        BUSTER_TEST(arguments, original.length == source.length && memcmp(original.pointer, source.pointer, source.length) == 0);
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+    scratch_end(temporary);
+#endif
+    return result;
+}
+
 // #1230: static scalar, aggregate and local-static addresses must retain the
 // cast's scaling and the subscript's signed count. Inspect serialized ELF
 // relocations as well as running every frontend/allocator combination.
@@ -16543,6 +17182,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_pointer_addresses);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_literal_addresses);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_literal_native);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unknown_type_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);

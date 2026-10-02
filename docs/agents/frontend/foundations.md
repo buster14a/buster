@@ -453,6 +453,25 @@ without facts for identical bitcode and diagnostics.
   addends, and rejects unrepresentable indices (GitHub #1230). Arithmetic on
   non-null integer-to-pointer static casts remains unsupported; it is refused
   rather than folded as if the trailing operator belonged inside the cast.
+- Static literal-address regressions are registered in
+  `compiler_driver_test_static_literal_addresses` and
+  `compiler_driver_test_static_literal_native` (GitHub #1268). The isolated
+  original sources cover whole and concatenated strings, pointer casts,
+  signed subscripts, constant selection, UTF-16/UTF-32 element strides,
+  aggregate pointer members, file-scope compound literal arrays/records,
+  and block-static `__func__` offsets. Fixed payloads and byte addends are
+  checked in both the direct object and the serialized ELF. Resolve the
+  relocation's symbol plus addend before comparing the image: an ELF writer
+  may use a section anchor rather than the unnamed object's own symbol.
+  The shared native source reads every pointer through volatile pointees
+  under both frontend forms, all four allocators, C17/GNU17 and O0/O2.
+  Linux GCC/Clang GNU17/GNU2x references receive identical source bytes.
+  Two mutable compound literal occurrences must retain separate storage;
+  string literals and const-qualified compound literals may share storage.
+  Function-body compound literals retain automatic storage duration and
+  cannot initialize static pointers. This boundary follows WG14 N1570
+  6.4.5, 6.5.2.5 and 6.6; it does not admit non-null integer-pointer
+  arithmetic or unrepresentable signed relocation addends.
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
