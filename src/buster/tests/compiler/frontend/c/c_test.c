@@ -11086,12 +11086,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_target_abi_macros(UnitTestArguments* a
 {
     UnitTestResult result = {0};
     enum { C_TEST_WIDE_INT, C_TEST_WIDE_UNSIGNED_INT, C_TEST_WIDE_UNSIGNED_SHORT };
-    struct { String8 type; String8 maximum; u32 size; } wide_types[] = {
+    typedef struct CTestAbiWideType CTestAbiWideType;
+    struct CTestAbiWideType
+    {
+        String8 type;
+        String8 maximum;
+        u32 size;
+    };
+    CTestAbiWideType wide_types[] = {
         {S8("int"), S8("2147483647"), 4},
         {S8("unsigned int"), S8("4294967295U"), 4},
         {S8("unsigned short"), S8("65535"), 2},
     };
-    struct { String8 triple; u32 wchar_type; u32 wint_type; bool int64_long; bool intmax_long; } targets[] = {
+    typedef struct CTestAbiMacroTarget CTestAbiMacroTarget;
+    struct CTestAbiMacroTarget
+    {
+        String8 triple;
+        u32 wchar_type;
+        u32 wint_type;
+        bool int64_long;
+        bool intmax_long;
+    };
+    CTestAbiMacroTarget targets[] = {
         {S8("x86_64-unknown-linux-gnu"), C_TEST_WIDE_INT, C_TEST_WIDE_UNSIGNED_INT, true, true},
         {S8("aarch64-unknown-linux-gnu"), C_TEST_WIDE_UNSIGNED_INT, C_TEST_WIDE_UNSIGNED_INT, true, true},
         {S8("x86_64-pc-windows-msvc"), C_TEST_WIDE_UNSIGNED_SHORT, C_TEST_WIDE_UNSIGNED_SHORT, false, false},
