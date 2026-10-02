@@ -703,7 +703,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
             {
                 if (fixture->sources[unit].length)
                 {
-                    source_paths[unit] = buster_test_temporary_path(arena, S8("buster-llvm-lifecycle-subject"), S8(".c"));
+                    source_paths[unit] = buster_test_temporary_path(arena, unit == 0 ? S8("buster-llvm-lifecycle-subject-0") : S8("buster-llvm-lifecycle-subject-1"), S8(".c"));
                     bool written = file_write(source_paths[unit], BUSTER_SLICE_TO_BYTE_SLICE(fixture->sources[unit]));
                     source_written = source_written && written;
                 }
@@ -733,7 +733,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
                     {
                         if (source_paths[unit].length)
                         {
-                            outputs[unit] = buster_test_temporary_path(arena, S8("buster-llvm-lifecycle-subject"), S8(".bc"));
+                            outputs[unit] = buster_test_temporary_path(arena, unit == 0 ? S8("buster-llvm-lifecycle-subject-0") : S8("buster-llvm-lifecycle-subject-1"), S8(".bc"));
                             String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), outputs[unit], source_paths[unit]};
                             CompilerDriverResult emitted = compiler_driver_execute_invocation(arena,
                                 compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
