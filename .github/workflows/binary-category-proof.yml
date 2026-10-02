@@ -1,0 +1,49 @@
+name: Binary category failure-first proof
+on:
+  push:
+    branches: [codex/2367-binary-category-proof]
+permissions:
+  contents: read
+jobs:
+  proof:
+    if: ${{ github.ref == 'refs/heads/codex/2367-binary-category-proof' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 329d18e7b51bee35bdf447c884255a46a60e7d0f
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prove base rejection gap and candidate repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "329d18e7b51bee35bdf447c884255a46a60e7d0f"
+          mkdir -p "$RUNNER_TEMP/category-proof"
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/category-proof/build-driver"
+          driver="$RUNNER_TEMP/category-proof/build-driver"
+          git show f73f75ed4a59594eb1f43ec505c100457bc35185:src/buster/lib/compiler/ir/ir.c > src/buster/lib/compiler/ir/ir.c
+          "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$driver" build --config Release -t ide
+          set +e
+          BUSTER_TEST_JOBS=2 build/Release/ide test --module=ir_tests --verbose=1 --ci=1 > "$RUNNER_TEMP/category-proof/base.log" 2>&1
+          base_status=$?
+          set -e
+          cat "$RUNNER_TEMP/category-proof/base.log"
+          test "$base_status" -eq 1
+          failures="$(grep -Fc 'validation.error == (variant ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE)' "$RUNNER_TEMP/category-proof/base.log")"
+          test "$failures" -eq 312
+          printf 'BINARY_CATEGORY_BASE_FAILURES=%s base=%s tests=%s\n' "$failures" "f73f75ed4a59594eb1f43ec505c100457bc35185" "329d18e7b51bee35bdf447c884255a46a60e7d0f"
+          git show 329d18e7b51bee35bdf447c884255a46a60e7d0f:src/buster/lib/compiler/ir/ir.c > src/buster/lib/compiler/ir/ir.c
+          "$driver" build --config Release -t ide
+          BUSTER_TEST_JOBS=2 build/Release/ide test --module=ir_tests --verbose=1 --ci=1 2>&1 | tee "$RUNNER_TEMP/category-proof/candidate.log"
+          printf 'BINARY_CATEGORY_CANDIDATE_PASS=%s\n' "329d18e7b51bee35bdf447c884255a46a60e7d0f"
+      - name: Retain proof logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: binary-category-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/category-proof/*.log
+          if-no-files-found: error
