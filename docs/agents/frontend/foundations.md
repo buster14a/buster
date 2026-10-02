@@ -431,6 +431,12 @@ without facts for identical bitcode and diagnostics.
   predicate bits/effects, diagnostics and native execution (#1225).
   Its static const initializer cases use the existing GNU folding extension;
   ISO integer-constant-expression admission keeps its separate checks.
+  Read-only lvalue materialization requires the whole declared object at byte
+  offset zero with its exact canonical access type. Reinterpreted or displaced
+  accesses remain unknown rather than borrowing the whole initializer's value.
+  The same fixture preserves direct, same-type and typedef reads, rejects the
+  static cast/offset neighbors, and pins conservative unevaluated predicate
+  answers with no loads or effects (#1566).
 - A folded conditional expression converts its selected value to the common
   type of both arms before any enclosing operator consumes it. Constant and
   runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
