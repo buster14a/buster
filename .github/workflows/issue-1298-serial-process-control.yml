@@ -1,7 +1,7 @@
-name: Serial process-control diagnostic
+name: Overaligned stack fixture portability diagnostic
 
-# Temporary issue-1298 hosted frontdoor evidence; remove before the source PR.
-# Configuration, warnings and test policy remain in build.c/CMake.
+# Temporary owned-fixture diagnosis; remove before the source PR.
+# Production source and registered fixtures remain unchanged in this transport.
 on:
   push:
     branches: [codex/1298-serial-process-control-cast]
@@ -15,16 +15,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  serial:
-    name: Serial ${{ matrix.cc }}
+  stack-portability:
+    name: GCC serial compiler and GCC/Clang stack fixture controls
     runs-on: ubuntu-26.04
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        cc: [clang, gcc]
+    timeout-minutes: 45
     env:
-      SERIAL_CC: ${{ matrix.cc }}
       CMAKE_BUILD_PARALLEL_LEVEL: 2
       BUSTER_TEST_JOBS: 1
       BUSTER_MATRIX_THREADS: 2
@@ -35,13 +30,7 @@ jobs:
           ref: ${{ github.sha }}
           path: candidate
           persist-credentials: false
-      - name: Checkout frozen baseline
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: cdcfa9b605a3e3f3dbb0b137973b868fc52ae302
-          path: baseline
-          persist-credentials: false
-      - name: Reproduce serial warning and run corrected serial frontdoor
+      - name: Diagnose the unchanged fixture and isolated portable copies
         shell: bash
         run: |
           set -euo pipefail
@@ -50,13 +39,22 @@ jobs:
           import hashlib, json, os, pathlib, shlex, signal, subprocess
 
           root = pathlib.Path.cwd()
+          checkout = root / "candidate"
           evidence = root / "evidence"
-          compiler = os.environ["SERIAL_CC"]
-          records = []
+          sources = evidence / "sources"
+          products = evidence / "products"
+          sources.mkdir()
+          products.mkdir()
+          commands = []
+          executions = []
+          artifact_hashes = {}
 
-          def run(label, argv, cwd=root, timeout=15, baseline_build=False):
-              command = [str(arg) for arg in argv]
-              process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE,
+          def save_json(name, value):
+              (evidence / name).write_text(json.dumps(value, indent=2) + "\n")
+
+          def run(label, argv, cwd=checkout, timeout=30, require_success=True):
+              argv = [str(arg) for arg in argv]
+              process = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, start_new_session=True)
               expired = False
               try:
@@ -67,102 +65,177 @@ jobs:
                   out, err = process.communicate()
               (evidence / (label + ".stdout")).write_bytes(out)
               (evidence / (label + ".stderr")).write_bytes(err)
-              records.append(dict(label=label, argv=command, cwd=str(cwd), returncode=process.returncode,
-                                  timed_out=expired, timeout_seconds=timeout))
-              (evidence / "commands.json").write_text(json.dumps(records, indent=2) + "\n")
-              text = (out + err).decode("utf-8", errors="replace")
+              commands.append(dict(label=label, argv=argv, cwd=str(cwd), returncode=process.returncode,
+                                   timed_out=expired, timeout_seconds=timeout))
+              save_json("commands.json", commands)
               print(label + ": exit=" + str(process.returncode) + " timed_out=" + str(expired), flush=True)
-              if expired:
-                  raise RuntimeError("timed out: " + label)
-              if baseline_build:
-                  required = ["os.c:" + str(baseline_line) + ":", "error:", "sign-conversion"]
-                  matching = [line for line in text.splitlines() if all(token in line for token in required)]
-                  if process.returncode == 0 and compiler == "gcc":
-                      outcome = "accepted-without-expected-warning"
-                  elif process.returncode > 0 and len(matching) == 1:
-                      outcome = "specific-signedness-refusal"
-                      print(matching[0], flush=True)
-                  else:
-                      raise RuntimeError("specific serial signed-conversion refusal missing: " + label + "\n" + text)
-                  (evidence / "baseline-result.json").write_text(json.dumps(
-                      dict(compiler=compiler, outcome=outcome, returncode=process.returncode,
-                           source_line=baseline_line, diagnostic=matching,
-                           aliases_observed={alias: alias in text for alias in ["ProcessControlAtomic", "u64"]}),
-                      indent=2) + "\n")
-                  print("baseline serial compiler outcome: " + outcome, flush=True)
-              elif process.returncode != 0:
-                  raise RuntimeError("unexpected frontdoor failure: " + label + "\n" + text)
-              return text
+              if expired or (require_success and process.returncode != 0):
+                  raise RuntimeError("diagnostic command failed: " + label)
+              return process.returncode, out, err
+
+          def hash_product(path):
+              artifact_hashes[str(path.relative_to(evidence))] = hashlib.sha256(path.read_bytes()).hexdigest()
+              save_json("artifact-sha256.json", artifact_hashes)
 
           for tool in ["clang", "gcc", "cmake", "ninja"]:
               run(tool + "-identity", [tool, "--version"])
-          paths = ["src/buster/lib/os.c", "src/buster/lib/os.h", "src/buster/tests/os_test.c",
-                   "docs/agents/platform.md", "build.c", "CMakeLists.txt", "AGENTS.md"]
-          hashes = {}
-          for stage in ["baseline", "candidate"]:
-              checkout = root / stage
-              run(stage + "-git", ["git", "rev-parse", "HEAD", "HEAD^{tree}"], checkout)
-              run(stage + "-status", ["git", "status", "--porcelain"], checkout)
-              run(stage + "-clean", ["git", "diff", "--exit-code"], checkout)
-              hashes[stage] = {path: hashlib.sha256((checkout / path).read_bytes()).hexdigest() for path in paths}
-              source = (checkout / "src/buster/lib/os.c").read_text()
-              load_body = source.split("u64 process_control_atomic_load(", 1)[1].split("\n}\n", 1)[0]
-              statement = "result = *address;" if stage == "baseline" else "result = (u64)*address;"
-              if statement not in load_body:
-                  raise RuntimeError("unexpected process-control source input: " + stage)
-              if stage == "baseline":
-                  offset = source.index(statement, source.index("u64 process_control_atomic_load("))
-                  baseline_line = source.count("\n", 0, offset) + 1
-          (evidence / "source-sha256.json").write_text(json.dumps(hashes, indent=2) + "\n")
+          _, identity, _ = run("candidate-git", ["git", "rev-parse", "HEAD", "HEAD^{tree}"])
+          run("candidate-clean", ["git", "diff", "--exit-code"])
+          run("candidate-status", ["git", "status", "--porcelain"])
+          expected_blobs = {
+              "src/buster/lib/os.c": "425cd3a9a7940facb251acda8970e40d66355566",
+              "src/buster/tests/os_test.c": "b59cb6499a1eb1033b330c0f7533d31bb938592f",
+              "docs/agents/platform.md": "09e62d1f90d02a51923c08f7c96fa3d5274a5f5d",
+              "tests/basic_c_overaligned_stack_caller.c": "2c7fe57d6fd08e1d820bb232127036743635701a",
+              "tests/basic_c_overaligned_stack_callee.c": "3bce2da96bad97260fd19d0d0f79da6d6092cd65",
+              "tests/basic_c_overaligned_stack_observe.c": "24085a11c385c0ecdb9e4b5f700faba50e97f20d",
+              "tests/basic_c_overaligned_stack_shapes.h": "104ed08167cce942d54a027f3903e330fe6a452c",
+              "src/buster/tests/compiler/driver/driver_test.c": "be3a289bc5fd0f0ac245223a9ff305830a7b7600",
+          }
+          source_identities = {}
+          for index, (path, expected_blob) in enumerate(expected_blobs.items()):
+              content = (checkout / path).read_bytes()
+              actual_blob = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+              if actual_blob != expected_blob:
+                  raise RuntimeError("source changed outside the diagnostic workflow: " + path)
+              source_identities[path] = dict(blob=actual_blob, sha256=hashlib.sha256(content).hexdigest(), bytes=len(content))
+          save_json("source-identities.json", source_identities)
+          save_json("retained-prior-result.json", dict(
+              candidate="b40964ecd347e0f6ecbe93595bf816b94f655ebf", workflow_run=36996005977,
+              gcc_job=110802744949, clang_job=110802745125,
+              gcc_build_and_os_tests="passed; 579 OS assertions", gcc_full_test_all="failed; 12 reverse mixed-stack driver assertions",
+              clang_full_test_all="passed", diagnostic_purpose="isolate fixture behavior, not replace or rerun the original full-suite result"))
 
-          for stage in ["baseline", "candidate"]:
-              checkout = root / stage
-              tools = checkout / ".ci-tools"
-              tools.mkdir()
-              driver = tools / "build"
-              # Existing hosted Clang bootstrap exception; compiler selection is generate-owned.
-              run(stage + "-bootstrap", ["clang", "-Isrc", "-Wall", "-Werror", "-Wno-unused-function",
-                  "-Wno-unused-variable", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char",
-                  "build.c", "-o", driver], checkout, 120)
-              build = checkout / "build/serial"
-              run(stage + "-generate", [driver, "generate", "--build-directory", build, "--cc", compiler,
-                  "--config", "Release", "--ci", "--no-sanitize", "--no-fuzz", "--no-lto", "--linker", "DEFAULT",
-                  "--", "-DBUSTER_DEBUG_INFO=OFF", "-DBUSTER_SINGLE_THREADED=ON",
-                  "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"], checkout, 120)
-              cache = (build / "CMakeCache.txt").read_text()
-              if "BUSTER_SINGLE_THREADED:BOOL=ON" not in cache:
-                  raise RuntimeError("serial configuration missing: " + stage)
-              (evidence / (stage + "-CMakeCache.txt")).write_text(cache)
-              commands = (build / "compile_commands.json").read_bytes()
-              (evidence / (stage + "-compile_commands.json")).write_bytes(commands)
-              selected = []
-              source_name = "ide.c" if compiler == "clang" else "os.c"
-              for row in json.loads(commands):
-                  argv = row.get("arguments") or shlex.split(row["command"])
-                  if pathlib.Path(row["file"]).name == source_name and "CMakeFiles/ide.dir/Release/" in " ".join(argv):
-                      selected.append(argv)
-              required = ["-DBUSTER_SINGLE_THREADED=1", "-DBUSTER_INCLUDE_TESTS=1", "-Werror", "-Wconversion"]
-              suppressed = ["-Wno-conversion", "-Wno-sign-conversion", "-Wno-error", "-Wno-error=conversion",
-                            "-Wno-error=sign-conversion"]
-              if len(selected) != 1 or not all(flag in selected[0] for flag in required) or any(flag in selected[0] for flag in suppressed):
-                  raise RuntimeError("serial OS-bearing Release ide compile flags missing or suppressed: " + stage)
-              (evidence / (stage + "-selected-compile-argv.json")).write_text(json.dumps(selected[0], indent=2) + "\n")
-              run(stage + "-build-ide", [driver, "build", "--build-directory", build, "--config", "Release", "-t", "ide"],
-                  checkout, 600 if stage == "baseline" else 900, baseline_build=(stage == "baseline"))
-              if stage == "candidate":
-                  ide = build / "Release/ide"
-                  (evidence / "candidate-compiler.sha256").write_text(hashlib.sha256(ide.read_bytes()).hexdigest() + "\n")
-                  run("candidate-os-tests", [ide, "test", "--module=os_tests", "--verbose=1", "--ci=1"], checkout, 600)
-                  run("candidate-test-all", [driver, "build", "--build-directory", build, "--config", "Release", "-t", "test_all"],
-                      checkout, 2400)
-          print("Serial frontdoor passed with " + compiler + ": baseline compiler outcome recorded, "
-                "corrected ide build, focused OS tests and full test_all.", flush=True)
+          caller_path = checkout / "tests/basic_c_overaligned_stack_caller.c"
+          caller = caller_path.read_text()
+          stride_statement = "    failures += (unsigned long long)before - (unsigned long long)after != 16;\n"
+          if caller.count(stride_statement) != 1:
+              raise RuntimeError("the specific fixture assertion changed")
+          portable = caller.replace(stride_statement, "")
+          canary_statement = "    *before = 37;\n"
+          result_statement = "    int failures = result.low != 9 || result.high != 9 || stack_return_float(value32) != 3.75;\n"
+          if portable.count(canary_statement) != 1 or portable.count(result_statement) != 1:
+              raise RuntimeError("the retained fixture checks changed")
+          copies = {
+              "original": caller,
+              "stride-free-diagnostic": portable,
+              "wrong-live-byte-control": portable.replace(canary_statement, "    *before = 38;\n"),
+              "wrong-result-control": portable.replace(result_statement, result_statement.replace("result.low != 9", "result.low != 10")),
+          }
+          caller_inputs = {}
+          for scenario, content in copies.items():
+              path = sources / (scenario + "-caller.c")
+              path.write_text(content)
+              caller_inputs[scenario] = path
+              hash_product(path)
+          for name in ["basic_c_overaligned_stack_callee.c", "basic_c_overaligned_stack_observe.c", "basic_c_overaligned_stack_shapes.h"]:
+              path = sources / name
+              path.write_bytes((checkout / "tests" / name).read_bytes())
+              hash_product(path)
+          save_json("copy-contract.json", dict(
+              original_source=str(caller_path), explanatory_copy="one stride assertion removed; not source acceptance",
+              safe_controls="in-range one-byte write of 38 instead of 37, and a wrong expected low result of 10 instead of 9",
+              original_allocation_sizes=[1, 1], checks_retained=["aggregate and float results", "live before byte", "live after byte"],
+              executions_planned=216, mixed_rows_per_scenario_and_host=24, all_host_rows_per_scenario_and_host=3))
+
+          tools = checkout / ".ci-tools"
+          tools.mkdir()
+          driver = tools / "build"
+          run("candidate-bootstrap", ["clang", "-Isrc", "-Wall", "-Werror", "-Wno-unused-function",
+              "-Wno-unused-variable", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "build.c", "-o", driver], timeout=120)
+          build = checkout / "build/stack-portability"
+          run("candidate-generate", [driver, "generate", "--build-directory", build, "--cc", "gcc",
+              "--config", "Release", "--ci", "--no-sanitize", "--no-fuzz", "--no-lto", "--linker", "DEFAULT", "--",
+              "-DBUSTER_DEBUG_INFO=OFF", "-DBUSTER_SINGLE_THREADED=ON", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"], timeout=120)
+          cache = (build / "CMakeCache.txt").read_text()
+          if "BUSTER_SINGLE_THREADED:BOOL=ON" not in cache:
+              raise RuntimeError("serial configuration missing")
+          (evidence / "candidate-CMakeCache.txt").write_text(cache)
+          compile_commands = (build / "compile_commands.json").read_bytes()
+          (evidence / "candidate-compile_commands.json").write_bytes(compile_commands)
+          selected = []
+          for row in json.loads(compile_commands):
+              argv = row.get("arguments") or shlex.split(row["command"])
+              if pathlib.Path(row["file"]).name == "os.c" and "CMakeFiles/ide.dir/Release/" in " ".join(argv):
+                  selected.append(argv)
+          required = ["-DBUSTER_SINGLE_THREADED=1", "-DBUSTER_INCLUDE_TESTS=1", "-Werror", "-Wconversion"]
+          suppressed = ["-Wno-conversion", "-Wno-sign-conversion", "-Wno-error", "-Wno-error=conversion", "-Wno-error=sign-conversion"]
+          if len(selected) != 1 or not all(flag in selected[0] for flag in required) or any(flag in selected[0] for flag in suppressed):
+              raise RuntimeError("serial strict-warning compiler flags missing or suppressed")
+          save_json("candidate-selected-compile-argv.json", selected[0])
+          run("candidate-build-ide", [driver, "build", "--build-directory", build, "--config", "Release", "-t", "ide"], timeout=900)
+          ide = build / "Release/ide"
+          save_json("candidate-compiler.json", dict(path=str(ide), sha256=hashlib.sha256(ide.read_bytes()).hexdigest(),
+                                                    checkout=identity.decode().splitlines()))
+
+          allocators = ["fast", "none", "mir-stack", "quality"]
+          for variant in range(3):
+              scalar = "-DOVERALIGNED_STACK_SCALAR_ONLY=1" if variant else "-UOVERALIGNED_STACK_SCALAR_ONLY"
+              frontend = "-fno-frontend-ssa" if variant == 1 else "-ffrontend-ssa"
+              buster_objects = {}
+              for allocator_index, allocator in enumerate(allocators):
+                  fallback = "-fno-machine-fallback" if variant and allocator_index != 1 else "-fmachine-fallback"
+                  common = [ide, "cc", "-fregister-allocator=" + allocator, scalar, fallback, frontend, "-fverify-codegen", "-I", sources, "-c"]
+                  callee_object = products / ("buster-v" + str(variant) + "-" + allocator + "-callee.o")
+                  run(callee_object.stem, common + [sources / "basic_c_overaligned_stack_callee.c", "-o", callee_object])
+                  hash_product(callee_object)
+                  buster_objects[(allocator, "callee")] = callee_object
+                  for scenario, caller_input in caller_inputs.items():
+                      object_path = products / ("buster-v" + str(variant) + "-" + allocator + "-" + scenario + "-caller.o")
+                      run(object_path.stem, common + [caller_input, "-o", object_path])
+                      hash_product(object_path)
+                      buster_objects[(allocator, scenario)] = object_path
+
+              for host in ["gcc", "clang"]:
+                  host_common = [host, "-DOVERALIGNED_STACK_OBSERVE=1", scalar, "-O0", "-fno-pic", "-g0", "-I", sources, "-c"]
+                  host_objects = {}
+                  for role in ["callee", "observe"]:
+                      object_path = products / (host + "-v" + str(variant) + "-" + role + ".o")
+                      run(object_path.stem, host_common + [sources / ("basic_c_overaligned_stack_" + role + ".c"), "-o", object_path])
+                      hash_product(object_path)
+                      host_objects[role] = object_path
+                  for scenario, caller_input in caller_inputs.items():
+                      object_path = products / (host + "-v" + str(variant) + "-" + scenario + "-caller.o")
+                      run(object_path.stem, host_common + [caller_input, "-o", object_path])
+                      hash_product(object_path)
+                      host_objects[scenario] = object_path
+                      control = products / (host + "-v" + str(variant) + "-" + scenario + "-all-host")
+                      run(control.name + "-link", [host, "-no-pie", "-o", control, object_path, host_objects["callee"], host_objects["observe"]])
+                      hash_product(control)
+                      code, _, _ = run(control.name + "-execute", [control], timeout=5, require_success=False)
+                      executions.append(dict(kind="all-host", host=host, variant=variant, scenario=scenario, returncode=code))
+                      save_json("executions.json", executions)
+                      for allocator in allocators:
+                          for direction in range(2):
+                              mixed = products / (host + "-v" + str(variant) + "-" + allocator + "-" + scenario + "-d" + str(direction))
+                              objects = [buster_objects[(allocator, scenario)], host_objects["callee"]] if direction == 0 else [host_objects[scenario], buster_objects[(allocator, "callee")]]
+                              run(mixed.name + "-link", [ide, "cc", "-o", mixed] + objects + [host_objects["observe"]])
+                              hash_product(mixed)
+                              code, _, _ = run(mixed.name + "-execute", [mixed], timeout=5, require_success=False)
+                              executions.append(dict(kind="mixed", host=host, variant=variant, allocator=allocator,
+                                                     direction=direction, scenario=scenario, returncode=code))
+                              save_json("executions.json", executions)
+
+          mismatches = []
+          for row in executions:
+              expected = 128 if row["scenario"] in ["wrong-live-byte-control", "wrong-result-control"] else 0
+              if row["scenario"] == "original" and row["host"] == "gcc" and (row["kind"] == "all-host" or row["direction"] == 1):
+                  expected = 128
+              if row["returncode"] != expected:
+                  mismatches.append(dict(observation=row, isolation_hypothesis_expected_exit=expected))
+          confirmed = len(executions) == 216 and not mismatches
+          save_json("diagnostic-summary.json", dict(executions_observed=len(executions), executions_planned=216,
+              isolation_hypothesis_confirmed=confirmed, mismatches=mismatches,
+              acceptance="diagnostic only; original full GCC suite remains failed and registered fixture source remains unchanged"))
+          if not confirmed:
+              raise RuntimeError("the specific stride-only hypothesis was not isolated; inspect retained actual exits")
+          print("Stride-only fixture hypothesis isolated across 216 actual executions; production acceptance remains pending.", flush=True)
           PY
-      - name: Retain exact serial diagnostic evidence
+      - name: Retain raw stack portability evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: issue-1298-${{ matrix.cc }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: issue-1298-stack-portability-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence
           if-no-files-found: error
           retention-days: 14
