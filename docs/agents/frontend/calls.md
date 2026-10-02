@@ -281,3 +281,23 @@ allocators and both frontend SSA forms on eligible hosts. Semantic checks
 for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
+
+## C99 inline function identity
+
+A body whose file-scope declarations all specify inline without extern is an
+inline definition, which supplies no external definition. Calls and address
+expressions share the external function identity; a referenced body must not
+become a second strong definition. A compatible extern or non-inline
+declaration in the same unit supplies the external definition. Static inline
+and GNU inline semantics retain their separate rules.
+
+The registered c_test_c99_inline_linkage checks symbol linkage, definition
+status and canonical function state in both frontend forms across six native
+target layouts and C99/C11/C17. Controls retain static inline, a preceding
+non-inline prototype and both GNU attribute directions. Its two-unit program
+checks the literal result 14, distinct private static helpers and equal
+function pointers. All four native allocator modes compile the units together
+and separately; Linux x86-64 also links the Buster objects with GCC and Clang
+and runs independent host-built versions of the same source recipe. This
+regression is published before the bounded emission repair so hosted evidence
+can show the duplicate definition before the fix.

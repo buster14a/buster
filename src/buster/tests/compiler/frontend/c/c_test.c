@@ -30153,6 +30153,218 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy_runtime(UnitTes
 }
 
 // A place is not a scalar value, and an unknown read is not known false.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL bool c_test_inline_linkage_spawn(UnitTestArguments* arguments, Arena* arena, SliceString8 command, String8 context)
+{
+    bool passed = false;
+    ProcessSpawnResult child = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
+        (ProcessSpawnOptions){.use_process_environment = true});
+    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+    {
+        ProcessWaitResult execution = os_process_wait_deadline(arena, child, 30000000);
+        passed = !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST_RAW(arguments, passed,
+            string_format(arena, S8("{S8}: status={u32} timeout={u32}"),
+                context, execution.platform_status, (u32)execution.timed_out));
+    }
+    return passed;
+}
+#endif
+
+// #1277: C99 inline bodies share the external function's single identity.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 first = S8(
+        "inline int square(int x) { return x * x; }\n"
+        "static inline int local_inline(int x) { return x + 5; }\n"
+        "int use1(int x) { return square(x) + 1; }\n"
+        "int use_local1(int x) { return local_inline(x); }\n"
+        "int (*address1(void))(int) { return square; }\n");
+    String8 second = S8(
+        "inline int square(int x) { return x * x; }\n"
+        "extern inline int square(int);\n"
+        "static inline int local_inline(int x) { return x + 2; }\n"
+        "int use1(int); int use_local1(int); int (*address1(void))(int);\n"
+        "int main(void) { return use1(3) + square(2) != 14 || use_local1(3) != 8 || local_inline(3) != 5 || address1() != square; }\n");
+    typedef struct CTestInlineLinkageCase CTestInlineLinkageCase;
+    struct CTestInlineLinkageCase
+    {
+        String8 source;
+        bool definition;
+        bool internal;
+    };
+    CTestInlineLinkageCase rows[] = {
+        {first, false, false},
+        {second, true, false},
+        {S8("int square(int);\ninline int square(int x) { return x * x; }\nint use(int x) { return square(x); }\n"), true, false},
+        {S8("extern inline __attribute__((gnu_inline)) int square(int x) { return x * x; }\nint use(int x) { return square(x); }\n"), false, false},
+        {S8("inline __attribute__((gnu_inline)) int square(int x) { return x * x; }\nint use(int x) { return square(x); }\n"), true, false},
+        {S8("static inline int square(int x) { return x * x; }\nint use(int x) { return square(x); }\n"), true, true},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C99, C_PREPROCESS_DIALECT_C11, C_PREPROCESS_DIALECT_C17};
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 target_index = 0; target_index < 6; target_index += 1)
+            {
+                Target target = target_native;
+                target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+                target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, rows[row].source, (CPreprocessOptions){
+                        .target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect],
+                    });
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("c99-inline-linkage.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    String8 context = string_format(temporary.arena, S8("inline row={u32} dialect={u32} target={u32} form={u32}"),
+                        row, dialect, target_index, form);
+                    BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified,
+                        string_format(temporary.arena, S8("{S8}: diagnostics={u32}"), context, lowered.diagnostic_count));
+                    if (lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count &&
+                        BUSTER_REQUIRE(arguments, lowered.program->module_count == 1))
+                    {
+                        IrModule* module = lowered.program->modules;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                        u32 found = 0;
+                        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                        {
+                            IrFunction* function = module->functions + function_index;
+                            if (!string_equal(function->name, S8("square")))
+                            {
+                                continue;
+                            }
+                            found += 1;
+                            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, function->symbol);
+                            bool correct = symbol && symbol->kind == IR_SYMBOL_FUNCTION &&
+                                symbol->is_definition == rows[row].definition &&
+                                symbol->linkage == (rows[row].internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL) &&
+                                function->state == (rows[row].definition ? IR_FUNCTION_LOWERED : IR_FUNCTION_DECLARATION) &&
+                                (rows[row].definition ? function->instruction_count != 0 : function->instruction_count == 0);
+                            BUSTER_TEST_RAW(arguments, correct, context);
+                        }
+                        BUSTER_TEST_RAW(arguments, found == 1, context);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 first_path = buster_test_temporary_path(arguments->arena, S8("c99-inline-first"), S8(".c"));
+    String8 second_path = buster_test_temporary_path(arguments->arena, S8("c99-inline-second"), S8(".c"));
+    bool written = file_write(first_path, BUSTER_SLICE_TO_BYTE_SLICE(first)) &&
+                   file_write(second_path, BUSTER_SLICE_TO_BYTE_SLICE(second));
+    BUSTER_TEST(arguments, written);
+    String8 flags[] = {S8("-std=c99"), S8("-std=c11"), S8("-std=c17")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    for (u32 dialect = 0; written && dialect < BUSTER_ARRAY_LENGTH(flags); dialect += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 context = string_format(temporary.arena, S8("C99 inline {S8} {S8} form={u32}"), flags[dialect], modes[mode], form);
+                String8 frontend = form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa");
+                String8 combined = buster_test_temporary_path(temporary.arena, S8("c99-inline-combined"), S8(".exe"));
+                String8 combined_command[] = {S8("-nostdinc"), flags[dialect], modes[mode], frontend, S8("-fverify-codegen"), S8("-o"), combined, first_path, second_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(combined_command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult linked = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("{S8} combined: {S8}"), context, linked.diagnostic));
+                if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {combined};
+                    c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), context);
+                }
+                String8 objects[] = {
+                    buster_test_temporary_path(temporary.arena, S8("c99-inline-first"), S8(".o")),
+                    buster_test_temporary_path(temporary.arena, S8("c99-inline-second"), S8(".o")),
+                };
+                String8 inputs[] = {first_path, second_path};
+                bool produced = true;
+                for (u32 unit = 0; unit < 2; unit += 1)
+                {
+                    String8 command[] = {S8("-nostdinc"), flags[dialect], modes[mode], frontend, S8("-fverify-codegen"), S8("-c"), S8("-o"), objects[unit], inputs[unit]};
+                    invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("{S8} object={u32}: {S8}"), context, unit, compiled.diagnostic));
+                    produced &= compiled.error == COMPILER_DRIVER_ERROR_NONE;
+                }
+                if (produced)
+                {
+                    String8 separate = buster_test_temporary_path(temporary.arena, S8("c99-inline-separate"), S8(".exe"));
+                    String8 command[] = {S8("-o"), separate, objects[0], objects[1]};
+                    CompilerDriverResult separate_link = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, separate_link.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("{S8} separate: {S8}"), context, separate_link.diagnostic));
+                    if (separate_link.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {separate};
+                        c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), context);
+                    }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+                    String8 references[] = {S8("gcc"), S8("clang")};
+                    for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+                    {
+                        String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                        if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                        {
+                            String8 output = buster_test_temporary_path(temporary.arena, S8("c99-inline-host-link"), S8(""));
+                            String8 host_command[] = {compiler, S8("-O0"), flags[dialect], objects[0], objects[1], S8("-o"), output};
+                            String8 host_context = string_format(temporary.arena, S8("{S8} host={S8}"), context, references[reference]);
+                            if (c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_command), host_context))
+                            {
+                                String8 run[] = {output};
+                                c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), host_context);
+                            }
+                        }
+                    }
+#endif
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    // Independent compilers confirm that the same two-unit recipe is valid.
+    String8 references[] = {S8("gcc"), S8("clang")};
+    for (u32 reference = 0; written && reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(flags); dialect += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+            if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+            {
+                String8 output = buster_test_temporary_path(temporary.arena, S8("c99-inline-reference"), S8(""));
+                String8 command[] = {compiler, S8("-O0"), flags[dialect], first_path, second_path, S8("-o"), output};
+                String8 context = string_format(temporary.arena, S8("C99 inline reference={S8} {S8}"), references[reference], flags[dialect]);
+                if (c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), context))
+                {
+                    String8 run[] = {output};
+                    c_test_inline_linkage_spawn(arguments, temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), context);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#endif
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -31405,6 +31617,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_c99_inline_linkage);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);
     BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
