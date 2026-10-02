@@ -11081,6 +11081,114 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_preprocessor_short_circuit(UnitTestArg
     return result;
 }
 
+// #1253: fixed ABI expectations, including equal-width typedef identities.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_target_abi_macros(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { C_TEST_WIDE_INT, C_TEST_WIDE_UNSIGNED_INT, C_TEST_WIDE_UNSIGNED_SHORT };
+    struct { String8 type; String8 maximum; u32 size; } wide_types[] = {
+        {S8("int"), S8("2147483647"), 4},
+        {S8("unsigned int"), S8("4294967295U"), 4},
+        {S8("unsigned short"), S8("65535"), 2},
+    };
+    struct { String8 triple; u32 wchar_type; u32 wint_type; bool int64_long; bool intmax_long; } targets[] = {
+        {S8("x86_64-unknown-linux-gnu"), C_TEST_WIDE_INT, C_TEST_WIDE_UNSIGNED_INT, true, true},
+        {S8("aarch64-unknown-linux-gnu"), C_TEST_WIDE_UNSIGNED_INT, C_TEST_WIDE_UNSIGNED_INT, true, true},
+        {S8("x86_64-pc-windows-msvc"), C_TEST_WIDE_UNSIGNED_SHORT, C_TEST_WIDE_UNSIGNED_SHORT, false, false},
+        {S8("aarch64-pc-windows-msvc"), C_TEST_WIDE_UNSIGNED_SHORT, C_TEST_WIDE_UNSIGNED_SHORT, false, false},
+        {S8("x86_64-apple-macos"), C_TEST_WIDE_INT, C_TEST_WIDE_INT, false, true},
+        {S8("aarch64-apple-macos"), C_TEST_WIDE_INT, C_TEST_WIDE_INT, false, true},
+        {S8("aarch64-apple-ios"), C_TEST_WIDE_INT, C_TEST_WIDE_INT, false, true},
+        {S8("x86_64-linux-android"), C_TEST_WIDE_INT, C_TEST_WIDE_UNSIGNED_INT, true, true},
+        {S8("aarch64-linux-android"), C_TEST_WIDE_UNSIGNED_INT, C_TEST_WIDE_UNSIGNED_INT, true, true},
+        {S8("x86_64-unknown-uefi"), C_TEST_WIDE_UNSIGNED_SHORT, C_TEST_WIDE_UNSIGNED_SHORT, false, false},
+        {S8("aarch64-unknown-uefi"), C_TEST_WIDE_UNSIGNED_SHORT, C_TEST_WIDE_UNSIGNED_SHORT, true, true},
+        {S8("wasm32-unknown-wasi"), C_TEST_WIDE_INT, C_TEST_WIDE_INT, false, false},
+        {S8("wasm64-unknown-freestanding"), C_TEST_WIDE_INT, C_TEST_WIDE_INT, false, false},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C23};
+    String8 checks = S8(
+        "#if defined(__OPTIMIZE__) || defined(__OPTIMIZE_SIZE__)\n"
+        "#error no inliner is available\n#endif\n"
+        "#if !defined(__NO_INLINE__) || __NO_INLINE__ != 1\n"
+        "#error missing no-inline contract\n#endif\n"
+        "_Static_assert(__builtin_types_compatible_p(__WCHAR_TYPE__, EXPECT_WCHAR), \"wchar identity\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__WINT_TYPE__, EXPECT_WINT), \"wint identity\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__INT64_TYPE__, EXPECT_INT64), \"int64 identity\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__UINT64_TYPE__, unsigned EXPECT_INT64), \"uint64 identity\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__INTMAX_TYPE__, EXPECT_INTMAX), \"intmax identity\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__UINTMAX_TYPE__, unsigned EXPECT_INTMAX), \"uintmax identity\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__INT64_C(1)), __INT64_TYPE__), \"int64 literal identity\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__UINT64_C(1)), __UINT64_TYPE__), \"uint64 literal identity\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__INTMAX_C(1)), __INTMAX_TYPE__), \"intmax literal identity\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__UINTMAX_C(1)), __UINTMAX_TYPE__), \"uintmax literal identity\");\n"
+        "_Static_assert(__SIZEOF_WCHAR_T__ == EXPECT_WCHAR_SIZE && sizeof(__WCHAR_TYPE__) == EXPECT_WCHAR_SIZE, \"wchar size\");\n"
+        "_Static_assert(__SIZEOF_WINT_T__ == EXPECT_WINT_SIZE && sizeof(__WINT_TYPE__) == EXPECT_WINT_SIZE, \"wint size\");\n"
+        "_Static_assert(__WCHAR_WIDTH__ == EXPECT_WCHAR_SIZE * 8 && __WINT_WIDTH__ == EXPECT_WINT_SIZE * 8, \"wide widths\");\n"
+        "_Static_assert(__WCHAR_MAX__ == EXPECT_WCHAR_MAX && __WINT_MAX__ == EXPECT_WINT_MAX, \"wide maxima\");\n"
+        "_Static_assert(__FLT_EVAL_METHOD__ == 0, \"float evaluation\");\n"
+        "_Static_assert(sizeof(__VERSION__) == sizeof(__clang_version__), \"version string\");\n"
+        "#define FLT_EVAL_METHOD __FLT_EVAL_METHOD__\n"
+        "int float_evaluation_method(void) { return FLT_EVAL_METHOD; }\n");
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                TargetParseResult target = target_parse_triple(targets[index].triple);
+                if (BUSTER_REQUIRE(arguments, target.error == TARGET_PARSE_ERROR_NONE))
+                {
+                    String8 source = string_format(temporary.arena,
+                        S8("#define EXPECT_WCHAR {S8}\n#define EXPECT_WINT {S8}\n"
+                           "#define EXPECT_INT64 {S8}\n#define EXPECT_INTMAX {S8}\n"
+                           "#define EXPECT_WCHAR_SIZE {u32}\n#define EXPECT_WINT_SIZE {u32}\n"
+                           "#define EXPECT_WCHAR_MAX {S8}\n#define EXPECT_WINT_MAX {S8}\n{S8}"),
+                        wide_types[targets[index].wchar_type].type, wide_types[targets[index].wint_type].type,
+                        targets[index].int64_long ? S8("long") : S8("long long"),
+                        targets[index].intmax_long ? S8("long") : S8("long long"),
+                        wide_types[targets[index].wchar_type].size, wide_types[targets[index].wint_type].size,
+                        wide_types[targets[index].wchar_type].maximum, wide_types[targets[index].wint_type].maximum, checks);
+                    CPreprocessOptions options = {.target = target.target, .data_layout = target_data_layout(target.target),
+                        .dialect = dialects[dialect], .source_path = S8("target-abi-macros.c")};
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, options.source_path, tokens, syntax, target.target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count &&
+                                       lowered.program && lowered.program->module_count == 1))
+                    {
+                        IrModule* module = lowered.program->modules;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                        BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("float_evaluation_method")) != 0);
+                    }
+                    CPreprocessResult raw = c_preprocess(temporary.arena,
+                        S8("__SIZEOF_WCHAR_T__ __WCHAR_MAX__ __SIZEOF_WINT_T__ __WINT_MAX__ "
+                           "__FLT_EVAL_METHOD__ __NO_INLINE__ __VERSION__ "
+                           "__INT64_C(1) __UINT64_C(1) __INTMAX_C(1) __UINTMAX_C(1)\n"), options);
+                    BUSTER_TEST(arguments, raw.diagnostic_count == 0 && raw.token_count == 12);
+                    c_test_preprocessed_token(arguments, &result, raw, 0, C_TOKEN_PREPROCESSING_NUMBER,
+                        string_format(temporary.arena, S8("{u32}"), wide_types[targets[index].wchar_type].size));
+                    c_test_preprocessed_token(arguments, &result, raw, 1, C_TOKEN_PREPROCESSING_NUMBER, wide_types[targets[index].wchar_type].maximum);
+                    c_test_preprocessed_token(arguments, &result, raw, 2, C_TOKEN_PREPROCESSING_NUMBER,
+                        string_format(temporary.arena, S8("{u32}"), wide_types[targets[index].wint_type].size));
+                    c_test_preprocessed_token(arguments, &result, raw, 3, C_TOKEN_PREPROCESSING_NUMBER, wide_types[targets[index].wint_type].maximum);
+                    c_test_preprocessed_token(arguments, &result, raw, 4, C_TOKEN_PREPROCESSING_NUMBER, S8("0"));
+                    c_test_preprocessed_token(arguments, &result, raw, 5, C_TOKEN_PREPROCESSING_NUMBER, S8("1"));
+                    c_test_preprocessed_token(arguments, &result, raw, 6, C_TOKEN_STRING_LITERAL, S8("\"18.0.0 (buster)\""));
+                    c_test_preprocessed_token(arguments, &result, raw, 7, C_TOKEN_PREPROCESSING_NUMBER, targets[index].int64_long ? S8("1L") : S8("1LL"));
+                    c_test_preprocessed_token(arguments, &result, raw, 8, C_TOKEN_PREPROCESSING_NUMBER, targets[index].int64_long ? S8("1UL") : S8("1ULL"));
+                    c_test_preprocessed_token(arguments, &result, raw, 9, C_TOKEN_PREPROCESSING_NUMBER, targets[index].intmax_long ? S8("1L") : S8("1LL"));
+                    c_test_preprocessed_token(arguments, &result, raw, 10, C_TOKEN_PREPROCESSING_NUMBER, targets[index].intmax_long ? S8("1UL") : S8("1ULL"));
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -31008,6 +31116,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
+    BUSTER_TEST_FIXTURE(arguments, c_test_target_abi_macros);
     BUSTER_TEST_FIXTURE(arguments, c_test_has_builtin);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);

@@ -10006,6 +10006,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         }
     }
     TargetDataLayout layout = options.data_layout;
+    bool apple_target = options.target.os == OPERATING_SYSTEM_MACOS || options.target.os == OPERATING_SYSTEM_IOS;
+    bool wasm_target = options.target.cpu_arch == CPU_ARCH_WASM32 || options.target.cpu_arch == CPU_ARCH_WASM64;
+    bool int64_uses_long = layout.long_integer.bit_width == 64 && !apple_target && !wasm_target;
+    bool intmax_uses_long = layout.long_integer.bit_width == 64 && !wasm_target;
     CToken* constant_parameter_replacement = arena_allocate(arena, CToken, 1);
     constant_parameter_replacement[0] = c_space_token(space, S8("value"), C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
     String8* constant_parameters = arena_allocate(arena, String8, 1);
@@ -10026,7 +10030,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         else if (macro_index >= 6)
         {
             bool is_unsigned = (macro_index & 1) != 0;
-            suffix = layout.long_integer.size == 8 ? (is_unsigned ? S8("UL") : S8("L")) : (is_unsigned ? S8("ULL") : S8("LL"));
+            bool uses_long = macro_index < 8 ? int64_uses_long : intmax_uses_long;
+            suffix = uses_long ? (is_unsigned ? S8("UL") : S8("L")) : (is_unsigned ? S8("ULL") : S8("LL"));
         }
         CToken* replacement = constant_parameter_replacement;
         u32 replacement_count = 1;
@@ -10045,15 +10050,22 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
     String8 signed_pointer_type = layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
     String8 unsigned_pointer_type = layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
-    String8 signed_64_type = layout.long_integer.bit_width == 64 ? S8("long") : S8("long long");
-    String8 unsigned_64_type = layout.unsigned_long_integer.bit_width == 64 ? S8("unsigned long") : S8("unsigned long long");
+    bool unsigned_wchar_target = target_uses_unsigned_wchar(options.target);
+    bool unsigned_wint_target = !short_wchar_target && !apple_target && !wasm_target;
+    // Equal widths do not select the platform's typedef identity. Darwin
+    // uses long long for int64_t but long for intmax_t; Wasm uses long long
+    // for both, including its LP64 target. Literal constructors must agree.
+    String8 signed_64_type = int64_uses_long ? S8("long") : S8("long long");
+    String8 unsigned_64_type = int64_uses_long ? S8("unsigned long") : S8("unsigned long long");
+    String8 signed_max_type = intmax_uses_long ? S8("long") : S8("long long");
+    String8 unsigned_max_type = intmax_uses_long ? S8("unsigned long") : S8("unsigned long long");
 #define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
     C_DEFINE_TYPE_MACRO("__PTRDIFF_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__INTPTR_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINTPTR_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_64_type);
-    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_64_type);
+    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_max_type);
+    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_max_type);
     C_DEFINE_TYPE_MACRO("__INT8_TYPE__", S8("signed char"));
     C_DEFINE_TYPE_MACRO("__UINT8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__INT16_TYPE__", S8("short"));
@@ -10062,9 +10074,12 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_64_type);
     C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_64_type);
-    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") :
-                      target_uses_unsigned_wchar(options.target) ? S8("unsigned int") : S8("int"));
-    C_DEFINE_TYPE_MACRO("__WINT_TYPE__", options.target.os == OPERATING_SYSTEM_UEFI ? S8("unsigned short") : S8("unsigned int"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__WINT_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wint_target ? S8("unsigned int") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_WCHAR_T__", short_wchar_target ? S8("2") : S8("4"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_WINT_T__", short_wchar_target ? S8("2") : S8("4"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_MAX__", short_wchar_target ? S8("65535") : unsigned_wchar_target ? S8("4294967295U") : S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__WINT_MAX__", short_wchar_target ? S8("65535") : unsigned_wint_target ? S8("4294967295U") : S8("2147483647"));
     C_DEFINE_TYPE_MACRO("__CHAR8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__CHAR32_TYPE__", S8("unsigned int"));
@@ -10146,6 +10161,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // CPython's Objects/floatobject.c stopped.  float and double are IEEE
     // binary32/64 on every hosted target here; the long double family
     // follows the target's layout below.
+    // Supported targets evaluate float/double at their declared precision.
+    C_DEFINE_TYPE_MACRO("__FLT_EVAL_METHOD__", S8("0"));
     C_DEFINE_TYPE_MACRO("__FLT_RADIX__", S8("2"));
     C_DEFINE_TYPE_MACRO("__FLT_MANT_DIG__", S8("24"));
     C_DEFINE_TYPE_MACRO("__FLT_DIG__", S8("6"));
@@ -10242,6 +10259,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
     C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
     C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
+    C_DEFINE_TYPE_MACRO("__WINT_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
     C_DEFINE_TYPE_MACRO("__ORDER_LITTLE_ENDIAN__", S8("1234"));
     C_DEFINE_TYPE_MACRO("__ORDER_BIG_ENDIAN__", S8("4321"));
     C_DEFINE_TYPE_MACRO("__BYTE_ORDER__", layout.endianness == TARGET_ENDIAN_LITTLE ? S8("__ORDER_LITTLE_ENDIAN__") : S8("__ORDER_BIG_ENDIAN__"));
@@ -10252,6 +10270,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // The string form beside the three numbers: CPython's Python/getcompiler.c
     // builds sys.version's compiler field from it.
     C_DEFINE_TYPE_MACRO("__clang_version__", S8("\"18.0.0 (buster)\""));
+    C_DEFINE_TYPE_MACRO("__VERSION__", S8("__clang_version__"));
+    // No inliner runs at any accepted -O level. Do not expose glibc's
+    // optimized extern-inline paths by advertising __OPTIMIZE__ or
+    // __OPTIMIZE_SIZE__; tell its guards explicitly that inlining is absent.
+    C_DEFINE_TYPE_MACRO("__NO_INLINE__", S8("1"));
     // C11 6.10.8.1 mandates both, in exactly these spellings ("Mmm dd yyyy"
     // and "hh:mm:ss").  A fixed epoch keeps builds reproducible; consumers
     // parse the SHAPE -- CPython's platform.py rejects sys.version when the
