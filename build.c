@@ -19,6 +19,7 @@
 //   cmake_profile_summary_*,                    diagnostics: build summaries
 //   ninja_log_summary_*, time_trace_summary_*,   and the compile/test time
 //   test_timing_summary_*                        summaries
+//   mode_matrix_*, test_mode_matrix_action      cross-target execution/structural checks
 //   tools/matrix_phase.c                       optional desktop phase observation
 //   matrix_superbuild_*                          the test_all_combinations
 //                                                superbuild scheduler
@@ -16415,8 +16416,9 @@ BUSTER_GLOBAL_LOCAL void test_doom_action_add(Arena* arena, TestDoomOptions opti
 // verification avenue the host offers: native execution when host and target
 // agree, qemu-aarch64 for AArch64 ELF, wine for x86-64 PE, and otherwise an
 // llvm-objdump disassembly oracle over the linked image. A leg whose avenue
-// tool is missing still compiles, links, and oracle-checks; it reports its
-// downgraded avenue in the MODE_MATRIX row rather than silently vanishing.
+// tool is missing still compiles and links, with structural checks only when
+// llvm-objdump is available. MODE_MATRIX reports the verification level;
+// disassembly establishes decoding, not behavior or relocation correctness.
 // A leg that must fail belongs in mode_matrix_expected_failures with its
 // issue number — the leg is then required to fail, so both rot directions
 // are caught: a regression fails the run, and a fix demands its entry back
@@ -16515,6 +16517,136 @@ BUSTER_GLOBAL_LOCAL ModeMatrixCommandResult mode_matrix_command(Arena* arena, Sl
     };
 }
 
+typedef struct ModeMatrixOracleOutput ModeMatrixOracleOutput;
+struct ModeMatrixOracleOutput
+{
+    u64 decoded;
+    u64 unknown;
+};
+
+// --no-show-raw-insn leaves only an address and mnemonic on each instruction
+// row. Section headers and symbol labels are not instructions, even when
+// their text contains <unknown>. This check establishes decoding, not behavior.
+BUSTER_GLOBAL_LOCAL ModeMatrixOracleOutput mode_matrix_oracle_parse(String8 output)
+{
+    ModeMatrixOracleOutput result = {0};
+    bool in_section = false;
+    String8 line = {0};
+    while (text_next_line(&output, &line))
+    {
+        line = build_compiler_output_trim(line);
+        if (string_starts_with_sequence(line, S8("Disassembly of section ")) && string_ends_with_sequence(line, S8(":")))
+        {
+            in_section = true;
+        }
+        else if (in_section)
+        {
+            IntegerParsingU64 address = string8_parse_u64_hexadecimal(line);
+            if (address.status == INTEGER_PARSING_SUCCESS && address.length && address.length < line.length && line.pointer[address.length] == ':')
+            {
+                String8 instruction = build_compiler_output_trim(string_slice(line, address.length + 1, line.length));
+                if (instruction.length)
+                {
+                    if (string_starts_with_sequence(instruction, S8("<unknown>"))) { result.unknown += 1; }
+                    else if ((instruction.pointer[0] >= 'a' && instruction.pointer[0] <= 'z') ||
+                             (instruction.pointer[0] >= 'A' && instruction.pointer[0] <= 'Z')) { result.decoded += 1; }
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_parse_self_test(void)
+{
+    String8 outputs[] = {
+        S8(""),
+        S8("dead: file format coff-arm64\nDisassembly of section .text:\n00000000 <unknown>:\n"),
+        S8("Disassembly of section .text:\n  1000: ret\n"),
+        S8("Disassembly of section .text:\n  1000: <unknown>\n"),
+        S8("Disassembly of section .text:\n  1000: ret\n  1004: <unknown>\n"),
+        S8("<unknown>: file format mach-o arm64\r\nDisassembly of section __TEXT,__text:\r\n"
+           "0000000100000ABC <unknown>:\r\n100000ABC: bl 0x100000ac0 <unknown>\r\n100000AC0: ret"),
+        S8("Disassembly of section .text:\n  1000:\n  1004 <unknown>:\n  nothex: <unknown>\n"),
+        S8("Disassembly of section .text:\n  1000: .word 0xffffffff\n  1004: .byte 0xff\n"),
+    };
+    u64 decoded[] = {0, 0, 1, 0, 1, 2, 0, 0};
+    u64 unknown[] = {0, 0, 0, 1, 1, 0, 0, 0};
+    bool result = true;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(outputs); index += 1)
+    {
+        ModeMatrixOracleOutput parsed = mode_matrix_oracle_parse(outputs[index]);
+        result = parsed.decoded == decoded[index] && parsed.unknown == unknown[index] && result;
+    }
+    string_print(S8("MODE_MATRIX_ORACLE_PARSER cases={u64} status={S8}\n"), BUSTER_ARRAY_LENGTH(outputs), result ? S8("pass") : S8("fail"));
+    return result;
+}
+
+typedef struct ModeMatrixOracleResult ModeMatrixOracleResult;
+struct ModeMatrixOracleResult
+{
+    ModeMatrixCommandResult command;
+    ModeMatrixOracleOutput output;
+    bool valid;
+};
+
+BUSTER_GLOBAL_LOCAL ModeMatrixOracleResult mode_matrix_oracle(Arena* arena, String8 oracle, String8 image)
+{
+    String8 arguments[] = {oracle, S8("-d"), S8("--no-show-raw-insn"), image};
+    ModeMatrixOracleResult result;
+    result.command = mode_matrix_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), true);
+    result.output = mode_matrix_oracle_parse(result.command.output);
+    result.valid = result.command.result == PROCESS_RESULT_SUCCESS && result.output.decoded && !result.output.unknown;
+    return result;
+}
+
+// Preserve the real linked image. Objcopy changes only the test-owned copy's
+// text, using the original section length. A successful objdump child must
+// still be refused, so this witnesses the old exit-status-only defect.
+BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_control(Arena* arena, String8 oracle, String8 objcopy, String8 image, String8 target, String8 section)
+{
+    ModeMatrixOracleResult pristine = mode_matrix_oracle(arena, oracle, image);
+    bool result = pristine.valid;
+    String8 payload = string_format(arena, S8("{S8}-oracle-text"), image);
+    String8 copy = string_format(arena, S8("{S8}-oracle-copy"), image);
+    String8 garbage = string_format(arena, S8("{S8}-oracle-garbage"), image);
+    if (result)
+    {
+        String8 dump_arguments[] = {objcopy, string_format(arena, S8("--dump-section={S8}={S8}"), section, payload), image, copy};
+        ModeMatrixCommandResult dump = mode_matrix_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(dump_arguments), true);
+        result = dump.result == PROCESS_RESULT_SUCCESS;
+        if (!result) { os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(dump.error)); }
+    }
+    if (result)
+    {
+        ByteSlice text = file_read(arena, payload, (FileReadOptions){.map_required = 0});
+        result = text.length != 0 && !(text.length % 4);
+        if (result)
+        {
+            memset(text.pointer, 0xff, text.length);
+            result = file_write(payload, text);
+        }
+    }
+    if (result)
+    {
+        String8 update_arguments[] = {objcopy, string_format(arena, S8("--update-section={S8}={S8}"), section, payload), copy, garbage};
+        ModeMatrixCommandResult update = mode_matrix_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(update_arguments), true);
+        result = update.result == PROCESS_RESULT_SUCCESS;
+        if (!result) { os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(update.error)); }
+    }
+    ModeMatrixOracleResult corrupt = {0};
+    bool corrupt_ran = result;
+    if (corrupt_ran)
+    {
+        corrupt = mode_matrix_oracle(arena, oracle, garbage);
+        result = corrupt.command.result == PROCESS_RESULT_SUCCESS && corrupt.output.unknown && !corrupt.valid;
+    }
+    string_print(S8("MODE_MATRIX_ORACLE_CONTROL target={S8} section={S8} pristine_decoded={u64} garbage_exit_zero={u64} garbage_unknown={u64} status={S8}\n"),
+        target, section, pristine.output.decoded, (u64)(corrupt_ran && corrupt.command.result == PROCESS_RESULT_SUCCESS),
+        corrupt.output.unknown, result ? S8("pass") : S8("fail"));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 mode_matrix_avenue_name(ModeMatrixAvenue avenue)
 {
     switch (avenue)
@@ -16569,6 +16701,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
     String8 qemu = executable_resolve_in_path(arena, S8("qemu-aarch64"));
     String8 wine = executable_resolve_in_path(arena, S8("wine"));
     String8 oracle = executable_resolve_in_path(arena, S8("llvm-objdump"));
+    String8 objcopy = executable_resolve_in_path(arena, S8("llvm-objcopy"));
+    bool controls_available = oracle.length && objcopy.length;
     ModeMatrixTarget targets[] = {
         {.name = S8("x86_64-linux"), .triple = S8("x86_64-unknown-linux-gnu")},
         {.name = S8("aarch64-linux"), .triple = S8("aarch64-unknown-linux-gnu")},
@@ -16625,11 +16759,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
         S8("tests/basic_c_fast_ra_cfg.c"),
     };
     String8 allocator_modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
-    string_print(S8("MODE_MATRIX_HARNESS ide={S8} targets={u64} modes={u64} fixtures={u64} qemu={u64} wine={u64} oracle={u64}\n"), ide,
-                 BUSTER_ARRAY_LENGTH(targets), BUSTER_ARRAY_LENGTH(allocator_modes), BUSTER_ARRAY_LENGTH(fixtures), (u64)(qemu.length != 0),
-                 (u64)(wine.length != 0), (u64)(oracle.length != 0));
+    string_print(S8("MODE_MATRIX_HARNESS ide={S8} targets={u64} modes={u64} fixtures={u64} qemu={u64} wine={u64} oracle={u64} objcopy={u64} controls={S8}\n"), ide,
+                  BUSTER_ARRAY_LENGTH(targets), BUSTER_ARRAY_LENGTH(allocator_modes), BUSTER_ARRAY_LENGTH(fixtures), (u64)(qemu.length != 0),
+                  (u64)(wine.length != 0), (u64)(oracle.length != 0), (u64)(objcopy.length != 0), controls_available ? S8("available") : S8("unavailable"));
 
-    u64 failures = 0;
+    u64 failures = mode_matrix_oracle_parse_self_test() ? 0 : 1;
+    u64 controls_passed = 0;
     u64 executed_legs = 0;
     u64 oracle_legs = 0;
     u64 expected_failures_hit = 0;
@@ -16688,22 +16823,24 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
                 }
                 else if (target->avenue == MODE_MATRIX_AVENUE_ORACLE)
                 {
-                    // The strongest check an unrunnable image admits: the
-                    // oracle walks the headers, sections, symbols and every
-                    // instruction byte, so a malformed object or a
-                    // relocation left dangling fails here even though
-                    // nothing executes.
-                    String8 oracle_arguments[] = {oracle, S8("-d"), image};
-                    ModeMatrixCommandResult oracle_run =
-                        mode_matrix_command(leg_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(oracle_arguments), true);
-                    if (oracle_run.result != PROCESS_RESULT_SUCCESS)
+                    ModeMatrixOracleResult oracle_run = mode_matrix_oracle(leg_temporary.arena, oracle, image);
+                    if (!oracle_run.valid)
                     {
-                        leg_failure = string_format(arena, S8("stage=oracle fixture={S8}"), fixture);
-                        if (!expected && oracle_run.error.length)
+                        leg_failure = string_format(arena, S8("stage=oracle fixture={S8} decoded={u64} unknown={u64}"), fixture,
+                            oracle_run.output.decoded, oracle_run.output.unknown);
+                        if (!expected && oracle_run.command.error.length)
                         {
-                            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(oracle_run.error));
+                            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(oracle_run.command.error));
                         }
                     }
+                }
+                // The AArch64 PE and Mach-O controls run once, including on
+                // native macOS, through the same structural helper as oracle legs.
+                if (!leg_failure.length && controls_available && !mode_index && !fixture_index && (target_index == 3 || target_index == 5))
+                {
+                    String8 section = target_index == 3 ? S8(".text") : S8("__TEXT,__text");
+                    if (mode_matrix_oracle_control(leg_temporary.arena, oracle, objcopy, image, target->name, section)) { controls_passed += 1; }
+                    else { leg_failure = string_format(arena, S8("stage=oracle-control fixture={S8}"), fixture); }
                 }
                 scratch_end(leg_temporary);
             }
@@ -16734,15 +16871,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
             {
                 oracle_legs += 1;
             }
-            string_print(S8("MODE_MATRIX leg={S8}/{S8} avenue={S8} status={S8} fixtures={u64} elapsed_us={u64}{S8}{S8}{S8}{S8}\n"), target->name, mode,
-                         mode_matrix_avenue_name(target->avenue), status, BUSTER_ARRAY_LENGTH(fixtures), leg_elapsed_us,
+            String8 verification = target->avenue == MODE_MATRIX_AVENUE_LINK ? S8("link-only") :
+                target->avenue == MODE_MATRIX_AVENUE_ORACLE ? S8("structural") : S8("behavioral");
+            string_print(S8("MODE_MATRIX leg={S8}/{S8} avenue={S8} verification={S8} status={S8} fixtures={u64} elapsed_us={u64}{S8}{S8}{S8}{S8}\n"), target->name, mode,
+                          mode_matrix_avenue_name(target->avenue), verification, status, BUSTER_ARRAY_LENGTH(fixtures), leg_elapsed_us,
                          leg_failure.length ? S8(" ") : S8(""), leg_failure, expected ? S8(" issue=") : S8(""), expected ? expected->issue : S8(""));
         }
     }
     u64 harness_elapsed_us = os_now_microseconds() - harness_start_us;
     u64 leg_count = BUSTER_ARRAY_LENGTH(targets) * BUSTER_ARRAY_LENGTH(allocator_modes);
-    string_print(S8("MODE_MATRIX_RESULT legs={u64} executed={u64} oracle_checked={u64} expected_failures={u64} failures={u64} elapsed_us={u64} status={S8}\n"),
-                 leg_count, executed_legs, oracle_legs, expected_failures_hit, failures, harness_elapsed_us, failures ? S8("fail") : S8("pass"));
+    if (controls_available && controls_passed != 2) { failures += 1; }
+    string_print(S8("MODE_MATRIX_RESULT legs={u64} executed={u64} oracle_checked={u64} oracle_controls={u64} controls={S8} expected_failures={u64} failures={u64} elapsed_us={u64} status={S8}\n"),
+                  leg_count, executed_legs, oracle_legs, controls_passed, controls_available ? (controls_passed == 2 ? S8("pass") : S8("fail")) : S8("unavailable"),
+                  expected_failures_hit, failures, harness_elapsed_us, failures ? S8("fail") : S8("pass"));
     return failures ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
 }
 
