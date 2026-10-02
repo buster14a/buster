@@ -19031,7 +19031,13 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // `*(int(**)(sqlite3_vtab*))(...)` and casts dlsym through a nested
         // one, both of which otherwise read as a call of the stars.
         bool empty_pointer_declarator = parenthesized_callee && c_ir_abstract_pointer_declarator(builder, callee_start, index);
-        if (parenthesized_callee && (callee_start + 1 >= index || empty_pointer_declarator ||
+        // The closing argument list of an active call is its result's
+        // callee group, including an empty list such as `get()(3)`.
+        // Link the exact delimiters rather than admitting empty type groups.
+        bool call_result_group = parenthesized_callee && active_call_count &&
+                                 builder->prepared_calls[active_calls[active_call_count - 1]].open_index == callee_start &&
+                                 builder->prepared_calls[active_calls[active_call_count - 1]].close_index == index;
+        if (parenthesized_callee && ((callee_start + 1 >= index && !call_result_group) || empty_pointer_declarator ||
                                      c_ir_group_type_name(builder, callee_start, index).value != IR_ID_UNDERLYING_INVALID))
         {
             callee_start = index;
@@ -21867,6 +21873,10 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 if (!function_type || !return_type || (function_type->parameter_count && !function_type->parameter_types))
                 {
                     builder->failure_token_index = selected->open_index - 1;
+                    if (!function_type || function_type->kind != IR_TYPE_FUNCTION)
+                    {
+                        builder->failure_message = S8("a call target must have pointer-to-function type");
+                    }
                     return false;
                 }
                 IrTypeId* indirect_parameter_types = arena_allocate(builder->arena, IrTypeId, function_type->parameter_count);

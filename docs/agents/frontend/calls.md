@@ -301,5 +301,9 @@ counters in all four native allocator modes; an untaken lazy operand calls
 neither factory nor callback. Invalid scalar callees and missing/extra
 callback arguments require diagnostics and an uncertified result.
 
-This fixture is published before the call-discovery repair so hosted checks
-can distinguish the existing empty-list refusal from the subsequent fix.
+Call discovery accepts an empty argument-list group only when the existing
+active-call stack links its exact opening and closing delimiters to the
+producing call. Abstract pointer and type-name groups retain their exclusions.
+Existing prepared-call ordering emits the producing call once and consumes
+its returned pointer for the subsequent call; no extra source walk is added.
+A nonfunction indirect target reports its construct before refusing lowering.
