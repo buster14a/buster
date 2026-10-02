@@ -401,7 +401,8 @@ struct LlvmBitcodeLifecycleFixture
 
 #if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle_consumer(UnitTestArguments* arguments, Arena* arena, String8 compiler,
-    String8 optimization, String8 first, String8 second, String8 observer, String8 expected, String8 fixture, String8 producer)
+    String8 optimization, String8 first, String8 second, String8 observer, String8 expected, String8 fixture, String8 producer,
+    bool* admission)
 {
     UnitTestResult result = {0};
     String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-lifecycle-consumer"), S8(""));
@@ -418,14 +419,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle_consumer(UnitTest
     command[command_count++] = S8("-o");
     command[command_count++] = executable;
     ProcessSpawnOptions options = {.use_process_environment = true, .search_path = true, .new_process_group = true,
-        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+        .capture_limits = {.per_stream = {BUSTER_KB(64), BUSTER_KB(64), BUSTER_KB(64)}, .total = BUSTER_KB(128)},
+        .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL};
     ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = command_count},
         (SliceString8){0}, (SliceString8){0}, options);
     if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
     {
         ProcessWaitResult compiled = os_process_wait_deadline(arena, spawned, 30000000);
+        *admission = *admission && !compiled.process_tree_cleanup_failed && !compiled.process_group_reservation_retained &&
+            !compiled.process_group_ownership_lost;
         bool compile_success = compiled.result == PROCESS_RESULT_SUCCESS && !compiled.timed_out &&
-            !compiled.capture_failed && !compiled.output_truncated && !compiled.process_tree_cleanup_failed;
+            !compiled.capture_failed && !compiled.output_truncated && *admission;
         if (!compile_success)
         {
             ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
@@ -440,10 +445,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle_consumer(UnitTest
             if (BUSTER_REQUIRE(arguments, child.handle != 0))
             {
                 ProcessWaitResult observed = os_process_wait_deadline(arena, child, 30000000);
+                *admission = *admission && !observed.process_tree_cleanup_failed && !observed.process_group_reservation_retained &&
+                    !observed.process_group_ownership_lost;
                 ByteSlice bytes = observed.streams[STANDARD_STREAM_OUTPUT];
                 String8 output = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
                 bool correct = observed.result == PROCESS_RESULT_SUCCESS && !observed.timed_out &&
-                    !observed.capture_failed && !observed.output_truncated && !observed.process_tree_cleanup_failed &&
+                    !observed.capture_failed && !observed.output_truncated && *admission &&
                     !observed.streams[STANDARD_STREAM_ERROR].length && string_equal(output, expected);
                 if (!correct)
                 {
@@ -453,7 +460,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle_consumer(UnitTest
                         (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
                 }
                 BUSTER_TEST(arguments, observed.result == PROCESS_RESULT_SUCCESS && !observed.timed_out &&
-                    !observed.capture_failed && !observed.output_truncated && !observed.process_tree_cleanup_failed);
+                    !observed.capture_failed && !observed.output_truncated && *admission);
                 BUSTER_TEST(arguments, observed.streams[STANDARD_STREAM_ERROR].length == 0);
                 BUSTER_STRING_TEST(arguments, output, expected);
                 if (correct)
@@ -690,9 +697,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
         "int main(void) { record_event(77); return 0; }\n");
     bool consumers_available = BUSTER_REQUIRE(arguments, compilers[0].length != 0);
     bool references_available = BUSTER_REQUIRE(arguments, compilers[1].length != 0);
+    bool admission = true;
     if (consumers_available && references_available)
     {
-        for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(fixtures); fixture_index += 1)
+        for (u32 fixture_index = 0; admission && fixture_index < BUSTER_ARRAY_LENGTH(fixtures); fixture_index += 1)
         {
             LlvmBitcodeLifecycleFixture* fixture = fixtures + fixture_index;
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -713,18 +721,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
             source_written = source_written && observer_written;
             if (BUSTER_REQUIRE(arguments, source_written))
             {
-                for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+                for (u32 compiler = 0; admission && compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
                 {
-                    for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                    for (u32 optimization = 0; admission && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
                     {
                         UnitTestResult reference = llvm_bitcode_test_lifecycle_consumer(arguments, arena, compilers[compiler],
                             optimizations[optimization], source_paths[0], source_paths[1], observer_path, fixture->expected_output,
-                            fixture->name, compiler == 0 ? S8("clang-source") : S8("gcc-source"));
+                            fixture->name, compiler == 0 ? S8("clang-source") : S8("gcc-source"), &admission);
                         result.test_count += reference.test_count;
                         result.succeeded_test_count += reference.succeeded_test_count;
                     }
                 }
-                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                for (u32 frontend = 0; admission && frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
                 {
                     String8 outputs[2] = {0};
                     LlvmBitcodeArtifact artifacts[2] = {0};
@@ -757,11 +765,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
                     }
                     if (emitted_all)
                     {
-                        for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                        for (u32 optimization = 0; admission && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
                         {
                             UnitTestResult consumed = llvm_bitcode_test_lifecycle_consumer(arguments, arena, compilers[0],
                                 optimizations[optimization], outputs[0], outputs[1], observer_path, fixture->expected_output,
-                                fixture->name, frontends[frontend]);
+                                fixture->name, frontends[frontend], &admission);
                             result.test_count += consumed.test_count;
                             result.succeeded_test_count += consumed.succeeded_test_count;
                         }
