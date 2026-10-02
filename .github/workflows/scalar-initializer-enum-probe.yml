@@ -1,0 +1,184 @@
+name: Scalar initializer enum diagnostic
+on:
+  push:
+    branches: [codex/1615-block-initializer-enum-scope-probe]
+permissions:
+  contents: read
+jobs:
+  baseline-candidate:
+    if: ${{ github.repository == 'buster14a/buster' && github.ref == 'refs/heads/codex/1615-block-initializer-enum-scope-probe' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 4a1cb73a4acfd16414be4a9faea944381f1a0397
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: f320f6b67d56e72976c5cf00df34b3f9a60768ad
+          path: candidate
+          persist-credentials: false
+      - name: Record source and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/positive evidence/negative
+          git -C baseline rev-parse HEAD 'HEAD^{tree}' | tee evidence/baseline.sha
+          git -C candidate rev-parse HEAD 'HEAD^{tree}' | tee evidence/candidate.sha
+          clang --version | tee evidence/clang.txt
+          gcc --version | tee evidence/gcc.txt
+          uname -a | tee evidence/runner.txt
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Write original independent-oracle inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > evidence/positive/0.c <<'C'
+          int main(void){int x=(sizeof(enum{E=2,F=E+1}),E+F);return x-5;}
+          C
+          cat > evidence/positive/1.c <<'C'
+          int main(void){int x=(enum{E=2,F=E+1})F;return x!=3||E!=2||F!=3;}
+          C
+          cat > evidence/positive/2.c <<'C'
+          int main(void){int x=(enum{E=2}){E};return x!=2||E!=2;}
+          C
+          cat > evidence/positive/3.c <<'C'
+          enum{Q=1};int main(void){int old=Q,x=(enum{Q=Q+1})Q,later=Q;return old!=1||x!=2||later!=2||Q!=2;}
+          C
+          cat > evidence/positive/4.c <<'C'
+          enum{Q=1};int main(void){int x=Q+(enum{Q=2})Q;return x!=3||Q!=2;}
+          C
+          cat > evidence/positive/5.c <<'C'
+          int main(void){int x=(enum{E=2})E,a[E];_Static_assert(sizeof a==2*sizeof(int),"bound");return x-2;}
+          C
+          cat > evidence/positive/6.c <<'C'
+          enum{Q=1};int main(void){int inner=0;{int x=(enum{Q=2})Q;inner=x;}_Static_assert(Q==1,"outer");return inner!=2||Q!=1;}
+          C
+          cat > evidence/positive/7.c <<'C'
+          int main(void){int x=(enum Tag{E=2})E;enum Tag object=E;return x!=2||object!=2;}
+          C
+          cat > evidence/positive/8.c <<'C'
+          int main(void){static int x=(enum{E=2})E;return x!=2||E!=2;}
+          C
+          cat > evidence/positive/9.c <<'C'
+          int main(void){int x=(enum{A=1})A+(enum{B=A+1})B;return x!=3||A!=1||B!=2;}
+          C
+          cat > evidence/positive/10.c <<'C'
+          int main(void){for(int x=sizeof(enum{E=2});x>0;x-=1)return E-2;return 1;}
+          C
+          cat > evidence/negative/0.c <<'C'
+          int main(void){int x=E+(enum{E=2})E;return x;}
+          C
+          cat > evidence/negative/1.c <<'C'
+          int main(void){{int x=(enum{E=2})E;(void)x;}return E;}
+          C
+          cat > evidence/negative/2.c <<'C'
+          int main(void){int E=(enum{E=2})0;return E;}
+          C
+          cat > evidence/negative/3.c <<'C'
+          int main(void){int x=(enum{E=2})0,E=0;return x+E;}
+          C
+          cat > evidence/negative/4.c <<'C'
+          int main(void){int x=(enum{E=2})0+(enum{E=3})0;return x;}
+          C
+          cat > evidence/negative/5.c <<'C'
+          int main(void){for(int x=sizeof(enum{E=2});x>0;x=0){}return E;}
+          C
+          cat > evidence/negative/6.c <<'C'
+          int main(void){int x=(enum{A=1})0+B+(enum{B=2})0;return x;}
+          C
+          cat > evidence/runtime.c <<'C'
+          enum{Q=1};static int sizes(void){int x=(sizeof(enum{E=2,F=E+1}),E+F);return x!=5||E!=2||F!=3;}static int cast(void){int x=(enum{E=2,F=E+1})F;return x!=3||E!=2||F!=3;}static int literal(void){int x=(enum{E=2}){E};return x!=2||E!=2;}static int later(void){int old=Q,x=(enum{Q=Q+1})Q,after=Q;return old!=1||x!=2||after!=2||Q!=2;}static int order(void){int x=Q+(enum{Q=2})Q;return x!=3||Q!=2;}static int bound(void){int x=(enum{E=2})E,a[E];return x!=2||sizeof a!=2*sizeof(int);}static int shadow(void){int inner=0;{int x=(enum{Q=2})Q;inner=x;}return inner!=2||Q!=1;}static int tagged(void){int x=(enum Tag{E=2})E;enum Tag object=E;return x!=2||object!=2;}static int stored(void){static int x=(enum{E=2})E;return x!=2||E!=2;}static int multiple(void){int x=(enum{A=1})A+(enum{B=A+1})B;return x!=3||A!=1||B!=2;}static int loop(void){for(int x=sizeof(enum{E=2});x>0;x-=1)return E!=2;return 1;}int main(void){return sizes()||cast()||literal()||later()||order()||bound()||shadow()||tagged()||stored()||multiple()||loop();}
+          C
+      - name: Require independent acceptance values and refusal neighbors
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cc in clang gcc; do
+            for opt in 0 2; do
+              for source in evidence/positive/*.c evidence/runtime.c; do
+                "$cc" -std=c17 -pedantic-errors "-O$opt" "$source" -o evidence/reference
+                ./evidence/reference
+                printf 'REFERENCE_ACCEPT cc=%s opt=%s source=%s status=0\n' "$cc" "$opt" "$source" | tee -a evidence/references.txt
+              done
+            done
+            for source in evidence/negative/*.c; do
+              set +e
+              "$cc" -std=c17 -pedantic-errors -fsyntax-only "$source" > evidence/reference-negative.stdout 2> evidence/reference-negative.stderr
+              status=$?
+              set -e
+              test "$status" -ne 0
+              printf 'REFERENCE_REFUSE cc=%s source=%s status=%s\n' "$cc" "$source" "$status" | tee -a evidence/references.txt
+              cat evidence/reference-negative.stderr >> evidence/references.txt
+            done
+          done
+      - name: Build baseline sequentially
+        working-directory: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-1615-init-baseline"
+          "$RUNNER_TEMP/buster-1615-init-baseline" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF 2>&1 | tee ../evidence/baseline-configure.log
+          "$RUNNER_TEMP/buster-1615-init-baseline" build --config Release -t ide -- -j2 2>&1 | tee ../evidence/baseline-build.log
+      - name: Require current dependent baseline failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          ./baseline/build/Release/ide cc -std=c17 -fsyntax-only evidence/positive/1.c > evidence/baseline.stdout 2> evidence/baseline.stderr
+          status=$?
+          set -e
+          printf 'BASELINE_INITIALIZER_STATUS=%s\n' "$status" | tee evidence/baseline-status.txt
+          test "$status" -eq 1
+          grep -F "use of undeclared identifier" evidence/baseline.stderr
+      - name: Build candidate with GCC sequentially
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcc -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-1615-init-candidate"
+          "$RUNNER_TEMP/buster-1615-init-candidate" generate --config Release --cc gcc --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON 2>&1 | tee ../evidence/candidate-configure.log
+          "$RUNNER_TEMP/buster-1615-init-candidate" build --config Release -t ide -- -j2 2>&1 | tee ../evidence/candidate-build.log
+      - name: Run registered frontend module
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/Release/ide test --module=c_frontend_tests --verbose=1 --ci=1 2>&1 | tee ../evidence/frontend-tests.log
+      - name: Require candidate syntax and every allocator/frontend execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          for source in evidence/positive/*.c; do
+            ./candidate/build/Release/ide cc -std=c17 -fsyntax-only "$source"
+          done
+          for source in evidence/negative/*.c; do
+            set +e
+            ./candidate/build/Release/ide cc -std=c17 -fsyntax-only "$source" > evidence/candidate-negative.stdout 2> evidence/candidate-negative.stderr
+            status=$?
+            set -e
+            test "$status" -eq 1
+            printf 'CANDIDATE_REFUSE source=%s status=%s\n' "$source" "$status" | tee -a evidence/refusals.txt
+            cat evidence/candidate-negative.stderr >> evidence/refusals.txt
+          done
+          for mode in none mir-stack fast quality; do
+            for form in -ffrontend-ssa -fno-frontend-ssa; do
+              output="evidence/runtime-$mode-${form#-f}"
+              ./candidate/build/Release/ide cc -std=c17 "-fregister-allocator=$mode" "$form" -fverify-codegen evidence/runtime.c -o "$output"
+              "./$output"
+              printf 'CANDIDATE_RUNTIME mode=%s form=%s status=0\n' "$mode" "$form" | tee -a evidence/runtime.txt
+            done
+          done
+          git -C candidate diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: initializer-enum-scope-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
