@@ -30973,7 +30973,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_cursor(UnitTestArgume
             FileMapRead mapped = file_map_read(temporary.arena, input, (FileReadOptions){0});
             bool original = mapped.bytes.pointer && mapped.bytes.length == source.length && !memcmp(mapped.bytes.pointer, source.pointer, source.length);
             BUSTER_TEST(arguments, original);
-            file_unmap_read(mapped);
+            file_map_unmap(mapped);
             String8 output = buster_test_temporary_path(temporary.arena, S8("windows-va-cursor-live"), S8(".exe"));
             String8 command[] = {S8("-std=c17"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"),
                 modes[mode], forms[form], S8("-fverify-codegen"), S8("-o"), output, input};
