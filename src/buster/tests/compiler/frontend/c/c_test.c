@@ -16326,6 +16326,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
             scratch_end(temporary);
         }
     }
+    // The nested type attribute ends before the outer cleanup specifier:
+    // its grammar state cannot replace the outer group's remaining names.
+    String8 nested_roles[] = {
+        S8("void tidy(int*); int aligned(void); int cleanup(void); int helper(int);"
+           " int probe(void) { int value __attribute__((aligned(sizeof(int __attribute__((aligned(sizeof(helper(1))))))), cleanup(tidy))) = 3; return value; }"),
+        S8("int aligned(void); int helper(int);"
+           " int probe(void) { int value __attribute__((aligned(sizeof(int __attribute__((aligned(sizeof(helper(1, 2))))))))) = 3; return value; }"),
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(nested_roles); row += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, nested_roles[row], (CPreprocessOptions){
+                .target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect],
+            });
+            CParseResult model = c_parse(temporary.arena, tokens);
+            CDiagnostic checked = c_test_check_named_call_arities(temporary.arena, &model, tokens, 0, (u32)tokens.token_count);
+            if (row)
+            {
+                BUSTER_STRING_TEST(arguments, checked.message, S8("too many arguments in the call to 'helper': it declares 1 parameter"));
+            }
+            else
+            {
+                BUSTER_TEST_RAW(arguments, !checked.message.length, nested_roles[row]);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST_RAW(arguments, !semantic.diagnostic_count && semantic.analysis_complete, nested_roles[row]);
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("attribute-nested-roles.c"), tokens, syntax, target_native,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified, nested_roles[row]);
+                    if (lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count &&
+                        BUSTER_REQUIRE(arguments, lowered.program->module_count == 1))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                        for (u32 index = 0; index < lowered.program->modules[0].function_count; index += 1)
+                        {
+                            IrFunction* function = lowered.program->modules[0].functions + index;
+                            if (string_equal(function->name, S8("probe")))
+                            {
+                                u32 calls = 0;
+                                for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+                                {
+                                    calls += function->instructions[instruction].opcode == IR_OPCODE_CALL;
+                                }
+                                BUSTER_TEST(arguments, calls == 1);
+                            }
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
     typedef struct CTestAttributeRefusal CTestAttributeRefusal;
     struct CTestAttributeRefusal
     {
