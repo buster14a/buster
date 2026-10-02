@@ -81,8 +81,8 @@
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.c",
-      "bytes": 176951,
-      "sha256": "358891a165a2e4bdd853e8bccfedb2f86d74a2d93145e571b6a1280867f96802"
+      "bytes": 178548,
+      "sha256": "9425a24ca6a76be8269e5b6c90f4758bede74681bfc422531c66268fc4eeb8ba"
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.h",
@@ -186,8 +186,8 @@
     },
     {
       "source": "src/buster/lib/x86_64.h",
-      "bytes": 1723,
-      "sha256": "55d25c14542c8e4a436c9a7a2dd31fac5f4075747776c44917c714ff7e8adedf"
+      "bytes": 1866,
+      "sha256": "7663bfc92d44794f96af390c7634c26634dddca9f3c4a7433b054ba196764cd3"
     },
     {
       "source": "tools/native-retirement-darwin/Availability.h",
