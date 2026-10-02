@@ -1,0 +1,127 @@
+name: Boolean i128 diagnostic
+on:
+  push:
+    branches: [codex/1326-bool-i128-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/codex/1326-bool-i128-probe'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: f73f75ed4a59594eb1f43ec505c100457bc35185
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e92f8180bebf12b0a7aebe785b0467bea810c8f5
+          path: candidate
+          persist-credentials: false
+      - name: Build isolated trusted compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version
+          cmake --version
+          ninja --version
+          for revision in baseline candidate; do
+            (
+              cd "$revision"
+              git rev-parse HEAD
+              clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/$revision-driver"
+              "$RUNNER_TEMP/$revision-driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=ON -DBUSTER_DEBUG_INFO=OFF
+              "$RUNNER_TEMP/$revision-driver" build --config Release -t ide
+              sha256sum build/Release/ide
+            )
+          done
+      - name: Establish refusal and full-width mixed-object correctness
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cat > evidence/kernel.c <<'SOURCE'
+          unsigned __int128 u_widen(_Bool b) { return (unsigned __int128)b; }
+          __int128 s_widen(_Bool b) { return (__int128)b; }
+          unsigned __int128 narrow_u(unsigned char b) { return (unsigned __int128)b; }
+          __int128 narrow_s(signed char b) { return (__int128)b; }
+          SOURCE
+          cat > evidence/caller.c <<'SOURCE'
+          extern unsigned __int128 u_widen(_Bool);
+          extern __int128 s_widen(_Bool);
+          extern unsigned __int128 narrow_u(unsigned char);
+          extern __int128 narrow_s(signed char);
+          int main(void)
+          {
+              volatile _Bool zero = 0, one = 1;
+              if (u_widen(zero) != 0 || u_widen(one) != 1) return 1;
+              if (s_widen(zero) != 0 || s_widen(one) != 1) return 2;
+              if (narrow_u(255) != 255 || narrow_s(-1) != -1 || narrow_s(-128) != -128) return 3;
+              return 0;
+          }
+          SOURCE
+          clang -O0 -fno-inline -funsigned-char -c evidence/kernel.c -o evidence/host-kernel.o
+          clang -O0 -fno-inline -funsigned-char -c evidence/caller.c -o evidence/host-caller.o
+          clang -no-pie evidence/host-kernel.o evidence/host-caller.o -o evidence/host-reference
+          timeout 20s evidence/host-reference
+          cat > evidence/wrong-kernel.c <<'SOURCE'
+          unsigned __int128 u_widen(_Bool b) { return (unsigned __int128)b + 1; }
+          __int128 s_widen(_Bool b) { return (__int128)b; }
+          unsigned __int128 narrow_u(unsigned char b) { return (unsigned __int128)b; }
+          __int128 narrow_s(signed char b) { return (__int128)b; }
+          SOURCE
+          clang -O0 -fno-inline -funsigned-char -c evidence/wrong-kernel.c -o evidence/wrong-kernel.o
+          clang -no-pie evidence/wrong-kernel.o evidence/host-caller.o -o evidence/wrong-reference
+          if timeout 20s evidence/wrong-reference; then
+            echo 'Wrong-value oracle control unexpectedly passed'
+            exit 1
+          else
+            wrong_status=$?
+            test "$wrong_status" = 1
+          fi
+          baseline_refusals=0
+          candidate_objects=0
+          native_observations=0
+          for target in x86_64-unknown-linux x86_64-apple-macos x86_64-pc-windows-msvc aarch64-unknown-linux aarch64-apple-macos aarch64-pc-windows-msvc; do
+            for frontend in -ffrontend-ssa -fno-frontend-ssa; do
+              for mode in none mir-stack fast quality; do
+                strict=()
+                if test "$mode" != none; then strict=(-fno-machine-fallback); fi
+                tag="$target-$frontend-$mode"
+                if baseline/build/Release/ide cc -target "$target" -march=baseline -fverify-codegen "$frontend" -fregister-allocator="$mode" "${strict[@]}" -g0 -c evidence/kernel.c -o "evidence/baseline-$tag.o" >"evidence/baseline-$tag.log" 2>&1; then
+                  echo "Unexpected baseline acceptance: $tag"
+                  exit 1
+                fi
+                grep -q 'kind=codegen.unsupported-instruction' "evidence/baseline-$tag.log"
+                grep -q 'opcode=cast' "evidence/baseline-$tag.log"
+                grep -q "function='u_widen'" "evidence/baseline-$tag.log"
+                baseline_refusals=$((baseline_refusals + 1))
+                candidate/build/Release/ide cc -target "$target" -march=baseline -fverify-codegen "$frontend" -fregister-allocator="$mode" "${strict[@]}" -g0 -c evidence/kernel.c -o "evidence/candidate-$tag.o" >"evidence/candidate-$tag.log" 2>&1
+                candidate_objects=$((candidate_objects + 1))
+                if test "$target" = x86_64-unknown-linux; then
+                  candidate/build/Release/ide cc -target "$target" -march=baseline -fverify-codegen "$frontend" -fregister-allocator="$mode" "${strict[@]}" -g0 -c evidence/caller.c -o "evidence/caller-$tag.o"
+                  clang -no-pie evidence/host-caller.o "evidence/candidate-$tag.o" -o "evidence/host-to-buster-$tag"
+                  clang -no-pie "evidence/caller-$tag.o" evidence/host-kernel.o -o "evidence/buster-to-host-$tag"
+                  clang -no-pie "evidence/caller-$tag.o" "evidence/candidate-$tag.o" -o "evidence/buster-to-buster-$tag"
+                  timeout 20s "evidence/host-to-buster-$tag"
+                  timeout 20s "evidence/buster-to-host-$tag"
+                  timeout 20s "evidence/buster-to-buster-$tag"
+                  native_observations=$((native_observations + 3))
+                fi
+              done
+            done
+          done
+          test "$baseline_refusals" = 48
+          test "$candidate_objects" = 48
+          test "$native_observations" = 24
+          printf 'BOOL_I128_PROBE baseline_refusals=%s candidate_objects=%s native_observations=%s\n' "$baseline_refusals" "$candidate_objects" "$native_observations" | tee evidence/result.txt
+          sha256sum evidence/kernel.c evidence/caller.c > evidence/source-sha256.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: boolean-i128-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          if-no-files-found: ignore
+          retention-days: 7
