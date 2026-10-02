@@ -19811,9 +19811,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_identifier_updates(UnitTestArgu
     return result;
 }
 
-// Assignment expressions can hide a dereference behind a parenthesized
-// address expression.  The result of `*(&local) = value` must remain usable
-// in a comma/return expression after its addressable place is recovered.
 // #1260: use assignment values through called places and preserve one call.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArguments* arguments)
 {
@@ -19838,6 +19835,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
         "int assignment_subscript(void) { return get_words()[1] = 11; }\n"
         "int compound_subscript(void) { return get_words()[1] += 2; }\n"
         "int address_compound(void) { int a = 1; int x = (*&a += 3); return x * 10 + a; }\n"
+        "int address_simple(void) { int a = 1; return (*&a = 7) * 10 + a; }\n"
+        "int address_argument(void) { int a = 1; int x = identity(*&a += 3); return x * 10 + a; }\n"
+        "int address_call(void) { return *&get()->m += 2; }\n"
         "#define CHECK(name, expected, stored) do { gm.m = 3; calls = 0; int actual = name(); failed |= actual != (expected) || gm.m != (stored) || calls != 1; } while (0)\n"
         "int main(void) {\n"
         "    int failed = 0;\n"
@@ -19846,10 +19846,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
         "    CHECK(assignment_condition, 8, 0); CHECK(compound_condition, 8, 5);\n"
         "    CHECK(assignment_arithmetic, 5, 4); CHECK(compound_arithmetic, 8, 7);\n"
         "    CHECK(assignment_comma, 7, 6); CHECK(compound_comma, 5, 4);\n"
-        "    CHECK(assignment_wrapped, 9, 9); CHECK(statement_control, 5, 5);\n"
+        "    CHECK(assignment_wrapped, 9, 9); CHECK(statement_control, 5, 5); CHECK(address_call, 5, 5);\n"
         "    calls = 0; words[1] = 3; failed |= assignment_subscript() != 11 || words[1] != 11 || calls != 1;\n"
         "    calls = 0; words[1] = 3; failed |= compound_subscript() != 5 || words[1] != 5 || calls != 1;\n"
-        "    failed |= address_compound() != 44; return failed;\n"
+        "    failed |= address_compound() != 44 || address_simple() != 77 || address_argument() != 44; return failed;\n"
         "}\n");
     typedef struct CTestCallAssignment CTestCallAssignment;
     struct CTestCallAssignment
@@ -19865,6 +19865,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
         {S8("assignment_comma"), S8("get")}, {S8("compound_comma"), S8("get")},
         {S8("assignment_wrapped"), S8("get")}, {S8("statement_control"), S8("get")},
         {S8("assignment_subscript"), S8("get_words")}, {S8("compound_subscript"), S8("get_words")},
+        {S8("address_call"), S8("get")},
     };
     for (u32 target_index = 0; target_index < 6; target_index += 1)
     {
@@ -19880,9 +19881,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
                     .target = target, .data_layout = target_data_layout(target),
                     .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
                 });
-                CParseResult parsed = c_parse(temporary.arena, tokens);
-                BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count);
-                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("call-assignment-values.c"), tokens, parsed, target,
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("call-assignment-values.c"), tokens, syntax, target,
                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
                 for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
                 {
@@ -19951,6 +19952,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
     return result;
 }
 
+// Assignment expressions can hide a dereference behind a parenthesized
+// address expression.  The result of `*(&local) = value` must remain usable
+// in a comma/return expression after its addressable place is recovered.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_address_assignment_expression(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};

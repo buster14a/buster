@@ -33918,17 +33918,18 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
     u32 start = frame->as.expression.start;
     u32 assignment = frame->as.expression.pending_assignment;
     // Most assignment operands can be lowered directly by the place
-    // machine.  A dereference whose pointer is itself parenthesized,
-    // such as `*(&local) = value`, is a value expression that the
-    // place machine intentionally does not parse.  Lower that small
-    // shape through the expression path and recover its final load's
+    // machine. A dereference whose pointer is parenthesized or formed
+    // by address-of, such as `*(&local) = value` or `*&local = value`,
+    // is a value expression the place machine does not parse. Lower
+    // that shape through the expression path and recover its final load's
     // operand in EXPRESSION_PLACE (the same recovery used for
     // parenthesized member assignments above).
     bool parenthesized_place =
         start < assignment &&
         (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
          (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
-          c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)));
+          (c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+           c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_AMPERSAND))));
     // `*d++ = value` — the copy loop in sbase's strlcpy — advances the
     // pointer while forming the place. The place machine parses an
     // identifier and its field/subscript suffixes, not an update, so

@@ -180,6 +180,23 @@ duplicate-target suppression. `ir_function_cfg_edge` replaces incoming-list
 searches. Mutation must invalidate `IrFunction.published_cfg`; it is not a
 semantic certificate. See [publication and lifetime details](../../canonical-cfg-publication.md).
 
+## Assignment destinations and values (#1260)
+
+Assignment expressions prepare calls in their destination before forming the
+place, then retain that place for storage and the expression result. Prepared
+call results feed the existing member/subscript suffix walk, so `get()->m = 3`
+and `get()[i] += 2` each evaluate the callee once. Destinations beginning with
+`*&`, like `*&local += 3`, use the existing expression continuation and recover
+the final load's place; the identifier-based place reader does not parse the
+address-of operand. Parenthesized and pointer-update destinations keep their
+existing routes.
+
+`c_test_call_assignment_values` checks semantic/canonical lowering on six
+native target layouts in GNU17/GNU23 and both frontend forms. Canonical call
+counts and supported desktop execution cover initializer, argument, condition,
+arithmetic, comma, wrapped/member/subscript and address-derived assignment
+values, including compound results and stored values under all allocators.
+
 ## Number facts
 
 `c_parse_ast` converts every preprocessing number of the final stream once
