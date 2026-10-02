@@ -306,4 +306,5 @@ active-call stack links its exact opening and closing delimiters to the
 producing call. Abstract pointer and type-name groups retain their exclusions.
 Existing prepared-call ordering emits the producing call once and consumes
 its returned pointer for the subsequent call; no extra source walk is added.
-A nonfunction indirect target reports its construct before refusing lowering.
+Semantic constraints and indirect lowering share a pointer-to-function
+message for a nonfunction computed target before refusing the call.
