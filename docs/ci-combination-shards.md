@@ -305,14 +305,32 @@ through inventory and execution. Canonical Release and serial fallback receive
 the same evidence capture. Ordinary runs retain their original stream behavior.
 The inventory query and evidence overhead are part of the qualification cohort;
 all three variants use it. No tests run during the independent inventory query.
-
-Retained test logs may contain arbitrary bytes from negative-test diagnostics.
++Retained test logs may contain arbitrary bytes from negative-test diagnostics.
 The offline unit-test reader preserves those bytes and their original digest;
 it requires valid UTF-8 for machine proof records, including records with
 damaged markers. Timestamp and ANSI wrappers do not relax that requirement.
 UTF-16 logs with a byte-order mark remain strictly decoded. Run the reader's
 encoding controls with `python3 -B tools/ci_unit_tests_measure_test.py -v`;
 ordinary workflow lint runs them and the campaign controls on every CI run.
+
+
+The same observed `ide` also emits one `CI_UNIT_HOST_V1` record only for
+`BUSTER_TEST_MODULE_GROUP=inventory`. It retains the architecture, feature
+oracle, four `TargetCpuFeatures` words, and the compiled `BUSTER_SIMD_512_BASE`
+and `BUSTER_SIMD_512` flags. Word `n` contains storage bits `64*n` through
+`64*n+63`, representing feature enum ordinals `64*n+1` through `64*n+64`;
+`NONE` has no bit. Words are in increasing order. On x86-64 the oracle is the actual
+`cpu_detect_features_x86_64()` result after OS/XCR0 usability filtering.
+AArch64 records the explicit `target_native.cpu_features` oracle; that existing
+oracle derives features from the detected model and is labeled `target-native`,
+not CPUID. Unsupported or unavailable oracles cannot qualify a campaign.
+The existing inventory SHA-256 and binary receipt bind this record to the
+invocation. `ci_unit_tests_campaign.host_profile()` validates it without
+running a binary. Legacy inventories remain readable as diagnostic evidence;
+qualification requires an observed `identity.native_host_profile` equal to
+the independent query and includes that profile in each exact row census.
+Duplicate, malformed or forged profiles fail closed. The ordinary test
+invocations, registered modules and assertion accounting are unchanged.
 
 Each variant needs three complete first attempts with matching source, runner
 images, toolchains and cache conditions. Compare queue-inclusive whole-workflow
@@ -333,3 +351,9 @@ are still required before either issue can be accepted.
 The tool records invocation binary/driver hashes within each sample while
 comparing source/policy, toolchains, conditions and exact census across runs;
 it does not require independently linked executables to have identical bytes.
+
+Native-feature guards can change executed fixture and assertion populations
+even when source, compiler and CPU model names match. Neither model names nor
+assertion totals may reconstruct a missing host profile or normalize differing
+censuses. Historical archives without measured host/resource evidence remain
+diagnostic; qualification requires a prospectively declared comparable cohort.

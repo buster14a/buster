@@ -24,6 +24,8 @@
 // BUSTER_TEST_MODULE_GROUP=driver|rest selects complementary process groups
 // (test_module_group_resolve), preserving audit ownership and table indices.
 // Its inventory value queries the table without running any registered module.
+// test_native_host_profile records the same binary's usable native features
+// and compiled SIMD tiers only for that independent inventory query.
 // CI_UNIT_MODULE_V1 inventories and the post-cleanup CI_UNIT_BATCH_V1 bind
 // selected timing rows to the complete registered suite for the parent.
 
@@ -35,6 +37,7 @@
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/time.h>
+#include <buster/lib/simd.h>
 #include <buster/lib/system_headers.h>
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/lib/x86_64.h>
@@ -1217,6 +1220,30 @@ BUSTER_GLOBAL_LOCAL bool test_module_group_union_valid(TestDescriptor* original,
                  original[index].parallel_kind == driver[index].parallel_kind && original[index].parallel_kind == rest[index].parallel_kind;
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL void test_native_host_profile(UnitTestArguments* arguments)
+{
+    BUSTER_CT_CHECK(TARGET_CPU_FEATURE_WORD_COUNT == 4);
+    TargetCpuFeatures features = target_native.cpu_features;
+    String8 feature_source = target_native.cpu_features_explicit ? S8("target-native") : S8("unavailable");
+#if BUSTER_CPU_ARCH_X86_64
+    String8 architecture = S8("x86_64");
+    features = cpu_detect_features_x86_64();
+    feature_source = S8("cpuid-xcr0");
+#elif BUSTER_CPU_ARCH_AARCH64
+    String8 architecture = S8("aarch64");
+#else
+    String8 architecture = cpu_arch_to_string_os(target_native.cpu_arch);
+#endif
+    // Storage bit n represents TargetCpuFeature ordinal n+1 (NONE has no bit).
+    // Word n contains storage bits 64*n through 64*n+63. x86 probing includes
+    // the OS/XCR0 usability gates;
+    // other architectures report the explicit native target's feature oracle.
+    arguments->show(arguments,
+        S8("CI_UNIT_HOST_V1 architecture={S8} feature_source={S8} feature_word_count=4 word0={u64} word1={u64} word2={u64} word3={u64} simd_512_base={u32} simd_512={u32}\n"),
+        architecture, feature_source, features.words[0], features.words[1], features.words[2], features.words[3],
+        (u32)BUSTER_SIMD_512_BASE, (u32)BUSTER_SIMD_512);
 }
 
 BUSTER_GLOBAL_LOCAL void test_module_group_inventory(UnitTestArguments* arguments, TestDescriptor* selected)
@@ -2434,6 +2461,10 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
                             module_group_name);
         }
         test_module_group_inventory(arguments, descriptors);
+        if (module_group == TEST_MODULE_GROUP_INVENTORY)
+        {
+            test_native_host_profile(arguments);
+        }
     }
     else if (arguments->module_selection.length)
     {
