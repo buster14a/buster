@@ -1175,9 +1175,9 @@ and comma declarators. It uses only the owning enum's member range.
 `c_test_initializer_enum_scope` checks acceptance/refusal, unique publication
 and both canonical frontend forms on the same three layouts.
 `c_test_initializer_enum_runtime` executes initializer order, cast/literal,
-tag, static-local, loop-header and later-declarator cases in all four allocator
+tag, static-local and later-declarator cases in all four allocator
 modes and both forms on supported desktop targets. Inferred array initializers,
-constexpr/GNU inferred declarations, file-scope initializers, qualified type
+constexpr/GNU inferred declarations, for initializers, file-scope initializers, qualified type
 names and expression-defined record members remain pending under #1615.
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and

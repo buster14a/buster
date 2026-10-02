@@ -4778,7 +4778,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         S8("int main(void){int x=(enum Tag{E=2})E;enum Tag object=E;return x!=2||object!=2;}"),
         S8("int main(void){static int x=(enum{E=2})E;return x!=2||E!=2;}"),
         S8("int main(void){int x=(enum{A=1})A+(enum{B=A+1})B;return x!=3||A!=1||B!=2;}"),
-        S8("int main(void){for(int x=sizeof(enum{E=2});x>0;x-=1)return E-2;return 1;}"),
     };
     String8 rejected[] = {
         S8("int main(void){int x=E+(enum{E=2})E;return x;}"),
@@ -4786,13 +4785,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         S8("int main(void){int E=(enum{E=2})0;return E;}"),
         S8("int main(void){int x=(enum{E=2})0,E=0;return x+E;}"),
         S8("int main(void){int x=(enum{E=2})0+(enum{E=3})0;return x;}"),
-        S8("int main(void){for(int x=sizeof(enum{E=2});x>0;x=0){}return E;}"),
         S8("int main(void){int x=(enum{A=1})0+B+(enum{B=2})0;return x;}"),
     };
     CDiagnosticKind rejection_kinds[] = {
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
         C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
-        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
     };
     Target targets[] = {target_native, target_native, target_native};
     targets[0].cpu_arch = CPU_ARCH_X86_64;
@@ -4903,8 +4901,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_runtime(UnitTestArgum
         "static int tagged(void){int x=(enum Tag{E=2})E;enum Tag object=E;return x!=2||object!=2;}"
         "static int stored(void){static int x=(enum{E=2})E;return x!=2||E!=2;}"
         "static int multiple(void){int x=(enum{A=1})A+(enum{B=A+1})B;return x!=3||A!=1||B!=2;}"
-        "static int loop(void){for(int x=sizeof(enum{E=2});x>0;x-=1)return E!=2;return 1;}"
-        "int main(void){return sizes()||cast()||literal()||later()||order()||bound()||shadow()||tagged()||stored()||multiple()||loop();}");
+        "int main(void){return sizes()||cast()||literal()||later()||order()||bound()||shadow()||tagged()||stored()||multiple();}");
     String8 source = buster_test_temporary_path(arguments->arena, S8("initializer-enum-runtime"), S8(".c"));
     String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};

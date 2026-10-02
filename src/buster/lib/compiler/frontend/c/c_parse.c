@@ -18539,7 +18539,7 @@ BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPrepr
 }
 
 BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
-                                                    CScopeId scope, u32 declaration_index, u32 start, u32 end)
+                                                    CScopeId scope, u32 declaration_index, u32 start, u32 end, bool is_for_initializer)
 {
     CAutoDeclarationInfo auto_info = {0};
     bool is_auto_type = c_parse_auto_declaration_info(preprocess, start, end, &auto_info);
@@ -19114,7 +19114,9 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             }
         }
         CTypeKind initializer_kind = type.value < result->type_count ? result->types[type.value].kind : C_TYPE_INVALID;
-        bool scalar_initializer = !is_auto_type && !is_constexpr &&
+        // For-declaration constraints differ between C17 and C23; keep that
+        // separate path out of this ordinary block-initializer producer.
+        bool scalar_initializer = !is_for_initializer && !is_auto_type && !is_constexpr &&
             (c_parse_expression_real_kind(initializer_kind) || c_type_kind_is_complex(initializer_kind) ||
              initializer_kind == C_TYPE_POINTER || initializer_kind == C_TYPE_NULLPTR);
         u32 attribute_resume = UINT32_MAX;
@@ -20102,7 +20104,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                     result->binding_scope = loop_scope;
                     if (index + 2 < first_separator &&
                         c_parse_local_declarations(machine, result_arena, result, preprocess, loop_scope, declaration_index, index + 2,
-                                                   first_separator))
+                                                   first_separator, true))
                     {
                         index = first_separator + 1;
                         statement_start = false;
@@ -20158,7 +20160,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             CAutoDeclarationInfo auto_declaration_info = {0};
             bool auto_declaration = c_parse_auto_declaration_info(preprocess, index, end, &auto_declaration_info);
             if (end < body_end &&
-                c_parse_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index, index, end))
+                c_parse_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index, index, end, false))
             {
                 index = end + 1;
                 statement_start = true;
