@@ -52303,6 +52303,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         CDeclaration* definition = 0;
         CDeclaration* first = 0;
         bool internal = false;
+        bool definition_initialized = false;
         u32 entity_bucket_end = declarations_by_entity_offsets[entity_index + 1];
         for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
         {
@@ -52323,6 +52324,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             if (initialized || (!is_extern && !definition))
             {
                 definition = declaration;
+                definition_initialized = initialized;
             }
         }
         if (!first)
@@ -52386,12 +52388,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             object_alignment = declaration_alignment;
             has_alignment = true;
         }
-        // C11 6.7.5p7 makes a definition without the specifier an error only
-        // for _Alignas; the GNU attribute merges across declarations, so
-        // mimalloc's `extern mi_decl_cache_align mi_stats_t _mi_stats_main;`
-        // aligns the bare definition in another line the way GCC and Clang
-        // align it.
-        if (has_alignment && has_standard_alignment && !definition->alignment_count)
+        // An initialized definition needs its own standard specifier. A
+        // tentative definition merges compatible requests from the entity
+        // regardless of which tentative declaration supplied its source site.
+        // GNU attributes still align a bare initialized definition, as in
+        // mimalloc's `extern mi_decl_cache_align mi_stats_t _mi_stats_main;`.
+        if (has_alignment && has_standard_alignment && definition_initialized && !definition->alignment_count)
         {
             alignment_valid = false;
         }

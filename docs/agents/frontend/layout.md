@@ -71,8 +71,15 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   including when every declaration is tentative or `extern`. Zero-only runs
   compare as the declared type's natural alignment; zero mixed with a stronger
   request leaves that stronger request in force.
-  Buster preserves its accepted aligned-first tentative boundary:
-  `_Alignas(16) int x; int x;`. An initialized definition must still carry a
+  Buster merges compatible explicit requests across tentative declarations in
+  both source orders: `_Alignas(16) int x; int x;` and
+  `int x; _Alignas(16) int x;` produce the same aligned object. Lowering records
+  whether the selected global declaration has an initializer; a tentative
+  omission cannot refuse the merged alignment. Its existing declaration site,
+  composite type and symbol linkage remain authoritative.
+  `c_test_tentative_alignment_merging` pins source identity, static linkage,
+  composite array types and direct-lowering initialized-definition refusals.
+  An initialized definition must still carry a
   specifier when another declaration used standard `_Alignas`, while GNU
   `aligned` can supply the alignment of a bare initialized definition. The
   agreement rule applies to GNU requests too; it preserves their existing
