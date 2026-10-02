@@ -12,6 +12,10 @@ if (BUSTER_HOT_RELOAD_DEMO)
         # worker creation do not belong in its object/JIT runtime.
         set(BUSTER_INCLUDE_TESTS OFF)
         set(BUSTER_SINGLE_THREADED ON)
+        # Loader-only sources rely on section GC for unused object converters;
+        # static unity declarations require the entire compiler implementation.
+        set(BUSTER_UNITY_BUILD_DEFINE 0)
+        set(BUSTER_NON_UNITY_SOURCE_CONDITION 1)
         executable_add(hot_reload OFF tools/hot_replace_probe/host.c
             MODULES os arena integer string target x86_64 hash byte_writer
                     compiler_dwarf compiler_aarch64_encoding compiler_assembly_metadata
@@ -20,7 +24,7 @@ if (BUSTER_HOT_RELOAD_DEMO)
         target_compile_options(hot_reload PRIVATE -ffunction-sections -fdata-sections)
         target_link_options(hot_reload PRIVATE "LINKER:--gc-sections")
         target_link_libraries(hot_reload PRIVATE m dl pthread)
-        add_custom_target(test_hot_reload
+        add_custom_target(test_hot_reload_lifecycle
             COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
                 "$<TARGET_FILE:hot_reload>" --self-test "$<TARGET_FILE:ide>"
             DEPENDS hot_reload ide

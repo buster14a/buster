@@ -49,7 +49,6 @@ BUSTER_GLOBAL_LOCAL bool probe_test_mapping(void* base, u64 size, bool present, 
 }
 
 #define PROBE_TEST_DESCRIPTOR "unsigned long long const pilot_descriptor[7] = {PILOT_DESCRIPTOR_VALUES};\n"
-#define PROBE_TEST_SOURCE_HEAD "#include \"pilot_contract.h\"\n"
 #define PROBE_TEST_STEP_ONE "unsigned long long pilot_step(PilotState* s) { s->total += pilot_host_delta(1); s->calls += 1; return s->total; }\n"
 #define PROBE_TEST_STEP_TWO "unsigned long long pilot_step(PilotState* s) { s->total += pilot_host_delta(2); s->calls += 1; return s->total; }\n"
 
@@ -100,7 +99,7 @@ BUSTER_GLOBAL_LOCAL bool probe_lifecycle_test(ProbeHost* host, char const* compi
 
         ProbeVersion* old = host->active;
         written = probe_test_source(source, PROBE_TEST_DESCRIPTOR PROBE_TEST_STEP_TWO);
-        probe_check(host, written && probe_compile(compiler, source, output) == PROBE_OK, "v2_buster_compiled");
+        probe_check(host, written && probe_compile(host, compiler, source, output) == PROBE_OK, "v2_buster_compiled");
         ProbeVersion* candidate = versions + 1;
         ProbeError prepared = probe_prepare(host, candidate, output);
         probe_check(host, prepared == PROBE_OK, "v2_prepared_separately");
@@ -110,7 +109,7 @@ BUSTER_GLOBAL_LOCAL bool probe_lifecycle_test(ProbeHost* host, char const* compi
             probe_check(host, probe_publish(host, candidate) == PROBE_BUSY && host->active == old, "outstanding_lease_blocks_reload");
             probe_check(host, probe_shutdown(host, versions) == PROBE_BUSY && host->active == old, "outstanding_lease_blocks_shutdown");
             probe_check(host, probe_rebuild(host, versions, "/absent/compiler", source, output) == PROBE_BUSY, "busy_rebuild_does_not_spawn_compiler");
-            probe_check(host, held.function && held.function(&host->state) == 2 && host->state.calls == 2, "old_lease_remains_callable");
+            probe_check(host, held.function && probe_call(&held, &host->state) == 2 && host->state.calls == 2, "old_lease_remains_callable");
             probe_check(host, probe_drop(&held) == PROBE_OK && !held.function && !held.version, "drop_clears_borrow_before_release");
             probe_check(host, probe_drop(&held) == PROBE_BAD_TRANSITION, "double_drop_rejected");
 
@@ -164,12 +163,15 @@ BUSTER_GLOBAL_LOCAL bool probe_lifecycle_test(ProbeHost* host, char const* compi
             {
                 PilotState before = host->state;
                 unsigned long long delta = (index & 1) ? 2 : 1;
+                void* retired_base = host->active->program.allocation_base;
+                u64 retired_size = host->active->program.allocation_size;
                 written = probe_test_source(source, (index & 1) ?
                     PROBE_TEST_DESCRIPTOR PROBE_TEST_STEP_TWO : PROBE_TEST_DESCRIPTOR PROBE_TEST_STEP_ONE);
                 probe_check(host, written && probe_rebuild(host, versions, compiler, source, output) == PROBE_OK &&
                     host->live_maps == 1 && host->peak_maps <= 2, "repeated_edit_rebuild_reload_bounded_to_two_slots");
                 probe_check(host, probe_step(host) && host->state.total == before.total + delta &&
                     host->state.calls == before.calls + 1, "repeated_reload_independent_counter_oracle");
+                probe_check(host, probe_test_mapping(retired_base, retired_size, false, false), "repeated_old_mapping_unmapped");
             }
             ProbeVersion* inactive = host->active == versions ? versions + 1 : versions;
             prepared = probe_prepare(host, inactive, output);

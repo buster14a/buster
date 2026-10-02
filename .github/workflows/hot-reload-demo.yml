@@ -55,4 +55,4 @@ jobs:
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: "2"
         run: |
-          "$RUNNER_TEMP/hot-reload-driver" build --config ${{ matrix.config }} -t test_hot_reload
+          "$RUNNER_TEMP/hot-reload-driver" build --config ${{ matrix.config }} -t test_hot_reload_lifecycle

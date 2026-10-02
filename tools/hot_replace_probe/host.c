@@ -21,21 +21,6 @@ BUSTER_GLOBAL_LOCAL ProgramState probe_program_state;
 BUSTER_V_IMPL ProgramState* program_state = &probe_program_state;
 BUSTER_V_IMPL OsState os_state;
 
-#if BUSTER_UNITY_BUILD
-#include <buster/lib/arena.c>
-#include <buster/lib/integer.c>
-#include <buster/lib/os.c>
-#include <buster/lib/string.c>
-#include <buster/lib/target.c>
-#include <buster/lib/x86_64.c>
-#include <buster/lib/hash.c>
-#include <buster/lib/byte_writer.c>
-#include <buster/lib/compiler/dwarf/dwarf.c>
-#include <buster/lib/compiler/assembly/aarch64_encoding.c>
-#include <buster/lib/compiler/assembly/x86_64_metadata.c>
-#include <buster/lib/compiler/object/object.c>
-#include <buster/lib/compiler/jit/jit.c>
-#endif
 
 #define PROBE_PATH_CAPACITY 4096
 #define PROBE_OBJECT_LIMIT BUSTER_MB(1)
@@ -88,6 +73,7 @@ struct ProbeHost
     u64 live_bytes;
     bool reject_arena_release_once;
     bool test_import_safe_point;
+    bool compile_blocked;
 };
 
 BUSTER_GLOBAL_LOCAL ProbeHost* probe_import_host;
@@ -359,13 +345,23 @@ BUSTER_GLOBAL_LOCAL ProbeError probe_reclaim(ProbeHost* host, ProbeVersion* vers
     return result;
 }
 
+// Clang function UBSan probes metadata before an indirect target; Buster JIT
+// entry points carry no such host-compiler prefix. Keep every other sanitizer.
+#if BUSTER_COMPILER_CLANG
+__attribute__((no_sanitize("function")))
+#endif
+BUSTER_GLOBAL_LOCAL unsigned long long probe_call(ProbeLease const* lease, PilotState* state)
+{
+    return lease->function(state);
+}
+
 BUSTER_GLOBAL_LOCAL bool probe_step(ProbeHost* host)
 {
     ProbeLease lease = probe_pin(host);
     bool result = lease.function != 0;
     if (result)
     {
-        unsigned long long observed = lease.function(&host->state);
+        unsigned long long observed = probe_call(&lease, &host->state);
         printf("COUNTER generation=%u total=%llu calls=%llu result=%llu\n",
                lease.version->generation, host->state.total, host->state.calls, observed);
         result = observed == host->state.total;
@@ -374,11 +370,11 @@ BUSTER_GLOBAL_LOCAL bool probe_step(ProbeHost* host)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ProbeError probe_compile(char const* compiler, char const* source, char const* output)
+BUSTER_GLOBAL_LOCAL ProbeError probe_compile(ProbeHost* host, char const* compiler, char const* source, char const* output)
 {
     // Remove only our private output; a failed compiler must not load stale code.
     ProbeError result = PROBE_COMPILE;
-    if (unlink(output) == 0 || errno == ENOENT)
+    if (!host->compile_blocked && (unlink(output) == 0 || errno == ENOENT))
     {
         TemporalArena scratch = scratch_begin(0, 0);
         String8 arguments[] = {string_from_cstring((char*)compiler), S8("cc"), S8("-g0"), S8("-fverify-codegen"),
@@ -391,8 +387,10 @@ BUSTER_GLOBAL_LOCAL ProbeError probe_compile(char const* compiler, char const* s
         if (spawn.handle)
         {
             ProcessWaitResult wait = os_process_wait_deadline(scratch.arena, spawn, PROBE_COMPILE_TIMEOUT_US);
+            host->compile_blocked = wait.process_tree_cleanup_failed || wait.process_group_reservation_retained ||
+                wait.process_group_ownership_lost;
             bool completed = wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && !wait.capture_failed &&
-                !wait.capture_limit_exceeded && !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained;
+                !wait.capture_limit_exceeded && !host->compile_blocked;
             if (completed)
             {
                 result = PROBE_OK;
@@ -458,7 +456,7 @@ BUSTER_GLOBAL_LOCAL ProbeError probe_rebuild(ProbeHost* host, ProbeVersion* vers
     }
     else
     {
-        result = probe_compile(compiler, source, output);
+        result = probe_compile(host, compiler, source, output);
         if (result == PROBE_OK)
         {
             result = probe_replace(host, versions, output);
@@ -558,8 +556,16 @@ int main(int argc, char** argv)
             bool self_test = !strcmp(argv[1], "--self-test");
             bool success = self_test ? probe_lifecycle_test(&host, argv[2], owned, output) :
                 probe_interactive(&host, argv[1], argv[2], output);
-            unlink(output);
-            success = rmdir(owned) == 0 && success;
+            if (!host.compile_blocked)
+            {
+                unlink(output);
+                success = rmdir(owned) == 0 && success;
+            }
+            else
+            {
+                printf("COMPILER_ADMISSION_STOPPED workspace_retained=%s\n", owned);
+                success = false;
+            }
             printf("HOT_RELOAD_RESULT checks=%u failures=%u live_maps=%u live_bytes=%llu peak_maps=%u cleanup=%s\n",
                 host.checks, host.failures, host.live_maps, (unsigned long long)host.live_bytes, host.peak_maps,
                 success ? "ok" : "failed");
