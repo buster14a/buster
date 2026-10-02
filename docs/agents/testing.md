@@ -418,6 +418,39 @@ failure reduction. See [metamorphic testing](../metamorphic-testing.md) for the
 transformation preconditions, reproducible seeds, strict execution mode and
 failure bundles. Cross-target compilation is not a behavioral pass.
 
+## Executed DWARF lifetimes
+
+`tools/debug_info_lifetime_oracle.py` executes a Linux x86-64 DWARF fixture
+through GDB with Python support. It checks exact source breakpoints, live
+`x`/`y`, three loop/callee transitions, the caller frame, callee lexical scope,
+and a correct-value-to-unavailable transition under FAST and QUALITY. The loop
+index may be explicitly unavailable before its first certified use; the callee
+parameter is required after its use. Arbitrary lookup errors are failures.
+
+On an authorized correctness host, run:
+
+```sh
+python3 tools/debug_info_lifetime_oracle.py --ide build/Release/ide --output /tmp/dwarf-lifetime
+```
+
+The Clang/GDB reference and wrong-value/missing-debug negative controls are
+required. `--baseline-ide PATH --expect-baseline-defect` additionally requires
+an executed wrong `x` after correct initial live values at the pinned baseline;
+it retains that failure explicitly. `--skip-costs` runs only the small fixture.
+The default three-trial cost workload separates object compilation with/without
+debug info, DWARF/relocation bytes, native/external linking, symbol loading,
+breakpoint resolution and stopped queries. Baseline failure aborts earlier, so
+aggregate debugger/query durations contain unequal work. Compare matching live
+queries. `.text` hashes must match across debug modes and compiler revisions.
+
+The branch-scoped `debug-lifetime-slice.yml` runs matched serial builds and this
+oracle on GitHub-hosted Ubuntu; no qualified performance hardware is selected.
+Its timings are diagnostics. Qualified performance acceptance remains pending.
+The existing static-type oracle is format/consumer coverage without inferior
+execution and does not replace these checks. Selector stack-slot aliases,
+sibling lexical blocks and optimized constant reconstruction are outside this
+bounded vreg-home slice.
+
 ## Constant name-binding oracle
 
 `tools/scope_oracle/` is a hand-run, stdlib-only detector for a subset the other

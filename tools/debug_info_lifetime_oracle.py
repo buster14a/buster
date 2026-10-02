@@ -10,6 +10,7 @@ in --output. Timings are hosted-runner diagnostics, not acceptance evidence.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import re
@@ -30,7 +31,8 @@ __attribute__((noinline)) static U mix(U v)
 }
 __attribute__((noinline)) static void mark(int i)
 {
-    g += (U)i; /* STOP_MARK */
+    g += (U)i;
+    return; /* STOP_MARK */
 }
 int main(void)
 {
@@ -51,6 +53,7 @@ EXPECTED_X = 11400714819323198485
 MASK = (1 << 64) - 1
 EXPECTED_Y = ((EXPECTED_X ^ (EXPECTED_X >> 31)) * EXPECTED_X) & MASK
 RESULT_PREFIX = "BUSTER_GDB_RESULT "
+COST_FUNCTION_COUNT = 128
 
 # GDB's public Python contract: Frame.read_var starts at the current lexical
 # block; find_sal identifies the stop's source location; older unwinds callers;
@@ -64,6 +67,8 @@ import gdb, json, pathlib, time, traceback
 config = json.loads(pathlib.Path(CONFIG_PATH).read_text())
 checks = []
 unavailable_count = 0
+x_unavailable_count = 0
+wrong_x_count = 0
 query_ns = 0
 
 def demand(condition, message):
@@ -71,7 +76,7 @@ def demand(condition, message):
         raise AssertionError(message)
 
 def inspect(frame, name, expected, allow_unavailable=False):
-    global query_ns, unavailable_count
+    global query_ns, unavailable_count, x_unavailable_count, wrong_x_count
     started = time.perf_counter_ns()
     value = frame.read_var(name)
     optimized = value.is_optimized_out
@@ -81,14 +86,19 @@ def inspect(frame, name, expected, allow_unavailable=False):
     if optimized or unavailable:
         demand(allow_unavailable, "VALUE {} unexpectedly unavailable".format(name))
         unavailable_count += 1
+        if name == "x":
+            x_unavailable_count += 1
     else:
         actual = int(value)
         record["value"] = actual
         record["address"] = str(value.address) if value.address is not None else None
-        demand(actual == expected, "VALUE {} got {} expected {}".format(name, actual, expected))
+        if name == "x" and actual != expected:
+            wrong_x_count += 1
     record["query_ns"] = time.perf_counter_ns() - started
     query_ns += record["query_ns"]
     checks.append(record)
+    if not (optimized or unavailable):
+        demand(actual == expected, "VALUE {} got {} expected {}".format(name, actual, expected))
 
 def stop_at(name, line):
     frame = gdb.newest_frame()
@@ -128,25 +138,25 @@ try:
     for iteration in range(3):
         gdb.execute("continue")
         caller = stop_at("main", config["loop_line"])
-        inspect(caller, "i", iteration)
+        inspect(caller, "i", iteration, allow_unavailable=True)
         inspect(caller, "x", config["expected_x"], allow_unavailable=True)
         gdb.execute("continue")
         frame = stop_at("mark", config["mark_line"])
         inspect(frame, "i", iteration)
         caller = frame.older()
         demand(caller is not None and caller.name() == "main", "FRAME mark caller is not main")
-        inspect(caller, "i", iteration)
+        inspect(caller, "i", iteration, allow_unavailable=True)
         inspect(caller, "x", config["expected_x"], allow_unavailable=True)
         # x belongs to main's lexical scope. A callee must not expose it as a
         # local even when its caller still retains a correct value.
         try:
             frame.read_var("x")
-        except gdb.error as error:
+        except (gdb.error, ValueError) as error:
             demand('not found' in str(error).lower(), "SCOPE unexpected read error {}".format(error))
             checks.append({"scope": "mark", "x": "not in scope"})
         else:
             raise AssertionError("SCOPE mark exposes main's x")
-    demand(unavailable_count > 0 or not config["require_unavailable"],
+    demand(x_unavailable_count > 0 or not config["require_unavailable"],
            "TRANSITION no explicitly unavailable value observed")
     gdb.execute("continue")
     demand(gdb.selected_inferior().pid == 0, "EXIT inferior did not terminate")
@@ -158,6 +168,8 @@ except Exception as error:
     traceback.print_exc()
 result["query_ns"] = query_ns
 result["unavailable_count"] = unavailable_count
+result["x_unavailable_count"] = x_unavailable_count
+result["wrong_x_count"] = wrong_x_count
 print("BUSTER_GDB_RESULT " + json.dumps(result, sort_keys=True))
 gdb.execute("quit " + ("0" if result["status"] == "pass" else "1"))
 '''
@@ -234,6 +246,61 @@ def footprint(readelf: str, artifact: Path, output: Path, stem: str, timeout: in
             "text_bytes": sum(size for name, size in sections.items() if name == ".text" or name.startswith(".text."))}
 
 
+def text_sha256(readelf: str, artifact: Path, size: int, output: Path, stem: str, timeout: int) -> str:
+    """Hash independently dumped .text bytes, excluding display addresses/ASCII.
+
+    readelf prints up to sixteen bytes per row in groups of four. The known
+    section size determines exactly how many hex fields to consume on the
+    final row, even if the printable ASCII column happens to spell hex.
+    """
+    record = checked([readelf, "--hex-dump=.text", "--wide", str(artifact)], output, stem, timeout)
+    content = bytearray()
+    for line in record["stdout"].splitlines():
+        fields = line.split()
+        if fields and re.fullmatch(r"0x[\da-fA-F]+", fields[0]):
+            row_size = min(16, size - len(content))
+            if row_size <= 0:
+                raise RuntimeError(f"{stem}: unexpected surplus readelf .text row")
+            field_count = (row_size + 3) // 4
+            hex_bytes = "".join(fields[1:1 + field_count])
+            if len(hex_bytes) != row_size * 2 or not re.fullmatch(r"[\da-fA-F]+", hex_bytes):
+                raise RuntimeError(f"{stem}: malformed readelf .text hex row")
+            content.extend(bytes.fromhex(hex_bytes))
+    if len(content) != size:
+        raise RuntimeError(f"{stem}: readelf .text dump has {len(content)} bytes, expected {size}")
+    return hashlib.sha256(content).hexdigest()
+
+
+def cost_program() -> str:
+    """Retain the runtime fixture then append exported, unexecuted debug work."""
+    body = PROGRAM[PROGRAM.index("int main(void)"):]
+    for marker in ("STOP_LIVE", "STOP_LOOP"):
+        body = body.replace(" /* " + marker + " */", "")
+    copies = [body.replace("int main(void)", f"int debug_cost_{index:03d}(void)", 1)
+              for index in range(COST_FUNCTION_COUNT)]
+    return PROGRAM + "\n" + "\n".join(copies)
+
+
+def consumer_passed(result: dict) -> bool:
+    return result["status"] == "pass" and result["returncode"] == 0 and not result["timed_out"]
+
+
+def expected_baseline_failure(result: dict) -> bool:
+    """Accept only the known baseline value defect or absent transition evidence."""
+    error = result.get("error", "")
+    checks = result.get("checks", [])
+    live_values = [check for check in checks if check.get("variable") in ("x", "y")][:2]
+    live_correct = (len(live_values) == 2 and live_values[0].get("variable") == "x" and
+                    live_values[0].get("value") == EXPECTED_X and live_values[1].get("variable") == "y" and
+                    live_values[1].get("value") == EXPECTED_Y)
+    loop_line = next(i for i, line in enumerate(PROGRAM.splitlines(), 1) if "STOP_LOOP" in line)
+    reached_loop = any(check.get("stop") == "main" and check.get("line") == loop_line for check in checks)
+    return (result["status"] == "fail" and result["returncode"] == 1 and not result["timed_out"] and
+            live_correct and reached_loop and
+            ((error.startswith("VALUE x got ") and result.get("wrong_x_count", 0) > 0) or
+             error == "TRANSITION no explicitly unavailable value observed"))
+
+
 def cost_slice(arguments, compilers: list[tuple[str, str]], source: Path, output: Path) -> dict:
     """Keep compile-only, emitted bytes, external/native link and consumer costs separate.
 
@@ -241,7 +308,7 @@ def cost_slice(arguments, compilers: list[tuple[str, str]], source: Path, output
     commands, tool status and wall duration are preserved; differences near
     fixed process startup cannot support a production throughput claim.
     """
-    rows, order = [], []
+    rows, order, text_hashes = [], [], {}
     for trial in range(arguments.trials):
         ordered = compilers if trial % 2 == 0 else list(reversed(compilers))
         variants = ("g", "g0") if trial % 2 == 0 else ("g0", "g")
@@ -257,6 +324,18 @@ def cost_slice(arguments, compilers: list[tuple[str, str]], source: Path, output
                            "compile_only_wall_ns": record["wall_ns"],
                            "object": footprint(arguments.readelf, obj, output, stem + "-sections", arguments.timeout),
                            "links": {}}
+                    object_text_size = row["object"]["sections"].get(".text")
+                    if object_text_size is None or row["object"]["text_bytes"] != object_text_size:
+                        raise RuntimeError(f"{stem}: cost identity check requires one .text section")
+                    row["object"]["text_sha256"] = text_sha256(arguments.readelf, obj, object_text_size,
+                                                              output, stem + "-text", arguments.timeout)
+                    digest = row["object"]["text_sha256"]
+                    # One digest per mode covers both g/g0, every trial and all
+                    # selected compiler revisions. Debug changes must not change
+                    # executable instructions in this bounded slice.
+                    prior = text_hashes.setdefault(mode, {"sha256": digest, "first": stem})
+                    if digest != prior["sha256"]:
+                        raise RuntimeError(f"{stem}: .text differs from {prior['first']}")
                     if variant == "g0" and row["object"]["debug_bytes"]:
                         raise RuntimeError(f"{stem}: -g0 object retained DWARF sections")
                     for linker, command in (("external", [arguments.clang, "-no-pie"]),
@@ -278,10 +357,13 @@ def cost_slice(arguments, compilers: list[tuple[str, str]], source: Path, output
                         row["links"][linker] = link
                     rows.append(row)
     return {"unit": "nanoseconds", "trials": arguments.trials, "execution_order": order, "rows": rows,
+            "generated_exported_functions": COST_FUNCTION_COUNT, "source_bytes": source.stat().st_size,
+            "text_identity": text_hashes,
             "limitations": ["diagnostic correctness host; qualified-host acceptance remains pending",
-                            "small fixed fixture includes compiler/linker process startup",
+                            "bounded generated workload includes compiler/linker process startup",
                             "external link includes the host C runtime; Buster link has its own entry stub",
                             "symbol load, breakpoint resolution, stopped-variable queries and total debugger wall are distinct",
+                            "baseline aborts at wrong x; total debugger/query times have unequal work; compare matching live x/y queries",
                             "debug bytes are a footprint measurement, not an end-to-end speedup"]}
 
 
@@ -289,14 +371,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ide", required=True)
     parser.add_argument("--baseline-ide", help="optional same-host before/after compiler")
+    parser.add_argument("--expect-baseline-defect", action="store_true",
+                        help="retain known baseline x failures as evidence; require an actually wrong baseline x")
     parser.add_argument("--clang", default="clang")
     parser.add_argument("--gdb", default="gdb")
     parser.add_argument("--readelf", default="readelf")
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--skip-costs", action="store_true")
+    parser.add_argument("--print-summary", action="store_true", help="print compact JSON without the full cost rows")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=int, default=60)
     arguments = parser.parse_args()
+    if arguments.expect_baseline_defect and not arguments.baseline_ide:
+        parser.error("--expect-baseline-defect requires --baseline-ide")
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "amd64"):
         parser.error("the executed consumer slice requires Linux x86-64")
     if arguments.trials < 1 or arguments.trials > 15:
@@ -309,7 +396,8 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=False)
     source = output / "lifetime.c"
     source.write_text(PROGRAM)
-    failures, results, costs = [], {}, None
+    failures, results, costs, expected_failures = [], {}, None, []
+    baseline_wrong_x_count = 0
     try:
         checked([arguments.gdb, "--version"], output, "gdb-version", arguments.timeout)
         checked([arguments.clang, "--version"], output, "clang-version", arguments.timeout)
@@ -317,7 +405,7 @@ def main() -> int:
         checked([arguments.clang, "-g", "-O0", str(source), "-o", str(reference)], output, "clang-build", arguments.timeout)
         result = debugger(arguments.gdb, reference, source, output, "clang-consumer", arguments.timeout, require_unavailable=False)
         results["clang"] = result
-        if result["status"] != "pass" or result["returncode"] != 0:
+        if not consumer_passed(result):
             failures.append("independent Clang/GDB fixture control failed")
         compilers = [("candidate", arguments.ide)]
         if arguments.baseline_ide:
@@ -330,8 +418,14 @@ def main() -> int:
                 checked(command + [str(source), "-o", str(executable)], output, stem + "-build", arguments.timeout)
                 result = debugger(arguments.gdb, executable, source, output, stem + "-consumer", arguments.timeout)
                 results[stem] = result
-                if result["status"] != "pass" or result["returncode"] != 0:
-                    failures.append(stem + ": " + result.get("error", "consumer process failed"))
+                if label == "baseline":
+                    baseline_wrong_x_count += result.get("wrong_x_count", 0)
+                if not consumer_passed(result):
+                    message = stem + ": " + result.get("error", "consumer process failed")
+                    if label == "baseline" and arguments.expect_baseline_defect and expected_baseline_failure(result):
+                        expected_failures.append(message)
+                    else:
+                        failures.append(message)
                 wrong = debugger(arguments.gdb, executable, source, output, stem + "-wrong-value", arguments.timeout, wrong_value=True)
                 if wrong["status"] != "fail" or wrong["returncode"] != 1 or not wrong.get("error", "").startswith("VALUE x got"):
                     failures.append(stem + ": wrong-value negative control did not fail for the expected value assertion")
@@ -342,21 +436,41 @@ def main() -> int:
                 if absent["status"] != "fail" or absent["returncode"] != 1 or not absent.get("error", "").startswith("BREAKPOINT"):
                     failures.append(stem + ": absent-debug negative control did not reject missing source breakpoints")
         if not arguments.skip_costs:
-            costs = cost_slice(arguments, compilers, source, output)
+            cost_source = output / "lifetime-cost.c"
+            cost_source.write_text(cost_program())
+            costs = cost_slice(arguments, compilers, cost_source, output)
             for row in costs["rows"]:
                 for linker, link in row["links"].items():
                     consumer = link.get("consumer")
-                    if consumer and (consumer["status"] != "pass" or consumer["returncode"] != 0):
-                        failures.append(f"cost trial {row['trial']} {row['compiler']} {row['mode']} {linker}: " +
-                                        consumer.get("error", "consumer process failed"))
+                    if consumer and row["compiler"] == "baseline":
+                        baseline_wrong_x_count += consumer.get("wrong_x_count", 0)
+                    if consumer and not consumer_passed(consumer):
+                        message = f"cost trial {row['trial']} {row['compiler']} {row['mode']} {linker}: " + \
+                                  consumer.get("error", "consumer process failed")
+                        if row["compiler"] == "baseline" and arguments.expect_baseline_defect and expected_baseline_failure(consumer):
+                            expected_failures.append(message)
+                        else:
+                            failures.append(message)
     except (RuntimeError, OSError, ValueError) as error:
         failures.append(str(error))
+    if arguments.expect_baseline_defect and baseline_wrong_x_count < 1:
+        failures.append("baseline defect control observed no wrong x in executed lifecycle consumers")
     summary = {"results": results, "costs": costs, "failures": failures,
+               "expected_baseline_failures": expected_failures, "baseline_wrong_x_count": baseline_wrong_x_count,
                "qualified_performance_acceptance": "pending; this oracle supplies correctness-host diagnostics"}
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     for failure in failures:
         print(failure, file=sys.stderr)
     print(f"debug lifetime oracle: {len(failures)} failure(s); evidence in {output}")
+    if arguments.print_summary:
+        compact = {"consumer_results": {label: {key: result.get(key) for key in
+                                                ("status", "error", "returncode", "wrong_x_count", "unavailable_count")}
+                                        for label, result in results.items()},
+                   "failures": failures, "expected_baseline_failures": expected_failures,
+                   "baseline_wrong_x_count": baseline_wrong_x_count,
+                   "cost_rows": len(costs["rows"]) if costs else 0,
+                   "text_identity": costs["text_identity"] if costs else None}
+        print(json.dumps(compact, sort_keys=True))
     return int(bool(failures))
 
 
