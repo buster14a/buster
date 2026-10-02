@@ -2999,7 +2999,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_storage_reuse(UnitTestArgu
         u16 move = (u16)(aarch64 ? MACHINE_A64_MOV_RR : MACHINE_X64_MOV_RR);
         u16 store = (u16)(aarch64 ? MACHINE_A64_STORE_FRAME64 : MACHINE_X64_STORE_FRAME64);
         u16 return_opcode = (u16)(aarch64 ? MACHINE_A64_RET : MACHINE_X64_RET);
-        u32 physical = aarch64 ? MACHINE_A64_X0 : MACHINE_X64_RAX;
+        u32 physical = aarch64 ? (u32)MACHINE_A64_X0 : (u32)MACHINE_X64_RAX;
         MachineRef physical_ref = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, physical);
         for (u32 empty_case = 0; empty_case < 3; empty_case += 1)
         {
