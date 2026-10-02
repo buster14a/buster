@@ -216,6 +216,29 @@ The evaluator self-test requires it to be valid with no unset choice.
   submitted to the service from this protocol's merge until window 2 closes,
   or the confirmatory set is `invalid`.
 
+Window 2 evaluated `inconclusive` (`aa-policy-sha256=8366b4d9…`). The cause was
+CPU 2 power management: after each 2 s inter-block gap, the first children ran
+slow and the following pairs ramped up, which shifted block medians. Host packet
+H1 pinned CPU 2's frequency policy, disabled its idle states deeper than C1,
+moved IRQs away and offlined its SMT sibling
+([#36](https://github.com/buster14a/buster/issues/36#issuecomment-5947820015)).
+
+### Frozen window-3 protocol
+
+`docs/zen5-aa-protocol-window3.json` is the protocol for window 3 on the H1
+host, approved on
+[#36](https://github.com/buster14a/buster/issues/36#issuecomment-5949598169).
+The self-test checks it as it checks the window-2 protocol.
+
+- **Pilots.** The H1 verification attempt (job 703) and four pilots (jobs 712,
+  721, 730, 739). No window-2 confirmatory value was used.
+- **Limits.** The limits use the window-2 rule unchanged.
+- **Seed and range.** The seed is `4260883` and the confirmatory range is
+  `740..9999`. The band and applicability are unchanged.
+- **Known host property.** A constant cold first child follows each 2 s gap.
+  A pilot also showed an unexplained periodic slowdown of about 8 s, which
+  sets the cross-root wall-time `block_shift` limit at 0.17.
+
 Each attempt is replayed from its exported result root:
 
 - the final manifest bytes must hash to the authenticated digest. The manifest

@@ -13,7 +13,7 @@ are consumers, not the definition of the platform layer.
 
 | Stable feature ID | Observable contract | Authoritative detail |
 |---|---|---|
-| `platform.processes` | Spawn with explicit argument/environment validation, executable lookup, standard-stream capture and failure reporting. | [Transactional process spawning](../agents/platform.md#transactional-process-spawning). |
+| `platform.processes` | Spawn with explicit argument/environment validation, executable lookup, standard-stream capture and failure reporting; replay ordinary POSIX drain transitions with sticky capture failure. | [Transactional process spawning](../agents/platform.md#transactional-process-spawning) and [captured-pipe replay](../agents/platform.md#deterministic-captured-pipe-replay). |
 | `platform.files` | Checked transfer completion and read boundaries, including partial I/O, EOF and native errors. | [File transfer completion](../agents/platform.md#file-transfer-completion) and [file reads](../agents/platform.md#file-read-boundaries). |
 | `platform.memory` | Virtual memory commitment with separately reported advisory prefault outcomes. | [Commitment and prefaulting](../agents/platform.md#virtual-memory-commitment-and-prefaulting). |
 | `platform.private-workspaces` | Claim a newly created directory without treating an existing entry as owned. | [Exclusive directory ownership](../agents/platform.md#exclusive-directory-ownership). |
