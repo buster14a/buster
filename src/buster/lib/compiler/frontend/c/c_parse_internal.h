@@ -7,6 +7,9 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 
 #if BUSTER_INCLUDE_TESTS
+// Calling-thread requested association-list bytes; excludes other type-machine
+// scratch and never includes the small local list.
+BUSTER_F_DECL u64 c_test_generic_association_scratch_bytes(void);
 BUSTER_F_DECL CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess,
                                                         u32 start, u32 end);
 BUSTER_F_DECL bool c_test_validate_constexpr_declaration(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
