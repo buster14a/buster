@@ -224,7 +224,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_empty_tests(UnitTestArgum
                 String8 direct_path = string_format_z(arena, S8("{S8}/direct-{u32}-{u32}"), root, frontend, row);
                 String8 indirect_path = string_format_z(arena, S8("{S8}/indirect-{u32}-{u32}"), root, frontend, row);
                 String8 program = string_format(arena, S8("static const char m[] = \"{S8}\";\n"
-                    "int main(void) { return *(const volatile char *)m != {u32}; }\n"), literals[row], row ? 97u : 0u);
+                    "int main(void) {{ return *(const volatile char *)m != {u32}; }}\n"), literals[row], row ? 97u : 0u);
                 bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program));
                 BUSTER_TEST(arguments, written);
                 if (written)
