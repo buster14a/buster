@@ -11116,9 +11116,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
         for (u32 operand = 0; info && operand < info->operand_count; operand += 1)
         {
             u32 role = info->operand_info[operand] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-            MachineRef reference = instruction->operands[operand];
-            if (role != MACHINE_OPERAND_ROLE_NONE && machine_ref_kind(reference) == MACHINE_REF_VIRTUAL_REGISTER &&
-                machine_ref_payload(reference) == payload)
+            MachineRef operand_reference = instruction->operands[operand];
+            if (role != MACHINE_OPERAND_ROLE_NONE && machine_ref_kind(operand_reference) == MACHINE_REF_VIRTUAL_REGISTER &&
+                machine_ref_payload(operand_reference) == payload)
             {
                 replay_end = BUSTER_MAX(replay_end, row + 1u);
             }
