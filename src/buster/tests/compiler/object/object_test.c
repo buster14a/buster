@@ -1552,6 +1552,321 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_writer_alignment_capacity(UnitTes
     return result;
 }
 
+
+typedef struct ObjectTestElfSection ObjectTestElfSection;
+struct ObjectTestElfSection
+{
+    u32 index;
+    u32 matches;
+    u64 header;
+    u32 type;
+    u64 flags;
+    u64 offset;
+    u64 size;
+    u32 link;
+    u32 info;
+    u64 alignment;
+    u64 entry_size;
+};
+
+// Decode section names and indices directly, independently of object_read.
+BUSTER_GLOBAL_LOCAL ObjectTestElfSection object_test_elf_named_section(ByteSlice bytes, String8 name)
+{
+    ObjectTestElfSection result = {.index = UINT32_MAX};
+    u64 table = 0;
+    u16 count = 0;
+    u16 strings = 0;
+    if (bytes.pointer && bytes.length >= 64)
+    {
+        memcpy(&table, bytes.pointer + 40, sizeof(table));
+        memcpy(&count, bytes.pointer + 60, sizeof(count));
+        memcpy(&strings, bytes.pointer + 62, sizeof(strings));
+        if (table <= bytes.length && (u64)count * 64 <= bytes.length - table && strings < count)
+        {
+            u64 string_header = table + (u64)strings * 64;
+            u64 string_offset = 0;
+            u64 string_size = 0;
+            memcpy(&string_offset, bytes.pointer + string_header + 24, sizeof(string_offset));
+            memcpy(&string_size, bytes.pointer + string_header + 32, sizeof(string_size));
+            if (string_offset <= bytes.length && string_size <= bytes.length - string_offset)
+            {
+                for (u32 index = 1; index < count; index += 1)
+                {
+                    u64 header = table + (u64)index * 64;
+                    u32 name_offset = 0;
+                    memcpy(&name_offset, bytes.pointer + header, sizeof(name_offset));
+                    if (name_offset < string_size && name.length < string_size - name_offset &&
+                        memcmp(bytes.pointer + string_offset + name_offset, name.pointer, name.length) == 0 &&
+                        bytes.pointer[string_offset + name_offset + name.length] == 0)
+                    {
+                        result.matches += 1;
+                        if (result.index == UINT32_MAX)
+                        {
+                            result.index = index;
+                            result.header = header;
+                            memcpy(&result.type, bytes.pointer + header + 4, sizeof(result.type));
+                            memcpy(&result.flags, bytes.pointer + header + 8, sizeof(result.flags));
+                            memcpy(&result.offset, bytes.pointer + header + 24, sizeof(result.offset));
+                            memcpy(&result.size, bytes.pointer + header + 32, sizeof(result.size));
+                            memcpy(&result.link, bytes.pointer + header + 40, sizeof(result.link));
+                            memcpy(&result.info, bytes.pointer + header + 44, sizeof(result.info));
+                            memcpy(&result.alignment, bytes.pointer + header + 48, sizeof(result.alignment));
+                            memcpy(&result.entry_size, bytes.pointer + header + 56, sizeof(result.entry_size));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_empty_sections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    for (u32 machine = 0; machine < 2; machine += 1)
+    {
+        for (u32 large = 0; large < 2; large += 1)
+        {
+            TemporalArena scope = arena_begin_temporal(temporary.arena);
+            Target target = {.cpu_arch = machine ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+            ObjectSection sections[OBJECT_SECTION_COUNT + 2] = {0};
+            for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+            {
+                sections[kind] = (ObjectSection){.name = object_section_name_for_kind((ObjectSectionKind)kind),
+                    .kind = (ObjectSectionKind)kind, .alignment = object_section_default_alignment((ObjectSectionKind)kind)};
+            }
+            u8 text[] = {0xc3, 0, 0, 0};
+            u32 arm_return = UINT32_C(0xd65f03c0);
+            if (machine) memcpy(text, &arm_return, sizeof(arm_return));
+            u64 data_size = large ? 4096 : 8;
+            u8* data = arena_allocate(temporary.arena, u8, data_size);
+            memset(data, 0, data_size);
+            sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(text);
+            sections[OBJECT_SECTION_DATA].data = (ByteSlice){.pointer = data, .length = data_size};
+            sections[OBJECT_SECTION_ZERO].alignment = 32;
+            // A custom name and an additional named section carry identity even
+            // with no bytes and no symbol. They must survive compaction.
+            sections[OBJECT_SECTION_COUNT] = (ObjectSection){.name = S8(".identity"), .kind = OBJECT_SECTION_READ_ONLY_DATA, .alignment = 64};
+            sections[OBJECT_SECTION_COUNT + 1] = (ObjectSection){.name = S8("registry"), .kind = OBJECT_SECTION_READ_ONLY_DATA, .alignment = 128};
+            ObjectSymbol symbols[] = {
+                {.name = S8("entry"), .section = OBJECT_SECTION_TEXT, .size = sizeof(text), .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                {.name = S8("empty_zero"), .section = OBJECT_SECTION_ZERO, .kind = OBJECT_SYMBOL_DATA},
+                {.name = S8("external"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            };
+            ObjectRelocation relocation = {.kind = OBJECT_RELOCATION_ABSOLUTE64, .section = OBJECT_SECTION_DATA, .symbol = 0, .addend = 7};
+            ObjectFile object = {.target = target, .sections = sections, .section_count = BUSTER_ARRAY_LENGTH(sections),
+                .symbols = symbols, .symbol_count = BUSTER_ARRAY_LENGTH(symbols), .relocations = &relocation, .relocation_count = 1};
+            ObjectArtifact artifact = object_write(temporary.arena, &object, OBJECT_FORMAT_ELF64);
+            if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE))
+            {
+                for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+                {
+                    ObjectTestElfSection section = object_test_elf_named_section(artifact.bytes, sections[kind].name);
+                    bool retained = kind == OBJECT_SECTION_TEXT || kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO;
+                    BUSTER_TEST(arguments, section.matches == (retained ? 1u : 0u));
+                }
+                ObjectTestElfSection text_section = object_test_elf_named_section(artifact.bytes, S8(".text"));
+                ObjectTestElfSection data_section = object_test_elf_named_section(artifact.bytes, S8(".data"));
+                ObjectTestElfSection zero_section = object_test_elf_named_section(artifact.bytes, S8(".bss"));
+                ObjectTestElfSection identity = object_test_elf_named_section(artifact.bytes, S8(".identity"));
+                ObjectTestElfSection registry = object_test_elf_named_section(artifact.bytes, S8("registry"));
+                ObjectTestElfSection rela = object_test_elf_named_section(artifact.bytes, S8(".rela.data"));
+                ObjectTestElfSection symtab = object_test_elf_named_section(artifact.bytes, S8(".symtab"));
+                ObjectTestElfSection strtab = object_test_elf_named_section(artifact.bytes, S8(".strtab"));
+                BUSTER_TEST(arguments, zero_section.type == 8 && zero_section.size == 0 && zero_section.alignment == 32);
+                BUSTER_TEST(arguments, identity.matches == 1 && identity.size == 0 && identity.alignment == 64);
+                BUSTER_TEST(arguments, registry.matches == 1 && registry.size == 0 && registry.alignment == 128);
+                BUSTER_TEST(arguments, text_section.size == sizeof(text) && data_section.size == data_size);
+                BUSTER_TEST(arguments, symtab.link == strtab.index && symtab.info == 2);
+                BUSTER_TEST(arguments, rela.type == 4 && rela.link == symtab.index && rela.info == data_section.index &&
+                    rela.size == 24 && rela.entry_size == 24);
+                u64 local = object_test_elf_symbol_offset(artifact.bytes, 1);
+                u64 global = object_test_elf_symbol_offset(artifact.bytes, 2);
+                u64 undefined = object_test_elf_symbol_offset(artifact.bytes, 3);
+                if (BUSTER_REQUIRE(arguments, local != UINT64_MAX && global != UINT64_MAX && undefined != UINT64_MAX))
+                {
+                    u16 local_section = 0;
+                    u16 global_section = 0;
+                    u16 undefined_section = 0;
+                    u64 local_size = UINT64_MAX;
+                    memcpy(&local_section, artifact.bytes.pointer + local + 6, sizeof(local_section));
+                    memcpy(&global_section, artifact.bytes.pointer + global + 6, sizeof(global_section));
+                    memcpy(&undefined_section, artifact.bytes.pointer + undefined + 6, sizeof(undefined_section));
+                    memcpy(&local_size, artifact.bytes.pointer + local + 16, sizeof(local_size));
+                    BUSTER_TEST(arguments, local_section == zero_section.index && local_size == 0);
+                    BUSTER_TEST(arguments, global_section == text_section.index && undefined_section == 0);
+                }
+                if (BUSTER_REQUIRE(arguments, rela.offset <= artifact.bytes.length && 24 <= artifact.bytes.length - rela.offset))
+                {
+                    u64 offset = UINT64_MAX;
+                    u64 information = 0;
+                    s64 addend = 0;
+                    memcpy(&offset, artifact.bytes.pointer + rela.offset, sizeof(offset));
+                    memcpy(&information, artifact.bytes.pointer + rela.offset + 8, sizeof(information));
+                    memcpy(&addend, artifact.bytes.pointer + rela.offset + 16, sizeof(addend));
+                    BUSTER_TEST(arguments, offset == 0 && information == ((UINT64_C(2) << 32) | (machine ? 257u : 1u)) && addend == 7);
+                }
+                ObjectFile read = object_read(temporary.arena, artifact.bytes, target);
+                if (BUSTER_REQUIRE(arguments, read.error == OBJECT_ERROR_NONE && read.symbol_count == 3 && read.relocation_count == 1))
+                {
+                    BUSTER_STRING_TEST(arguments, read.symbols[read.relocations[0].symbol].name, S8("entry"));
+                    BUSTER_TEST(arguments, read.relocations[0].section == OBJECT_SECTION_DATA && read.relocations[0].offset == 0 &&
+                        read.relocations[0].kind == OBJECT_RELOCATION_ABSOLUTE64 && read.relocations[0].addend == 7);
+                    BUSTER_TEST(arguments, read.symbols[0].section == OBJECT_SECTION_ZERO && read.symbols[0].size == 0 &&
+                        read.sections[OBJECT_SECTION_ZERO].alignment == 32);
+                    BUSTER_TEST(arguments, read.section_count == OBJECT_SECTION_COUNT + 1 &&
+                        string_equal(read.sections[OBJECT_SECTION_COUNT].name, S8("registry")) &&
+                        read.sections[OBJECT_SECTION_COUNT].virtual_size == 0 && read.sections[OBJECT_SECTION_COUNT].alignment == 128);
+                }
+                ObjectArtifact borrowed = object_write_borrowing(temporary.arena, &object, OBJECT_FORMAT_ELF64);
+                if (BUSTER_REQUIRE(arguments, borrowed.error == OBJECT_ERROR_NONE))
+                {
+                    u32 slice_count = 0;
+                    ByteSlice* slices = object_artifact_slices(temporary.arena, borrowed, &slice_count);
+                    u64 position = 0;
+                    bool equal = borrowed.bytes.length == artifact.bytes.length;
+                    for (u32 slice = 0; equal && slice < slice_count; slice += 1)
+                    {
+                        equal = position <= artifact.bytes.length && slices[slice].length <= artifact.bytes.length - position &&
+                            memcmp(slices[slice].pointer, artifact.bytes.pointer + position, slices[slice].length) == 0;
+                        position += slices[slice].length;
+                    }
+                    BUSTER_TEST(arguments, equal && position == artifact.bytes.length);
+                    BUSTER_TEST(arguments, borrowed.borrowed_payload_count == large && borrowed.statistics.payload_bytes_borrowed == (large ? data_size : 0));
+                    BUSTER_TEST(arguments, artifact.statistics.image_bytes_stored == artifact.bytes.length &&
+                        artifact.statistics.image_bytes_patched == 0 && artifact.statistics.retained_bytes == artifact.bytes.length);
+                }
+            }
+            arena_set_position(temporary.arena, scope.position);
+        }
+        // Empty TLS definitions still need their section identity, STT_TLS
+        // type and alignment; an additional canonical name also stays distinct.
+        ObjectSection sections[OBJECT_SECTION_COUNT + 1] = {0};
+        for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+        {
+            sections[kind] = (ObjectSection){.name = object_section_name_for_kind((ObjectSectionKind)kind),
+                .kind = (ObjectSectionKind)kind, .alignment = 1};
+        }
+        sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment = 64;
+        sections[OBJECT_SECTION_COUNT] = (ObjectSection){.name = S8(".rodata"), .kind = OBJECT_SECTION_READ_ONLY_DATA, .alignment = 128};
+        ObjectSymbol symbol = {.name = S8("empty_tls"), .section = OBJECT_SECTION_THREAD_LOCAL_ZERO, .kind = OBJECT_SYMBOL_DATA, .global = true};
+        Target target = {.cpu_arch = machine ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        ObjectFile object = {.target = target, .sections = sections, .section_count = BUSTER_ARRAY_LENGTH(sections), .symbols = &symbol, .symbol_count = 1};
+        ObjectArtifact artifact = object_write(temporary.arena, &object, OBJECT_FORMAT_ELF64);
+        if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE))
+        {
+            ObjectTestElfSection zero = object_test_elf_named_section(artifact.bytes, S8(".tbss"));
+            ObjectTestElfSection data = object_test_elf_named_section(artifact.bytes, S8(".tdata"));
+            ObjectTestElfSection additional = object_test_elf_named_section(artifact.bytes, S8(".rodata"));
+            BUSTER_TEST(arguments, zero.matches == 1 && zero.type == 8 && zero.flags == 0x403 && zero.size == 0 && zero.alignment == 64);
+            BUSTER_TEST(arguments, data.matches == 0);
+            BUSTER_TEST(arguments, additional.matches == 1 && additional.size == 0 && additional.alignment == 128);
+            u8 symbol_type = 0;
+            BUSTER_TEST(arguments, object_test_elf_symbol_type(artifact.bytes, S8("empty_tls"), &symbol_type) && symbol_type == 6);
+            u64 raw_symbol = object_test_elf_symbol_offset(artifact.bytes, 1);
+            if (BUSTER_REQUIRE(arguments, raw_symbol != UINT64_MAX))
+            {
+                u16 section_index = 0;
+                memcpy(&section_index, artifact.bytes.pointer + raw_symbol + 6, sizeof(section_index));
+                BUSTER_TEST(arguments, section_index == zero.index);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// An original ELF fixture with legacy unreferenced empty .pdata/.xdata
+// contributions after two rodata bytes, and a named zero-size section. It
+// never calls the writer whose omission policy the other fixture exercises.
+BUSTER_GLOBAL_LOCAL ByteSlice object_test_elf_empty_legacy(Arena* arena, Target target, bool referenced)
+{
+    ByteSlice result = {.pointer = arena_allocate(arena, u8, 768), .length = 768};
+    memset(result.pointer, 0, result.length);
+    memcpy(result.pointer, "\x7f" "ELF\x02\x01\x01", 7);
+    object_test_write_u16(result, 16, 1);
+    object_test_write_u16(result, 18, target.cpu_arch == CPU_ARCH_X86_64 ? 62 : 183);
+    object_test_write_u32(result, 20, 1);
+    object_test_write_u64(result, 40, 256);
+    object_test_write_u16(result, 52, 64);
+    object_test_write_u16(result, 58, 64);
+    object_test_write_u16(result, 60, 8);
+    object_test_write_u16(result, 62, 7);
+    result.pointer[64] = 'a';
+    memcpy(result.pointer + 144, "\0m\0empty\0", 9);
+    String8 names[] = {S8(""), S8(".rodata"), S8(".pdata"), S8(".xdata"), S8("registry"), S8(".symtab"), S8(".strtab"), S8(".shstrtab")};
+    u32 name_cursor = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        u64 header = 256 + (u64)index * 64;
+        object_test_write_u32(result, header, name_cursor);
+        memcpy(result.pointer + 160 + name_cursor, names[index].pointer, names[index].length);
+        name_cursor += (u32)names[index].length + 1;
+        if (index)
+        {
+            object_test_write_u32(result, header + 4, index == 5 ? 2 : index >= 6 ? 3 : 1);
+            object_test_write_u64(result, header + 8, index < 5 ? 2 : 0);
+            object_test_write_u64(result, header + 24, index == 1 ? 64 : index < 5 ? 66 : index == 5 ? 72 : index == 6 ? 144 : 160);
+            object_test_write_u64(result, header + 32, index == 1 ? 2 : index == 5 ? 72 : index == 6 ? 9 : 0);
+            object_test_write_u64(result, header + 48, index == 2 ? 4 : index == 3 ? 16 : index == 4 ? 32 : index == 5 ? 8 : 1);
+        }
+    }
+    object_test_write_u64(result, 256 + 7 * 64 + 32, name_cursor);
+    object_test_write_u32(result, 256 + 5 * 64 + 40, 6);
+    object_test_write_u32(result, 256 + 5 * 64 + 44, 1);
+    object_test_write_u64(result, 256 + 5 * 64 + 56, 24);
+    object_test_write_u32(result, 96, 1);
+    result.pointer[100] = 0x11;
+    object_test_write_u16(result, 102, 1);
+    object_test_write_u64(result, 112, 2);
+    object_test_write_u32(result, 120, 3);
+    result.pointer[124] = 0x11;
+    object_test_write_u16(result, 126, referenced ? 2 : 0);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_empty_reader(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    for (u32 machine = 0; machine < 2; machine += 1)
+    {
+        Target target = {.cpu_arch = machine ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        for (u32 referenced = 0; referenced < 2; referenced += 1)
+        {
+            TemporalArena scope = arena_begin_temporal(temporary.arena);
+            ByteSlice bytes = object_test_elf_empty_legacy(temporary.arena, target, referenced != 0);
+            ObjectFile object = object_read(temporary.arena, bytes, target);
+            if (BUSTER_REQUIRE(arguments, object.error == OBJECT_ERROR_NONE && object.section_count == OBJECT_SECTION_COUNT + 1 && object.symbol_count == 2))
+            {
+                BUSTER_TEST(arguments, object.sections[OBJECT_SECTION_READ_ONLY_DATA].data.length == (referenced ? 4u : 2u));
+                BUSTER_TEST(arguments, object.sections[OBJECT_SECTION_READ_ONLY_DATA].alignment == (referenced ? 4u : 1u));
+                BUSTER_TEST(arguments, object.sections[OBJECT_SECTION_READ_ONLY_DATA].data.pointer[0] == 'a' &&
+                    object.sections[OBJECT_SECTION_READ_ONLY_DATA].data.pointer[1] == 0);
+                BUSTER_STRING_TEST(arguments, object.symbols[0].name, S8("m"));
+                BUSTER_TEST(arguments, object.symbols[0].section == OBJECT_SECTION_READ_ONLY_DATA && object.symbols[0].value == 0 && object.symbols[0].size == 2);
+                BUSTER_STRING_TEST(arguments, object.symbols[1].name, S8("empty"));
+                BUSTER_TEST(arguments, object.symbols[1].section == (referenced ? OBJECT_SECTION_READ_ONLY_DATA : OBJECT_SECTION_UNDEFINED) &&
+                    object.symbols[1].value == (referenced ? 4u : 0u) && object.symbols[1].size == 0);
+                BUSTER_STRING_TEST(arguments, object.sections[OBJECT_SECTION_COUNT].name, S8("registry"));
+                BUSTER_TEST(arguments, object.sections[OBJECT_SECTION_COUNT].virtual_size == 0 && object.sections[OBJECT_SECTION_COUNT].alignment == 32);
+            }
+            // Zero size does not excuse malformed alignment or an invalid
+            // ordinary section index in the symbol table.
+            object_test_write_u64(bytes, 256 + 2 * 64 + 48, 3);
+            BUSTER_TEST(arguments, object_read(temporary.arena, bytes, target).error == OBJECT_ERROR_INVALID_INPUT);
+            object_test_write_u64(bytes, 256 + 2 * 64 + 48, 4);
+            object_test_write_u16(bytes, 126, 8);
+            BUSTER_TEST(arguments, object_read(temporary.arena, bytes, target).error == OBJECT_ERROR_INVALID_INPUT);
+            arena_set_position(temporary.arena, scope.position);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_thread_local_symbol_identity(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2395,6 +2710,12 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult dwarf5 = object_test_dwarf5_sections(arguments);
     result.test_count += dwarf5.test_count;
     result.succeeded_test_count += dwarf5.succeeded_test_count;
+    UnitTestResult empty_sections = object_test_elf_empty_sections(arguments);
+    result.test_count += empty_sections.test_count;
+    result.succeeded_test_count += empty_sections.succeeded_test_count;
+    UnitTestResult empty_reader = object_test_elf_empty_reader(arguments);
+    result.test_count += empty_reader.test_count;
+    result.succeeded_test_count += empty_reader.succeeded_test_count;
     UnitTestResult thread_local_identity = object_test_elf_thread_local_symbol_identity(arguments);
     result.test_count += thread_local_identity.test_count;
     result.succeeded_test_count += thread_local_identity.succeeded_test_count;
