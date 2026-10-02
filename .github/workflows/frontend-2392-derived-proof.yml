@@ -122,7 +122,7 @@ jobs:
           }
           SOURCE
           cat > proof/registered-member-cases.c <<'SOURCE'
-          int member_tag(void) { int c = 7; struct T { char c[8]; }; return c; }
+          int member_tag(void) { int c = 7; struct T { char c[8]; }; return c || member_qualified_bound() != 4; }
           int member_object(void) { int c = 4; struct T { char c[3]; } t = {{1, 2, 3}}; return c + t.c[1]; }
           int member_union(void) { unsigned c = 5; union { char c[8]; unsigned wc[2]; } t = {{1, 2, 3}}; return c + t.c[2]; }
           int c = 9; int member_file_name(void) { struct T { char c[8]; }; return c; }
@@ -141,6 +141,7 @@ jobs:
           int member_qualified_sizeof(void) { int c = 2; return c + sizeof(const struct { char c[8]; }); }
           int member_qualified_union(void) { int c = 3; return c + sizeof(const volatile union { char c[5]; char other[2]; }); }
           int member_scalar(void) { int c = 4; struct T { char c; } t = {3}; return c + t.c; }
+          int member_qualified_bound(void) { int c[2] = {1, 2}; return sizeof(const struct { char a[sizeof(c[0])]; }); }
           int main(void) { return member_tag() != 7 || member_object() != 6 || member_union() != 8 || member_file_name() != 9 || member_pointer() != 8 || member_shadow() != 2 || member_nested() != 7 || member_macro() != 9 || member_multidimensional() != 8 || member_derived() != 5 || member_typedef() != 7 || member_conditional() != 5 || member_incomplete() != 8 || member_qualified_sizeof() != 10 || member_qualified_union() != 8 || member_scalar() != 7; }
           SOURCE
           cat > proof/registered-union-cases.c <<'SOURCE'
@@ -180,6 +181,9 @@ jobs:
           SOURCE
           cat > proof/member-refusal-5.c <<'SOURCE'
           int f(void) { int c = 0; return sizeof(const struct { char a[sizeof(c[0])]; }); }
+          SOURCE
+          cat > proof/member-refusal-6.c <<'SOURCE'
+          int f(void) { int c = 0; int a[sizeof(c[0])]; return 0; }
           SOURCE
           for cc in clang gcc; do
               for std in c17 c23; do

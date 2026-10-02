@@ -198,7 +198,9 @@ record prebinding also recognizes leading type qualifiers before `struct` or
 `union`, so their member bounds exist before this role snapshot. The mask
 outlives each body's scratch checkpoint and skips only the declarator opener,
 so `int c; struct T { char c[8]; };` respects the separate member namespace
-(C17 6.2.3p1), while invalid subscripts inside a bound remain checked.
+(C17 6.2.3p1). Expression subscripts also bypass the broader local-declarator
+mask, so invalid subscripts inside a bound remain checked even when body
+binding recorded a declaration inside an expression record's brace scope.
 `c_test_member_array_declarators` covers tag-only and object declarations,
 unions, shadowing, macros, derived members and expression neighbours through
 semantics-only analysis and both canonical frontend forms. Its runtime source
