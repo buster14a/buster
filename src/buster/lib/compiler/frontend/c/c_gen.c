@@ -49592,6 +49592,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
         global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
         return true;
     }
+    builder->static_initializer_token_plus_one = start + 1;
     for (u32 index = start; index < end; index += 1)
     {
         if (c_ir_label_address_prefix(builder, start, index) && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
@@ -50108,9 +50109,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
 BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
 {
     u32 previous_initializer = builder->static_initializer_token_plus_one;
-    u32 start = 0;
-    u32 end = 0;
-    builder->static_initializer_token_plus_one = c_ir_declaration_initializer_range(builder->preprocess, declaration, &start, &end) ? start + 1 : 0;
+    builder->static_initializer_token_plus_one = 0;
     bool result = c_ir_global_initializer_impl(builder, declaration, type, global);
     builder->static_initializer_token_plus_one = previous_initializer;
     return result;
