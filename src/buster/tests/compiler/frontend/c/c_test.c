@@ -4895,54 +4895,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArgument
         S8("int n; int f(void) { enum { n = 3 }; struct S { int a[n]; }; return sizeof(struct S); }"),
         S8("enum { N = 3 }; typedef int A[N]; int f(int N) { struct S { A a; }; return sizeof(struct S); }"),
     };
-    for (u32 form = 0; form < 2; form += 1)
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
+    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
     {
-        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(rejected); case_index += 1)
+        for (u32 form = 0; form < 2; form += 1)
         {
-            TemporalArena temporary = scratch_begin(0, 0);
-            CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[case_index].source,
-                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
-            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
-            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, rejected[case_index].source);
-            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
-            bool member_diagnostic = false;
-            for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(rejected); case_index += 1)
             {
-                CDiagnostic diagnostic = semantic.diagnostics[index];
-                member_diagnostic |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
-                    string_equal(diagnostic.message, S8("a structure or union member may not have variably modified type")) &&
-                    diagnostic.location.line == rejected[case_index].member_line && diagnostic.location.column == rejected[case_index].member_column;
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[case_index].source,
+                    (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect_index]});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, rejected[case_index].source);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                bool member_diagnostic = false;
+                for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                {
+                    CDiagnostic diagnostic = semantic.diagnostics[index];
+                    member_diagnostic |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                        string_equal(diagnostic.message, S8("a structure or union member may not have variably modified type")) &&
+                        diagnostic.location.line == rejected[case_index].member_line && diagnostic.location.column == rejected[case_index].member_column;
+                }
+                BUSTER_TEST_RAW(arguments, member_diagnostic, rejected[case_index].source);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("variable-member.c"), tokens, syntax, target_native,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && lowered.program == 0, rejected[case_index].source);
+                BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                for (u32 index = 0; index < semantic.diagnostic_count && index < lowered.diagnostic_count; index += 1)
+                {
+                    BUSTER_TEST(arguments, semantic.diagnostics[index].kind == lowered.diagnostics[index].kind);
+                    BUSTER_STRING_TEST(arguments, semantic.diagnostics[index].message, lowered.diagnostics[index].message);
+                    BUSTER_TEST(arguments, semantic.diagnostics[index].location.line == lowered.diagnostics[index].location.line);
+                    BUSTER_TEST(arguments, semantic.diagnostics[index].location.column == lowered.diagnostics[index].location.column);
+                }
+                scratch_end(temporary);
             }
-            BUSTER_TEST_RAW(arguments, member_diagnostic, rejected[case_index].source);
-            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("variable-member.c"), tokens, syntax, target_native,
-                                                             (CIRLowerOptions){.disable_direct_ssa = form != 0});
-            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && lowered.program == 0, rejected[case_index].source);
-            BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
-            for (u32 index = 0; index < semantic.diagnostic_count && index < lowered.diagnostic_count; index += 1)
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(accepted); case_index += 1)
             {
-                BUSTER_TEST(arguments, semantic.diagnostics[index].kind == lowered.diagnostics[index].kind);
-                BUSTER_STRING_TEST(arguments, semantic.diagnostics[index].message, lowered.diagnostics[index].message);
-                BUSTER_TEST(arguments, semantic.diagnostics[index].location.line == lowered.diagnostics[index].location.line);
-                BUSTER_TEST(arguments, semantic.diagnostics[index].location.column == lowered.diagnostics[index].location.column);
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, accepted[case_index],
+                    (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect_index]});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && semantic.diagnostic_count == 0, accepted[case_index]);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("constant-member.c"), tokens, syntax, target_native,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, accepted[case_index]);
+                if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+                scratch_end(temporary);
             }
-            scratch_end(temporary);
-        }
-        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(accepted); case_index += 1)
-        {
-            TemporalArena temporary = scratch_begin(0, 0);
-            CPreprocessResult tokens = c_preprocess(temporary.arena, accepted[case_index],
-                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
-            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
-            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
-            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && semantic.diagnostic_count == 0, accepted[case_index]);
-            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("constant-member.c"), tokens, syntax, target_native,
-                                                             (CIRLowerOptions){.disable_direct_ssa = form != 0});
-            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, accepted[case_index]);
-            if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
-            {
-                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
-            }
-            scratch_end(temporary);
         }
     }
     return result;
