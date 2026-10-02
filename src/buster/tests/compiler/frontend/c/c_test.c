@@ -15708,7 +15708,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             "_Static_assert(E_ARRAY == 16 && E_UNION == 16 && E_ADDRESS == 16 && E_CONST == 16 && E_EXPRESSION == 8 && E_CAST == 8 && E_CHAIN == 16, \"typed and const member queries\");\n"
             "_Static_assert(E_PRAGMA == PRAGMA_REQUEST && __alignof__(pragma_object.plain) == 1, \"pragma target rules\");\n"
             "_Static_assert(__alignof__(int) == 4 && _Alignof(short) == 2 && __alignof__(incidental.c) == 1, \"type and incidental alignment\");\n"
-            "_Static_assert(sizeof s2.x == 4 && sizeof((&au)->x) == 4 && sizeof groups[0].x == 4 && sizeof promoted.x == 4 && sizeof(((struct S2 *)0)->x) == 4, \"sizeof keeps natural size\");\n"
+            "_Static_assert(sizeof s2.x == 4, \"sizeof direct member\");\n"
+            "_Static_assert(sizeof((&au)->x) == 4, \"sizeof address member\");\n"
+            "_Static_assert(sizeof groups[0].x == 4, \"sizeof const union member\");\n"
+            "_Static_assert(sizeof promoted.x == 4, \"sizeof promoted member\");\n"
+            "_Static_assert(sizeof(((struct S2 *)0)->x) == 4, \"sizeof cast member\");\n"
             "_Static_assert(__alignof__(+s2.x) == 4 && __alignof__(1 + s2.x) == 4 && __alignof__(s2.x + 1) == 4, \"arithmetic values\");\n"
             "_Static_assert(__alignof__(&s2.x) == 8 && __alignof__(++s2.x) == 4 && __alignof__(s2.x = s2.x) == 4, \"outer operators\");\n"
             "_Static_assert(__alignof__((0, s2.x)) == 4 && __alignof__(1 ? s2.x : s2.x) == 4 && __alignof__(array_member.values[0]) == 4, \"other values\");\n"
@@ -15791,7 +15795,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
                 for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
                 {
-                    BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[index].message);
+                    String8 context = string_format(temporary.arena, S8("member alignment target={u32} dialect={u32} form={u32} line={u32} column={u32}: {S8}"),
+                        target_index, dialect, form, lowered.diagnostics[index].location.line, lowered.diagnostics[index].location.column,
+                        lowered.diagnostics[index].message);
+                    BUSTER_TEST_RAW(arguments, false, context);
                 }
                 if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
                                               lowered.program->module_count == 1))
