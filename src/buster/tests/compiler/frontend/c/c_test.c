@@ -6349,6 +6349,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tagged_member_microsoft_anonymous(Unit
 // Buster policy; independent compilers check only the side-effect-free values.
 BUSTER_GLOBAL_LOCAL String8 const c_test_initializer_override_source = S8_INITIALIZER(
     "struct S { int a, b, c; }; union U { long long a; short b; };\n"
+    "struct Bits { unsigned : 3; unsigned a : 3; unsigned : 0; unsigned b : 3; };\n"
+    "struct Volatile { volatile int a; int b; };\n"
     "static struct S static_s = {.a = 1, .b = 2, .a = 3, .a = 4};\n"
     "static int static_a[3] = {1, 2, [0] = 3, [0] = 4};\n"
     "static union U static_u = {.a = 0x10101, .b = 2};\n"
@@ -6363,8 +6365,8 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_initializer_override_source = S8_INITIA
     "int *p = (int[3]){[2] = 9, [0] = 3, 5, [0] = 7, 8};\n"
     "union U v = (union U){.b = 3, .a = 11, .b = 4};\n"
     "union U repeated = {.b = 1, .b = 2, .b = 3};\n"
-    "struct Bits { unsigned : 3; unsigned a : 3; unsigned : 0; unsigned b : 3; } bits = {1, 2, .a = 3, .a = 4};\n"
-    "struct Volatile { volatile int a; int b; } qualified = {.a = 1, .a = 2, 3};\n"
+    "struct Bits bits = {1, 2, .a = 3, .a = 4};\n"
+    "struct Volatile qualified = {.a = 1, .a = 2, 3};\n"
     "if (s.a != 4 || s.b != 2 || s.c || a[0] != 4 || a[1] != 2 || a[2] || u.b != 2) return 1;\n"
     "if (t.a != 7 || t.b != 8 || t.c != 9 || p[0] != 7 || p[1] != 8 || p[2] != 9 || v.b != 4) return 2;\n"
     "if (static_s.a != s.a || static_s.b != s.b || static_s.c != s.c || static_a[0] != a[0] || static_a[1] != a[1] || static_u.b != u.b) return 3;\n"
