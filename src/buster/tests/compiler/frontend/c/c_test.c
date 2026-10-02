@@ -30734,6 +30734,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_semantics(UnitTestArg
             "#define __crt_va_start(ap, last) __va_start(&(ap), last)\n"
             "__inline int unused_va_start(int last, ...) { va_list cursor; __crt_va_start(cursor, last); return last; }\n"
             "int main(void) { return 0; }\n"), C_TYPE_POINTER},
+        {S8("public-builtin-direct"),
+         S8("typedef char *public_list;\n"
+            "__inline int unused_va_start(int last, ...) { public_list cursor; __builtin_va_start(cursor, last); return last; }\n"
+            "int main(void) { return 0; }\n"), C_TYPE_POINTER},
     };
     for (u32 architecture = 0; architecture < 2; architecture += 1)
     {
@@ -30891,6 +30895,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_cursor(UnitTestArgume
         {S8("builtin-end-pointer"), S8("void probe(int last, ...) { char *cursor; __builtin_va_end(cursor); }\n")},
         {S8("builtin-arg-pointer"), S8("int probe(int last, ...) { char *cursor; return __builtin_va_arg(cursor, int); }\n")},
         {S8("address-rvalue"), S8("void probe(int last, ...) { char *cursor; __va_start(&(cursor + 1), last); }\n")},
+        {S8("builtin-const-cursor"), S8("void probe(int last, ...) { char *const cursor = 0; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-atomic-cursor"), S8("void probe(int last, ...) { _Atomic(char *) cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-void-pointee"), S8("void probe(int last, ...) { void *cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-integer-pointee"), S8("void probe(int last, ...) { int *cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-unsigned-character"), S8("void probe(int last, ...) { unsigned char *cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-signed-character"), S8("void probe(int last, ...) { signed char *cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-nested-pointer"), S8("void probe(int last, ...) { char **cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-const-pointee"), S8("void probe(int last, ...) { const char *cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-volatile-pointee"), S8("void probe(int last, ...) { volatile char *cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-atomic-pointee"), S8("void probe(int last, ...) { _Atomic(char) *cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-arity-one"), S8("void probe(int last, ...) { char *cursor; __builtin_va_start(cursor); }\n")},
+        {S8("builtin-arity-three"), S8("void probe(int last, ...) { char *cursor; __builtin_va_start(cursor, last, 0); }\n")},
+        {S8("builtin-nonvariadic"), S8("void probe(int last) { char *cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-rvalue"), S8("void probe(int last, ...) { char *cursor; __builtin_va_start(cursor + 1, last); }\n")},
+        {S8("builtin-addressed-pointer"), S8("void probe(int last, ...) { char *cursor; __builtin_va_start(&cursor, last); }\n")},
+        {S8("builtin-array"), S8("void probe(int last, ...) { char cursor[8]; __builtin_va_start(cursor, last); }\n")},
     };
     for (u32 layout = 0; layout < 6; layout += 1)
     {
