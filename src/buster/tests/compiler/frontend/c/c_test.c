@@ -30152,6 +30152,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
                     }
                     scratch_end(temporary);
                 }
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 source = S8("int volatile_literal_update(void) { return ++(volatile int){5}; }\n");
+                    String8 context = string_format(temporary.arena, S8("volatile literal update target={u32} dialect={u32} form={u32}"),
+                                                   target_index, dialect, form);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                        .target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect],
+                    });
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("volatile-literal-update.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified, context);
+                    if (!lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
+                        BUSTER_REQUIRE(arguments, lowered.program->module_count == 1))
+                    {
+                        IrFunction* function = c_test_find_ir_function(lowered.program->modules, S8("volatile_literal_update"));
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            u32 loads = 0;
+                            u32 volatile_loads = 0;
+                            u32 volatile_stores = 0;
+                            for (u32 index = 0; index < function->instruction_count; index += 1)
+                            {
+                                IrInstruction instruction = function->instructions[index];
+                                loads += instruction.opcode == IR_OPCODE_LOAD;
+                                volatile_loads += instruction.opcode == IR_OPCODE_LOAD && instruction.volatile_access;
+                                volatile_stores += instruction.opcode == IR_OPCODE_STORE && instruction.volatile_access;
+                            }
+                            BUSTER_TEST_RAW(arguments, loads == 1 && volatile_loads == 1 && volatile_stores == 2,
+                                string_format(temporary.arena, S8("{S8}: loads={u32} volatile-loads={u32} volatile-stores={u32}"),
+                                              context, loads, volatile_loads, volatile_stores));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
                 for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);

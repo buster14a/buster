@@ -991,7 +991,10 @@ as values (#1261). Fixed returned/stored values and indexed call counters protec
 old/new results, original-object identity, one evaluation, volatile accesses and
 postfix precedence: `(__imag__ z)++` updates the imaginary component, while
 `__imag__ z++` projects the previous whole-complex update. Const and nonplace
-operands remain rejected. Independent sources run through syntax, semantic and
+operands remain rejected. A separate canonical volatile scalar-literal neighbor
+requires one volatile read and two volatile stores (initialization and update),
+so place recovery cannot retain an artificial value read or erase its qualifier.
+Independent sources run through syntax, semantic and
 canonical APIs on six native layouts, GNU17/GNU23 and both frontend forms. A
 combined executable retains all literal oracles in every native allocator mode
 at O0/O2. Hosted Linux x86-64 Clang compiles and executes all fifteen original
