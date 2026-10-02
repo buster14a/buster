@@ -1739,6 +1739,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_scalar_abi_wire(UnitTestArg
                 }
             }
         }
+        // BOOLEAN has semantic LLVM width one even when its descriptive
+        // bit_width is absent or spells a storage width. Keep the original
+        // seven target rows unchanged and add these canonical neighbors.
+        u32 boolean_widths[] = {0, 32};
+        for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(boolean_widths); variant += 1)
+        {
+            types[5].bit_width = boolean_widths[variant];
+            LlvmBitcodeArtifact boolean = llvm_bitcode_emit_with_options(arena, &program, &module, 1, options);
+            LlvmScalarAbiWire* boolean_wire = arena_allocate(arena, LlvmScalarAbiWire, 1);
+            *boolean_wire = (LlvmScalarAbiWire){0};
+            bool boolean_decoded = llvm_bitcode_artifact_is_valid(boolean) && llvm_bitcode_test_scalar_read(arena, boolean.bytes, boolean_wire);
+            String8 boolean_context = string_format(arena, S8("BOOLEAN ABI target={S8} width_field={u32} error={S8}: {S8}"),
+                target.triple, boolean_widths[variant], llvm_bitcode_error_code_name(boolean.error.code), boolean.error.message);
+            BUSTER_TEST_RAW(arguments, boolean_decoded && boolean_wire->function_count == function_count, boolean_context);
+            u32 boolean_seen = 0;
+            for (u32 function = 0; boolean_decoded && function < boolean_wire->function_count; function += 1)
+            {
+                u32 named = UINT32_MAX;
+                for (u32 index = 0; index < 8; index += 1)
+                {
+                    if (string_equal(boolean_wire->names[function], names[index])) named = index;
+                }
+                if (named < 8)
+                {
+                    boolean_seen |= (u32)1 << named;
+                    u64 list = boolean_wire->functions[function].operands[4];
+                    u64 expected = target.bool_extension ? UINT64_C(1) << LLVM_SCALAR_ABI_Z_EXT : 0;
+                    BUSTER_TEST_RAW(arguments, llvm_bitcode_test_scalar_mask(boolean_wire, list, named == 7 ? 6 : 5) == expected, boolean_context);
+                    if (named == 4)
+                    {
+                        BUSTER_TEST_RAW(arguments, llvm_bitcode_test_scalar_mask(boolean_wire, list, 0) == expected, boolean_context);
+                        u64 type_id = boolean_wire->functions[function].operands[0];
+                        bool function_type = type_id < boolean_wire->type_count && boolean_wire->types[type_id].code == 21;
+                        u64 result_type = function_type ? boolean_wire->types[type_id].operands[1] : UINT64_MAX;
+                        BUSTER_TEST_RAW(arguments, result_type < boolean_wire->type_count && boolean_wire->types[result_type].code == 7 &&
+                            boolean_wire->types[result_type].operands[0] == 1, boolean_context);
+                    }
+                }
+            }
+            BUSTER_TEST_RAW(arguments, boolean_seen == 255, boolean_context);
+        }
+        types[5].bit_width = 1;
         scratch_end(temporary);
     }
     return result;

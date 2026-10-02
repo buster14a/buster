@@ -181,6 +181,8 @@ all five default conventions plus explicit canonical x86-64 System V on
 Windows and Win64 on Linux. Ordinary C i32/i64 and aggregate-coerced i8
 parameters/results receive no scalar extension. A separate canonical
 integer i1 control distinguishes Win64's bool exception from a width rule.
+Canonical BOOLEAN neighbors with zero or storage-width bit_width fields retain
+LLVM i1 and the same bool policy; that field cannot turn BOOLEAN into INTEGER.
 The x86-64 aggregate rows retain typed hidden-result and by-value attributes,
 alignment and shifted parameter indices. Fixed narrow parameters of variadic
 signatures retain their attributes; anonymous promoted i32 operands gain none.
