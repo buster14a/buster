@@ -325,3 +325,7 @@ external definition from another unit. Pre-created function symbols take the
 same definition decision, preserving real alias definitions; GNU inline-only
 bodies do not mark those symbols defined. Unused bodies retain their existing
 dropped state. No inline optimizer, dependency walk or GNU policy is added.
+
+Windows __inline and __forceinline macros normalize to plain inline. In GNU17,
+bare bodies therefore retain external declarations; explicit static and extern
+controls keep their respective internal and external definitions.

@@ -5015,6 +5015,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
                 {
                     String8 names[] = {S8("static_inline"), S8("static_force"), S8("external_inline"), S8("external_force"),
                                        S8("bare_inline"), S8("bare_force"), S8("inline_probe"), S8("api_inline"), S8("api_force")};
+                    // Windows aliases preprocess to plain inline. In GNU17,
+                    // a bare inline body supplies no external definition.
+                    bool definitions[] = {true, true, true, true, false, false, true, false, false};
                     for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
                     {
                         u32 matches = 0;
@@ -5025,7 +5028,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
                             {
                                 matches += 1;
                                 BUSTER_TEST(arguments, symbol->linkage == (name_index < 2 ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL));
-                                BUSTER_TEST(arguments, symbol->is_definition == (name_index < 7));
+                                BUSTER_TEST_RAW(arguments, symbol->is_definition == definitions[name_index], names[name_index]);
+                                if (name_index == 4 || name_index == 5)
+                                {
+                                    u32 functions = 0;
+                                    IrModule* module = lowered.program->modules;
+                                    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                                    {
+                                        IrFunction* function = module->functions + function_index;
+                                        if (function->symbol.value == symbol->id.value)
+                                        {
+                                            functions += 1;
+                                            BUSTER_TEST_RAW(arguments, function->state == IR_FUNCTION_DECLARATION &&
+                                                                      function->instruction_count == 0, names[name_index]);
+                                        }
+                                    }
+                                    BUSTER_TEST_RAW(arguments, functions == 1, names[name_index]);
+                                }
                             }
                         }
                         BUSTER_TEST_RAW(arguments, matches == 1, names[name_index]);
