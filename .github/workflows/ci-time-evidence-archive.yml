@@ -1,0 +1,58 @@
+name: CI time evidence archive
+
+# Archive-only branch; never run on main, PRs, merge groups or a schedule.
+on:
+  push:
+    branches: [codex/709-ci-time-evidence]
+    paths:
+      - .github/workflows/ci-time-evidence-archive.yml
+      - docs/performance-audits/evidence/2026-10-02-ci-time/archive.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-time-evidence-archive-709
+  cancel-in-progress: false
+
+jobs:
+  preserve:
+    if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/codex/709-ci-time-evidence' && github.event_name == 'push'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - name: Preserve and verify existing evidence only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONUNBUFFERED: '1'
+        run: python3 -B docs/performance-audits/evidence/2026-10-02-ci-time/archive.py
+      - name: Commit evidence to its archive branch only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/codex/709-ci-time-evidence
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          root=docs/performance-audits/evidence/2026-10-02-ci-time
+          git add -f -- "$root/evidence.zip" "$root/derived" "$root/publication.json" "$root/publication-artifact-metadata.json"
+          git -c core.hooksPath=/dev/null commit -m 'docs(ci): retain 27 original artifacts and byte-verified audit ledgers'
+          git push origin HEAD:refs/heads/codex/709-ci-time-evidence
+          printf '## Evidence archived\n\nCommit: `%s`\n\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          cat "$root/publication.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain publication receipt and bundle
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-time-evidence-709-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            docs/performance-audits/evidence/2026-10-02-ci-time/evidence.zip
+            docs/performance-audits/evidence/2026-10-02-ci-time/publication.json
+          if-no-files-found: error
+          retention-days: 90
