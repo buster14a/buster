@@ -23426,11 +23426,20 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
                 CType source_element = result->types[source_pointee.value];
                 bool object_void_compatible = (target_element.kind == C_TYPE_VOID && source_element.kind != C_TYPE_FUNCTION) ||
                                               (source_element.kind == C_TYPE_VOID && target_element.kind != C_TYPE_FUNCTION);
+                // ISO assignment permits void pointers only against object pointers.
+                // GNU modes on native Linux/macOS also admit callback storage through
+                // void*: an explicit Buster extension, not an ISO compatibility rule.
+                // Keep other pointee mismatches and qualifier losses diagnosed.
+                bool native_callback_storage = (preprocess.target.cpu_arch == CPU_ARCH_X86_64 || preprocess.target.cpu_arch == CPU_ARCH_AARCH64) &&
+                                               (preprocess.target.os == OPERATING_SYSTEM_LINUX || preprocess.target.os == OPERATING_SYSTEM_MACOS);
+                bool function_void_compatible = c_preprocess_dialect_is_gnu(preprocess.dialect) && native_callback_storage &&
+                                                ((target_element.kind == C_TYPE_VOID && source_element.kind == C_TYPE_FUNCTION) ||
+                                                 (source_element.kind == C_TYPE_VOID && target_element.kind == C_TYPE_FUNCTION));
                 bool drops_qualifier = (source_element.is_const && !target_element.is_const) ||
                                        (source_element.is_volatile && !target_element.is_volatile) ||
                                        (source_element.is_restrict && !target_element.is_restrict) ||
                                        (!object_void_compatible && source_element.is_atomic && !target_element.is_atomic);
-                bool compatible = object_void_compatible ||
+                bool compatible = object_void_compatible || function_void_compatible ||
                                   c_parse_types_compatible(machine->scratch_arena, result, preprocess,
                                       c_parse_unqualified_type(result, target_pointee), c_parse_unqualified_type(result, source_pointee));
                 if (!compatible && target_element.kind == C_TYPE_ARRAY && source_element.kind == C_TYPE_ARRAY &&
