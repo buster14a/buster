@@ -13893,7 +13893,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integers(
                     CompilerDriverAddressIntegerCase const* expected = cases + row;
                     String8 context = string_format(arena, S8("address-integer row={S8} target={S8} dialect={S8} form={S8}"),
                                                     expected->name, targets[target], dialects[dialect], forms[form]);
-                    String8 source = string_format(arena, S8("{S8}{S8}\nint main(void){return 0;}\n"), prefix, expected->declaration);
+                    String8 source_parts[] = {prefix, expected->declaration, S8("\nint main(void){return 0;}\n")};
+                    String8 source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
                     String8 name = string_format(arena, S8("buster-address-integer-{u32}-{u32}-{u32}-{u32}"),
                                                 row, target, dialect, form);
                     String8 input = buster_test_temporary_path(arena, name, S8(".c"));
