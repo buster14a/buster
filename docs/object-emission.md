@@ -79,6 +79,11 @@ runtime semantics the object model cannot preserve: unsupported section types,
 legacy `.ctors`/`.dtors` and their priority families, `.init`/`.fini` fragments,
 and exception tables the reader previously discarded. An unsupported allocated
 note is refused too; its contract must be understood before it can be dropped.
+One canonical GNU property note is understood: the optional x86 IBT/SHSTK or
+AArch64 BTI/PAC/GCS `FEATURE_1_AND` record. Its output feature intersection is
+zero because Buster's generated code does not assert those features, so this
+note is omitted. Unknown bits, additional properties, required ISA properties,
+other note formats, and unsupported flags/alignment are refused.
 Unallocated unknown metadata and unsupported debug section types retain their
 skip policy. Supported DWARF payloads still pass through without DIE decoding.
 
@@ -96,7 +101,9 @@ path, or archive/member path, in the import error and publishes no output image.
 architectures. `compiler_driver_elf_semantic_tests` imports host-compiled inputs
 on Linux x86-64/AArch64, checks attributable refusal and no artifact, and requires
 the host linker/runtime to preserve each input's meaning. A preinit control
-continues to link and run through both linkers.
+continues to link and run through both linkers, as does a canonical optional
+GNU property control. Raw note controls cover every known feature combination,
+unknown/required properties, malformed shape, and payload bounds.
 
 ## The work ledger: `ObjectWriteStatistics`
 

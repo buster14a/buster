@@ -151,6 +151,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
                 "int main(void) { return 1; }\n"), S8("unsupported ELF section .fini (type 1)")},
             {S8("allocated-note"), S8("__asm__(\".pushsection .note.vendor,\\\"a\\\",@note\\n.balign 4\\n.long 4,4,1\\n.asciz \\\"VND\\\"\\n.long 0\\n.popsection\");\n"
                 "int main(void) { return 0; }\n"), S8("unsupported ELF section .note.vendor (type 7)")},
+            {S8("gnu-property-control"), S8("__asm__(\".pushsection .note.gnu.property,\\\"a\\\",@note\\n.balign 8\\n.long 4,16,5\\n.asciz \\\"GNU\\\"\\n.long 0xc0000002,4,0\\n.long 0\\n.popsection\");\n"
+                "int main(void) { return 0; }\n"), {0}},
 #else
             {S8("init"), S8("static int ran; void semantic_hook(void) { ran = 1; }\n"
                 "__asm__(\".pushsection .init,\\\"ax\\\",%progbits\\nbl semantic_hook\\n.popsection\");\n"
@@ -160,16 +162,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
                 "int main(void) { return 1; }\n"), S8("unsupported ELF section .fini (type 1)")},
             {S8("allocated-note"), S8("__asm__(\".pushsection .note.vendor,\\\"a\\\",%note\\n.balign 4\\n.long 4,4,1\\n.asciz \\\"VND\\\"\\n.long 0\\n.popsection\");\n"
                 "int main(void) { return 0; }\n"), S8("unsupported ELF section .note.vendor (type 7)")},
+            {S8("gnu-property-control"), S8("__asm__(\".pushsection .note.gnu.property,\\\"a\\\",%note\\n.balign 8\\n.long 4,16,5\\n.asciz \\\"GNU\\\"\\n.long 0xc0000000,4,0\\n.long 0\\n.popsection\");\n"
+                "int main(void) { return 0; }\n"), {0}},
 #endif
-            {S8("absolute"), S8("extern char semantic_absolute;\n"
-                "__asm__(\".globl semantic_absolute\\n.set semantic_absolute,0x1234\");\n"
-                "int main(void) { return (unsigned long)&semantic_absolute != 0x1234; }\n"),
+            // Put the absolute address in data: AArch64 instruction fixups
+            // cannot encode this small SHN_ABS value in every host compiler.
+            {S8("absolute"), S8("extern const unsigned long semantic_absolute_address;\n"
+                "__asm__(\".globl semantic_absolute\\n.set semantic_absolute,0x1234\\n"
+                ".pushsection .data\\n.balign 8\\n.globl semantic_absolute_address\\nsemantic_absolute_address:\\n.quad semantic_absolute\\n.popsection\");\n"
+                "int main(void) { return semantic_absolute_address != 0x1234; }\n"),
                 S8("unsupported ELF symbol semantic_absolute (section index 65521)")},
-            {S8("weak-absolute"), S8("extern char semantic_absolute __attribute__((weak));\n"
-                "__asm__(\".weak semantic_absolute\\n.set semantic_absolute,0x1234\");\n"
-                "int main(void) { return (unsigned long)&semantic_absolute != 0x1234; }\n"),
+            {S8("weak-absolute"), S8("extern const unsigned long semantic_absolute_address;\n"
+                "__asm__(\".weak semantic_absolute\\n.set semantic_absolute,0x1234\\n"
+                ".pushsection .data\\n.balign 8\\n.globl semantic_absolute_address\\nsemantic_absolute_address:\\n.quad semantic_absolute\\n.popsection\");\n"
+                "int main(void) { return semantic_absolute_address != 0x1234; }\n"),
                 S8("unsupported ELF symbol semantic_absolute (section index 65521)")},
-            {S8("preinit-control"), S8("static int ran; static void preinit(void) { ran = 1; }\n"
+            {S8("preinit-control"), S8("static volatile int ran; static void preinit(void) { ran = 1; }\n"
                 "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(void) = preinit;\n"
                 "__attribute__((constructor)) static void constructor(void) { ran = ran == 1 ? 2 : 9; }\n"
                 "int main(void) { return ran != 2; }\n"), {0}},
@@ -185,7 +193,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
             String8 oracle = string_format_z(arena, S8("{S8}/{S8}-oracle"), root, test.name);
             String8 output = string_format_z(arena, S8("{S8}/{S8}-buster"), root, test.name);
             BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(test.program)));
-            String8 compile[] = {S8("-O2"), S8("-fno-pie"), S8("-c"), source, S8("-o"), object};
+            String8 compile[] = {S8("-O2"), S8("-fno-pie"), S8("-c"), source, S8("-o"), object,
+#if BUSTER_CPU_ARCH_X86_64
+                S8("-fcf-protection=none"), // The GNU property control emits its own single record.
+#endif
+            };
             bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
             BUSTER_TEST(arguments, produced);
             if (produced)

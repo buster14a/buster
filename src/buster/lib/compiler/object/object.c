@@ -4915,6 +4915,41 @@ BUSTER_GLOBAL_LOCAL bool object_reader_merge_initializer_arrays(Arena* arena, Ob
     return result;
 }
 
+// FEATURE_1_AND records describe optional compatibility. Buster's generated
+// code has no feature assertion, so the ABI intersection is zero and the
+// output omits the property. Unknown or mandatory properties cannot be dropped.
+BUSTER_GLOBAL_LOCAL ObjectError object_read_elf_optional_property(ByteSlice bytes, u64 offset, u64 size, u64 flags, u64 alignment, CpuArch architecture)
+{
+    ObjectError result = OBJECT_ERROR_INVALID_INPUT;
+    if (offset <= bytes.length && size <= bytes.length - offset)
+    {
+        result = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        if (size == 32 && flags == 2 && alignment == 8)
+        {
+            u32 name_size = 0;
+            u32 descriptor_size = 0;
+            u32 note_type = 0;
+            u32 property_type = 0;
+            u32 property_size = 0;
+            u32 feature_bits = 0;
+            bool read = object_read_u32(bytes, offset, &name_size) && object_read_u32(bytes, offset + 4, &descriptor_size) &&
+                        object_read_u32(bytes, offset + 8, &note_type) && object_read_u32(bytes, offset + 16, &property_type) &&
+                        object_read_u32(bytes, offset + 20, &property_size) && object_read_u32(bytes, offset + 24, &feature_bits);
+            if (read && name_size == 4 && descriptor_size == 16 && note_type == 5 && property_size == 4 &&
+                memcmp(bytes.pointer + offset + 12, "GNU\0", 4) == 0)
+            {
+                u32 supported_type = architecture == CPU_ARCH_X86_64 ? 0xc0000002u : 0xc0000000u;
+                u32 supported_bits = architecture == CPU_ARCH_X86_64 ? 3u : 7u;
+                if (property_type == supported_type && !(feature_bits & ~supported_bits))
+                {
+                    result = OBJECT_ERROR_NONE;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, Target target)
 {
     bool read_ok = true;
@@ -5065,6 +5100,20 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     read_ok = false;
                 }
+            }
+            if (read_ok && section_type == 7 && (flags & 2) && string_equal(name, S8(".note.gnu.property")))
+            {
+                ObjectError property_error = object_read_elf_optional_property(bytes, offset, size, flags, alignment, target.cpu_arch);
+                if (property_error == OBJECT_ERROR_NONE)
+                {
+                    continue;
+                }
+                result.error = property_error;
+                if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                {
+                    result.diagnostic = string_format(arena, S8("unsupported ELF section {S8} (type {u32})"), name, section_type);
+                }
+                read_ok = false;
             }
             bool unwind = false;
             if (read_ok)

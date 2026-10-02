@@ -1303,6 +1303,20 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_elf_semantic_input(Arena* arena, Strin
     return bytes;
 }
 
+BUSTER_GLOBAL_LOCAL ByteSlice object_test_elf_optional_property_input(Arena* arena, CpuArch architecture, u32 features)
+{
+    ByteSlice bytes = object_test_elf_semantic_input(arena, S8(".note.gnu.property"), 7, 2, 1, 1, false, architecture);
+    object_test_write_u64(bytes, 256 + 64 + 32, 32);
+    object_test_write_u32(bytes, 64, 4);
+    object_test_write_u32(bytes, 68, 16);
+    object_test_write_u32(bytes, 72, 5);
+    memcpy(bytes.pointer + 76, "GNU\0", 4);
+    object_test_write_u32(bytes, 80, architecture == CPU_ARCH_X86_64 ? 0xc0000002u : 0xc0000000u);
+    object_test_write_u32(bytes, 84, 4);
+    object_test_write_u32(bytes, 88, features);
+    return bytes;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_semantic_refusals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1332,9 +1346,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_semantic_refusals(UnitTestArg
             ObjectFile read = object_read(temporary.arena, bytes, target);
             BUSTER_TEST(arguments, read.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
             BUSTER_STRING_TEST(arguments, read.diagnostic, string_format(temporary.arena, S8("unsupported ELF section .vendor (type {u32})"), unsupported_types[index]));
-            object_test_write_u64(bytes, 256 + 64 + 8, 0);
-            read = object_read(temporary.arena, bytes, target);
-            BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.symbol_count == 0);
+            // Symbol/relocation tables still need valid table structure when
+            // unallocated; this arbitrary payload is only a metadata control.
+            if (unsupported_types[index] != 2 && unsupported_types[index] != 4 && unsupported_types[index] != 9)
+            {
+                object_test_write_u64(bytes, 256 + 64 + 8, 0);
+                read = object_read(temporary.arena, bytes, target);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.symbol_count == 0);
+            }
         }
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(exception_names); index += 1)
         {
@@ -1380,6 +1399,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_semantic_refusals(UnitTestArg
                 bytes.pointer[96 + 24 + 4] = 4;
                 read = object_read(temporary.arena, bytes, target);
                 BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.symbol_count == 0);
+            }
+        }
+        // Known optional AND feature combinations are safe to omit because
+        // generated code has no matching assertion. Unknown/mandatory records
+        // and malformed bounds retain attributable refusal.
+        u32 known_features = target.cpu_arch == CPU_ARCH_X86_64 ? 3u : 7u;
+        for (u32 features = 0; features <= known_features; features += 1)
+        {
+            ByteSlice bytes = object_test_elf_optional_property_input(temporary.arena, target.cpu_arch, features);
+            object_test_write_u32(bytes, 92, 0xa5a5a5a5u); // Note padding has no semantic meaning.
+            ObjectFile read = object_read(temporary.arena, bytes, target);
+            BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.symbol_count == 0);
+        }
+        typedef struct PropertyMutation PropertyMutation;
+        struct PropertyMutation
+        {
+            String8 name;
+            u64 offset;
+            u64 value;
+            bool wide;
+            ObjectError error;
+        };
+        PropertyMutation property_mutations[] = {
+            {S8("owner-size"), 64, 3, false, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("descriptor-size"), 68, 12, false, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("note-type"), 72, 4, false, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("owner-name"), 76, 0, false, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("property-size"), 84, 8, false, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("wrong-architecture"), 80, target.cpu_arch == CPU_ARCH_X86_64 ? 0xc0000000u : 0xc0000002u, false, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("required-isa"), 80, 0xc0008002u, false, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("unknown-feature"), 88, 8, false, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("flags"), 256 + 64 + 8, 3, true, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("alignment"), 256 + 64 + 48, 4, true, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("truncated-note"), 256 + 64 + 32, 31, true, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("additional-record"), 256 + 64 + 32, 48, true, OBJECT_ERROR_UNSUPPORTED_TARGET},
+            {S8("payload-overrun"), 256 + 64 + 24, 576 - 31, true, OBJECT_ERROR_INVALID_INPUT},
+            {S8("offset-overflow"), 256 + 64 + 24, UINT64_MAX, true, OBJECT_ERROR_INVALID_INPUT},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(property_mutations); index += 1)
+        {
+            PropertyMutation mutation = property_mutations[index];
+            ByteSlice bytes = object_test_elf_optional_property_input(temporary.arena, target.cpu_arch, known_features);
+            if (mutation.wide)
+            {
+                object_test_write_u64(bytes, mutation.offset, mutation.value);
+            }
+            else
+            {
+                object_test_write_u32(bytes, mutation.offset, (u32)mutation.value);
+            }
+            ObjectFile read = object_read(temporary.arena, bytes, target);
+            BUSTER_TEST(arguments, read.error == mutation.error);
+            BUSTER_STRING_TEST(arguments, read.diagnostic, S8("unsupported ELF section .note.gnu.property (type 7)"));
+            if (read.error != mutation.error)
+            {
+                arguments->show(arguments, S8("GNU property mutation {S8}, architecture {u32}: error {u32}, expected {u32}\n"),
+                                mutation.name, (u32)target.cpu_arch, (u32)read.error, (u32)mutation.error);
             }
         }
         // Unallocated unknown debug/vendor metadata keeps the old skip policy,
