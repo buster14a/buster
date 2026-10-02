@@ -4857,6 +4857,130 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_member_search(UnitTestArgumen
 
 // Frozen acceptance covers the same source through semantics-only and both
 // canonical lowering forms, including valid neighboring declarations.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_WASM32, .os = OPERATING_SYSTEM_FREESTANDING},
+        {.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING},
+    };
+    String8 rejected[] = {
+        S8("int keep = 7;\nint big[18446744073709551615ULL];"),
+        S8("int keep = 7;\nint big[2305843009213693951ULL];"),
+        S8("int keep = 7;\nstruct S { int v[4611686018427387904ULL]; };"),
+        S8("int keep = 7;\nint f(void) { char local[18446744073709551615ULL]; return local[0]; }"),
+        S8("int keep = 7;\ntypedef char Grid[4294967296ULL][4294967296ULL];"),
+        S8("int keep = 7;\nvoid f(int a[2305843009213693952ULL]);"),
+        S8("int keep = 7;\nint (*pointer)[2305843009213693952ULL];"),
+        S8("int keep = 7;\ntypedef int Big[2305843009213693952ULL];"),
+    };
+    String8 wide_rejected[] = {
+        S8("int keep = 7;\nchar big[(unsigned __int128)0xffffffffffffffffULL + 1];"),
+        S8("int keep = 7;\ntypedef unsigned __int128 U; char big[(U)0xffffffffffffffffULL + 1];"),
+        S8("int keep = 7;\nchar big[((unsigned __int128)1 << 64) + 1];"),
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        TargetDataLayout layout = target_data_layout(target);
+        for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                u32 wide_count = layout.has_128_bit_integer ? (u32)BUSTER_ARRAY_LENGTH(wide_rejected) : 0;
+                u32 rejected_count = (u32)BUSTER_ARRAY_LENGTH(rejected) + wide_count;
+                for (u32 case_index = 0; case_index < rejected_count; case_index += 1)
+                {
+                    TemporalArena temporary = scratch_begin(0, 0);
+                    String8 source = case_index < BUSTER_ARRAY_LENGTH(rejected) ? rejected[case_index]
+                        : wide_rejected[case_index - BUSTER_ARRAY_LENGTH(rejected)];
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                        (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = dialects[dialect_index]});
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, source);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("oversized-array.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, semantic.analysis_complete && semantic.diagnostic_count != 0, source);
+                    BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, source);
+                    bool source_diagnostic = false;
+                    for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                    {
+                        CDiagnostic diagnostic = semantic.diagnostics[index];
+                        source_diagnostic |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 2 &&
+                            string_first_sequence(diagnostic.message, S8("array is too large")) != BUSTER_STRING_NO_MATCH;
+                    }
+                    BUSTER_TEST_RAW(arguments, source_diagnostic, source);
+                    // Plain storage/typedef cases are safe through the older
+                    // model-building API too: no giant backing bytes are made.
+                    if (case_index < 3 || case_index == 4 || case_index >= BUSTER_ARRAY_LENGTH(rejected))
+                    {
+                        CAnalysisResult model = c_analyze_semantics(temporary.arena, tokens, syntax);
+                        CIRLowerResult direct = c_lower_to_ir_with_options(temporary.arena, S8("oversized-array.c"), tokens, model, target,
+                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        bool direct_diagnostic = false;
+                        for (u32 index = 0; index < direct.diagnostic_count; index += 1)
+                        {
+                            CDiagnostic diagnostic = direct.diagnostics[index];
+                            direct_diagnostic |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 2 &&
+                                string_first_sequence(diagnostic.message, S8("array is too large")) != BUSTER_STRING_NO_MATCH;
+                        }
+                        BUSTER_TEST_RAW(arguments, direct_diagnostic && !direct.canonical_ir_certified, source);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            // Literal limits come from the independent Clang policy. These
+            // types allocate no backing object; only the scalar sizeof result
+            // and a pointer are globals, even at the admitted boundary.
+            String8 maximum = target.cpu_arch == CPU_ARCH_WASM32 ? S8("4294967295ULL") : S8("2305843009213693951ULL");
+            String8 source = string_format(temporary.arena,
+                S8("typedef char Boundary[{S8}]; Boundary *pointer; unsigned long long measured = sizeof(Boundary);"
+                   " typedef char Narrow[(unsigned char)0xffffffffffffffffULL]; Narrow *narrow;"
+                   " typedef int Zero[0]; Zero *zero; void prototype(int a[*]);"
+                   " struct Flex { int head; char tail[]; };"
+                   " int runtime(int n) { char a[n]; return sizeof(a) != (unsigned)n; }"), maximum);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("array-size-boundary.c"), tokens, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && semantic.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0 && lowered.canonical_ir_certified && lowered.program != 0, source);
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                bool measured = false;
+                for (u32 index = 0; index < lowered.program->modules[0].global_count; index += 1)
+                {
+                    IrGlobal global = lowered.program->modules[0].globals[index];
+                    IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global.symbol);
+                    if (symbol && string_equal(symbol->name, S8("measured")))
+                    {
+                        measured = true;
+                        BUSTER_TEST(arguments, global.initializer_bits == (target.cpu_arch == CPU_ARCH_WASM32 ? UINT32_MAX : 2305843009213693951ULL));
+                    }
+                }
+                BUSTER_TEST(arguments, measured);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -32014,6 +32138,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_array_object_size_limits);
     BUSTER_TEST_FIXTURE(arguments, c_test_declaration_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
     BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
