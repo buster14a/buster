@@ -69,7 +69,7 @@ class QualificationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def run_fixture(self, variant="combined-overlap", reuse=False):
+    def run_fixture(self, variant="combined-overlap", reuse=False, cohort_name=qualification.LEGACY_COHORT):
         names = list(github.combination_jobs("split" if variant == "split-overlap" else "combined"))
         if reuse:
             names.append(github.MAIN_REUSE_JOB)
@@ -78,7 +78,8 @@ class QualificationTests(unittest.TestCase):
         jobs = [dict(id=i + 1, name=name, status="completed", conclusion="success", run_attempt=1, labels=["synthetic"],
                      created_at=stamp(1), started_at=stamp(10), completed_at=stamp(110), steps=[])
                 for i, name in enumerate(names)]
-        return dict(id=123, path=".github/workflows/ci.yml", event="workflow_dispatch", head_branch="codex/ci-checks-" + variant,
+        prefix = "codex/2120-evidence-v2-" if cohort_name == qualification.PROSPECTIVE_COHORT else "codex/ci-checks-"
+        return dict(id=123, path=".github/workflows/ci.yml", event="workflow_dispatch", head_branch=prefix + variant,
                     status="completed", conclusion="success", run_attempt=1, head_sha="a" * 40, workflow_blob_sha="b" * 40,
                     created_at=stamp(0), jobs=jobs)
 
@@ -179,6 +180,39 @@ class QualificationTests(unittest.TestCase):
     def test_native_success_requirements_are_not_replaced_by_timestamps(self):
         with self.assertRaisesRegex(ValueError, "ineligible GitHub attempt"):
             qualification.timing(self.run_fixture(), "combined-overlap")
+
+    def test_named_cohorts_accept_only_their_exact_dispatch_variant_refs(self):
+        for cohort_name in qualification.COHORT_BRANCHES:
+            for variant in qualification.VARIANTS:
+                run = self.run_fixture(variant, cohort_name=cohort_name)
+                with self.subTest(cohort=cohort_name, variant=variant), mock.patch.object(github, "measure", return_value=(self.measured(), None)):
+                    measured = qualification.timing(run, variant, cohort_name)
+                    self.assertEqual(measured["job_count"], 27 if variant == "split-overlap" else 21)
+                branches = {branch for mapping in qualification.COHORT_BRANCHES.values() for branch in mapping.values()}
+                branches.discard(run["head_branch"])
+                branches.update(("main", run["head_branch"] + "-extra", "prefix/" + run["head_branch"], None))
+                for branch in branches:
+                    with self.subTest(cohort=cohort_name, variant=variant, branch=branch), self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+                        qualification.timing(dict(run, head_branch=branch), variant, cohort_name)
+                for event in (None, "push", "pull_request", "merge_group", "schedule"):
+                    with self.subTest(cohort=cohort_name, variant=variant, event=event), self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+                        qualification.timing(dict(run, event=event), variant, cohort_name)
+                if cohort_name == qualification.PROSPECTIVE_COHORT:
+                    with self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+                        qualification.timing(run, variant)
+        with self.assertRaisesRegex(ValueError, "unknown qualification cohort"):
+            qualification.timing(self.run_fixture(), "combined-overlap", "unknown")
+
+    def test_sample_propagates_cohort_before_loading_native_evidence(self):
+        run = self.run_fixture(cohort_name=qualification.PROSPECTIVE_COHORT)
+        item = dict(variant="combined-overlap", run=reference(self.root, "run.json", run))
+        with mock.patch.object(github, "measure", return_value=(self.measured(), None)), mock.patch.object(qualification, "conditions", side_effect=ValueError("native evidence marker")) as joined:
+            with self.assertRaisesRegex(ValueError, "native evidence marker"):
+                qualification.sample(self.root, dict(item, conditions={}), qualification.PROSPECTIVE_COHORT)
+            self.assertEqual(joined.call_count, 1)
+        with mock.patch.object(qualification, "conditions") as joined, self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+            qualification.sample(self.root, item)
+        joined.assert_not_called()
 
     def test_missing_unknown_and_unmatched_conditions_fail(self):
         run = self.run_fixture("split-overlap")
@@ -352,14 +386,106 @@ class QualificationTests(unittest.TestCase):
                     conditions={"same": True}, platforms={"same": True}, timing=dict(elapsed_seconds=wall, runner_seconds=105 if variant != "combined-overlap" else 100,
                     job_seconds={"Windows x86-64 checks": windows}, initial_queue_seconds=5, job_queue_seconds={}))
 
-    def campaign(self):
+    def campaign(self, cohort=None):
         path = self.root / "campaign.json"
         samples = [dict(variant=variant, synthetic_id=i + 1) for i, variant in enumerate(qualification.VARIANTS * 3)]
-        reference(self.root, path.name, dict(schema=qualification.SCHEMA, repository="buster14a/buster", samples=samples))
+        value = dict(schema=qualification.SCHEMA, repository="buster14a/buster", samples=samples)
+        if cohort is not None:
+            value["cohort"] = cohort
+        reference(self.root, path.name, value)
         return path
 
+    def prospective_cohort(self):
+        return dict(name=qualification.PROSPECTIVE_COHORT, head_sha="a" * 40, workflow_blob_sha="b" * 40)
+
+    def test_prospective_cohort_pins_are_retained_without_accepting_resources(self):
+        declaration = self.prospective_cohort()
+        def collect(root, item, cohort_name):
+            self.assertEqual(cohort_name, qualification.PROSPECTIVE_COHORT)
+            return self.observation(item["variant"], item["synthetic_id"])
+        with mock.patch.object(qualification, "sample", side_effect=collect) as collected:
+            report = qualification.qualify(self.campaign(declaration))
+        self.assertEqual(collected.call_count, 9)
+        self.assertEqual(report["cohort"], declaration)
+        self.assertEqual(report["head_sha"], declaration["head_sha"])
+        self.assertEqual(report["workflow_blob_sha"], declaration["workflow_blob_sha"])
+        self.assertEqual(report["timing_status"], "accepted")
+        self.assertEqual(report["status"], "pending")
+        self.assertFalse(report["performance_accepted"])
+        self.assertEqual(report["resource_review"], "pending")
+        self.assertEqual(report["issues"]["2119"]["maximum_time_ratio"], .90)
+        self.assertEqual(report["issues"]["2120"]["maximum_time_ratio"], .85)
+        self.assertTrue(all(issue["maximum_runner_seconds_ratio"] == 1.05 for issue in report["issues"].values()))
+
+    def test_malformed_cohort_declarations_refuse_before_loading_samples(self):
+        valid = self.prospective_cohort()
+        invalid = [None, [], "issue2120-evidence-v2", {}, dict(valid, name="unknown"), dict(valid, name=False),
+                   dict(valid, branches={}), {key: value for key, value in valid.items() if key != "name"}]
+        for key in ("head_sha", "workflow_blob_sha"):
+            invalid.append({field: value for field, value in valid.items() if field != key})
+            invalid.extend(dict(valid, **{key: value}) for value in (None, False, True, int("1" * 40), "a" * 39, "a" * 41,
+                                                                        "A" * 40, "g" * 40, "a" * 40 + "\n", []))
+        for declaration in invalid:
+            path = self.campaign()
+            value = json.loads(path.read_text())
+            value["cohort"] = declaration
+            reference(self.root, path.name, value)
+            with self.subTest(declaration=declaration), mock.patch.object(qualification, "sample") as collected:
+                report = qualification.qualify(path)
+            collected.assert_not_called()
+            self.assertEqual(report["status"], "pending")
+            self.assertFalse(report["performance_accepted"])
+            self.assertTrue(report["errors"])
+
+    def test_every_prospective_sample_must_match_both_declared_pins(self):
+        for key in ("head_sha", "workflow_blob_sha"):
+            for changed in range(1, 10):
+                def collect(root, item, cohort_name):
+                    result = self.observation(item["variant"], item["synthetic_id"])
+                    if item["synthetic_id"] == changed:
+                        result[key] = "c" * 40
+                    return result
+                with self.subTest(key=key, changed=changed), mock.patch.object(qualification, "sample", side_effect=collect):
+                    report = qualification.qualify(self.campaign(self.prospective_cohort()))
+                self.assertEqual(report["status"], "pending")
+                self.assertFalse(report["performance_accepted"])
+                self.assertIn("sample differs from declared cohort: " + key, report["errors"])
+
+    def test_mutually_equal_samples_cannot_redefine_declared_source_or_workflow(self):
+        for key in ("head_sha", "workflow_blob_sha"):
+            def collect(root, item, cohort_name):
+                result = self.observation(item["variant"], item["synthetic_id"])
+                result[key] = "c" * 40
+                return result
+            with self.subTest(key=key), mock.patch.object(qualification, "sample", side_effect=collect):
+                report = qualification.qualify(self.campaign(self.prospective_cohort()))
+            self.assertEqual(report["status"], "pending")
+            self.assertFalse(report["performance_accepted"])
+            self.assertIn("sample differs from declared cohort: " + key, report["errors"])
+
+    def test_declared_cohort_keeps_nine_distinct_samples_and_exact_comparability(self):
+        for mutation in ("missing", "duplicate-run", "conditions", "platforms"):
+            def collect(root, item, cohort_name):
+                result = self.observation(item["variant"], item["synthetic_id"])
+                if item["synthetic_id"] == 9:
+                    if mutation == "duplicate-run":
+                        result["run_id"] = 1
+                    elif mutation in ("conditions", "platforms"):
+                        result[mutation] = {"changed": True}
+                return result
+            path = self.campaign(self.prospective_cohort())
+            if mutation == "missing":
+                value = json.loads(path.read_text())
+                value["samples"].pop()
+                reference(self.root, path.name, value)
+            with self.subTest(mutation=mutation), mock.patch.object(qualification, "sample", side_effect=collect):
+                report = qualification.qualify(path)
+            self.assertEqual(report["status"], "pending")
+            self.assertFalse(report["performance_accepted"])
+            self.assertTrue(report["errors"])
+
     def test_contract_boundaries_and_runner_growth_are_enforced(self):
-        def collect(root, item):
+        def collect(root, item, cohort_name=qualification.LEGACY_COHORT):
             return self.observation(item["variant"], item["synthetic_id"])
         with mock.patch.object(qualification, "sample", side_effect=collect):
             report = qualification.qualify(self.campaign())
@@ -372,7 +498,7 @@ class QualificationTests(unittest.TestCase):
         self.assertTrue(all(issue["status"] == "pending" for issue in report["issues"].values()))
         self.assertEqual(report["issues"]["2119"]["time_ratio"], .90)
         self.assertEqual(report["issues"]["2120"]["time_ratio"], .85)
-        def costly(root, item):
+        def costly(root, item, cohort_name=qualification.LEGACY_COHORT):
             result = collect(root, item)
             if result["variant"] == "split-overlap":
                 result["timing"]["runner_seconds"] = 105.1
@@ -387,7 +513,7 @@ class QualificationTests(unittest.TestCase):
 
     def test_changed_census_source_images_and_repeated_runs_stay_pending(self):
         for key in ("head_sha", "workflow_blob_sha", "conditions", "platforms", "run_id"):
-            def collect(root, item):
+            def collect(root, item, cohort_name=qualification.LEGACY_COHORT):
                 result = self.observation(item["variant"], item["synthetic_id"])
                 if item["synthetic_id"] == 9:
                     result[key] = 1 if key == "run_id" else "changed"
@@ -600,7 +726,7 @@ class QualificationTests(unittest.TestCase):
         desktop = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
         self.assertTrue(all(row["native_host_profile"] == HOST_PROFILE for row in desktop["census"].values()))
         for changed in ("native_host_profile", "modules"):
-            def collect(root, sample):
+            def collect(root, sample, cohort_name=qualification.LEGACY_COHORT):
                 result = self.observation(sample["variant"], sample["synthetic_id"])
                 result["platforms"] = copy.deepcopy(desktop)
                 if sample["synthetic_id"] == 9:

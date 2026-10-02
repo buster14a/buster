@@ -60,6 +60,7 @@ COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + (
 SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
 SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "Windows x86-64")
 SPLIT_QUALIFICATION_BRANCH = "codex/ci-checks-split-overlap"
+SPLIT_QUALIFICATION_BRANCHES = (SPLIT_QUALIFICATION_BRANCH, "codex/2120-evidence-v2-split-overlap")
 SPLIT_COMBINATION_PLATFORMS = tuple(
     f"{platform} {shard}" for platform in PLATFORMS
     for shard in (("release",) + SPLIT_CHECK_SHARDS
@@ -637,7 +638,7 @@ def require_jobs(args):
     expected_names = combination_jobs(checks_layout)
     if checks_layout == "split" and run.get("event") != "workflow_dispatch":
         raise ValueError("The split checks layout requires a workflow_dispatch run")
-    if checks_layout == "split" and run.get("head_branch") != SPLIT_QUALIFICATION_BRANCH:
+    if checks_layout == "split" and run.get("head_branch") not in SPLIT_QUALIFICATION_BRANCHES:
         raise ValueError("The split checks layout requires the exact qualification branch")
     draft = draft_pull_request_run(run, head_sha, getattr(args, "event_name", None),
                                    getattr(args, "event_path", None))
