@@ -249,7 +249,8 @@ class ParserTests(unittest.TestCase):
     def test_fault_script(self):
         mmaps, faults = lab.parse_fault_script(FAULT_SCRIPT)
         self.assertEqual(len(mmaps), 2)
-        self.assertEqual(mmaps[1][2:], ("//anon", "rw-p"))
+        self.assertEqual(mmaps[1][3:], ("//anon", "rw-p"))
+        self.assertEqual(mmaps[1][0], 1919.424616)
         self.assertEqual(len(faults), 4)
         self.assertEqual(faults[1][1:], (0x7ef8b9600010, 0x5581eae13000, "c_ir_append_instruction"))
         self.assertEqual(faults[2][1], 0x7ef8b9601000)
@@ -665,15 +666,18 @@ class FindingTests(Fakes, unittest.TestCase):
         self.assertEqual(lab.metric_text(0.4, 1), "0.4 (rounded to 0.1)")
         value, formula = lab.recompute_metric(rows[0], lab.stat_values(rows), None)
         self.assertAlmostEqual(value, 73900351 / 4120569627)
-        value, formula = lab.recompute_metric(rows[2], lab.stat_values(rows), (22287659913, "instructions:u (timed median)"))
-        self.assertAlmostEqual(value, 0.025224, places=5)
+        # A group run cannot assign events to metrics: no partial recompute.
+        self.assertIsNone(lab.recompute_metric(rows[2], lab.stat_values(rows), (22287659913, "instructions:u (timed median)")))
+        # A bad_speculation-style metric with "mispredict" in its name is not the branch rate.
+        self.assertIsNone(lab.recompute_metric(dict(rows[0], metric_unit="ops", metric_name="bad_speculation_from_mispredicts"),
+                                               lab.stat_values(rows), None))
         directory = self.timed_dir()
         write_files(directory, {"topdown/groups.json": json.dumps([{"group": "branch_prediction", "exit": 0}]),
                                 "topdown/branch_prediction.csv": BRANCH_CSV})
         problems = []
         text = "\n".join(lab.render_topdown(directory, [], problems))
         self.assertIn("| branch_misprediction_rate | < 0.05 (perf printed 0.0; rounded to 0.1) per_branch | 0.01793 (1.79%) = ex_ret_brn_misp / ex_ret_brn |", text)
-        self.assertIn("| l1_dtlb_misses_pti | < 0.05 (perf printed 0.0; rounded to 0.1) per_1k_instr | 0.02522 = ls_l1_d_tlb_miss.all:u / instructions:u (timed median) x 1000 |", text)
+        self.assertIn("| l1_dtlb_misses_pti | < 0.05 (perf printed 0.0; rounded to 0.1) per_1k_instr | - |", text)
         self.assertIn("branch misprediction rate 1.79% (ex_ret_brn_misp / ex_ret_brn), branch MPKI 3.316", text)
         self.assertNotIn("0.000 ", text)
 
@@ -715,6 +719,56 @@ class FindingTests(Fakes, unittest.TestCase):
     def test_unresolved_address_named_by_dso(self):
         text = "# Samples: 9 of event 'page-faults:u'\n    12.00%  ide  [.] 0x000000000018f5ce\n     3.00%  libc.so.6  [.] memset\n"
         self.assertEqual([entry[2] for entry in lab.report_entries(text)], ["ide 0x18f5ce", "memset"])
+
+
+
+# LAB2 review: a metric measured alone is the sum of its non-instruction
+# events, whichever event perf printed the metric beside (raw perf 7.2.4).
+SPLIT_ITLB_JSON = "\n".join(json.dumps(record) for record in [
+    {"counter-value": "4896.000000", "unit": "", "event": "bp_l1_tlb_miss_l2_tlb_miss.all:u", "event-runtime": 1512561037,
+     "pcnt-running": 100.00, "metric-value": "1.017065", "metric-unit": "per_1k_instr  l1_itlb_misses_pti"},
+    {"counter-value": "22287208434.000000", "unit": "", "event": "instructions:u", "event-runtime": 1512561037, "pcnt-running": 100.00},
+    {"counter-value": "22662652.000000", "unit": "", "event": "bp_l1_tlb_miss_l2_tlb_hit:u", "event-runtime": 1512561037, "pcnt-running": 100.00}])
+SPLIT_CCX_JSON = "\n".join(json.dumps(record) for record in [
+    {"counter-value": "22287208493.000000", "unit": "", "event": "instructions:u", "event-runtime": 1512561037, "pcnt-running": 100.00,
+     "metric-value": "0.548865", "metric-unit": "per_1k_instr  l1_demand_data_cache_fills_from_same_ccx_pti"},
+    {"counter-value": "12232670.000000", "unit": "", "event": "ls_dmnd_fills_from_sys.local_ccx:u", "event-runtime": 1512561037, "pcnt-running": 100.00}])
+# LAB1/LAB2 review: an address reused by later file mappings.
+REUSED_FAULT_SCRIPT = """ 100.000000: PERF_RECORD_MMAP2 1/1: [0x7f0000000000(0x8000) @ 0 fe:00 1 1]: r--p /repo/src/base.h
+ 100.001000:     7f0000000010 [unknown]     5581eae13000 c_lex_dispatch
+ 100.002000: PERF_RECORD_MMAP2 1/1: [0x7f0000000000(0x8000) @ 0 fe:00 2 2]: r--p /repo/src/driver_diagnostic.c
+ 100.003000:     7f0000000020 [unknown]     5581eae13000 c_lex_dispatch
+ 101.000000: PERF_RECORD_MMAP2 1/1: [0x7f0000000000(0x136000) @ 0 fe:00 3 3]: r--p /usr/lib/libm.so.6
+ 101.001000:     7f0000000030 [unknown]     5581eae13000 link_step
+"""
+
+
+class Lab2ReviewTests(unittest.TestCase):
+    def recompute(self, text):
+        rows = lab.parse_stat_json(text)
+        metric = [row for row in lab.metric_rows(rows)][0]
+        values = lab.stat_values(rows)
+        return lab.recompute_metric(metric, values, lab.instruction_count(values), alone=True)
+
+    def test_split_metric_sums_every_non_instruction_event(self):
+        value, formula = self.recompute(SPLIT_ITLB_JSON)
+        self.assertAlmostEqual(value, (4896 + 22662652) / 22287208434 * 1000, places=6)
+        self.assertAlmostEqual(value, 1.0171, places=4)
+        self.assertIn("bp_l1_tlb_miss_l2_tlb_hit + bp_l1_tlb_miss_l2_tlb_miss.all", formula)
+
+    def test_metric_printed_beside_instructions(self):
+        value, formula = self.recompute(SPLIT_CCX_JSON)
+        self.assertAlmostEqual(value, 0.548865, places=5)
+        self.assertNotIn("instructions /", formula)
+
+    def test_fault_resolves_against_mapping_live_at_fault_time(self):
+        mmaps, faults = lab.parse_fault_script(REUSED_FAULT_SCRIPT)
+        self.assertEqual([lab.classify_address(f[1], mmaps, f[0]) for f in faults],
+                         [lab.TRANSIENT_FILES, lab.TRANSIENT_FILES, lab.classify_address(faults[2][1], mmaps)])
+        self.assertTrue(lab.classify_address(faults[2][1], mmaps, faults[2][0]).startswith("/usr/lib/libm.so.6"))
+        summary = lab.fault_summary(REUSED_FAULT_SCRIPT, buckets=2)
+        self.assertEqual(dict(summary["regions"])[lab.TRANSIENT_FILES], 2)
+        self.assertNotIn("driver_diagnostic", " ".join(label for label, _ in summary["regions"]))
 
 
 if __name__ == "__main__":

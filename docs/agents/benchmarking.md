@@ -91,8 +91,13 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   - `perf stat -x,` prints metrics with display precision (often one decimal).
     The lab uses `-j` (six decimals) with `-x,` as a fallback, marks rounded
     values ("rounded to 0.1", a printed 0.0 as "< 0.05"), and recomputes the
-    branch misprediction rate, branch MPKI and per-1k-instruction metrics from
-    the raw counts (with the timed median instructions when the group has none).
+    branch misprediction rate and branch MPKI from the named event pair. A
+    per-1k-instruction metric is recomputed only from a run that measured it
+    alone, as the sum of its non-instruction events: perf attaches the metric
+    to whichever event prints first, and many Zen 5 metrics sum several events.
+  - Page-fault regions are resolved against the mapping live at fault time;
+    perf records no munmap, so a file mapping later replaced at the same
+    address is grouped as a transient file mapping (preprocessor sources).
   - A multiplexed group (counters running less than 100% of the time) is
     re-measured one `-M <metric>` per run; the non-multiplexed values lead and
     the group value is a flagged fallback.

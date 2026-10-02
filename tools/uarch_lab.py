@@ -345,16 +345,28 @@ def instruction_count(values, fallback=None):
     return fallback
 
 
-def recompute_metric(row, values, instructions):
+def recompute_metric(row, values, instructions, alone=False):
     """(value, formula) for a metric the raw counts of the same output
-    determine, else None.  instructions is instruction_count's result."""
-    name, unit = row["metric_name"].lower(), row["metric_unit"]
-    if unit == "per_branch" or "mispredict" in name:
+    determine, else None.  instructions is instruction_count's result.
+
+    perf attaches `metric-value` to whichever event prints first, and many
+    Zen 5 metrics sum several events, so the event on the metric's line is
+    not its numerator.  A per-1k-instruction metric is recomputed only from
+    a run that measured that metric alone (alone=True), where every
+    non-instruction event belongs to it; a group run cannot assign events
+    to metrics without the metric expression and yields None.  A per-branch
+    rate is the named mispredict/branch pair, which is exact either way."""
+    unit = row["metric_unit"]
+    if unit == "per_branch":
         pair = branch_pair(values)
         if pair:
             return pair[0] / pair[1], "%s / %s" % (pair[2], pair[3])
-    if unit == "per_1k_instr" and row["event"] and row["value"] is not None and instructions and instructions[0]:
-        return row["value"] * 1000.0 / instructions[0], "%s / %s x 1000" % (row["event"], instructions[1])
+    if unit == "per_1k_instr" and alone and instructions and instructions[0]:
+        events = sorted(event for event, value in values.items()
+                        if value is not None and event not in INSTRUCTION_EVENTS and event != "duration_time")
+        if events:
+            total = sum(values[event] for event in events)
+            return total * 1000.0 / instructions[0], "(%s) / %s x 1000" % (" + ".join(events), instructions[1])
     return None
 
 
@@ -533,25 +545,28 @@ def parse_annotate(text, limit=10):
     return rows[:limit]
 
 
-MMAP_LINE = re.compile(r"PERF_RECORD_MMAP2? \d+/\d+: \[(0x[0-9a-f]+)\((0x[0-9a-f]+)\) @ [^\]]*\]: "
+MMAP_LINE = re.compile(r"(?:(\d+\.\d+):\s+)?PERF_RECORD_MMAP2? \d+/\d+: \[(0x[0-9a-f]+)\((0x[0-9a-f]+)\) @ [^\]]*\]: "
                        r"(?:([rwxps-]{4}) )?(.*\S)\s*$")
 # `time: addr [addr-symbol] ip symbol`; perf prints the data address's own
 # symbol when it resolves one, so that column is optional.
 FAULT_LINE = re.compile(r"^\s*(?:\S+\s+\d+\s+(?:\[\d+\]\s+)?)?(\d+\.\d+):\s+(?:\S+:\s+)?"
                         r"([0-9a-f]+)\s+(?:\S+\s+)??([0-9a-f]+)\s*(.*)$")
+TRANSIENT_FILES = "transient file mappings (mapped, then replaced at the same address; e.g. sources/headers the preprocessor reads)"
 
 
 def parse_fault_script(text):
     """`perf script -F time,addr,ip,sym --show-mmap-events` -> (mmaps, faults).
 
-    mmaps: [(start, end, name, protection)]; faults: [(time, addr, ip, sym)]."""
+    mmaps: [(time, start, end, name, protection)] in record order (time None
+    when perf printed none); faults: [(time, addr, ip, sym)]."""
     mmaps, faults = [], []
     for line in text.splitlines():
         if "PERF_RECORD_" in line:
             match = MMAP_LINE.search(line)
             if match:
-                start, length = int(match.group(1), 16), int(match.group(2), 16)
-                mmaps.append((start, start + length, match.group(4), match.group(3) or ""))
+                start, length = int(match.group(2), 16), int(match.group(3), 16)
+                moment = float(match.group(1)) if match.group(1) else None
+                mmaps.append((moment, start, start + length, match.group(5), match.group(4) or ""))
             continue
         match = FAULT_LINE.match(line)
         if match:
@@ -560,14 +575,32 @@ def parse_fault_script(text):
     return mmaps, faults
 
 
-def classify_address(address, mmaps):
-    """Region label for a faulting data address; later mappings win."""
-    for start, end, name, protection in reversed(mmaps):
-        if start <= address < end:
-            size = (end - start) / 1048576
-            label = "anon" if name.startswith("//anon") or not name else name
-            return "%s %s @0x%x (%.1f MiB)" % (label, protection, start, size)
-    return "not an mmap seen by perf (brk heap/stack/pre-exec) @%#x GiB-region" % (address >> 30 << 30)
+def classify_address(address, mmaps, moment=None):
+    """Region label for a faulting data address at time `moment`.
+
+    perf records mmaps but not munmaps, and the compiler maps hundreds of
+    sources and headers at the same few addresses, so the mapping that held
+    an address at fault time is the latest one covering it that started at
+    or before the fault; a later mapping at the same address implies the
+    earlier one ended.  A file mapping superseded that way is reported as
+    one transient-file region instead of under whichever file came last.
+    Without a moment the last covering mapping wins (old behaviour)."""
+    chosen = None
+    for index in range(len(mmaps) - 1, -1, -1):
+        when, start, end, name, protection = mmaps[index]
+        if start <= address < end and (moment is None or when is None or when <= moment):
+            chosen = index
+            break
+    if chosen is None:
+        return "not an mmap seen by perf (brk heap/stack/pre-exec) @%#x GiB-region" % (address >> 30 << 30)
+    when, start, end, name, protection = mmaps[chosen]
+    is_file = bool(name) and not name.startswith("//anon") and not name.startswith("[")
+    superseded = any(later[1] < end and start < later[2] for later in mmaps[chosen + 1:])
+    if is_file and superseded and moment is not None:
+        return TRANSIENT_FILES
+    size = (end - start) / 1048576
+    label = "anon" if name.startswith("//anon") or not name else name
+    return "%s %s @0x%x (%.1f MiB)" % (label, protection, start, size)
 
 
 # ---------------------------------------------------------------- statistics
@@ -1472,7 +1505,7 @@ def topdown_group_lines(directory, entry, counts, findings, problems, timed_inst
         else:
             value_text = "%s %s" % (metric_text(own["metric_value"], own["metric_decimals"]), own["metric_unit"])
             chosen_metrics.append((own["metric_name"], own["metric_value"], own["metric_unit"]))
-        recomputed = recompute_metric(own, own_values, instructions)
+        recomputed = recompute_metric(own, own_values, instructions, alone=row["metric_name"] in split)
         recomputed_text = "-"
         if recomputed:
             recomputed_text = "%s%s = %s" % (significant(recomputed[0]), " (%.2f%%)" % (recomputed[0] * 100) if own["metric_unit"] == "per_branch" else "", recomputed[1])
@@ -1644,8 +1677,8 @@ def fault_summary(text, buckets=20):
     if not faults:
         return None
     regions = {}
-    for _, address, _, _ in faults:
-        label = classify_address(address, mmaps)
+    for moment, address, _, _ in faults:
+        label = classify_address(address, mmaps, moment)
         regions[label] = regions.get(label, 0) + 1
     first, last = min(fault[0] for fault in faults), max(fault[0] for fault in faults)
     width = max((last - first) / buckets, 1e-9)
