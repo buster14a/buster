@@ -1,0 +1,70 @@
+name: Artifact regression baseline and candidate
+on:
+  push:
+    branches: [codex/2376-artifact-regression-probe]
+permissions:
+  contents: read
+jobs:
+  focused:
+    if: ${{ vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Run sequential baseline and fixed artifact modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/codex/2376-artifact-regression-probe
+          evidence="$RUNNER_TEMP/artifact-regression-evidence"
+          mkdir -p "$evidence"
+          base=f73f75ed4a59594eb1f43ec505c100457bc35185
+          git fetch --no-tags --depth=1 origin "$base"
+          git rev-parse HEAD HEAD^{tree} > "$evidence/candidate-source.txt"
+          git diff --stat "$base" HEAD > "$evidence/candidate-diff-stat.txt"
+          git worktree add --detach "$RUNNER_TEMP/artifact-baseline" "$base"
+          git worktree add --detach "$RUNNER_TEMP/artifact-fixed" "$GITHUB_SHA"
+          git show "$GITHUB_SHA:src/buster/tests/compiler/object/object_test.c" > "$RUNNER_TEMP/artifact-baseline/src/buster/tests/compiler/object/object_test.c"
+          git show "$GITHUB_SHA:src/buster/tests/compiler/jit/jit_test.c" > "$RUNNER_TEMP/artifact-baseline/src/buster/tests/compiler/jit/jit_test.c"
+          clang --version > "$evidence/clang.txt"
+          uname -a > "$evidence/host.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/artifact-build"
+          sha256sum "$RUNNER_TEMP/artifact-build" > "$evidence/driver-sha256.txt"
+          for variant in baseline fixed; do
+            cd "$RUNNER_TEMP/artifact-$variant"
+            git rev-parse HEAD HEAD^{tree} > "$evidence/$variant-source.txt"
+            git diff --stat > "$evidence/$variant-worktree-delta.txt"
+            git hash-object src/buster/lib/compiler/object/object.c src/buster/lib/compiler/jit/jit.c src/buster/tests/compiler/object/object_test.c src/buster/tests/compiler/jit/jit_test.c > "$evidence/$variant-blob-identities.txt"
+            "$RUNNER_TEMP/artifact-build" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF > "$evidence/$variant-configure.log" 2>&1
+            "$RUNNER_TEMP/artifact-build" build --config Release -t ide > "$evidence/$variant-build.log" 2>&1
+            sha256sum build/Release/ide > "$evidence/$variant-ide-sha256.txt"
+            for module in object_tests jit_tests; do
+              status=0
+              build/Release/ide test --verbose=1 --ci=1 --module="$module" > "$evidence/$variant-$module.log" 2>&1 || status=$?
+              printf '%s %s status=%s\n' "$variant" "$module" "$status" | tee -a "$evidence/results.txt"
+              if [[ "$variant" == baseline ]]; then
+                test "$status" -eq 1
+                if [[ "$module" == object_tests ]]; then
+                  rg 'object_test_coff_x64_tls_index_addends' "$evidence/$variant-$module.log"
+                else
+                  rg 'jit_test_imported_function_data_pc32' "$evidence/$variant-$module.log"
+                fi
+              else
+                test "$status" -eq 0
+              fi
+              tail -n 8 "$evidence/$variant-$module.log"
+            done
+          done
+      - name: Retain exact source and raw results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: artifact-regression-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifact-regression-evidence
+          if-no-files-found: error
+          retention-days: 14
