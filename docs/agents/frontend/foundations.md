@@ -980,9 +980,9 @@ needs object identity must explicitly materialize storage.
 Complex rvalues use this same operation through `c_ir_complex_compose`, not a
 `LOCAL`/`FIELD`/`STORE`/`LOAD` construction sequence. Arithmetic consumers in
 `c_ir_complex_split` project a known constructor's two scalar operands directly.
-This bounded projection does not apply to the `__real__`/`__imag__` lvalue path:
-component assignments must continue to designate their original object.
-Qualifiers, volatile memory, and non-constructor values retain their existing
+GNU value projections also read known constructor operands directly. Component
+assignments follow the place machine and continue to designate their original
+object. Qualifiers, volatile memory, and non-constructor values retain their
 explicit load/store path. No whole-function cleanup pass is required.
 
 The registered `c_test_runtime_place_updates` requires compound-literal scalar,
@@ -991,30 +991,55 @@ as values (#1261). Fixed returned/stored values and indexed call counters protec
 old/new results, original-object identity, one evaluation, volatile accesses and
 postfix precedence: `(__imag__ z)++` updates the imaginary component, while
 `__imag__ z++` projects the previous whole-complex update. Const and nonplace
-operands remain rejected. A separate canonical volatile scalar-literal neighbor
+operands remain rejected through semantic-only and lowering APIs, including
+real-component projections of enumerators under prefix/postfix updates and
+nested complete groups. A separate canonical volatile scalar-literal neighbor
 requires one volatile read and two volatile stores (initialization and update),
 so place recovery cannot retain an artificial value read or erase its qualifier.
 Independent sources run through syntax, semantic and
 canonical APIs on six native layouts, GNU17/GNU23 and both frontend forms. A
 combined executable retains all literal oracles in every native allocator mode
 at O0/O2. Hosted Linux x86-64 Clang compiles and executes all fifteen original
-cases in GNU17/GNU2x at O0/O2, including whole-complex postfix precedence and
-indexed compound-assignment single evaluation. Its separate indexed assignment
+cases plus a valid nested-projection neighbor in GNU17/GNU2x at O0/O2, including
+whole-complex postfix precedence and indexed compound-assignment single evaluation. Its separate indexed assignment
 control returns bits 0..4 for mismatched result, index-call count, stored real,
 stored imaginary and untouched neighbor; the expected exit is zero.
-GCC 15.2 passed the other fourteen cases but diverged on the original indexed
-compound assignment: the index-call count differed from one while all four
+GCC 15.2's earlier full program passed the twelve cases preceding the indexed
+compound assignment, then diverged there: its index-call count differed from one
+while all four
 value/storage checks matched. The failed full/mask evidence remains pinned to
 regression head `63024bec`. Mandatory GCC acceptance therefore calls fourteen
-unchanged original cases plus a separate explicitly sequenced index/address
-neighbor. It retains the original fifteenth body without invoking it and excludes
+unchanged original cases plus an explicitly sequenced index/address neighbor and
+the nested-projection neighbor. It retains the original fifteenth body without invoking it and excludes
 that diagnostic mask from active GCC acceptance. The neighbor protects its own
 fixed result/storage/counter values; it is not evidence for the original compound
 assignment's single evaluation. Buster's fifteen original oracles and Clang's
 full/mask controls remain unchanged. Compiler and process failures are assertions,
-and expected values never adapt to reference output. This regression checkpoint
-adds no lowering behavior; hosted results must establish current failures before
-a production repair is published.
+and expected values never adapt to reference output.
+
+Runtime compound-literal updates reuse the existing expression child and recover
+the literal's materialized place, retaining its volatile access flag. Existing
+tail recovery retracts only a proven-unused final value read, preserving all
+earlier operand effects. Complex-part places instead lower their operand
+through a place child, then retain the original object's component and access
+flags. Parentheses and complex prefixes remain explicit stack continuations;
+rvalue arithmetic cannot gain a modifiable temporary through value projection.
+Both postfix gates retain compound literals as primary objects rather than casts,
+and keep complex-part unary prefixes outside a whole-object postfix update.
+A complex postfix result captures its prior scalar components in the existing
+immutable aggregate before the object is stored, so a later value projection
+cannot reread the updated object. Semantic projection retains const/volatile
+qualifiers, and whole-complex updates remain limited to GNU dialects. Explicit
+semantic-only and lowering refusal controls protect const and nonplace operands.
+An existing TYPE frame carries one query-local fact for the zero-valued imaginary
+projection of a real arithmetic operand; complete groups and component prefixes
+preserve it, while value-producing operators and dereference clear it. The existing
+expression-query flag row caches that fact independently of its checking-mode key.
+Update, assignment, address and asm-output consumers reject it without changing the
+CType or adding another type walk. A valid real-of-imaginary complex component
+neighbor still updates its original component, and real-scalar imaginary values
+remain usable as zero-valued expressions.
+These paths add no recursive descent, separate pass or retained lookup table.
 
 Raw IR tests cover both direct frontend SSA and its memory-form reference, so scalar
 parameter promotion cannot conceal complex construction temporaries.

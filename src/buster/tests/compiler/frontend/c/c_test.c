@@ -30100,12 +30100,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
         {S8("check_compound_index"), S8("static int compound_calls; static int compound_next(void) { compound_calls++; return 1; }\nint check_compound_index(void) { double _Complex slots[2] = {0, 0}; __real__ slots[1] = 3; __imag__ slots[1] = 7; compound_calls = 0; double r = (__real__ slots[compound_next()] += 1.5); return r != 4.5 || compound_calls != 1 || __real__ slots[1] != 4.5 || __imag__ slots[1] != 7 || slots[0] != 0; }\n"), 1},
         {S8("check_volatile_part"), S8("int check_volatile_part(void) { volatile double _Complex z = 0; __real__ z = 1; __imag__ z = 2; double old = (__imag__ z)++; double now = (__real__ z += 2); return old != 2 || now != 3 || __real__ z != 3 || __imag__ z != 3; }\n"), 0},
         {S8("check_projection_value"), S8("int check_projection_value(void) { double _Complex z = 0; __real__ z = 1; __imag__ z = 2; double r = __real__ (z + 3); double i = __imag__ (z + 3); return r != 4 || i != 2 || __real__ z != 1 || __imag__ z != 2; }\n"), 0},
+        {S8("check_nested_projection"), S8("int check_nested_projection(void) { double _Complex z = 0; __real__ z = 1; __imag__ z = 2; double old = (__real__(__imag__ z))++; double now = ++(__real__(__real__ z)); int n = 4; int r = ++__real__ n; int zero = __imag__ n; return old != 2 || now != 2 || r != 5 || n != 5 || zero != 0 || __real__ z != 2 || __imag__ z != 3; }\n"), 0},
     };
     String8 rejected[] = {
         S8("int bad(void) { return ++(const int){5}; }\n"),
         S8("int bad(void) { const double _Complex z = 0; return ++__real__ z; }\n"),
         S8("int bad(void) { const double _Complex z = 0; return (__imag__ z)++; }\n"),
         S8("int bad(void) { double _Complex z = 0; return ++__real__ (z + 1); }\n"),
+        S8("enum { n = 3 }; int bad(void) { return ++__real__ n; }\n"),
+        S8("enum { n = 3 }; int bad(void) { return (__real__ n)++; }\n"),
+        S8("enum { n = 3 }; int bad(void) { return ++(__real__((__real__(n)))); }\n"),
+        S8("enum { n = 3 }; int bad(void) { return ((__real__((__real__(n)))))--; }\n"),
+        S8("int bad(void) { int n = 3; return ++__imag__ n; }\n"),
+        S8("int bad(void) { double n = 3; return (__imag__ n)++; }\n"),
+        S8("int bad(void) { double _Complex z = 0; return ++(__imag__(__real__ z)); }\n"),
+        S8("int bad(void) { int n = 3; return (__real__(__imag__ n))++; }\n"),
+        S8("int bad(void) { int n = 3; __imag__ n = 4; return n; }\n"),
+        S8("int bad(void) { int n = 3; return *&(__imag__ n); }\n"),
+        S8("void bad(void) { int n = 3; __asm__(\"\" : \"=r\" (__imag__ n)); }\n"),
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
     for (u32 target_index = 0; target_index < 6; target_index += 1)
@@ -30194,6 +30206,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
                         .target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect],
                     });
                     CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    BUSTER_TEST_RAW(arguments, semantic.diagnostic_count != 0,
+                        string_format(temporary.arena, S8("semantic-only rejected place update row={u32} target={u32} dialect={u32} form={u32}"),
+                                      row, target_index, dialect, form));
                     CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("invalid-place-update.c"), tokens, syntax, target,
                         (CIRLowerOptions){.disable_direct_ssa = form != 0});
                     BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified,

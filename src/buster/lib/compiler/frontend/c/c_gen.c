@@ -14834,6 +14834,8 @@ typedef enum CIrPlaceContinuation
     C_IR_PLACE_CONTINUATION_SUBSCRIPT,
     C_IR_PLACE_CONTINUATION_GROUP,
     C_IR_PLACE_CONTINUATION_EXPRESSION,
+    C_IR_PLACE_CONTINUATION_REAL_PART,
+    C_IR_PLACE_CONTINUATION_IMAGINARY_PART,
 } CIrPlaceContinuation;
 
 typedef enum CIrCompoundContinuation
@@ -14970,6 +14972,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 token_index);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token_index);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source);
 
 BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
@@ -15011,6 +15014,29 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             start += 1;
             end -= 1;
         }
+        CConditionalOperator part = C_CONDITIONAL_OPERATOR_COUNT;
+        if (start < end && c_ir_complex_part_operator(builder, builder->preprocess.tokens[start], &part))
+        {
+            // The part of an object remains a place. Lower the operand as a
+            // place child so a constructor or arithmetic value cannot acquire
+            // modifiable storage through the ordinary value projection.
+            frame->as.place.local = 0;
+            frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[start]);
+            frame->as.place.start = start;
+            frame->as.place.end = end;
+            frame->as.place.index = end;
+            frame->as.place.continuation = part == C_CONDITIONAL_REAL_PART ? C_IR_PLACE_CONTINUATION_REAL_PART
+                                                                         : C_IR_PLACE_CONTINUATION_IMAGINARY_PART;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                    .kind = C_IR_LOWER_FRAME_PLACE,
+                                                    .as.place = {.start = start + 1, .end = end},
+                                                }))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
         u32 dereference_count = 0;
         // A unary `*` before the base identifier applies to the complete
         // postfix expression (`*p->field` means `*(p->field)`).  Keep that
@@ -15047,6 +15073,13 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             IrTypeId grouped_cast_type = depth ? IR_TYPE_ID_INVALID : c_ir_group_type_name(builder, index, close - 1);
             if (grouped_cast_type.value != IR_ID_UNDERLYING_INVALID)
             {
+                if (close < end && c_token_is_punctuator(&builder->preprocess.tokens[close], C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    // Expression lowering already materializes a compound
+                    // literal and its suffixes. Recover that object's place,
+                    // without interpreting its type name as a cast operand.
+                    goto c_ir_place_expression_base;
+                }
                 // `*(int*)ud` is a place whose pointer operand is a cast,
                 // rather than a parenthesized single identifier.  Preserve
                 // the cast type so the base value can be converted before
@@ -15202,6 +15235,7 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
                 // value and recover its final load's source place when the
                 // child returns.  The same path handles the older
                 // dereference-over-complex-base shape used by Lua.
+c_ir_place_expression_base:
                 frame->as.place.local = 0;
                 frame->as.place.place = IR_VALUE_ID_INVALID;
                 frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[start]);
@@ -15353,7 +15387,29 @@ c_ir_place_base_resolved:
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_VLA)
+        if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_REAL_PART ||
+            frame->as.place.continuation == C_IR_PLACE_CONTINUATION_IMAGINARY_PART)
+        {
+            IrValueId operand = machine->child_result.value;
+            bool imaginary = frame->as.place.continuation == C_IR_PLACE_CONTINUATION_IMAGINARY_PART;
+            IrType* type = operand.value < builder->function->value_count
+                               ? ir_type_from_id(&builder->program->types, builder->function->values[operand.value].canonical_type) : 0;
+            IrValueId place = IR_VALUE_ID_INVALID;
+            if (type && builder->function->values[operand.value].category == IR_VALUE_PLACE)
+            {
+                if (type->is_complex)
+                {
+                    place = c_ir_emit_field_index_place(builder, operand, imaginary ? 1u : 0u, frame->as.place.source);
+                }
+                else if (!imaginary && (type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN))
+                {
+                    place = operand;
+                }
+            }
+            frame->as.place.place = place;
+            frame->as.place.index = frame->as.place.end;
+        }
+        else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_VLA)
         {
             frame->as.place.place = machine->child_result.value;
             frame->as.place.index = machine->child_result.index;
@@ -15379,7 +15435,14 @@ c_ir_place_base_resolved:
         else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_EXPRESSION)
         {
             IrValueId place = machine->child_result.value;
-            IrValueId direct_place = c_ir_ssa_read_place(builder, place, false);
+            // The expression child only materializes a value to return it.
+            // Retract its terminal read when the existing recovery contract
+            // proves it is unused, retaining all earlier operand effects.
+            IrValueId direct_place = c_ir_recover_place_from_value(builder, place);
+            if (direct_place.value == IR_ID_UNDERLYING_INVALID)
+            {
+                direct_place = c_ir_ssa_read_place(builder, place, false);
+            }
             if (direct_place.value != IR_ID_UNDERLYING_INVALID)
             {
                 place = direct_place;
@@ -17575,6 +17638,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_part_operator(CIntegerIrBuilder* b
         }
         return type->kind == IR_TYPE_FLOAT ? c_ir_complex_zero(builder, type_id, source)
                                            : c_ir_emit_integer_value_typed(builder, 0, false, (CToken){0}, type_id);
+    }
+    IrValueId real = IR_VALUE_ID_INVALID;
+    IrValueId imaginary_value = IR_VALUE_ID_INVALID;
+    if (c_ir_complex_constructed_parts(builder, value, &real, &imaginary_value))
+    {
+        return imaginary ? imaginary_value : real;
     }
     IrTypeId element = complex_type->element_type;
     IrValueId place = c_ir_complex_operand_place(builder, value, source);
@@ -25232,12 +25301,30 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_increment(CIntegerIrBuilder* builder, IrVa
         }
         return prefix ? atomic_result : atomic_previous;
     }
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    if (!prefix && c_ir_value_complex_type(builder, previous))
+    {
+        IrTypeId captured_type = builder->function->values[previous.value].canonical_type;
+        // A postfix result is a captured value. Retaining the original load's
+        // object would let a subsequent part projection reread it after the
+        // update. Capture both components in the existing immutable aggregate.
+        IrValueId real = IR_VALUE_ID_INVALID;
+        IrValueId imaginary = IR_VALUE_ID_INVALID;
+        if (!c_ir_complex_split(builder, previous, &real, &imaginary, source))
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        previous = c_ir_complex_compose(builder, captured_type, real, imaginary, source);
+        if (previous.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+    }
     IrValueId values[2] = {
         previous,
         one,
     };
     u32 value_count = 2;
-    IrSourceRange source = c_ir_token_source_range(builder, token);
     if (!c_ir_apply_operation(builder, c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, values, &value_count,
                               source, IR_TYPE_ID_INVALID) ||
         value_count != 1 || !c_ir_emit_store_place(builder, place, type, values[0], source))
@@ -28839,6 +28926,11 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         {
             IrValueId literal = machine->child_result.value;
             IrValueId literal_place = c_ir_emit_temporary(builder, state->pending_type, state->pending_source);
+            if (literal_place.value < builder->function->value_count)
+            {
+                IrType* literal_type = ir_type_from_id(&builder->program->types, state->pending_type);
+                builder->function->values[literal_place.value].is_volatile = literal_type && literal_type->is_volatile;
+            }
             if (literal.value == IR_ID_UNDERLYING_INVALID || literal_place.value == IR_ID_UNDERLYING_INVALID ||
                 !c_ir_emit_store_place(builder, literal_place, state->pending_type, literal, state->pending_source))
             {
@@ -29035,17 +29127,21 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     if (postfix_place_update && update_operand_start < update_operand_end)
     {
         CToken first = builder->preprocess.tokens[update_operand_start];
+        CConditionalOperator part = C_CONDITIONAL_OPERATOR_COUNT;
         postfix_update_has_outer_prefix =
             c_token_is_punctuator(&first, C_PUNCTUATOR_STAR) || c_token_is_punctuator(&first, C_PUNCTUATOR_AMPERSAND) ||
             c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS) ||
             c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION) || c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE) ||
+            c_ir_complex_part_operator(builder, first, &part) ||
             (first.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, first))));
         if (!postfix_update_has_outer_prefix && c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, update_operand_start, update_operand_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
                                                        C_PUNCTUATOR_RIGHT_PARENTHESIS);
             postfix_update_has_outer_prefix =
-                close + 1 < update_operand_end && c_ir_group_type_name(builder, update_operand_start, close).value != IR_ID_UNDERLYING_INVALID;
+                close + 1 < update_operand_end &&
+                !c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+                c_ir_group_type_name(builder, update_operand_start, close).value != IR_ID_UNDERLYING_INVALID;
         }
     }
     u32 update_operand_depth = 0;
@@ -29265,7 +29361,9 @@ c_ir_expression_core_loop:
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, index, operand_end - 1, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                 outer_prefix =
-                    close < operand_end - 1 && close + 1 < operand_end - 1 && c_ir_group_type_name(builder, index, close).value != IR_ID_UNDERLYING_INVALID;
+                    close < operand_end - 1 && close + 1 < operand_end - 1 &&
+                    !c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+                    c_ir_group_type_name(builder, index, close).value != IR_ID_UNDERLYING_INVALID;
             }
             if (postfix && !outer_prefix)
             {
