@@ -29,7 +29,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   cannot serve as that offset. Fixed images reuse `link_elf_thread_local_offset`
   and the packed loaded-section map shared with the section table. The TLS
   block starts at the maximum `.tdata`/`.tbss` alignment so that each section's
-  address agrees with its block-relative symbol offsets. Local-exec relocations
+  address agrees with its block-relative symbol offsets. Fixed writers align
+  both TLS class starts by final virtual address, including an alignment larger
+  than the image base; file-offset alignment alone leaves the base's residue. Local-exec relocations
   round the whole block to that same alignment before computing x86-64 TP
   offsets. AArch64 places its block after the 16-byte TCB rounded to this
   alignment before adding the module offset and relocation addend.
@@ -40,7 +42,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   and modify both initialized and zero-fill executable TLS. Source/object,
   fixed/PIE, and demand/`-rdynamic` routes have host-linker/runtime controls
   and independent raw ELF checks for type, binding, visibility, section index,
-  size, block-relative value, initialized bytes and `PT_TLS` bounds. An unused
+  size, block-relative value, initialized bytes and `PT_TLS` bounds. Sole-class
+  `.tdata`/`.tbss` controls check `p_align`, `sh_addralign`, initialized-template
+  load coverage and native DSO/local-exec pointer identity at 32 bytes and
+  8 MiB; weak definitions preserve binding 2. An unused
   public TLS symbol distinguishes demand export from `-rdynamic`; a hidden
   definition stays absent in both modes. Linux AArch64 covers its supported
   fixed-address routes; other image writers retain their existing TLS scope.

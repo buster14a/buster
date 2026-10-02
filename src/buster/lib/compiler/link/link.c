@@ -6088,13 +6088,22 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 dynamic_offset = align_forward(got_offset + got_size, 8);
     u32 dynamic_count = needed_library_count + 11 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0);
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
-    // A block-relative TLS offset must also locate the named section in the
-    // image: aligning only .tdata can place .tbss at a different relative offset.
+    // Both class addresses must agree with their block-relative TLS offsets.
+    // Align final virtual addresses: the requested alignment may exceed the
+    // fixed image base and leave file-offset alignment at a nonzero residue.
     u64 thread_local_alignment =
         BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
-    section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] = align_forward(dynamic_offset + dynamic_size, thread_local_alignment);
+    if (!link_elf_virtual_align(dynamic_offset + dynamic_size, thread_local_alignment, &section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
     u64 file_size = section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
-    section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] = align_forward(file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
+    if (!link_elf_virtual_align(file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment, &section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO]))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
     u64 thread_local_memory_end = section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
     if (!link_elf_virtual_align(thread_local_memory_end, object->sections[OBJECT_SECTION_ZERO].alignment, &section_offsets[OBJECT_SECTION_ZERO]))
     {
