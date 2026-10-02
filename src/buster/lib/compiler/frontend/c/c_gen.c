@@ -3,7 +3,9 @@
 // IrProgram from the preprocessed token stream and the parser's entities,
 // scopes, and types, lowering every function body and global initializer.
 // c_ir_lower_capacity_plan owns the non-mutating count/overflow check before
-// the program arena is touched. The remaining phase/state graph is in
+// the program arena is touched. c_lower_to_ir_run owns the private, checked
+// CIrQueryMachine buffer arena and releases it after every core result. The
+// remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
 // There is no AST — lowering re-walks token ranges directly, resolving
 // identifiers through the parse result's scopes and answering structure
@@ -51095,19 +51097,75 @@ bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult pars
     return valid;
 }
 
-BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
-                                                    CIRLowerOptions options)
+BUSTER_C_INTERNAL bool c_ir_query_machine_buffer_size(u64 capacity, u64* reserved_size_out)
+{
+    u64 size = arena_minimum_position;
+    bool valid = reserved_size_out && capacity <= UINT32_MAX &&
+        c_type_parse_buffer_size_add(&size, capacity, sizeof(CIrQueryFrame), BUSTER_ALIGN_OF(CIrQueryFrame)) &&
+        c_type_parse_buffer_size_add(&size, capacity, sizeof(CIrQueryFrame), BUSTER_ALIGN_OF(CIrQueryFrame)) &&
+        c_type_parse_buffer_size_add(&size, capacity, sizeof(CIrConstantValue), BUSTER_ALIGN_OF(CIrConstantValue)) &&
+        c_type_parse_buffer_size_add(&size, capacity, sizeof(CIrConstantOperator), BUSTER_ALIGN_OF(CIrConstantOperator)) &&
+        c_type_parse_buffer_size_add(&size, capacity, sizeof(CIrQueryResume), BUSTER_ALIGN_OF(CIrQueryResume)) &&
+        size <= ARENA_MAX_RESERVATION - (BUSTER_KB(64) - 1);
+    if (valid)
+    {
+        *reserved_size_out = (size + BUSTER_KB(64) - 1) & ~(BUSTER_KB(64) - 1);
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL Arena* c_ir_query_machine_allocate(CIrQueryMachine* queries, u32 capacity)
+{
+    Arena* result = 0;
+    u64 reserved_size = 0;
+    if (queries && c_ir_query_machine_buffer_size(capacity, &reserved_size))
+    {
+        result = arena_create((ArenaCreation){
+            .reserved_size = reserved_size,
+            .granularity = BUSTER_KB(64),
+            .initial_size = BUSTER_MIN(reserved_size, BUSTER_KB(256)),
+            .flags = {.no_pool = 1},
+        });
+        if (result)
+        {
+            *queries = (CIrQueryMachine){
+                .frames = arena_allocate(result, CIrQueryFrame, capacity),
+                .completed = arena_allocate(result, CIrQueryFrame, capacity),
+                .values = arena_allocate(result, CIrConstantValue, capacity),
+                .operators = arena_allocate(result, CIrConstantOperator, capacity),
+                .resumes = arena_allocate(result, CIrQueryResume, capacity),
+                .frame_capacity = capacity,
+                .completed_capacity = capacity,
+                .value_capacity = capacity,
+                .operator_capacity = capacity,
+            };
+        }
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_ir_query_buffer_budget(void)
+{
+    u64 size = 0;
+    bool valid = c_ir_query_machine_buffer_size(UINT32_MAX, &size) &&
+                 size <= ARENA_MAX_RESERVATION &&
+                 size >= arena_minimum_position + (u64)UINT32_MAX * 2 * sizeof(CIrQueryFrame);
+    u64 accepted = size;
+    valid = valid && !c_ir_query_machine_buffer_size((u64)UINT32_MAX + 1, &size) && size == accepted &&
+            !c_ir_query_machine_buffer_size(UINT64_MAX, &size) && size == accepted &&
+            !c_ir_query_machine_buffer_size(16, 0);
+    return valid;
+}
+#endif
+
+BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_core(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
+                                                     CIRLowerOptions options, CIrLowerCapacityPlan plan, CIrQueryMachine queries)
 {
     CIRLowerResult result = {0};
-    CIrLowerCapacityPlan plan = {0};
-    if (!arena || !c_ir_lower_capacity_plan(preprocess, parse, &plan))
-    {
-        return result;
-    }
     u32 type_capacity = plan.type_capacity;
     u32 symbol_capacity = plan.symbol_capacity;
     u32 function_capacity = plan.function_capacity;
-    u32 query_frame_capacity = plan.query_frame_capacity;
     Arena* temporary_conflicts[] = {
         arena,
     };
@@ -51125,17 +51183,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     u32 label_candidate_count = label_candidates_valid ? parse.position_index->label_candidate_count : 0;
     u32 const* stream_matching_delimiters_plus_one =
         label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters_plus_one : 0;
-    CIrQueryMachine queries = {
-        .frames = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
-        .completed = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
-        .values = arena_allocate(temporary_arena, CIrConstantValue, (u32)query_frame_capacity),
-        .operators = arena_allocate(temporary_arena, CIrConstantOperator, (u32)query_frame_capacity),
-        .resumes = arena_allocate(temporary_arena, CIrQueryResume, (u32)query_frame_capacity),
-        .frame_capacity = (u32)query_frame_capacity,
-        .completed_capacity = (u32)query_frame_capacity,
-        .value_capacity = (u32)query_frame_capacity,
-        .operator_capacity = (u32)query_frame_capacity,
-    };
     // One per declaration for the lowering failures, one per entity for the
     // definition failures, one per deferred static assertion, a second per
     // declaration for an __attribute__((alias)) naming a target this unit
@@ -53937,6 +53984,36 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     scratch_end(temporary);
     result.canonical_ir_certified = result.program && !result.diagnostic_count &&
                                     !program->rejected_function_count && !module->rejected_function_count;
+    return result;
+}
+
+BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
+                                                    CIRLowerOptions options)
+{
+    CIRLowerResult result = {0};
+    CIrLowerCapacityPlan plan = {0};
+    if (arena && c_ir_lower_capacity_plan(preprocess, parse, &plan))
+    {
+        // Full declaration spans bound all five query append buffers. A large
+        // initializer can exceed shared scratch with its second frame array.
+        // This reservation owns only those buffers and survives every core
+        // scratch rewind; none of their rows escape the lowering result.
+        CIrQueryMachine queries = {0};
+        Arena* query_arena = c_ir_query_machine_allocate(&queries, plan.query_frame_capacity);
+        if (query_arena)
+        {
+            result = c_lower_to_ir_core(arena, source_path, preprocess, parse, target, options, plan, queries);
+            arena_destroy(query_arena, 1);
+        }
+        else
+        {
+            *c_ir_lower_diagnostic_slot(&result, arena, 1) = (CDiagnostic){
+                .message = S8("could not allocate C IR query buffers"),
+                .location = parse.declaration_count ? c_preprocess_site_location(&preprocess, parse.declarations[0].location) : (CSourceLocation){0},
+                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+            };
+        }
+    }
     return result;
 }
 
