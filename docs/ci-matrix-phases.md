@@ -147,5 +147,20 @@ test output and verifies the binary hash before and after execution. It retains
 `unit-observations/<task-id>/` beside the phase directory, leaving the strict
 phase journal inventory unchanged. Query failure, output truncation, cleanup
 failure, changed binaries or an existing receipt fail the observed task.
-Ordinary runs keep direct streams. These qualification observations do not
-supply CPU time or peak RSS; positive timing alone cannot accept either issue.
+Ordinary runs keep direct streams. These unit completion and phase timing
+receipts do not supply comparable CPU time or peak RSS; positive timing alone
+cannot accept either issue.
+
+The separate `BUSTER_CI_CONDITIONS_EVIDENCE` opt-in records selected Go, iOS/
+analyzer/UEFI Ninja, and Android adb hash/version receipts in the same three
+dispatch variants. It leaves the native desktop observation flag and phase
+journal schema unchanged. `ci_checks_qualification.py::condition_keys` declares
+the required role tool/cache inputs; selected-tool receipts bind the exact
+source/run/attempt/workflow job and are checked before comparison. Temporary
+receipt paths are provenance, while selected executable hash/version and all
+existing desktop/native identities remain comparison inputs. Cache scope is
+the existing Zig evidence, Android initial requested-package validity and
+explicit Actions-cache policy; it adds no global OS/language cache census.
+Missing legacy versions stay pending. See
+[checks qualification](ci-combination-shards.md#further-checks-partition-qualification-2120)
+for artifact paths and prospective cohort requirements.

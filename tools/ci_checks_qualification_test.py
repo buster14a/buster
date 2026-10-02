@@ -85,6 +85,37 @@ class QualificationTests(unittest.TestCase):
     def measured(self):
         return {"job_seconds": {"Windows x86-64 checks": 100}, "elapsed_seconds": 110, "runner_seconds": 2100}
 
+    def conditions_fixture(self, run):
+        jobs = {}
+        for job in run["jobs"]:
+            if qualification.skipped_reuse(job):
+                continue
+            name = qualification.role(job["name"])
+            tools, caches = qualification.condition_keys(name)
+            entry = dict(job_id=job["id"], image_os="fixture", image_version="1", runner="synthetic",
+                         toolchains={key: "synthetic1" for key in tools}, caches={key: "not-used" for key in caches})
+            if "BUSTER_CI_ZIG_CACHE_HIT" in caches:
+                entry["caches"]["BUSTER_CI_ZIG_CACHE_HIT"] = "false"
+            if name == "Android x86-64":
+                entry["toolchains"].update(android_system_image="system-images;android-35;google_apis;x86_64", android_system_image_revision="9")
+                entry["caches"]["android_sdk_package_state_before"] = {
+                    "emulator": "failure", "platforms;android-35": "success",
+                    "system-images;android-35;google_apis;x86_64": "failure"}
+            if name in qualification.SELECTED_TOOL_ROLES:
+                job_key, tool, key = qualification.SELECTED_TOOL_ROLES[name]
+                comparable = dict(sha256="c" * 64, version="synthetic1\n")
+                selection = dict(kind="executable", requested=tool, path="/synthetic/" + tool, resolved_path="/synthetic/" + tool)
+                if tool == "ninja":
+                    selection.update(kind="cmake-cache", requested=selection["path"], cmake_cache="/synthetic/CMakeCache.txt")
+                receipt = dict(schema="buster-ci-selected-tool-v1", repository="buster14a/buster", source_revision=run["head_sha"],
+                               run_id=str(run["id"]), run_attempt=str(run["run_attempt"]), job=job_key, tool=tool,
+                               status="observed", selection=selection, comparable=comparable,
+                               command=[selection["resolved_path"], "--version" if tool == "ninja" else "version"])
+                entry["selected_tools"] = {tool: reference(self.root, "selected-tool-" + str(job["id"]) + ".json", receipt)}
+                entry["toolchains"][key] = comparable
+            jobs[job["name"]] = entry
+        return dict(schema="buster-ci-checks-conditions-v1", run_id=run["id"], jobs=jobs)
+
     def test_exact_inventory_and_optional_reuse_is_counted(self):
         for variant, expected in (("combined-overlap", 21), ("split-overlap", 27)):
             for reuse in (False, True):
@@ -119,9 +150,7 @@ class QualificationTests(unittest.TestCase):
     def test_skipped_reuse_has_no_assigned_runner_conditions(self):
         run = self.run_fixture(reuse=True)
         run["jobs"][-1].update(conclusion="skipped", created_at=None, started_at=None, completed_at=None, labels=[])
-        jobs = {job["name"]: dict(job_id=job["id"], image_os="fixture", image_version="1", runner="synthetic", toolchains={"fixture": "1"}, caches={})
-                for job in run["jobs"] if job["name"] != github.MAIN_REUSE_JOB}
-        value = dict(schema="buster-ci-checks-conditions-v1", run_id=123, jobs=jobs)
+        value = self.conditions_fixture(run)
         _, skipped = qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
         _, absent = qualification.conditions(self.root, reference(self.root, "conditions.json", value), self.run_fixture())
         self.assertEqual(skipped, absent)
@@ -153,8 +182,7 @@ class QualificationTests(unittest.TestCase):
 
     def test_missing_unknown_and_unmatched_conditions_fail(self):
         run = self.run_fixture("split-overlap")
-        jobs = {job["name"]: dict(job_id=job["id"], image_os="fixture", image_version="1", runner="synthetic", toolchains={"fixture": "1"}, caches={}) for job in run["jobs"]}
-        value = dict(schema="buster-ci-checks-conditions-v1", run_id=123, jobs=jobs)
+        value = self.conditions_fixture(run)
         good = reference(self.root, "conditions.json", value)
         _, normalized = qualification.conditions(self.root, good, run)
         self.assertEqual(len(normalized), 21)
@@ -165,6 +193,146 @@ class QualificationTests(unittest.TestCase):
             invalid = copy.deepcopy(value)
             change(invalid)
             with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+
+    def test_every_required_role_tool_and_cache_key_is_enforced(self):
+        run = self.run_fixture("split-overlap")
+        value = self.conditions_fixture(run)
+        for job in run["jobs"]:
+            for group in ("toolchains", "caches"):
+                for key in value["jobs"][job["name"]][group]:
+                    for missing in (True, False):
+                        invalid = copy.deepcopy(value)
+                        if missing:
+                            del invalid["jobs"][job["name"]][group][key]
+                        else:
+                            invalid["jobs"][job["name"]][group][key] = "unknown"
+                        with self.subTest(job=job["name"], group=group, key=key, missing=missing), self.assertRaises(ValueError):
+                            qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+
+    def test_desktop_required_tools_preserve_the_actual_supported_architecture_scope(self):
+        for shard in ("release", "checks"):
+            self.assertEqual(qualification.condition_keys("Windows AArch64 " + shard)[0], {"cl", "clang"})
+            self.assertEqual(qualification.condition_keys("Windows x86-64 " + shard)[0], {"cl", "clang", "gcc", "zig"})
+            for platform in ("Linux x86-64", "Linux AArch64", "macOS AArch64"):
+                self.assertEqual(qualification.condition_keys(platform + " " + shard)[0], {"clang", "gcc", "zig"})
+        for shard in github.SPLIT_CHECK_SHARDS:
+            self.assertEqual(qualification.condition_keys("Windows x86-64 " + shard), qualification.condition_keys("Windows x86-64 checks"))
+
+    def test_wrong_role_maps_and_empty_required_tools_do_not_pass(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        for name in ("Workflow lint", "Linux x86-64 native", "UEFI firmware boot", "Android x86-64"):
+            for tools in ({"fixture": "1"}, {key: {} for key in value["jobs"][name]["toolchains"]}):
+                invalid = copy.deepcopy(value)
+                invalid["jobs"][name]["toolchains"] = tools
+                with self.subTest(name=name, tools=tools), self.assertRaises(ValueError):
+                    qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+        with self.assertRaisesRegex(ValueError, "unknown conditions role"):
+            qualification.condition_keys("not a workflow job")
+
+    def test_selected_tool_receipt_identity_and_authority_are_required(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        entry = value["jobs"]["Workflow lint"]
+        path = self.root / entry["selected_tools"]["go"]["path"]
+        original = json.loads(path.read_text())
+        changes = ({"source_revision": "d" * 40}, {"repository": "somewhere/else"}, {"run_id": "124"},
+                   {"run_attempt": "2"}, {"job": "mobile"}, {"tool": "ninja"}, {"status": "unknown"},
+                   {"command": ["/synthetic/go", "--version"]}, {"comparable": {"sha256": "bad", "version": "1"}},
+                   {"selection": dict(original["selection"], kind="cmake-cache")},
+                   {"selection": dict(original["selection"], requested=False)},
+                   {"selection": dict(original["selection"], requested=123)},
+                   {"selection": dict(original["selection"], requested="go\x00")},
+                   {"selection": dict(original["selection"], path="/synthetic/go\x00")},
+                   {"selection": dict(original["selection"], resolved_path="/synthetic/go\x00")})
+        for change in changes:
+            invalid = copy.deepcopy(value)
+            receipt = dict(original, **change)
+            invalid["jobs"]["Workflow lint"]["selected_tools"]["go"] = reference(self.root, "changed-tool.json", receipt)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+        for selected in ({}, {"ninja": entry["selected_tools"]["go"]}):
+            invalid = copy.deepcopy(value)
+            invalid["jobs"]["Workflow lint"]["selected_tools"] = selected
+            with self.subTest(selected=selected), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+
+    def test_selected_tool_provenance_is_retained_without_comparing_temporary_roots(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        _, original = qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+        entry = value["jobs"]["UEFI firmware boot"]
+        receipt = json.loads((self.root / entry["selected_tools"]["ninja"]["path"]).read_text())
+        receipt["selection"]["cmake_cache"] = "/different/job/root/CMakeCache.txt"
+        receipt["selection"].update(path="/different/tools/ninja", resolved_path="/different/tools/ninja", requested="/different/tools/ninja")
+        receipt["command"][0] = "/different/tools/ninja"
+        entry["selected_tools"]["ninja"] = reference(self.root, "different-root.json", receipt)
+        _, changed = qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+        self.assertEqual(original, changed)
+        entry["toolchains"]["ninja"]["version"] = "different\n"
+        with self.assertRaisesRegex(ValueError, "differs from condition map"):
+            qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+
+    def test_selected_tool_binary_digest_is_a_string_even_when_all_digits(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        entry = value["jobs"]["Workflow lint"]
+        receipt = json.loads((self.root / entry["selected_tools"]["go"]["path"]).read_text())
+        receipt["comparable"]["sha256"] = int("1" * 64)
+        entry["toolchains"]["go"] = receipt["comparable"]
+        entry["selected_tools"]["go"] = reference(self.root, "numeric-digest.json", receipt)
+        with self.assertRaisesRegex(ValueError, "bounded selected tool identity"):
+            qualification.conditions(self.root, reference(self.root, "invalid.json", value), run)
+
+    def test_malformed_selected_receipt_objects_fail_with_a_pending_input_error(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        ref = value["jobs"]["Workflow lint"]["selected_tools"]["go"]
+        original = json.loads((self.root / ref["path"]).read_text())
+        for malformed in ([], "record", 1, None):
+            for field in (None, "selection", "comparable"):
+                receipt = copy.deepcopy(original)
+                if field is None:
+                    receipt = malformed
+                else:
+                    receipt[field] = malformed
+                invalid = copy.deepcopy(value)
+                invalid["jobs"]["Workflow lint"]["selected_tools"]["go"] = reference(self.root, "malformed.json", receipt)
+                with self.subTest(field=field, malformed=malformed), self.assertRaises(ValueError):
+                    qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+            for name in ("Workflow lint", "Linux x86-64 native", "CI complete"):
+                invalid = copy.deepcopy(value)
+                invalid["jobs"][name]["selected_tools"] = malformed
+                with self.subTest(references=name, malformed=malformed), self.assertRaises(ValueError):
+                    qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+
+    def test_split_roles_keep_full_tool_maps_and_exact_cache_equality(self):
+        run = self.run_fixture("split-overlap")
+        value = self.conditions_fixture(run)
+        for group, key, change in (("toolchains", "gcc", "other compiler"), ("caches", "BUSTER_CI_ZIG_CACHE_HIT", "true")):
+            invalid = copy.deepcopy(value)
+            invalid["jobs"]["Linux x86-64 portability"][group][key] = change
+            with self.subTest(group=group), self.assertRaisesRegex(ValueError, "split jobs have different"):
+                qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+        invalid = copy.deepcopy(value)
+        del invalid["jobs"]["Linux x86-64 portability"]["toolchains"]["clang"]
+        with self.assertRaisesRegex(ValueError, "required role"):
+            qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+
+    def test_android_cache_scope_is_initial_validity_and_revision_not_absence(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        qualification.conditions(self.root, reference(self.root, "conditions.json", value), run)
+        for change in ("absent", "unknown"):
+            invalid = copy.deepcopy(value)
+            invalid["jobs"]["Android x86-64"]["caches"]["android_sdk_package_state_before"]["emulator"] = change
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
+        for revision in ("unknown", True, False, 1.0, 0, "0", "09"):
+            invalid = copy.deepcopy(value)
+            invalid["jobs"]["Android x86-64"]["toolchains"]["android_system_image_revision"] = revision
+            with self.subTest(revision=revision), self.assertRaises(ValueError):
                 qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
 
     def test_digest_binding_and_empty_campaign_stay_pending(self):
