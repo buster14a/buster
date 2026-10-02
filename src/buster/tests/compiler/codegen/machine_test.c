@@ -3053,22 +3053,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_storage_reuse(UnitTestArgu
                         if (certified)
                         {
                             BUSTER_TEST(arguments, empty_reference.valid && empty_reference_code.valid);
-                            BUSTER_TEST(arguments, empty_placement.frame_size == empty_reference.frame_size &&
-                                                       empty_placement.edge_copy_temporary_offset == empty_reference.edge_copy_temporary_offset &&
-                                                       empty_placement.incoming_base == empty_reference.incoming_base);
-                            for (u32 row = 0; row < empty_function.instruction_count; row += 1)
+                            if (empty_reference.valid && empty_reference_code.valid && empty_code.valid)
                             {
-                                for (u32 operand = 0; operand < MACHINE_INSTRUCTION_OPERAND_COUNT; operand += 1)
+                                BUSTER_TEST(arguments, empty_placement.frame_size == empty_reference.frame_size &&
+                                                           empty_placement.edge_copy_temporary_offset == empty_reference.edge_copy_temporary_offset &&
+                                                           empty_placement.incoming_base == empty_reference.incoming_base);
+                                for (u32 row = 0; row < empty_function.instruction_count; row += 1)
                                 {
-                                    u32 index = row * MACHINE_INSTRUCTION_OPERAND_COUNT + operand;
-                                    BUSTER_TEST(arguments, empty_placement.operand_registers[index] == empty_reference.operand_registers[index]);
+                                    for (u32 operand = 0; operand < MACHINE_INSTRUCTION_OPERAND_COUNT; operand += 1)
+                                    {
+                                        u32 index = row * MACHINE_INSTRUCTION_OPERAND_COUNT + operand;
+                                        BUSTER_TEST(arguments, empty_placement.operand_registers[index] == empty_reference.operand_registers[index]);
+                                    }
                                 }
-                            }
-                            BUSTER_TEST(arguments, empty_code.byte_count == empty_reference_code.byte_count);
-                            for (u32 byte = 0; empty_code.valid && empty_reference_code.valid &&
-                                               byte < empty_code.byte_count && byte < empty_reference_code.byte_count; byte += 1)
-                            {
-                                BUSTER_TEST(arguments, empty_code.bytes[byte] == empty_reference_code.bytes[byte]);
+                                BUSTER_TEST(arguments, empty_code.byte_count == empty_reference_code.byte_count);
+                                for (u32 byte = 0; empty_code.valid && empty_reference_code.valid &&
+                                                   byte < empty_code.byte_count && byte < empty_reference_code.byte_count; byte += 1)
+                                {
+                                    BUSTER_TEST(arguments, empty_code.bytes[byte] == empty_reference_code.bytes[byte]);
+                                }
                             }
                         }
                         else
