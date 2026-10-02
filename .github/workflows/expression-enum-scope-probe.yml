@@ -1,0 +1,97 @@
+name: Expression enum scope diagnostic
+on:
+  push:
+    branches: [codex/1615-expression-enum-scope-probe]
+permissions:
+  contents: read
+jobs:
+  baseline-candidate:
+    if: ${{ github.repository == 'buster14a/buster' && github.ref == 'refs/heads/codex/1615-expression-enum-scope-probe' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: f73f75ed4a59594eb1f43ec505c100457bc35185
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 34ee8c0b89151dd764dd4e06600dbcb5dadbc49a
+          path: candidate
+          persist-credentials: false
+      - name: Record exact source and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git -C baseline rev-parse HEAD 'HEAD^{tree}' | tee evidence/baseline.sha
+          git -C candidate rev-parse HEAD 'HEAD^{tree}' | tee evidence/candidate.sha
+          clang --version | tee evidence/clang.txt
+          gcc --version | tee evidence/gcc.txt
+          uname -a | tee evidence/runner.txt
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Build baseline sequentially
+        working-directory: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-1615-baseline"
+          "$RUNNER_TEMP/buster-1615-baseline" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF 2>&1 | tee ../evidence/baseline-configure.log
+          "$RUNNER_TEMP/buster-1615-baseline" build --config Release -t ide -- -j2 2>&1 | tee ../evidence/baseline-build.log
+      - name: Require current baseline failure and independent acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > evidence/witness.c <<'C'
+          int main(void){(void)sizeof(enum{E=2,F=E+1});return E+F-5;}
+          C
+          clang -std=c17 -pedantic-errors evidence/witness.c -o evidence/clang-witness
+          ./evidence/clang-witness
+          gcc -std=c17 -pedantic-errors evidence/witness.c -o evidence/gcc-witness
+          ./evidence/gcc-witness
+          set +e
+          ./baseline/build/Release/ide cc -std=c17 -fsyntax-only evidence/witness.c > evidence/baseline.stdout 2> evidence/baseline.stderr
+          status=$?
+          set -e
+          printf 'BASELINE_WITNESS_STATUS=%s\n' "$status" | tee evidence/baseline-status.txt
+          test "$status" -eq 1
+          grep -F "use of undeclared identifier" evidence/baseline.stderr
+      - name: Build candidate sequentially
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-1615-candidate"
+          "$RUNNER_TEMP/buster-1615-candidate" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON 2>&1 | tee ../evidence/candidate-configure.log
+          "$RUNNER_TEMP/buster-1615-candidate" build --config Release -t ide -- -j2 2>&1 | tee ../evidence/candidate-build.log
+      - name: Run registered frontend module
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/Release/ide test --module=c_frontend_tests --verbose=1 --ci=1 2>&1 | tee ../evidence/frontend-tests.log
+      - name: Require candidate syntax and native execution in every mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./candidate/build/Release/ide cc -std=c17 -fsyntax-only evidence/witness.c
+          for mode in none mir-stack fast quality; do
+            for form in -ffrontend-ssa -fno-frontend-ssa; do
+              output="evidence/witness-$mode-${form#-f}"
+              ./candidate/build/Release/ide cc -std=c17 "-fregister-allocator=$mode" "$form" -fverify-codegen evidence/witness.c -o "$output"
+              "./$output"
+              printf 'CANDIDATE_RUNTIME mode=%s form=%s status=0\n' "$mode" "$form" | tee -a evidence/runtime.txt
+            done
+          done
+          git -C candidate diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: expression-enum-scope-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
