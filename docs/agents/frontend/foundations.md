@@ -365,10 +365,11 @@ without facts for identical bitcode and diagnostics.
   canonical frontend forms on six desktop layouts in C17/GNU17. Its native
   sibling checks volatile observations in all four allocators and both forms;
   mandatory Linux GCC/Clang C17/GNU17 O0/O2 controls use the same fixed source.
-  Process failures and 30-second timeouts fail. Existing machineless function
-  answers and refused function-valued/type-name operands, including nested
-  queries, remain policy controls,
-  not cross-compiler conformance claims. This regression-only checkpoint changes
+  Process failures and 30-second timeouts fail. The existing machineless
+  function-size divergence remains read-only evidence outside this partial
+  repair. Refused function-valued/type-name operands, including nested queries,
+  remain policy controls, not cross-compiler conformance claims. This
+  regression-only checkpoint changes
   no production behavior. The broader stored-layout and GNU function-alignment
   obligations remain open under #1258/#1247; no issue completion is claimed.
   Its caller supplies the semantic model at the expression's declaration point.

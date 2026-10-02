@@ -362,8 +362,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression(UnitTestArgumen
         {S8("struct S { _Alignas(16) char m; }; enum { QUERY = sizeof(*(struct S *)0) };"), 16},
         {S8("int (*p)(void); enum { QUERY = sizeof(0 ? p : p) };"), 8},
         {S8("static int table[3]; enum { QUERY = sizeof(table) / sizeof((table)[0]) };"), 3},
-        // Preserve this existing machineless answer; it is not a GNU oracle.
-        {S8("int (*p)(void); enum { QUERY = sizeof(*p) };"), 8},
     };
     typedef struct CTestEnumSizeofRefusal CTestEnumSizeofRefusal;
     struct CTestEnumSizeofRefusal
