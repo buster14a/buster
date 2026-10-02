@@ -531,6 +531,9 @@ struct CRecordLayoutMember
     u32 alignment;
     // The largest explicit aligned(N)/_Alignas(N) written on the member.
     u32 alignment_request;
+    // Microsoft ordinary members retain an aligned typedef's request after
+    // packing; this is distinct from an alignment written on the member.
+    u32 type_alignment_request;
     u32 bit_width;
     bool is_bit_field;
     bool is_named;
