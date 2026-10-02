@@ -85,8 +85,8 @@ jobs:
         run: |
           set -euo pipefail
           timeout 90s .ci-tools/build compatibility_spawn_self_test 2>&1 | tee evidence/spawn.log
-          rg '^COMPATIBILITY_SPAWN_SELF_TEST inheritance=pass overrides=pass invalid_environment=pass script0=pass legacy_script0=pass$' evidence/spawn.log
-          rg '^COMPATIBILITY_SPAWN_SELF_TEST status=pass$' evidence/spawn.log
+          grep -E '^COMPATIBILITY_SPAWN_SELF_TEST inheritance=pass overrides=pass invalid_environment=pass script0=pass legacy_script0=pass$' evidence/spawn.log
+          grep -E '^COMPATIBILITY_SPAWN_SELF_TEST status=pass$' evidence/spawn.log
       - name: Exercise spawn helpers under ASan and UBSan
         id: sanitized
         if: ${{ !cancelled() && steps.driver.outcome == 'success' }}
@@ -95,8 +95,8 @@ jobs:
           set -euo pipefail
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined build.c -o .ci-tools/build-sanitized 2>&1 | tee evidence/driver-sanitized-build.log
           ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 timeout 90s .ci-tools/build-sanitized compatibility_spawn_self_test 2>&1 | tee evidence/spawn-sanitized.log
-          rg '^COMPATIBILITY_SPAWN_SELF_TEST inheritance=pass overrides=pass invalid_environment=pass script0=pass legacy_script0=pass$' evidence/spawn-sanitized.log
-          rg '^COMPATIBILITY_SPAWN_SELF_TEST status=pass$' evidence/spawn-sanitized.log
+          grep -E '^COMPATIBILITY_SPAWN_SELF_TEST inheritance=pass overrides=pass invalid_environment=pass script0=pass legacy_script0=pass$' evidence/spawn-sanitized.log
+          grep -E '^COMPATIBILITY_SPAWN_SELF_TEST status=pass$' evidence/spawn-sanitized.log
       - name: Clang-only CPython reference without a Buster compiler
         id: reference
         if: ${{ !cancelled() && steps.driver.outcome == 'success' }}
@@ -107,9 +107,9 @@ jobs:
           test ! -e build/Release/ide
           timeout 1400s .ci-tools/build test_cpython --reference-only "$PWD/external/cpython" 2>&1 | tee evidence/cpython-reference.log
           test ! -e build/Release/ide
-          rg '^CPYTHON_CONFIGURE tree=clang .* status=pass$' evidence/cpython-reference.log
-          rg '^CPYTHON_BUILD tree=clang .* status=pass$' evidence/cpython-reference.log
-          rg '^CPYTHON_REFERENCE_ONLY status=pass buster_validation=unrun suite=unrun$' evidence/cpython-reference.log
+          grep -E '^CPYTHON_CONFIGURE tree=clang .* status=pass$' evidence/cpython-reference.log
+          grep -E '^CPYTHON_BUILD tree=clang .* status=pass$' evidence/cpython-reference.log
+          grep -E '^CPYTHON_REFERENCE_ONLY status=pass buster_validation=unrun suite=unrun$' evidence/cpython-reference.log
       - name: Compare CPython output with an independent host-Python invocation
         id: oracle
         if: ${{ !cancelled() && steps.reference.outcome == 'success' }}
@@ -153,8 +153,8 @@ jobs:
         run: |
           set -euo pipefail
           timeout 800s .ci-tools/build test_zlib --config Release "$PWD/external/zlib" 2>&1 | tee evidence/zlib.log
-          rg '^ZLIB_CONFIGURE target=libz.a status=pass source=' evidence/zlib.log
-          rg '^ZLIB_RESULT commit=51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf library_sources=15 test_sources=3 allocators=4 status=pass$' evidence/zlib.log
+          grep -E '^ZLIB_CONFIGURE target=libz.a status=pass source=' evidence/zlib.log
+          grep -E '^ZLIB_RESULT commit=51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf library_sources=15 test_sources=3 allocators=4 status=pass$' evidence/zlib.log
           python3 - <<'PY'
           import pathlib
           directories = list(pathlib.Path("build").glob("zlib-v1.3.1-*/configure-source"))
