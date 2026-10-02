@@ -344,6 +344,12 @@ struct ObjectFile
     u32 comdat_count;
     ObjectDebugModule* debug_modules;
     u32 debug_module_count;
+    // ELF .note.GNU-stack is metadata, never an allocated section. An
+    // explicit SHF_EXECINSTR request survives object merging; image writers
+    // refuse it because executable stacks are unsupported. No note means
+    // nonexecuting, matching LLD. The driver supplies the input name.
+    String8 executable_stack_source;
+    bool requires_executable_stack;
     // The GNU `constructor(N)`/`destructor(N)` priority of every entry of
     // OBJECT_SECTION_INIT_ARRAY (index 0) and OBJECT_SECTION_FINI_ARRAY
     // (index 1): one u32 per OBJECT_INITIALIZER_ENTRY_SIZE bytes of that
