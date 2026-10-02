@@ -1665,7 +1665,10 @@ struct MachineStackPlacement
     // pops them around the frame and the unwind actions record the pushes.
     u64 callee_saved_mask;
     bool valid;
-    u8 reserved[3];
+    // Capacity refusal is distinct from a malformed placement under strict
+    // verification; native dispatch preserves codegen.capacity diagnostics.
+    bool capacity_exceeded;
+    u8 reserved[2];
 };
 
 // Which field of a native thread-local sequence a call site names. The
