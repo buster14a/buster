@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-02",
+  "issue": 2274,
+  "buster_source": "d4ca72fb4e97ae0a410b0d03258b00495fa45e13",
+  "buster_production_tree": "e3a17ff788cbfc5f4038f3c260a121315ddf561c",
+  "diagnostic_commit": "e19b531e03db62afd8f688ecd69d7f9f111283bf",
+  "measured_gcc": "Ubuntu 15.2.0-16ubuntu1",
+  "gcc_capability_source": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+  "source_report_comment": "https://github.com/buster14a/buster/issues/2274#issuecomment-5952384555",
+  "report_inventory": {
+    "dimensions": 45,
+    "recommendations": 11,
+    "license_rows": 8,
+    "primary_source_links": 49
+  },
+  "workspace_pdf": {
+    "bytes": 120367,
+    "sha256": "3ac207e77a13a63935ba6f378f4442aa3894f6db21141e70176be7b2f07af511"
+  },
+  "unavailable_original_workspace_files": [
+    "work/benchmark-evidence.md",
+    "work/buster-architecture.md",
+    "work/gcc-capabilities.md",
+    "work/final-measurement-review.md",
+    "work/performance-report.json",
+    "work/report-content.json",
+    "work/generate_results.py",
+    "work/render_pdf.py",
+    "work/render_report.py",
+    "original locally minted performance audit and PDF QA previews"
+  ],
+  "limitations": [
+    "Workspace connection returned409 environment_offline during publication. Substantive findings from working notes are incorporated in the 42k full report; their original bytes and frozen rendering inputs cannot currently be copied.",
+    "The measured compiler executable was never retained by the experiment. Its SHA256, size, exact build recipe and build provenance are archived.",
+    "Cloud hosted diagnostics are not qualified 9700X/native-retirement acceptance. No laptop or 9700X execution.",
+    "GCC 15.2 timing must not be relabeled GCC 16.2. Common inputs/semantic flags and g0 match; this is not a full debug-information comparison.",
+    "GNU-time RSS is maximum child peak, not simultaneous aggregate process-tree RSS. Distro GCC hardening was retained and not matched by an ablation.",
+    "Failed and rejected attempts are preserved; every wall-time inference from 37005042712 is rejected."
+  ],
+  "licenses": "Buster first-party license unselected at pinned revision; third-party notices do not grant a project-wide license. GCC compiler GPL-3.0-or-later; runtime exceptions and component-specific terms detailed in report."
+}

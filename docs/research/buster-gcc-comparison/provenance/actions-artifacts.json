@@ -1,0 +1,60 @@
+[
+  {
+    "id": 11225512379,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyNTUxMjM3OQ==",
+    "name": "gcc-comparison-2274-37004946749-1",
+    "size_in_bytes": 442,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11225512379",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11225512379/zip",
+    "expired": false,
+    "digest": "sha256:7b2576cfb9fae66d1fbfb7d6878a03855660c69458f5cfa5821ec9d96e24a8f0",
+    "created_at": "2026-10-02T12:08:44Z",
+    "updated_at": "2026-10-02T12:08:44Z",
+    "expires_at": "2026-11-01T12:08:44Z",
+    "workflow_run": {
+      "id": 37004946749,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/2274-gcc-comparison-diagnostic",
+      "head_sha": "916e1835360350d0d432ebf87cca5528dc4153c9"
+    }
+  },
+  {
+    "id": 11224892963,
+    "name": "gcc-comparison-2274-37005042712-1",
+    "size_in_bytes": 451047,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11224892963",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11224892963/zip",
+    "expired": false,
+    "created_at": "2026-10-02T12:11:27Z",
+    "expires_at": "2026-11-01T12:11:26Z",
+    "updated_at": "2026-10-02T12:11:27Z",
+    "digest": "sha256:619d7c825ece0752362c9f62b56195da2e3641c29e007026c1226ee5ef4642e4",
+    "workflow_run": {
+      "id": 37005042712,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/2274-gcc-comparison-diagnostic",
+      "head_sha": "7649753da84e04197cddef684488c85d61e98683"
+    }
+  },
+  {
+    "id": 11225068516,
+    "name": "gcc-comparison-2274-37005475203-1",
+    "size_in_bytes": 451176,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11225068516",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11225068516/zip",
+    "expired": false,
+    "created_at": "2026-10-02T12:16:34Z",
+    "expires_at": "2026-11-01T12:16:33Z",
+    "updated_at": "2026-10-02T12:16:34Z",
+    "digest": "sha256:47c04b2c3f12e26c1346c4dbde0face10643dbc7a0256e364495a5686fec94ec",
+    "workflow_run": {
+      "id": 37005475203,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/2274-gcc-comparison-diagnostic",
+      "head_sha": "e19b531e03db62afd8f688ecd69d7f9f111283bf"
+    }
+  }
+]

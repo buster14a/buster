@@ -1,0 +1,43 @@
+{
+  "runs": [
+    {
+      "run_id": 37004946749,
+      "artifact_id": 11225512379,
+      "bytes": 442,
+      "sha256": "7b2576cfb9fae66d1fbfb7d6878a03855660c69458f5cfa5821ec9d96e24a8f0",
+      "file_name": "run-37004946749-setup-failure.zip",
+      "classification": "Failed before compiler build; no benchmark data."
+    },
+    {
+      "run_id": 37005042712,
+      "artifact_id": 11224892963,
+      "bytes": 451047,
+      "entries": 1257,
+      "sha256": "619d7c825ece0752362c9f62b56195da2e3641c29e007026c1226ee5ef4642e4",
+      "file_name": "run-37005042712-rejected-wall-timing.zip",
+      "classification": "Every elapsed-time inference rejected because timed waiting quantized results. Behavior probes retained."
+    },
+    {
+      "run_id": 37005475203,
+      "artifact_id": 11225068516,
+      "bytes": 451176,
+      "entries": 1257,
+      "sha256": "47c04b2c3f12e26c1346c4dbde0face10643dbc7a0256e364495a5686fec94ec",
+      "file_name": "run-37005475203-current-diagnostic.zip",
+      "classification": "Current bounded diagnostic measurements; no qualified performance acceptance."
+    }
+  ],
+  "reports": [
+    {
+      "path": "buster-vs-gcc-comparison.pdf",
+      "url": "https://oaisdmntprnortheu.blob.core.windows.net/files/00000000-5bdc-81f4-8109-6a13b825dde5/raw?se=2026-10-02T14%3A33%3A36Z&sp=r&sv=2026-02-06&sr=b&scid=01a0fcbe-8a00-767d-b3ec-5a3b126d085c&skoid=697a5987-0cd9-4222-b5b8-500b90fa271b&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-10-02T05%3A43%3A44Z&ske=2026-10-03T05%3A43%3A44Z&sks=b&skv=2026-02-06&sig=JrEFKRxA/fcxP8PSAUKgVi2vCMra1fqOhI0wnLsFwaw%3D",
+      "workspace_sha256": "3ac207e77a13a63935ba6f378f4442aa3894f6db21141e70176be7b2f07af511"
+    },
+    {
+      "path": "buster-vs-gcc-report.html",
+      "url": "https://oaisdmntprnortheu.blob.core.windows.net/files/00000000-c250-81f4-96b9-0a6d964ef158/raw?se=2026-10-02T14%3A33%3A36Z&sp=r&sv=2026-02-06&sr=b&scid=01a0fcbe-8a00-767d-b3ec-5a3b126d085c&skoid=697a5987-0cd9-4222-b5b8-500b90fa271b&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-10-02T08%3A53%3A09Z&ske=2026-10-03T08%3A53%3A09Z&sks=b&skv=2026-02-06&sig=34pAD46vMrRIxKadCWzvTWGbEhcEbUqCWl5NljFPWDc%3D",
+      "required_sha256": "90b1346875cc01b9b2be5b9176de568b595d52a64451ebe22c75495321711341",
+      "workspace_sha256": "90b1346875cc01b9b2be5b9176de568b595d52a64451ebe22c75495321711341"
+    }
+  ]
+}

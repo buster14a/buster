@@ -1,0 +1,43 @@
+name: GCC comparison diagnostic (#2274)
+on:
+  push:
+    branches: [codex/2274-gcc-comparison-diagnostic]
+permissions:
+  contents: read
+concurrency:
+  group: gcc-comparison-2274
+  cancel-in-progress: false
+jobs:
+  diagnostic:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Record build and immutable source
+        run: |
+          mkdir -p gcc-comparison-evidence
+          git rev-parse HEAD 'HEAD^{tree}' > gcc-comparison-evidence/diagnostic-revision.txt
+          git diff d4ca72fb4e97ae0a410b0d03258b00495fa45e13 -- src build.c CMakeLists.txt > gcc-comparison-evidence/production.diff
+          test ! -s gcc-comparison-evidence/production.diff
+          clang --version > gcc-comparison-evidence/build-compiler.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-gcc-compare-build"
+          "$RUNNER_TEMP/buster-gcc-compare-build" generate --ci --cc clang --linker DEFAULT -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-gcc-compare-build" build --config Release -t ide -- -j2
+      - name: Fixed-count compile and runtime diagnostics
+        run: python3 tools/research/gcc-comparison-diagnostic.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: gcc-comparison-2274-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            gcc-comparison-evidence
+            build/CMakeCache.txt
+            build/compile_commands.json
+          retention-days: 30
+          if-no-files-found: error

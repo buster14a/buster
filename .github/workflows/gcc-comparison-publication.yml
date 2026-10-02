@@ -1,0 +1,33 @@
+name: GCC comparison evidence publication
+on:
+  push:
+    branches: ['codex/2274-publish-gcc-comparison']
+    paths:
+      - '.github/workflows/gcc-comparison-publication.yml'
+      - 'tools/research/publish-gcc-comparison.py'
+      - 'tools/research/gcc-comparison-publication-inputs.json'
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: gcc-comparison-publication-2274
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Preserve frozen artifacts and independently replay statistics
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/research/publish-gcc-comparison.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: gcc-comparison-publication-${{ github.run_id }}
+          path: docs/research/buster-gcc-comparison
+          if-no-files-found: warn
+          retention-days: 30

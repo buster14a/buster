@@ -1,0 +1,1932 @@
+﻿2026-10-02T12:14:10.8045878Z Current runner version: '2.337.0'
+2026-10-02T12:14:10.8085508Z ##[group]Runner Image Provisioner
+2026-10-02T12:14:10.8087187Z Hosted Compute Agent
+2026-10-02T12:14:10.8088216Z Version: 20260901.588
+2026-10-02T12:14:10.8089446Z Commit: f88ec8081b781fac6c440065ac7ff9e710ce3d0b
+2026-10-02T12:14:10.8090756Z Build Date: 2026-09-01T19:56:44Z
+2026-10-02T12:14:10.8092070Z Worker ID: {ab9dfb25-a686-41cd-afda-e81ba6178539}
+2026-10-02T12:14:10.8093520Z Azure Region: eastus
+2026-10-02T12:14:10.8094419Z ##[endgroup]
+2026-10-02T12:14:10.8096951Z ##[group]Operating System
+2026-10-02T12:14:10.8098042Z Ubuntu
+2026-10-02T12:14:10.8098909Z 26.04.1
+2026-10-02T12:14:10.8099930Z LTS
+2026-10-02T12:14:10.8100792Z ##[endgroup]
+2026-10-02T12:14:10.8102649Z ##[group]Runner Image
+2026-10-02T12:14:10.8104060Z Image: ubuntu-26.04
+2026-10-02T12:14:10.8105114Z Version: 20260927.149.1
+2026-10-02T12:14:10.8107908Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20260927.149/images/ubuntu/Ubuntu2604-Readme.md
+2026-10-02T12:14:10.8110683Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20260927.149
+2026-10-02T12:14:10.8112508Z ##[endgroup]
+2026-10-02T12:14:10.8114640Z ##[group]GITHUB_TOKEN Permissions
+2026-10-02T12:14:10.8117762Z Contents: read
+2026-10-02T12:14:10.8118814Z Metadata: read
+2026-10-02T12:14:10.8119875Z ##[endgroup]
+2026-10-02T12:14:10.8123347Z Secret source: Actions
+2026-10-02T12:14:10.8125129Z Cache mode: write
+2026-10-02T12:14:10.8126410Z Prepare workflow directory
+2026-10-02T12:14:10.8630630Z Prepare all required actions
+2026-10-02T12:14:10.8682332Z Getting action download info
+2026-10-02T12:14:11.0453213Z Download action repository 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' (SHA:11bd71901bbe5b1630ceea73d27597364c9af683)
+2026-10-02T12:14:11.1386246Z Download action repository 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+2026-10-02T12:14:11.3243685Z Complete job name: diagnostic
+2026-10-02T12:14:11.4064324Z ##[group]Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+2026-10-02T12:14:11.4065446Z with:
+2026-10-02T12:14:11.4065905Z   persist-credentials: false
+2026-10-02T12:14:11.4066406Z   fetch-depth: 0
+2026-10-02T12:14:11.4066856Z   repository: buster14a/buster
+2026-10-02T12:14:11.4070995Z   token: ***
+2026-10-02T12:14:11.4071421Z   ssh-strict: true
+2026-10-02T12:14:11.4071858Z   ssh-user: git
+2026-10-02T12:14:11.4072280Z   clean: true
+2026-10-02T12:14:11.4072905Z   sparse-checkout-cone-mode: true
+2026-10-02T12:14:11.4073443Z   fetch-tags: false
+2026-10-02T12:14:11.4073884Z   show-progress: true
+2026-10-02T12:14:11.4074318Z   lfs: false
+2026-10-02T12:14:11.4074730Z   submodules: false
+2026-10-02T12:14:11.4075172Z   set-safe-directory: true
+2026-10-02T12:14:11.4076117Z env:
+2026-10-02T12:14:11.4076544Z   CMAKE_BUILD_PARALLEL_LEVEL: 2
+2026-10-02T12:14:11.4077063Z   BUSTER_TEST_JOBS: 1
+2026-10-02T12:14:11.4077508Z ##[endgroup]
+2026-10-02T12:14:11.5125185Z Syncing repository: buster14a/buster
+2026-10-02T12:14:11.5128377Z ##[group]Getting Git version info
+2026-10-02T12:14:11.5129758Z Working directory is '/home/runner/work/buster/buster'
+2026-10-02T12:14:11.5131561Z [command]/usr/bin/git version
+2026-10-02T12:14:11.5136589Z git version 2.55.0
+2026-10-02T12:14:11.5163487Z ##[endgroup]
+2026-10-02T12:14:11.5179752Z Temporarily overriding HOME='/home/runner/work/_temp/b5d20c55-23ac-4d2d-939a-4b4f706439f2' before making global git config changes
+2026-10-02T12:14:11.5182274Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-02T12:14:11.5185706Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/buster/buster
+2026-10-02T12:14:11.5258986Z Deleting the contents of '/home/runner/work/buster/buster'
+2026-10-02T12:14:11.5261948Z ##[group]Initializing the repository
+2026-10-02T12:14:11.5269624Z [command]/usr/bin/git init /home/runner/work/buster/buster
+2026-10-02T12:14:11.5407756Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-10-02T12:14:11.5409441Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-10-02T12:14:11.5410816Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-10-02T12:14:11.5411785Z hint: call:
+2026-10-02T12:14:11.5412216Z hint:
+2026-10-02T12:14:11.5413071Z hint: 	git config --global init.defaultBranch <name>
+2026-10-02T12:14:11.5413849Z hint:
+2026-10-02T12:14:11.5414677Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-10-02T12:14:11.5416297Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-10-02T12:14:11.5417552Z hint:
+2026-10-02T12:14:11.5418108Z hint: 	git branch -m <name>
+2026-10-02T12:14:11.5418605Z hint:
+2026-10-02T12:14:11.5419260Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-10-02T12:14:11.5420267Z Initialized empty Git repository in /home/runner/work/buster/buster/.git/
+2026-10-02T12:14:11.5423628Z [command]/usr/bin/git remote add origin https://github.com/buster14a/buster
+2026-10-02T12:14:11.5480881Z ##[endgroup]
+2026-10-02T12:14:11.5481722Z ##[group]Disabling automatic garbage collection
+2026-10-02T12:14:11.5486992Z [command]/usr/bin/git config --local gc.auto 0
+2026-10-02T12:14:11.5527727Z ##[endgroup]
+2026-10-02T12:14:11.5528581Z ##[group]Setting up auth
+2026-10-02T12:14:11.5536549Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-02T12:14:11.5576970Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-02T12:14:11.6099725Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-02T12:14:11.6144133Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-02T12:14:11.6439531Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-10-02T12:14:11.6487287Z ##[endgroup]
+2026-10-02T12:14:11.6488789Z ##[group]Fetching the repository
+2026-10-02T12:14:11.6499525Z [command]/usr/bin/git -c protocol.version=2 fetch --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+2026-10-02T12:14:28.7196843Z From https://github.com/buster14a/buster
+2026-10-02T12:14:28.7198209Z  * [new branch]          ai_x86_64_long_double_float16 -> origin/ai_x86_64_long_double_float16
+2026-10-02T12:14:28.7199484Z  * [new branch]          archive/branch-snapshot-20260930 -> origin/archive/branch-snapshot-20260930
+2026-10-02T12:14:28.7200793Z  * [new branch]          audit/parameter-matrix-238-14ebc9aa -> origin/audit/parameter-matrix-238-14ebc9aa
+2026-10-02T12:14:28.7202145Z  * [new branch]          automation/1732-rebase-current-base -> origin/automation/1732-rebase-current-base
+2026-10-02T12:14:28.7203612Z  * [new branch]          bootstrap/1790-support-digest -> origin/bootstrap/1790-support-digest
+2026-10-02T12:14:28.7204749Z  * [new branch]          ci-pr2156-macro-oracle-20261001 -> origin/ci-pr2156-macro-oracle-20261001
+2026-10-02T12:14:28.7205724Z  * [new branch]          claude/426-aa-protocol-window3 -> origin/claude/426-aa-protocol-window3
+2026-10-02T12:14:28.7206463Z  * [new branch]          claude/brave-feynman-1g8df5 -> origin/claude/brave-feynman-1g8df5
+2026-10-02T12:14:28.7207449Z  * [new branch]          claude/buster-compiler-lifetime-jslgwu-b-semantic-queries -> origin/claude/buster-compiler-lifetime-jslgwu-b-semantic-queries
+2026-10-02T12:14:28.7208553Z  * [new branch]          claude/buster-efficiency-campaign-5a6k5g -> origin/claude/buster-efficiency-campaign-5a6k5g
+2026-10-02T12:14:28.7209356Z  * [new branch]          claude/clever-noether-xyqyt7 -> origin/claude/clever-noether-xyqyt7
+2026-10-02T12:14:28.7210126Z  * [new branch]          claude/determined-johnson-n1tzjh -> origin/claude/determined-johnson-n1tzjh
+2026-10-02T12:14:28.7211401Z  * [new branch]          claude/eloquent-dijkstra-4dnltv -> origin/claude/eloquent-dijkstra-4dnltv
+2026-10-02T12:14:28.7212423Z  * [new branch]          claude/epic-mccarthy-nvr70y -> origin/claude/epic-mccarthy-nvr70y
+2026-10-02T12:14:28.7213831Z  * [new branch]          claude/fervent-cray-zlsgsj-string-counts -> origin/claude/fervent-cray-zlsgsj-string-counts
+2026-10-02T12:14:28.7214664Z  * [new branch]          claude/funny-heisenberg-ldyeyv -> origin/claude/funny-heisenberg-ldyeyv
+2026-10-02T12:14:28.7215333Z  * [new branch]          claude/hopeful-bardeen-y44j61 -> origin/claude/hopeful-bardeen-y44j61
+2026-10-02T12:14:28.7215971Z  * [new branch]          claude/modest-goodall-nh0eg2 -> origin/claude/modest-goodall-nh0eg2
+2026-10-02T12:14:28.7216592Z  * [new branch]          claude/nice-gates-e8d16i   -> origin/claude/nice-gates-e8d16i
+2026-10-02T12:14:28.7217209Z  * [new branch]          claude/nifty-bardeen-8s4arb -> origin/claude/nifty-bardeen-8s4arb
+2026-10-02T12:14:28.7217882Z  * [new branch]          claude/pensive-newton-i2xujq -> origin/claude/pensive-newton-i2xujq
+2026-10-02T12:14:28.7218556Z  * [new branch]          claude/practical-allen-tabyz5 -> origin/claude/practical-allen-tabyz5
+2026-10-02T12:14:28.7219214Z  * [new branch]          claude/sharp-johnson-efebz1 -> origin/claude/sharp-johnson-efebz1
+2026-10-02T12:14:28.7220026Z  * [new branch]          claude/stoic-clarke-j0gj55 -> origin/claude/stoic-clarke-j0gj55
+2026-10-02T12:14:28.7220784Z  * [new branch]          claude/youthful-brown-0qlzll -> origin/claude/youthful-brown-0qlzll
+2026-10-02T12:14:28.7221507Z  * [new branch]          codex/1162-exact-systemd-slice-20260925 -> origin/codex/1162-exact-systemd-slice-20260925
+2026-10-02T12:14:28.7222247Z  * [new branch]          codex/1190-ordinary-throughput -> origin/codex/1190-ordinary-throughput
+2026-10-02T12:14:28.7223511Z  * [new branch]          codex/1192-queue-retention -> origin/codex/1192-queue-retention
+2026-10-02T12:14:28.7224501Z  * [new branch]          codex/1205-v1-compat-policy -> origin/codex/1205-v1-compat-policy
+2026-10-02T12:14:28.7225243Z  * [new branch]          codex/1223-assembly-binding-validation -> origin/codex/1223-assembly-binding-validation
+2026-10-02T12:14:28.7226090Z  * [new branch]          codex/1223-preserve-assembly-symbol-binding -> origin/codex/1223-preserve-assembly-symbol-binding
+2026-10-02T12:14:28.7226932Z  * [new branch]          codex/1224-logical-constant-eligibility -> origin/codex/1224-logical-constant-eligibility
+2026-10-02T12:14:28.7227711Z  * [new branch]          codex/1225-constant-truth-sanitizers -> origin/codex/1225-constant-truth-sanitizers
+2026-10-02T12:14:28.7228421Z  * [new branch]          codex/1225-constant-value-truth -> origin/codex/1225-constant-value-truth
+2026-10-02T12:14:28.7229110Z  * [new branch]          codex/1226-half-baseline   -> origin/codex/1226-half-baseline
+2026-10-02T12:14:28.7229832Z  * [new branch]          codex/1230-static-pointer-address-probe -> origin/codex/1230-static-pointer-address-probe
+2026-10-02T12:14:28.7230657Z  * [new branch]          codex/1230-static-pointer-validation -> origin/codex/1230-static-pointer-validation
+2026-10-02T12:14:28.7231430Z  * [new branch]          codex/1233-unwind-baseline -> origin/codex/1233-unwind-baseline
+2026-10-02T12:14:28.7232342Z  * [new branch]          codex/1233-unwind-validation -> origin/codex/1233-unwind-validation
+2026-10-02T12:14:28.7233316Z  * [new branch]          codex/1233-unwind-x64-validation -> origin/codex/1233-unwind-x64-validation
+2026-10-02T12:14:28.7234022Z  * [new branch]          codex/1234-vla-runtime-validation -> origin/codex/1234-vla-runtime-validation
+2026-10-02T12:14:28.7234770Z  * [new branch]          codex/1236-bit-field-assignment-values -> origin/codex/1236-bit-field-assignment-values
+2026-10-02T12:14:28.7235497Z  * [new branch]          codex/1236-bit-field-validation -> origin/codex/1236-bit-field-validation
+2026-10-02T12:14:28.7236217Z  * [new branch]          codex/1237-elf-stack-contract -> origin/codex/1237-elf-stack-contract
+2026-10-02T12:14:28.7237124Z  * [new branch]          codex/1239-sysv-padding-eightbytes -> origin/codex/1239-sysv-padding-eightbytes
+2026-10-02T12:14:28.7237927Z  * [new branch]          codex/124-gpr-prewarm-candidate-20260924-a -> origin/codex/124-gpr-prewarm-candidate-20260924-a
+2026-10-02T12:14:28.7238776Z  * [new branch]          codex/1240-align-indirect-result-buffers -> origin/codex/1240-align-indirect-result-buffers
+2026-10-02T12:14:28.7239628Z  * [new branch]          codex/1244-cap-pragma-pack-member-alignment -> origin/codex/1244-cap-pragma-pack-member-alignment
+2026-10-02T12:14:28.7240662Z  * [new branch]          codex/1245-promote-narrow-wide-bit-fields -> origin/codex/1245-promote-narrow-wide-bit-fields
+2026-10-02T12:14:28.7241690Z  * [new branch]          codex/1246-integer-conversion-rank -> origin/codex/1246-integer-conversion-rank
+2026-10-02T12:14:28.7242455Z  * [new branch]          codex/1247-constant-facts-validation -> origin/codex/1247-constant-facts-validation
+2026-10-02T12:14:28.7243540Z  * [new branch]          codex/1247-protected-type-constants -> origin/codex/1247-protected-type-constants
+2026-10-02T12:14:28.7244321Z  * [new branch]          codex/1247-type-constant-validation -> origin/codex/1247-type-constant-validation
+2026-10-02T12:14:28.7245074Z  * [new branch]          codex/125-allocation-checker-probe -> origin/codex/125-allocation-checker-probe
+2026-10-02T12:14:28.7245872Z  * [new branch]          codex/1250-member-static-assert-regressions -> origin/codex/1250-member-static-assert-regressions
+2026-10-02T12:14:28.7246797Z  * [new branch]          codex/1251-sysv-empty-aggregates -> origin/codex/1251-sysv-empty-aggregates
+2026-10-02T12:14:28.7247542Z  * [new branch]          codex/1253-target-predefined-abi-macros -> origin/codex/1253-target-predefined-abi-macros
+2026-10-02T12:14:28.7248492Z  * [new branch]          codex/1255-bool-bitfield-load-type -> origin/codex/1255-bool-bitfield-load-type
+2026-10-02T12:14:28.7249295Z  * [new branch]          codex/1257-promote-bool-switch-controls -> origin/codex/1257-promote-bool-switch-controls
+2026-10-02T12:14:28.7250127Z  * [new branch]          codex/1266-automatic-initializer-overrides -> origin/codex/1266-automatic-initializer-overrides
+2026-10-02T12:14:28.7250951Z  * [new branch]          codex/1283-signed-immediate-relocations -> origin/codex/1283-signed-immediate-relocations
+2026-10-02T12:14:28.7251642Z  * [new branch]          codex/129-row-writer-probe -> origin/codex/129-row-writer-probe
+2026-10-02T12:14:28.7252303Z  * [new branch]          codex/1297-labeled-scaling-research -> origin/codex/1297-labeled-scaling-research
+2026-10-02T12:14:28.7253397Z  * [new branch]          codex/1298-serial-process-control-cast -> origin/codex/1298-serial-process-control-cast
+2026-10-02T12:14:28.7254255Z  * [new branch]          codex/1308-preserve-volatile-frame-storage -> origin/codex/1308-preserve-volatile-frame-storage
+2026-10-02T12:14:28.7255002Z  * [new branch]          codex/1316-audit-broken-pipe -> origin/codex/1316-audit-broken-pipe
+2026-10-02T12:14:28.7255633Z  * [new branch]          codex/1324-mode-matrix-oracle -> origin/codex/1324-mode-matrix-oracle
+2026-10-02T12:14:28.7256274Z  * [new branch]          codex/1332-wasm-frame-alignment -> origin/codex/1332-wasm-frame-alignment
+2026-10-02T12:14:28.7256989Z  * [new branch]          codex/1337-preserve-llvm-weak-linkage -> origin/codex/1337-preserve-llvm-weak-linkage
+2026-10-02T12:14:28.7257771Z  * [new branch]          codex/1340-scalar-binary-type-families -> origin/codex/1340-scalar-binary-type-families
+2026-10-02T12:14:28.7258527Z  * [new branch]          codex/1370-selection-benchmark-docs -> origin/codex/1370-selection-benchmark-docs
+2026-10-02T12:14:28.7259274Z  * [new branch]          codex/1375-dwarf-reused-home-validity -> origin/codex/1375-dwarf-reused-home-validity
+2026-10-02T12:14:28.7260148Z  * [new branch]          codex/1377-absolute-bootstrap-resource-paths -> origin/codex/1377-absolute-bootstrap-resource-paths
+2026-10-02T12:14:28.7261174Z  * [new branch]          codex/1380-format-placeholder-diagnostics -> origin/codex/1380-format-placeholder-diagnostics
+2026-10-02T12:14:28.7261923Z  * [new branch]          codex/1399-compat-harness-spawn -> origin/codex/1399-compat-harness-spawn
+2026-10-02T12:14:28.7262945Z  * [new branch]          codex/1407-preserve-comment-directive-lines -> origin/codex/1407-preserve-comment-directive-lines
+2026-10-02T12:14:28.7263846Z  * [new branch]          codex/1410-transparent-union-qualifiers -> origin/codex/1410-transparent-union-qualifiers
+2026-10-02T12:14:28.7264642Z  * [new branch]          codex/1411-gnu-fallthrough-regressions -> origin/codex/1411-gnu-fallthrough-regressions
+2026-10-02T12:14:28.7265467Z  * [new branch]          codex/1422-preserve-test-allocator-selection -> origin/codex/1422-preserve-test-allocator-selection
+2026-10-02T12:14:28.7266204Z  * [new branch]          codex/1438-ifetch-census   -> origin/codex/1438-ifetch-census
+2026-10-02T12:14:28.7266857Z  * [new branch]          codex/1470-bounded-source-lex-reuse -> origin/codex/1470-bounded-source-lex-reuse
+2026-10-02T12:14:28.7267505Z  * [new branch]          codex/1487-baseline-xgetbv -> origin/codex/1487-baseline-xgetbv
+2026-10-02T12:14:28.7268673Z  * [new branch]          codex/1493-bounded-zig-install-recovery -> origin/codex/1493-bounded-zig-install-recovery
+2026-10-02T12:14:28.7269752Z  * [new branch]          codex/1516-spelling-scan-research-8f67 -> origin/codex/1516-spelling-scan-research-8f67
+2026-10-02T12:14:28.7270925Z  * [new branch]          codex/1559-lex-diagnostic-fallback -> origin/codex/1559-lex-diagnostic-fallback
+2026-10-02T12:14:28.7271756Z  * [new branch]          codex/1560-diagnose-invalid-bit-field-widths -> origin/codex/1560-diagnose-invalid-bit-field-widths
+2026-10-02T12:14:28.7272597Z  * [new branch]          codex/1562-local-linkage-redeclarations -> origin/codex/1562-local-linkage-redeclarations
+2026-10-02T12:14:28.7274220Z  * [new branch]          codex/1565-round-float-initializer-literals -> origin/codex/1565-round-float-initializer-literals
+2026-10-02T12:14:28.7275079Z  * [new branch]          codex/1578-check-coff-macho-limits -> origin/codex/1578-check-coff-macho-limits
+2026-10-02T12:14:28.7275926Z  * [new branch]          codex/1580-debugger-arena-failure-control -> origin/codex/1580-debugger-arena-failure-control
+2026-10-02T12:14:28.7276823Z  * [new branch]          codex/1618-reject-variable-length-members -> origin/codex/1618-reject-variable-length-members
+2026-10-02T12:14:28.7277650Z  * [new branch]          codex/1630-validate-c23-noreturn-ir -> origin/codex/1630-validate-c23-noreturn-ir
+2026-10-02T12:14:28.7278402Z  * [new branch]          codex/1646-static-assert-message -> origin/codex/1646-static-assert-message
+2026-10-02T12:14:28.7279446Z  * [new branch]          codex/1709-shared-dso-exit-handlers -> origin/codex/1709-shared-dso-exit-handlers
+2026-10-02T12:14:28.7280295Z  * [new branch]          codex/1725-source-diagnostics -> origin/codex/1725-source-diagnostics
+2026-10-02T12:14:28.7281397Z  * [new branch]          codex/1751-session-ownership -> origin/codex/1751-session-ownership
+2026-10-02T12:14:28.7283118Z  * [new branch]          codex/1782-fold-named-object-array-bounds -> origin/codex/1782-fold-named-object-array-bounds
+2026-10-02T12:14:28.7284681Z  * [new branch]          codex/1783-single-static-assert-diagnostic -> origin/codex/1783-single-static-assert-diagnostic
+2026-10-02T12:14:28.7285557Z  * [new branch]          codex/1793-wasm-integer-shim-exit -> origin/codex/1793-wasm-integer-shim-exit
+2026-10-02T12:14:28.7286188Z  * [new branch]          codex/1808-main-ci-reuse   -> origin/codex/1808-main-ci-reuse
+2026-10-02T12:14:28.7286850Z  * [new branch]          codex/1808-recollect-reuse-discovery -> origin/codex/1808-recollect-reuse-discovery
+2026-10-02T12:14:28.7287544Z  * [new branch]          codex/1811-integrated-rollout -> origin/codex/1811-integrated-rollout
+2026-10-02T12:14:28.7288183Z  * [new branch]          codex/1811-native-activation -> origin/codex/1811-native-activation
+2026-10-02T12:14:28.7289449Z  * [new branch]          codex/1826-isolated-test-partitions -> origin/codex/1826-isolated-test-partitions
+2026-10-02T12:14:28.7290889Z  * [new branch]          codex/1835-bootstrap-support-reader -> origin/codex/1835-bootstrap-support-reader
+2026-10-02T12:14:28.7292227Z  * [new branch]          codex/1835-bootstrap-workflow-contract -> origin/codex/1835-bootstrap-workflow-contract
+2026-10-02T12:14:28.7293434Z  * [new branch]          codex/1836-retire-removed-forgejo-bridge -> origin/codex/1836-retire-removed-forgejo-bridge
+2026-10-02T12:14:28.7294268Z  * [new branch]          codex/1837-string-escape-fixture-bound -> origin/codex/1837-string-escape-fixture-bound
+2026-10-02T12:14:28.7295065Z  * [new branch]          codex/1838-check-machine-frame-capacity -> origin/codex/1838-check-machine-frame-capacity
+2026-10-02T12:14:28.7295912Z  * [new branch]          codex/1839-executable-section-permissions -> origin/codex/1839-executable-section-permissions
+2026-10-02T12:14:28.7296718Z  * [new branch]          codex/1844-reject-invalid-build-cwd -> origin/codex/1844-reject-invalid-build-cwd
+2026-10-02T12:14:28.7297438Z  * [new branch]          codex/1849-macro-rescan-boundaries -> origin/codex/1849-macro-rescan-boundaries
+2026-10-02T12:14:28.7298154Z  * [new branch]          codex/1851-c17-trigraph-translation -> origin/codex/1851-c17-trigraph-translation
+2026-10-02T12:14:28.7298801Z  * [new branch]          codex/1852-ucn-identifiers -> origin/codex/1852-ucn-identifiers
+2026-10-02T12:14:28.7299535Z  * [new branch]          codex/1857-enforce-declarator-constraints -> origin/codex/1857-enforce-declarator-constraints
+2026-10-02T12:14:28.7300301Z  * [new branch]          codex/1859-declaration-constraints -> origin/codex/1859-declaration-constraints
+2026-10-02T12:14:28.7301079Z  * [new branch]          codex/1866-bound-stalled-merge-group-steps -> origin/codex/1866-bound-stalled-merge-group-steps
+2026-10-02T12:14:28.7302032Z  * [new branch]          codex/1885-native-frame-batching -> origin/codex/1885-native-frame-batching
+2026-10-02T12:14:28.7303100Z  * [new branch]          codex/1885-native-frame-diagnostic -> origin/codex/1885-native-frame-diagnostic
+2026-10-02T12:14:28.7303885Z  * [new branch]          codex/1885-native-frame-qualification -> origin/codex/1885-native-frame-qualification
+2026-10-02T12:14:28.7304637Z  * [new branch]          codex/1898-external-archive-control -> origin/codex/1898-external-archive-control
+2026-10-02T12:14:28.7305372Z  * [new branch]          codex/1899-preserve-header-operands -> origin/codex/1899-preserve-header-operands
+2026-10-02T12:14:28.7306158Z  * [new branch]          codex/1902-pragma-generation-oracle -> origin/codex/1902-pragma-generation-oracle
+2026-10-02T12:14:28.7306837Z  * [new branch]          codex/1903-slider-diagnostic -> origin/codex/1903-slider-diagnostic
+2026-10-02T12:14:28.7307572Z  * [new branch]          codex/1905-point-attachment-diagnostic -> origin/codex/1905-point-attachment-diagnostic
+2026-10-02T12:14:28.7308290Z  * [new branch]          codex/1906-kerning-diagnostic -> origin/codex/1906-kerning-diagnostic
+2026-10-02T12:14:28.7308926Z  * [new branch]          codex/1906-kerning-integration -> origin/codex/1906-kerning-integration
+2026-10-02T12:14:28.7309661Z  * [new branch]          codex/1906-kerning-integration-diagnostic -> origin/codex/1906-kerning-integration-diagnostic
+2026-10-02T12:14:28.7310751Z  * [new branch]          codex/1915-index-tls-relaxation-sites -> origin/codex/1915-index-tls-relaxation-sites
+2026-10-02T12:14:28.7312081Z  * [new branch]          codex/1926-hot-replacement-probe -> origin/codex/1926-hot-replacement-probe
+2026-10-02T12:14:28.7313436Z  * [new branch]          codex/1941-cuik-comparison-evidence -> origin/codex/1941-cuik-comparison-evidence
+2026-10-02T12:14:28.7314290Z  * [new branch]          codex/1948-claude-c-compiler-comparison -> origin/codex/1948-claude-c-compiler-comparison
+2026-10-02T12:14:28.7315079Z  * [new branch]          codex/1952-bounded-partial-redraw -> origin/codex/1952-bounded-partial-redraw
+2026-10-02T12:14:28.7316459Z  * [new branch]          codex/1957-native-low-stack-admission -> origin/codex/1957-native-low-stack-admission
+2026-10-02T12:14:28.7317287Z  * [new branch]          codex/2013-indirect-variadic-call-register -> origin/codex/2013-indirect-variadic-call-register
+2026-10-02T12:14:28.7318046Z  * [new branch]          codex/2016-admin-ruleset-audit -> origin/codex/2016-admin-ruleset-audit
+2026-10-02T12:14:28.7318747Z  * [new branch]          codex/2032-bash-array-portability -> origin/codex/2032-bash-array-portability
+2026-10-02T12:14:28.7319644Z  * [new branch]          codex/2032-matched-analyzer-evidence -> origin/codex/2032-matched-analyzer-evidence
+2026-10-02T12:14:28.7320400Z  * [new branch]          codex/2032-same-driver-merge-group -> origin/codex/2032-same-driver-merge-group
+2026-10-02T12:14:28.7321146Z  * [new branch]          codex/2099-driver-iteration-width -> origin/codex/2099-driver-iteration-width
+2026-10-02T12:14:28.7321880Z  * [new branch]          codex/2116-summary-write-probe -> origin/codex/2116-summary-write-probe
+2026-10-02T12:14:28.7322584Z  * [new branch]          codex/2116-summary-write-publish -> origin/codex/2116-summary-write-publish
+2026-10-02T12:14:28.7323641Z  * [new branch]          codex/2119-ci-contract-validation -> origin/codex/2119-ci-contract-validation
+2026-10-02T12:14:28.7324379Z  * [new branch]          codex/2119-ci-source-snapshot -> origin/codex/2119-ci-source-snapshot
+2026-10-02T12:14:28.7325075Z  * [new branch]          codex/2119-current-main-evidence -> origin/codex/2119-current-main-evidence
+2026-10-02T12:14:28.7325819Z  * [new branch]          codex/2119-source-size-materialization -> origin/codex/2119-source-size-materialization
+2026-10-02T12:14:28.7326832Z  * [new branch]          codex/2120-byte-safe-ci-evidence -> origin/codex/2120-byte-safe-ci-evidence
+2026-10-02T12:14:28.7328602Z  * [new branch]          codex/2120-native-host-census -> origin/codex/2120-native-host-census
+2026-10-02T12:14:28.7329420Z  * [new branch]          codex/2120-native-resource-witnesses -> origin/codex/2120-native-resource-witnesses
+2026-10-02T12:14:28.7330203Z  * [new branch]          codex/2120-split-configure-evidence -> origin/codex/2120-split-configure-evidence
+2026-10-02T12:14:28.7330898Z  * [new branch]          codex/2122-llvm-icu-provenance -> origin/codex/2122-llvm-icu-provenance
+2026-10-02T12:14:28.7331545Z  * [new branch]          codex/2122-llvm-linker-runtime -> origin/codex/2122-llvm-linker-runtime
+2026-10-02T12:14:28.7332183Z  * [new branch]          codex/2122-llvm-runtime-probe -> origin/codex/2122-llvm-runtime-probe
+2026-10-02T12:14:28.7333230Z  * [new branch]          codex/2122-llvm-unwind-validation -> origin/codex/2122-llvm-unwind-validation
+2026-10-02T12:14:28.7334003Z  * [new branch]          codex/2122-private-icu-runtime -> origin/codex/2122-private-icu-runtime
+2026-10-02T12:14:28.7334654Z  * [new branch]          codex/2133-aarch64-rel-addends -> origin/codex/2133-aarch64-rel-addends
+2026-10-02T12:14:28.7335509Z  * [new branch]          codex/2134-bind-reuse-finalization -> origin/codex/2134-bind-reuse-finalization
+2026-10-02T12:14:28.7336323Z  * [new branch]          codex/2134-bound-reuse-finalization -> origin/codex/2134-bound-reuse-finalization
+2026-10-02T12:14:28.7337029Z  * [new branch]          codex/2150-cancellation-readiness -> origin/codex/2150-cancellation-readiness
+2026-10-02T12:14:28.7337702Z  * [new branch]          codex/2150-readiness-validation -> origin/codex/2150-readiness-validation
+2026-10-02T12:14:28.7338345Z  * [new branch]          codex/2155-diagnose-vm-bounds -> origin/codex/2155-diagnose-vm-bounds
+2026-10-02T12:14:28.7339012Z  * [new branch]          codex/2159-retain-main-push-checks -> origin/codex/2159-retain-main-push-checks
+2026-10-02T12:14:28.7339777Z  * [new branch]          codex/2159-validate-main-push-concurrency -> origin/codex/2159-validate-main-push-concurrency
+2026-10-02T12:14:28.7340595Z  * [new branch]          codex/2168-optional-apple-architecture -> origin/codex/2168-optional-apple-architecture
+2026-10-02T12:14:28.7341595Z  * [new branch]          codex/2179-native-image-browser -> origin/codex/2179-native-image-browser
+2026-10-02T12:14:28.7342260Z  * [new branch]          codex/2179-xcb-raster-presenter -> origin/codex/2179-xcb-raster-presenter
+2026-10-02T12:14:28.7343319Z  * [new branch]          codex/2183-publish-delimiter-pairs -> origin/codex/2183-publish-delimiter-pairs
+2026-10-02T12:14:28.7344096Z  * [new branch]          codex/2199-bound-cmake-fixture-timeout -> origin/codex/2199-bound-cmake-fixture-timeout
+2026-10-02T12:14:28.7344872Z  * [new branch]          codex/2203-ms-aligned-typedef-pack -> origin/codex/2203-ms-aligned-typedef-pack
+2026-10-02T12:14:28.7345705Z  * [new branch]          codex/2206-deterministic-identity-timeout-test -> origin/codex/2206-deterministic-identity-timeout-test
+2026-10-02T12:14:28.7346549Z  * [new branch]          codex/2209-posix-child-launch-errors -> origin/codex/2209-posix-child-launch-errors
+2026-10-02T12:14:28.7347327Z  * [new branch]          codex/2210-atomic-bootstrap-readiness -> origin/codex/2210-atomic-bootstrap-readiness
+2026-10-02T12:14:28.7348071Z  * [new branch]          codex/2218-decouple-x86-host-probe -> origin/codex/2218-decouple-x86-host-probe
+2026-10-02T12:14:28.7348745Z  * [new branch]          codex/2221-bound-xcb-transfers -> origin/codex/2221-bound-xcb-transfers
+2026-10-02T12:14:28.7349385Z  * [new branch]          codex/2229-canonical-ir-oracle -> origin/codex/2229-canonical-ir-oracle
+2026-10-02T12:14:28.7349991Z  * [new branch]          codex/2230-spirv-compute   -> origin/codex/2230-spirv-compute
+2026-10-02T12:14:28.7350626Z  * [new branch]          codex/2231-safe-point-hot-reload -> origin/codex/2231-safe-point-hot-reload
+2026-10-02T12:14:28.7351351Z  * [new branch]          codex/2232-linear-comdat-associations -> origin/codex/2232-linear-comdat-associations
+2026-10-02T12:14:28.7352331Z  * [new branch]          codex/2233-image-browser-fixture-location -> origin/codex/2233-image-browser-fixture-location
+2026-10-02T12:14:28.7353413Z  * [new branch]          codex/2234-posix-capture-replay -> origin/codex/2234-posix-capture-replay
+2026-10-02T12:14:28.7354153Z  * [new branch]          codex/2236-native-object-investigation -> origin/codex/2236-native-object-investigation
+2026-10-02T12:14:28.7354893Z  * [new branch]          codex/2240-dwarf-loclist-capacity -> origin/codex/2240-dwarf-loclist-capacity
+2026-10-02T12:14:28.7355584Z  * [new branch]          codex/2245-spirv-fixture-location -> origin/codex/2245-spirv-fixture-location
+2026-10-02T12:14:28.7356303Z  * [new branch]          codex/2274-gcc-comparison-diagnostic -> origin/codex/2274-gcc-comparison-diagnostic
+2026-10-02T12:14:28.7356975Z  * [new branch]          codex/2277-msvc-comparison -> origin/codex/2277-msvc-comparison
+2026-10-02T12:14:28.7357549Z  * [new branch]          codex/2277-msvc-evidence   -> origin/codex/2277-msvc-evidence
+2026-10-02T12:14:28.7358213Z  * [new branch]          codex/2279-raddebugger-compatibility -> origin/codex/2279-raddebugger-compatibility
+2026-10-02T12:14:28.7358950Z  * [new branch]          codex/2286-clang-suite-foundation -> origin/codex/2286-clang-suite-foundation
+2026-10-02T12:14:28.7359709Z  * [new branch]          codex/267-condition-code-projections -> origin/codex/267-condition-code-projections
+2026-10-02T12:14:28.7360467Z  * [new branch]          codex/267-condition-oracle-validation -> origin/codex/267-condition-oracle-validation
+2026-10-02T12:14:28.7361231Z  * [new branch]          codex/267-legacy-vector-source-layout -> origin/codex/267-legacy-vector-source-layout
+2026-10-02T12:14:28.7361938Z  * [new branch]          codex/267-scalar-source-layout -> origin/codex/267-scalar-source-layout
+2026-10-02T12:14:28.7362593Z  * [new branch]          codex/267-shift-source-layout -> origin/codex/267-shift-source-layout
+2026-10-02T12:14:28.7363736Z  * [new branch]          codex/426-offline-eligibility-20260925 -> origin/codex/426-offline-eligibility-20260925
+2026-10-02T12:14:28.7364680Z  * [new branch]          codex/47-effort-policy-probe -> origin/codex/47-effort-policy-probe
+2026-10-02T12:14:28.7365290Z  * [new branch]          codex/513-mir-only-native  -> origin/codex/513-mir-only-native
+2026-10-02T12:14:28.7365916Z  * [new branch]          codex/514-direct-deletion-stack -> origin/codex/514-direct-deletion-stack
+2026-10-02T12:14:28.7366682Z  * [new branch]          codex/53-determinism-perturbation-20260930 -> origin/codex/53-determinism-perturbation-20260930
+2026-10-02T12:14:28.7367396Z  * [new branch]          codex/709-ci-time-evidence -> origin/codex/709-ci-time-evidence
+2026-10-02T12:14:28.7368004Z  * [new branch]          codex/75-preserve-variadic-al -> origin/codex/75-preserve-variadic-al
+2026-10-02T12:14:28.7368718Z  * [new branch]          codex/780-preserve-valid-sdk-packages -> origin/codex/780-preserve-valid-sdk-packages
+2026-10-02T12:14:28.7369697Z  * [new branch]          codex/83-failure-atomicity-20260930 -> origin/codex/83-failure-atomicity-20260930
+2026-10-02T12:14:28.7370369Z  * [new branch]          codex/880-d2-probe         -> origin/codex/880-d2-probe
+2026-10-02T12:14:28.7370932Z  * [new branch]          codex/880-evidence-a23-data -> origin/codex/880-evidence-a23-data
+2026-10-02T12:14:28.7371531Z  * [new branch]          codex/880-evidence-a24-data -> origin/codex/880-evidence-a24-data
+2026-10-02T12:14:28.7372120Z  * [new branch]          codex/880-evidence-a25-data -> origin/codex/880-evidence-a25-data
+2026-10-02T12:14:28.7372955Z  * [new branch]          codex/880-evidence-a26-data -> origin/codex/880-evidence-a26-data
+2026-10-02T12:14:28.7373750Z  * [new branch]          codex/880-evidence-a27-data -> origin/codex/880-evidence-a27-data
+2026-10-02T12:14:28.7374359Z  * [new branch]          codex/880-evidence-a28-data -> origin/codex/880-evidence-a28-data
+2026-10-02T12:14:28.7375098Z  * [new branch]          codex/880-evidence-a29-data -> origin/codex/880-evidence-a29-data
+2026-10-02T12:14:28.7375878Z  * [new branch]          codex/880-evidence-a32-data -> origin/codex/880-evidence-a32-data
+2026-10-02T12:14:28.7376506Z  * [new branch]          codex/880-evidence-a33-data -> origin/codex/880-evidence-a33-data
+2026-10-02T12:14:28.7377173Z  * [new branch]          codex/880-evidence-bqeg-36374014500 -> origin/codex/880-evidence-bqeg-36374014500
+2026-10-02T12:14:28.7377865Z  * [new branch]          codex/880-evidence-krepro2-data -> origin/codex/880-evidence-krepro2-data
+2026-10-02T12:14:28.7378589Z  * [new branch]          codex/880-evidence-pdisp-data -> origin/codex/880-evidence-pdisp-data
+2026-10-02T12:14:28.7471409Z  * [new branch]          codex/880-evidence-pfixed-data -> origin/codex/880-evidence-pfixed-data
+2026-10-02T12:14:28.7472640Z  * [new branch]          codex/880-evidence-prepro-data -> origin/codex/880-evidence-prepro-data
+2026-10-02T12:14:28.7473714Z  * [new branch]          codex/880-evidence-readback -> origin/codex/880-evidence-readback
+2026-10-02T12:14:28.7474378Z  * [new branch]          codex/880-p-repro          -> origin/codex/880-p-repro
+2026-10-02T12:14:28.7474955Z  * [new branch]          codex/881-a1-binding       -> origin/codex/881-a1-binding
+2026-10-02T12:14:28.7475525Z  * [new branch]          codex/881-a1-campaign      -> origin/codex/881-a1-campaign
+2026-10-02T12:14:28.7476088Z  * [new branch]          codex/881-a1-fold          -> origin/codex/881-a1-fold
+2026-10-02T12:14:28.7476629Z  * [new branch]          codex/881-a1-fold-next     -> origin/codex/881-a1-fold-next
+2026-10-02T12:14:28.7477216Z  * [new branch]          codex/881-aa-authority     -> origin/codex/881-aa-authority
+2026-10-02T12:14:28.7477763Z  * [new branch]          codex/881-aa-phase         -> origin/codex/881-aa-phase
+2026-10-02T12:14:28.7478317Z  * [new branch]          codex/881-aa-pin-prep      -> origin/codex/881-aa-pin-prep
+2026-10-02T12:14:28.7478878Z  * [new branch]          codex/881-adapter-shards   -> origin/codex/881-adapter-shards
+2026-10-02T12:14:28.7479545Z  * [new branch]          codex/881-broker-retirement-stages -> origin/codex/881-broker-retirement-stages
+2026-10-02T12:14:28.7480706Z  * [new branch]          codex/881-native-invocation-evidence -> origin/codex/881-native-invocation-evidence
+2026-10-02T12:14:28.7481406Z  * [new branch]          codex/881-per-input-metrics -> origin/codex/881-per-input-metrics
+2026-10-02T12:14:28.7482031Z  * [new branch]          codex/881-record-generators -> origin/codex/881-record-generators
+2026-10-02T12:14:28.7482624Z  * [new branch]          codex/881-unit-builds      -> origin/codex/881-unit-builds
+2026-10-02T12:14:28.7483682Z  * [new branch]          codex/881-worker-unit-compose -> origin/codex/881-worker-unit-compose
+2026-10-02T12:14:28.7484369Z  * [new branch]          codex/881-worker-unit-coordinator -> origin/codex/881-worker-unit-coordinator
+2026-10-02T12:14:28.7485015Z  * [new branch]          codex/882-precutover-prep  -> origin/codex/882-precutover-prep
+2026-10-02T12:14:28.7485649Z  * [new branch]          codex/campaign-cloud-helpers -> origin/codex/campaign-cloud-helpers
+2026-10-02T12:14:28.7486306Z  * [new branch]          codex/capability-portfolio -> origin/codex/capability-portfolio
+2026-10-02T12:14:28.7486996Z  * [new branch]          codex/ci-checks-combined-all-builds -> origin/codex/ci-checks-combined-all-builds
+2026-10-02T12:14:28.7487777Z  * [new branch]          codex/ci-checks-combined-overlap -> origin/codex/ci-checks-combined-overlap
+2026-10-02T12:14:28.7488475Z  * [new branch]          codex/ci-checks-split-overlap -> origin/codex/ci-checks-split-overlap
+2026-10-02T12:14:28.7489220Z  * [new branch]          codex/font-batch-integration-diagnostic -> origin/codex/font-batch-integration-diagnostic
+2026-10-02T12:14:28.7489957Z  * [new branch]          codex/issue-1000-unsigned-char -> origin/codex/issue-1000-unsigned-char
+2026-10-02T12:14:28.7490710Z  * [new branch]          codex/issue-118-file-open-policy-5004a068 -> origin/codex/issue-118-file-open-policy-5004a068
+2026-10-02T12:14:28.7491662Z  * [new branch]          codex/issue-1655-source-snapshot -> origin/codex/issue-1655-source-snapshot
+2026-10-02T12:14:28.7492469Z  * [new branch]          codex/rescue-292-ir-free-syntax-only-wip -> origin/codex/rescue-292-ir-free-syntax-only-wip
+2026-10-02T12:14:28.7493584Z  * [new branch]          codex/rescue-797-enum-token-view-wip -> origin/codex/rescue-797-enum-token-view-wip
+2026-10-02T12:14:28.7494418Z  * [new branch]          compiler/issue-33-canonical-local-promotion -> origin/compiler/issue-33-canonical-local-promotion
+2026-10-02T12:14:28.7495154Z  * [new branch]          fix/1654-clang-asan-runtime -> origin/fix/1654-clang-asan-runtime
+2026-10-02T12:14:28.7495760Z  * [new branch]          fix/1731-x87-float16-runtime -> origin/fix/1731-x87-float16-runtime
+2026-10-02T12:14:28.7496451Z  * [new branch]          fix/1790-desktop-artifact-resolution -> origin/fix/1790-desktop-artifact-resolution
+2026-10-02T12:14:28.7497140Z  * [new branch]          fix/1793-wasm-integer-exit -> origin/fix/1793-wasm-integer-exit
+2026-10-02T12:14:28.7498105Z  * [new branch]          gh-readonly-queue/main/pr-1690-0959a3acc9d169a19e92bcf4c2b4e0d6946d372c -> origin/gh-readonly-queue/main/pr-1690-0959a3acc9d169a19e92bcf4c2b4e0d6946d372c
+2026-10-02T12:14:28.7499360Z  * [new branch]          gh-readonly-queue/main/pr-1985-5857d752adb9ee8e8d09676a50ec3f2a2e279747 -> origin/gh-readonly-queue/main/pr-1985-5857d752adb9ee8e8d09676a50ec3f2a2e279747
+2026-10-02T12:14:28.7500581Z  * [new branch]          gh-readonly-queue/main/pr-2266-d4ca72fb4e97ae0a410b0d03258b00495fa45e13 -> origin/gh-readonly-queue/main/pr-2266-d4ca72fb4e97ae0a410b0d03258b00495fa45e13
+2026-10-02T12:14:28.7501425Z  * [new branch]          main                       -> origin/main
+2026-10-02T12:14:28.7502105Z  * [new branch]          native-retirement-staging/pr-1801-36571836619-1 -> origin/native-retirement-staging/pr-1801-36571836619-1
+2026-10-02T12:14:28.7503172Z  * [new branch]          native-retirement-staging/pr-1801-36577928221-1 -> origin/native-retirement-staging/pr-1801-36577928221-1
+2026-10-02T12:14:28.7504065Z  * [new branch]          native-retirement-staging/pr-927-35655313959-1 -> origin/native-retirement-staging/pr-927-35655313959-1
+2026-10-02T12:14:28.7505007Z  * [new branch]          native-retirement/catch-up -> origin/native-retirement/catch-up
+2026-10-02T12:14:28.7505706Z  * [new branch]          research/1790-action-resolution-probe -> origin/research/1790-action-resolution-probe
+2026-10-02T12:14:28.7506507Z  * [new branch]          research/390-error-cause-boundary-8f67df7 -> origin/research/390-error-cause-boundary-8f67df7
+2026-10-02T12:14:28.7507230Z  * [new branch]          validation/1732-current-head -> origin/validation/1732-current-head
+2026-10-02T12:14:28.7507832Z  * [new branch]          validation/1732-x87-varargs -> origin/validation/1732-x87-varargs
+2026-10-02T12:14:28.7508402Z  * [new tag]             bench-service-880-425b8b5a -> bench-service-880-425b8b5a
+2026-10-02T12:14:28.7508940Z  * [new tag]             bench-service-880-6a59bc4f -> bench-service-880-6a59bc4f
+2026-10-02T12:14:28.7509472Z  * [new tag]             bench-service-880-d0c8ce2c -> bench-service-880-d0c8ce2c
+2026-10-02T12:14:28.7510085Z  * [new tag]             native-retirement-evidence-2bb4ce9 -> native-retirement-evidence-2bb4ce9
+2026-10-02T12:14:28.7510764Z  * [new tag]             native-retirement-evidence-eb1bef2 -> native-retirement-evidence-eb1bef2
+2026-10-02T12:14:28.7511514Z  * [new tag]             native-retirement-evidence-history-20260912 -> native-retirement-evidence-history-20260912
+2026-10-02T12:14:28.7513198Z [command]/usr/bin/git branch --list --remote origin/codex/2274-gcc-comparison-diagnostic
+2026-10-02T12:14:28.7513857Z   origin/codex/2274-gcc-comparison-diagnostic
+2026-10-02T12:14:28.7514794Z [command]/usr/bin/git rev-parse refs/remotes/origin/codex/2274-gcc-comparison-diagnostic
+2026-10-02T12:14:28.7515309Z e19b531e03db62afd8f688ecd69d7f9f111283bf
+2026-10-02T12:14:28.7516166Z ##[endgroup]
+2026-10-02T12:14:28.7516608Z ##[group]Determining the checkout info
+2026-10-02T12:14:28.7517088Z ##[endgroup]
+2026-10-02T12:14:28.7517544Z [command]/usr/bin/git sparse-checkout disable
+2026-10-02T12:14:28.7518441Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-10-02T12:14:28.7519412Z ##[group]Checking out the ref
+2026-10-02T12:14:28.7520107Z [command]/usr/bin/git checkout --progress --force -B codex/2274-gcc-comparison-diagnostic refs/remotes/origin/codex/2274-gcc-comparison-diagnostic
+2026-10-02T12:14:29.3020472Z Switched to a new branch 'codex/2274-gcc-comparison-diagnostic'
+2026-10-02T12:14:29.3023046Z branch 'codex/2274-gcc-comparison-diagnostic' set up to track 'origin/codex/2274-gcc-comparison-diagnostic'.
+2026-10-02T12:14:29.3081023Z ##[endgroup]
+2026-10-02T12:14:29.3138057Z [command]/usr/bin/git log -1 --format=%H
+2026-10-02T12:14:29.3167295Z e19b531e03db62afd8f688ecd69d7f9f111283bf
+2026-10-02T12:14:29.3178928Z ##[group]Removing auth
+2026-10-02T12:14:29.3182530Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-02T12:14:29.3223612Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-02T12:14:29.3520674Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-02T12:14:29.3546222Z http.https://github.com/.extraheader
+2026-10-02T12:14:29.3555711Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-10-02T12:14:29.3592229Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-02T12:14:29.3882359Z ##[endgroup]
+2026-10-02T12:14:29.4098382Z ##[group]Run mkdir -p gcc-comparison-evidence
+2026-10-02T12:14:29.4098940Z [36;1mmkdir -p gcc-comparison-evidence[0m
+2026-10-02T12:14:29.4099544Z [36;1mgit rev-parse HEAD 'HEAD^{tree}' > gcc-comparison-evidence/diagnostic-revision.txt[0m
+2026-10-02T12:14:29.4100635Z [36;1mgit diff d4ca72fb4e97ae0a410b0d03258b00495fa45e13 -- src build.c CMakeLists.txt > gcc-comparison-evidence/production.diff[0m
+2026-10-02T12:14:29.4101351Z [36;1mtest ! -s gcc-comparison-evidence/production.diff[0m
+2026-10-02T12:14:29.4101850Z [36;1mclang --version > gcc-comparison-evidence/build-compiler.txt[0m
+2026-10-02T12:14:29.4102585Z [36;1mclang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-gcc-compare-build"[0m
+2026-10-02T12:14:29.4103937Z [36;1m"$RUNNER_TEMP/buster-gcc-compare-build" generate --ci --cc clang --linker DEFAULT -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF[0m
+2026-10-02T12:14:29.4104782Z [36;1m"$RUNNER_TEMP/buster-gcc-compare-build" build --config Release -t ide -- -j2[0m
+2026-10-02T12:14:29.4295363Z shell: /usr/bin/bash -e {0}
+2026-10-02T12:14:29.4295797Z env:
+2026-10-02T12:14:29.4296114Z   CMAKE_BUILD_PARALLEL_LEVEL: 2
+2026-10-02T12:14:29.4296467Z   BUSTER_TEST_JOBS: 1
+2026-10-02T12:14:29.4296798Z ##[endgroup]
+2026-10-02T12:14:32.9521850Z BUSTER_BUILD_DIRECTORY: build
+2026-10-02T12:14:32.9522449Z BUSTER_BUILD_CONFIG: Debug
+2026-10-02T12:14:32.9523197Z BUSTER_CC: clang
+2026-10-02T12:14:32.9524485Z BUSTER_LINKER: DEFAULT
+2026-10-02T12:14:32.9527867Z + /usr/local/bin/cmake --warn-uninitialized -Werror=dev -B build -DBUSTER_CI=ON -DCMAKE_C_COMPILER=clang -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DCMAKE_LINKER_TYPE=DEFAULT -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=ON -DBUSTER_DEVELOPER_TARGETS=ON -DBUSTER_BUILD_DRIVER=/home/runner/work/_temp/buster-gcc-compare-build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug;Release -DBUSTER_SINGLE_THREADED=OFF -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
+2026-10-02T12:14:32.9798161Z The --warn-uninitialized option is deprecated.  Use -Wuninitialized instead.
+2026-10-02T12:14:32.9857298Z The error=dev option is deprecated.  Use -Werror=author instead.
+2026-10-02T12:14:33.1224710Z -- The C compiler identification is Clang 21.1.8
+2026-10-02T12:14:33.1404341Z -- Detecting C compiler ABI info
+2026-10-02T12:14:33.2359412Z -- Detecting C compiler ABI info - done
+2026-10-02T12:14:33.2509605Z -- Check for working C compiler: /usr/bin/clang - skipped
+2026-10-02T12:14:33.2522258Z -- Detecting C compile features
+2026-10-02T12:14:33.2523861Z -- Detecting C compile features - done
+2026-10-02T12:14:33.2906227Z -- BUSTER_VULKAN_SDK: 
+2026-10-02T12:14:33.2906838Z -- BUSTER_SLANGC_EXECUTABLE: BUSTER_SLANGC_EXECUTABLE-NOTFOUND
+2026-10-02T12:14:33.2907419Z -- BUSTER_CI: ON
+2026-10-02T12:14:33.2907962Z -- BUSTER_LINK_LIBC: ON
+2026-10-02T12:14:33.2908362Z -- BUSTER_OPTIMIZE: configuration-derived
+2026-10-02T12:14:33.2908844Z -- BUSTER_UNITY_BUILD: OFF
+2026-10-02T12:14:33.2909231Z -- BUSTER_INCLUDE_TESTS: OFF
+2026-10-02T12:14:33.2909622Z -- BUSTER_SANITIZE: OFF
+2026-10-02T12:14:33.2910027Z -- BUSTER_SANITIZER_REDUCED_DEBUG: OFF
+2026-10-02T12:14:33.2910521Z -- BUSTER_DEBUG_INFO: OFF
+2026-10-02T12:14:33.2910917Z -- BUSTER_FRAME_POINTERS: OFF
+2026-10-02T12:14:33.2911330Z -- BUSTER_TIME_TRACE: OFF
+2026-10-02T12:14:33.2911727Z -- BUSTER_INSTRUMENT: OFF
+2026-10-02T12:14:33.2912129Z -- BUSTER_FUZZ_AVAILABLE: OFF
+2026-10-02T12:14:33.2912565Z -- BUSTER_LTO: OFF
+2026-10-02T12:14:33.2913241Z -- BUSTER_PRODUCTION_PROFILE: OFF
+2026-10-02T12:14:33.2913707Z -- BUSTER_PGO_GENERATE: 
+2026-10-02T12:14:33.2914118Z -- BUSTER_PGO_USE: 
+2026-10-02T12:14:33.2914488Z -- BUSTER_PGO_MANIFEST: 
+2026-10-02T12:14:33.2914904Z -- BUSTER_PGO_FINGERPRINT: 
+2026-10-02T12:14:33.2915356Z -- BUSTER_CHECK_OPTIONAL_WARNINGS: ON
+2026-10-02T12:14:33.2916313Z -- BUSTER_DEVELOPER_TARGETS: ON
+2026-10-02T12:14:33.2916832Z -- BUSTER_REQUIRE_VULKAN_SDK: ON
+2026-10-02T12:14:33.2917303Z -- BUSTER_COMPILE_SHADERS: OFF
+2026-10-02T12:14:33.2917764Z -- BUSTER_USE_SLANG_SHADERS: OFF
+2026-10-02T12:14:33.2918204Z -- BUSTER_SINGLE_THREADED: OFF
+2026-10-02T12:14:33.2918926Z -- CMAKE_HOST_SYSTEM_PROCESSOR: x86_64
+2026-10-02T12:14:33.2919426Z -- CMAKE_SYSTEM_PROCESSOR: x86_64
+2026-10-02T12:14:33.2919930Z -- CMAKE_GENERATOR: Ninja Multi-Config
+2026-10-02T12:14:33.2920445Z -- CMAKE_CONFIGURATION_TYPES: Debug;Release
+2026-10-02T12:14:33.2920966Z -- CMAKE_DEFAULT_BUILD_TYPE: Debug
+2026-10-02T12:14:33.2921392Z -- CMAKE_BUILD_TYPE: 
+2026-10-02T12:14:33.2921775Z -- CMAKE_C_COMPILER_ID: Clang
+2026-10-02T12:14:33.2922201Z -- CMAKE_LINKER_TYPE: DEFAULT
+2026-10-02T12:14:33.2922613Z -- C_COMPILER_ZIG: OFF
+2026-10-02T12:14:33.2923271Z -- BUSTER_USE_VULKAN: OFF
+2026-10-02T12:14:33.2923663Z -- BUSTER_USE_D3D12: OFF
+2026-10-02T12:14:33.2924057Z -- BUSTER_USE_METAL: OFF
+2026-10-02T12:14:33.2924512Z -- CMAKE_COLOR_DIAGNOSTICS: ON
+2026-10-02T12:14:33.2924988Z -- CMAKE_EXPORT_COMPILE_COMMANDS: ON
+2026-10-02T12:14:33.2925465Z -- GDB: gdb_executable-NOTFOUND
+2026-10-02T12:14:33.2925915Z -- LLDB: lldb_executable-NOTFOUND
+2026-10-02T12:14:33.2950440Z -- Performing Test BUSTER_HAS_C_FLAG__Wexperimental_lifetime_safety
+2026-10-02T12:14:33.3893146Z -- Performing Test BUSTER_HAS_C_FLAG__Wexperimental_lifetime_safety - Success
+2026-10-02T12:14:33.3902496Z -- Performing Test BUSTER_HAS_C_FLAG__Whigher_precision_for_complex_division
+2026-10-02T12:14:33.4680264Z -- Performing Test BUSTER_HAS_C_FLAG__Whigher_precision_for_complex_division - Success
+2026-10-02T12:14:33.4703780Z -- Performing Test BUSTER_HAS_C_FLAG__Wimplicit_void_ptr_cast
+2026-10-02T12:14:33.5460558Z -- Performing Test BUSTER_HAS_C_FLAG__Wimplicit_void_ptr_cast - Success
+2026-10-02T12:14:33.5471552Z -- Performing Test BUSTER_HAS_C_FLAG__Wshift_bool
+2026-10-02T12:14:33.6234767Z -- Performing Test BUSTER_HAS_C_FLAG__Wshift_bool - Success
+2026-10-02T12:14:33.6243887Z -- Performing Test BUSTER_HAS_C_FLAG__Wthread_safety
+2026-10-02T12:14:33.7000869Z -- Performing Test BUSTER_HAS_C_FLAG__Wthread_safety - Success
+2026-10-02T12:14:33.7010235Z -- Performing Test BUSTER_HAS_C_FLAG__Wunique_object_duplication
+2026-10-02T12:14:33.7762256Z -- Performing Test BUSTER_HAS_C_FLAG__Wunique_object_duplication - Success
+2026-10-02T12:14:33.9317371Z -- ide modules: OS;ENTRY_POINT;ARENA;INTEGER;STRING;FLOAT;COMPILER_C_FRONTEND;COMPILER_AARCH64_ENCODING;COMPILER_AARCH64_EXACT_BRIDGE;COMPILER_AARCH64_CONTROL_SEMANTICS;COMPILER_AARCH64_SYSTEM_REGISTERS;COMPILER_AARCH64_SEMANTICS;COMPILER_AARCH64_SYSTEM_SEMANTICS;COMPILER_AARCH64_SYNTAX;COMPILER_AARCH64_SEMANTIC_VM;COMPILER_AARCH64_DIRECT_SIMD;COMPILER_AARCH64_COMPLEX_SIMD;COMPILER_AARCH64_MEMORY_SEMANTICS;COMPILER_AARCH64_ALIAS_PROJECTION;COMPILER_ASSEMBLY;COMPILER_ASSEMBLY_UNIT;COMPILER_ASSEMBLY_METADATA;COMPILER_ASSEMBLY_COMPLETION_CENSUS;COMPILER_IR;COMPILER_DIAGNOSTIC;COMPILER_DEBUG;COMPILER_MACHINE;COMPILER_BOOTSTRAP_TRACE;COMPILER_CODEGEN;COMPILER_DWARF;BYTE_WRITER;COMPILER_CODEVIEW;COMPILER_PDB;COMPILER_OBJECT;COMPILER_JIT;COMPILER_LINK;COMPILER_WASM;COMPILER_GPU;COMPILER_LLVM_BITCODE;COMPILER_EBPF;COMPILER_SPIRV;COMPILER_DRIVER;SIMD;FILE;TARGET;TIME;HASH
+2026-10-02T12:14:33.9335308Z -- ide files: src/buster/apps/ide/ide.c src/buster/lib/os.c;src/buster/lib/entry_point.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/float.c;src/buster/lib/compiler/frontend/c/c_source.c;src/buster/lib/compiler/frontend/c/c_parse.c;src/buster/lib/compiler/frontend/c/c_gen.c;src/buster/lib/compiler/assembly/aarch64_encoding.c;src/buster/lib/compiler/assembly/aarch64_exact_bridge.c;src/buster/lib/compiler/assembly/aarch64_control_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_registers.c;src/buster/lib/compiler/assembly/aarch64_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_semantics.c;src/buster/lib/compiler/assembly/aarch64_syntax.c;src/buster/lib/compiler/assembly/aarch64_semantic_vm.c;src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_memory_semantics.c;src/buster/lib/compiler/assembly/aarch64_alias_projection.c;src/buster/lib/compiler/assembly/assembly.c;src/buster/lib/compiler/assembly/assembly_unit.c;src/buster/lib/compiler/assembly/x86_64_metadata.c;src/buster/lib/compiler/assembly/x86_64_completion_census.c;src/buster/lib/compiler/ir/ir.c;src/buster/lib/compiler/diagnostic.c;src/buster/lib/compiler/debug/debug.c;src/buster/lib/compiler/codegen/machine.c;src/buster/lib/compiler/codegen/bootstrap_trace.c;src/buster/lib/compiler/codegen/codegen.c;src/buster/lib/compiler/dwarf/dwarf.c;src/buster/lib/byte_writer.c;src/buster/lib/compiler/codeview/codeview.c;src/buster/lib/compiler/pdb/pdb.c;src/buster/lib/compiler/object/object.c;src/buster/lib/compiler/jit/jit.c;src/buster/lib/compiler/link/link.c;src/buster/lib/compiler/wasm/wasm.c;src/buster/lib/compiler/gpu/gpu.c;src/buster/lib/compiler/llvm/bitcode.c;src/buster/lib/compiler/ebpf/ebpf.c;src/buster/lib/compiler/spirv/spirv.c;src/buster/lib/compiler/driver/driver.c;src/buster/lib/simd.c;src/buster/lib/file.c;src/buster/lib/target.c;src/buster/lib/time.c;src/buster/lib/hash.c;src/buster/lib/x86_64.c
+2026-10-02T12:14:33.9349566Z -- No supported debugger found for ide_debug
+2026-10-02T12:14:33.9350112Z -- Configuring done (0.9s)
+2026-10-02T12:14:33.9709660Z -- Generating done (0.0s)
+2026-10-02T12:14:33.9714279Z -- Build files have been written to: /home/runner/work/buster/buster/build
+2026-10-02T12:14:33.9764104Z CMake generation (cc=clang, fuzz_available=OFF, sanitize=OFF) took 1.024105 seconds (1024105000 nanoseconds)
+2026-10-02T12:14:34.0352487Z [1/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/byte_writer_test.c.o
+2026-10-02T12:14:34.0788361Z [2/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/arena_test.c.o
+2026-10-02T12:14:34.1210525Z [3/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/integer_test.c.o
+2026-10-02T12:14:34.1637335Z [4/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/sanitizer_test.c.o
+2026-10-02T12:14:34.2075394Z [5/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/hash_test.c.o
+2026-10-02T12:14:34.2552161Z [6/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/simd_test.c.o
+2026-10-02T12:14:34.2987126Z [7/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/string_test.c.o
+2026-10-02T12:14:34.3579236Z [8/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/os_test.c.o
+2026-10-02T12:14:34.4178264Z [9/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/file_test.c.o
+2026-10-02T12:14:34.4611207Z [10/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/target_test.c.o
+2026-10-02T12:14:34.5025918Z [11/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/truetype_test.c.o
+2026-10-02T12:14:34.5389352Z [12/109] Building C object CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o
+2026-10-02T12:14:34.5454156Z [13/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/image_test.c.o
+2026-10-02T12:14:34.5843646Z [14/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/metamorphic/metamorphic_test.c.o
+2026-10-02T12:14:34.6082489Z [15/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/frontend/c/c_test.c.o
+2026-10-02T12:14:34.6564279Z [16/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/frontend/c/type_layout_test.c.o
+2026-10-02T12:14:34.6657531Z [17/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/frontend/c/once_test.c.o
+2026-10-02T12:14:34.6994491Z [18/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/frontend/c/macro_conditional_test.c.o
+2026-10-02T12:14:34.7087360Z [19/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/frontend/c/record_layout_test.c.o
+2026-10-02T12:14:34.7430232Z [20/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_encoding_test.c.o
+2026-10-02T12:14:34.7518658Z [21/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c.o
+2026-10-02T12:14:34.7866004Z [22/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c.o
+2026-10-02T12:14:34.7943121Z [23/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_system_registers_test.c.o
+2026-10-02T12:14:34.8317395Z [24/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_semantics_test.c.o
+2026-10-02T12:14:34.8369846Z [25/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c.o
+2026-10-02T12:14:34.8767555Z [26/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_syntax_test.c.o
+2026-10-02T12:14:34.8778675Z [27/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c.o
+2026-10-02T12:14:34.9206672Z [28/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c.o
+2026-10-02T12:14:34.9210608Z [29/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c.o
+2026-10-02T12:14:34.9644100Z [30/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c.o
+2026-10-02T12:14:34.9648669Z [31/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/aarch64_alias_projection_test.c.o
+2026-10-02T12:14:35.0139470Z [32/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/assembly_test.c.o
+2026-10-02T12:14:35.0253461Z [33/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/x86_64_forwarding_test.c.o
+2026-10-02T12:14:35.0750169Z [34/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/x86_64_metadata_test.c.o
+2026-10-02T12:14:35.0832434Z [35/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/x86_64_tls_test.c.o
+2026-10-02T12:14:35.1201619Z [36/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/padding_test.c.o
+2026-10-02T12:14:35.1284801Z [37/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/x86_64_got_test.c.o
+2026-10-02T12:14:35.1660152Z [38/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c.o
+2026-10-02T12:14:35.1733663Z [39/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/diagnostic_test.c.o
+2026-10-02T12:14:35.2160369Z [40/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/ir/vector_contract_test.c.o
+2026-10-02T12:14:35.2212944Z [41/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/ir/ir_test.c.o
+2026-10-02T12:14:35.2657861Z [42/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/llvm/bitcode_test.c.o
+2026-10-02T12:14:35.2690045Z [43/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/codegen/machine_select_test.c.o
+2026-10-02T12:14:35.3209144Z [44/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/codegen/machine_test.c.o
+2026-10-02T12:14:35.3299799Z [45/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/codegen/codegen_test.c.o
+2026-10-02T12:14:35.3772108Z [46/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/debug/debug_test.c.o
+2026-10-02T12:14:35.3794937Z [47/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/codegen/aarch64_stride_test.c.o
+2026-10-02T12:14:35.4230931Z [48/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/dwarf/dwarf_test.c.o
+2026-10-02T12:14:35.4236427Z [49/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/codeview/codeview_test.c.o
+2026-10-02T12:14:35.4701333Z [50/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/pdb/pdb_test.c.o
+2026-10-02T12:14:35.4823849Z [51/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/object/object_test.c.o
+2026-10-02T12:14:35.5275296Z [52/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/jit/jit_test.c.o
+2026-10-02T12:14:35.5388156Z [53/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/link/link_test.c.o
+2026-10-02T12:14:35.5707730Z [54/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/gpu/gpu_test.c.o
+2026-10-02T12:14:35.5816241Z [55/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/spirv/spirv_test.c.o
+2026-10-02T12:14:35.6227948Z [56/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/driver/object_path_test.c.o
+2026-10-02T12:14:35.6374302Z [57/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/compiler/driver/driver_test.c.o
+2026-10-02T12:14:35.6684519Z [58/109] Building C object CMakeFiles/ide.dir/Release/src/buster/tests/x86_64_test.c.o
+2026-10-02T12:14:35.7832599Z [59/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/entry_point.c.o
+2026-10-02T12:14:35.9042427Z [60/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/arena.c.o
+2026-10-02T12:14:35.9551485Z [61/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/integer.c.o
+2026-10-02T12:14:36.4905632Z [62/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/string.c.o
+2026-10-02T12:14:36.5421567Z [63/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/float.c.o
+2026-10-02T12:14:36.5948831Z [64/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/os.c.o
+2026-10-02T12:14:39.7160186Z [65/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/frontend/c/c_source.c.o
+2026-10-02T12:14:48.5509306Z [66/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/frontend/c/c_parse.c.o
+2026-10-02T12:14:50.0146186Z [67/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_encoding.c.o
+2026-10-02T12:14:50.1062572Z [68/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_exact_bridge.c.o
+2026-10-02T12:14:50.2907188Z [69/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_control_semantics.c.o
+2026-10-02T12:14:50.5454816Z [70/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_system_registers.c.o
+2026-10-02T12:14:51.3095825Z [71/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_semantics.c.o
+2026-10-02T12:14:51.4918276Z [72/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_system_semantics.c.o
+2026-10-02T12:14:51.9914760Z [73/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_syntax.c.o
+2026-10-02T12:14:52.8496384Z [74/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_semantic_vm.c.o
+2026-10-02T12:14:53.2913312Z [75/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c.o
+2026-10-02T12:14:53.7828516Z [76/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c.o
+2026-10-02T12:14:54.4462357Z [77/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_memory_semantics.c.o
+2026-10-02T12:14:54.8173161Z [78/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/aarch64_alias_projection.c.o
+2026-10-02T12:14:56.8836388Z [79/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/frontend/c/c_gen.c.o
+2026-10-02T12:14:57.6208711Z [80/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/assembly_unit.c.o
+2026-10-02T12:14:58.0476543Z [81/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/assembly.c.o
+2026-10-02T12:14:58.8803702Z [82/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/x86_64_completion_census.c.o
+2026-10-02T12:15:02.5622866Z [83/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/ir/ir.c.o
+2026-10-02T12:15:02.6475883Z [84/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/diagnostic.c.o
+2026-10-02T12:15:03.0124481Z [85/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/debug/debug.c.o
+2026-10-02T12:15:03.4734382Z [86/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/assembly/x86_64_metadata.c.o
+2026-10-02T12:15:04.7183334Z [87/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/codegen/bootstrap_trace.c.o
+2026-10-02T12:15:17.6049940Z [88/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/codegen/codegen.c.o
+2026-10-02T12:15:18.1263974Z [89/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/codegen/machine.c.o
+2026-10-02T12:15:18.1917870Z [90/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/byte_writer.c.o
+2026-10-02T12:15:18.5718708Z [91/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/codeview/codeview.c.o
+2026-10-02T12:15:18.6041699Z [92/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/dwarf/dwarf.c.o
+2026-10-02T12:15:19.1533777Z [93/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/pdb/pdb.c.o
+2026-10-02T12:15:19.3723801Z [94/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/jit/jit.c.o
+2026-10-02T12:15:23.2545863Z [95/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/object/object.c.o
+2026-10-02T12:15:24.3111097Z [96/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/link/link.c.o
+2026-10-02T12:15:24.8569054Z [97/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/wasm/wasm.c.o
+2026-10-02T12:15:25.0568720Z [98/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/gpu/gpu.c.o
+2026-10-02T12:15:26.1604504Z [99/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/ebpf/ebpf.c.o
+2026-10-02T12:15:26.3818416Z [100/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/spirv/spirv.c.o
+2026-10-02T12:15:26.7890617Z [101/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/llvm/bitcode.c.o
+2026-10-02T12:15:26.8325994Z [102/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/simd.c.o
+2026-10-02T12:15:26.9929263Z [103/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/file.c.o
+2026-10-02T12:15:27.4080991Z [104/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/target.c.o
+2026-10-02T12:15:27.4708094Z [105/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/time.c.o
+2026-10-02T12:15:27.5729144Z [106/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/hash.c.o
+2026-10-02T12:15:27.7289277Z [107/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/x86_64.c.o
+2026-10-02T12:15:28.2256784Z [108/109] Building C object CMakeFiles/ide.dir/Release/src/buster/lib/compiler/driver/driver.c.o
+2026-10-02T12:15:28.3315646Z [109/109] Linking C executable Release/ide
+2026-10-02T12:15:28.3375967Z ##[group]Run python3 tools/research/gcc-comparison-diagnostic.py
+2026-10-02T12:15:28.3376477Z [36;1mpython3 tools/research/gcc-comparison-diagnostic.py[0m
+2026-10-02T12:15:28.3437723Z shell: /usr/bin/bash -e {0}
+2026-10-02T12:15:28.3438008Z env:
+2026-10-02T12:15:28.3438225Z   CMAKE_BUILD_PARALLEL_LEVEL: 2
+2026-10-02T12:15:28.3438498Z   BUSTER_TEST_JOBS: 1
+2026-10-02T12:15:28.3438716Z ##[endgroup]
+2026-10-02T12:16:32.8523837Z GCC_COMPARISON_COMPLETE
+2026-10-02T12:16:32.8525642Z [
+2026-10-02T12:16:32.8525980Z   {
+2026-10-02T12:16:32.8526282Z     "workload": "tiny",
+2026-10-02T12:16:32.8526672Z     "tool": "buster-fast",
+2026-10-02T12:16:32.8527079Z     "accepted": true,
+2026-10-02T12:16:32.8527727Z     "input_sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949",
+2026-10-02T12:16:32.8528966Z     "object_bytes": 2400,
+2026-10-02T12:16:32.8529416Z     "output_sha256": "560cab000b5f787316ff50eb7f9dd56c25edfe74f155f5a2a9c51c87daac6735",
+2026-10-02T12:16:32.8529920Z     "sections": {
+2026-10-02T12:16:32.8530119Z       "argv": [
+2026-10-02T12:16:32.8530315Z         "size",
+2026-10-02T12:16:32.8530516Z         "-A",
+2026-10-02T12:16:32.8530760Z         "gcc-comparison-evidence/tiny-buster-fast.o"
+2026-10-02T12:16:32.8531200Z       ],
+2026-10-02T12:16:32.8531497Z       "exit": 0,
+2026-10-02T12:16:32.8534362Z       "stdout": "gcc-comparison-evidence/tiny-buster-fast.o  :\nsection              size   addr\n.text                   8      0\n.rodata                 0      0\n.data                   0      0\n.bss                    0      0\n.tdata                  0      0\n.tbss                   0      0\n.init_array             0      0\n.fini_array             0      0\n.eh_frame              56      0\n.pdata                  0      0\n.xdata                  0      0\n.debug_info             0      0\n.debug_abbrev           0      0\n.debug_line             0      0\n.debug_str              0      0\n.debug_loc              0      0\n.debug_ranges           0      0\n.debug$S                0      0\n.debug$T                0      0\n.debug_addr             0      0\n.debug_str_offsets      0      0\n.debug_line_str         0      0\n.debug_rnglists         0      0\n.debug_loclists         0      0\nTotal                  64\n\n\n",
+2026-10-02T12:16:32.8537676Z       "stderr": ""
+2026-10-02T12:16:32.8537884Z     },
+2026-10-02T12:16:32.8538064Z     "text_bytes": 8,
+2026-10-02T12:16:32.8538266Z     "link": {
+2026-10-02T12:16:32.8538451Z       "argv": [
+2026-10-02T12:16:32.8538637Z         "gcc",
+2026-10-02T12:16:32.8538980Z         "-no-pie",
+2026-10-02T12:16:32.8539234Z         "gcc-comparison-evidence/tiny-buster-fast.o",
+2026-10-02T12:16:32.8539541Z         "-o",
+2026-10-02T12:16:32.8539770Z         "gcc-comparison-evidence/tiny-buster-fast"
+2026-10-02T12:16:32.8540056Z       ],
+2026-10-02T12:16:32.8540241Z       "exit": 0,
+2026-10-02T12:16:32.8540438Z       "stdout": "",
+2026-10-02T12:16:32.8540635Z       "stderr": ""
+2026-10-02T12:16:32.8540823Z     },
+2026-10-02T12:16:32.8541006Z     "validation": {
+2026-10-02T12:16:32.8541200Z       "argv": [
+2026-10-02T12:16:32.8541532Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/tiny-buster-fast"
+2026-10-02T12:16:32.8541941Z       ],
+2026-10-02T12:16:32.8542119Z       "exit": 0,
+2026-10-02T12:16:32.8542311Z       "stdout": "",
+2026-10-02T12:16:32.8542512Z       "stderr": ""
+2026-10-02T12:16:32.8543150Z     },
+2026-10-02T12:16:32.8543357Z     "correct": true,
+2026-10-02T12:16:32.8543580Z     "compile_valid": true,
+2026-10-02T12:16:32.8543804Z     "compile": {
+2026-10-02T12:16:32.8543988Z       "n": 12,
+2026-10-02T12:16:32.8544169Z       "wall_s": {
+2026-10-02T12:16:32.8544370Z         "median": 0.021099478000010663,
+2026-10-02T12:16:32.8544670Z         "min": 0.0160694479999961,
+2026-10-02T12:16:32.8545020Z         "max": 0.02436282299998993
+2026-10-02T12:16:32.8545318Z       },
+2026-10-02T12:16:32.8545492Z       "cpu_s": {
+2026-10-02T12:16:32.8545684Z         "median": 0.01,
+2026-10-02T12:16:32.8546167Z         "min": 0.0,
+2026-10-02T12:16:32.8546370Z         "max": 0.01
+2026-10-02T12:16:32.8546560Z       },
+2026-10-02T12:16:32.8546733Z       "maxrss_kib": {
+2026-10-02T12:16:32.8546935Z         "median": 22232.0,
+2026-10-02T12:16:32.8547146Z         "min": 22064,
+2026-10-02T12:16:32.8547339Z         "max": 22432
+2026-10-02T12:16:32.8547529Z       }
+2026-10-02T12:16:32.8547697Z     },
+2026-10-02T12:16:32.8547875Z     "runtime_valid": false
+2026-10-02T12:16:32.8548081Z   },
+2026-10-02T12:16:32.8548248Z   {
+2026-10-02T12:16:32.8548425Z     "workload": "tiny",
+2026-10-02T12:16:32.8548633Z     "tool": "gcc-O0",
+2026-10-02T12:16:32.8548839Z     "accepted": true,
+2026-10-02T12:16:32.8549212Z     "input_sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949",
+2026-10-02T12:16:32.8549639Z     "object_bytes": 1216,
+2026-10-02T12:16:32.8550251Z     "output_sha256": "beb4beb92ea38931e4348505d097e892cdfa27ca52ea75e9bac2fda1f66524c3",
+2026-10-02T12:16:32.8550670Z     "sections": {
+2026-10-02T12:16:32.8550862Z       "argv": [
+2026-10-02T12:16:32.8551051Z         "size",
+2026-10-02T12:16:32.8551232Z         "-A",
+2026-10-02T12:16:32.8551452Z         "gcc-comparison-evidence/tiny-gcc-O0.o"
+2026-10-02T12:16:32.8551732Z       ],
+2026-10-02T12:16:32.8551904Z       "exit": 0,
+2026-10-02T12:16:32.8553352Z       "stdout": "gcc-comparison-evidence/tiny-gcc-O0.o  :\nsection              size   addr\n.text                  15      0\n.data                   0      0\n.bss                    0      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              56      0\nTotal                 142\n\n\n",
+2026-10-02T12:16:32.8554378Z       "stderr": ""
+2026-10-02T12:16:32.8554571Z     },
+2026-10-02T12:16:32.8554751Z     "text_bytes": 15,
+2026-10-02T12:16:32.8554952Z     "link": {
+2026-10-02T12:16:32.8555138Z       "argv": [
+2026-10-02T12:16:32.8555316Z         "gcc",
+2026-10-02T12:16:32.8555503Z         "-no-pie",
+2026-10-02T12:16:32.8555754Z         "gcc-comparison-evidence/tiny-gcc-O0.o",
+2026-10-02T12:16:32.8556035Z         "-o",
+2026-10-02T12:16:32.8556242Z         "gcc-comparison-evidence/tiny-gcc-O0"
+2026-10-02T12:16:32.8556510Z       ],
+2026-10-02T12:16:32.8556688Z       "exit": 0,
+2026-10-02T12:16:32.8556884Z       "stdout": "",
+2026-10-02T12:16:32.8557083Z       "stderr": ""
+2026-10-02T12:16:32.8557595Z     },
+2026-10-02T12:16:32.8557901Z     "validation": {
+2026-10-02T12:16:32.8558207Z       "argv": [
+2026-10-02T12:16:32.8558675Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/tiny-gcc-O0"
+2026-10-02T12:16:32.8559232Z       ],
+2026-10-02T12:16:32.8559488Z       "exit": 0,
+2026-10-02T12:16:32.8559770Z       "stdout": "",
+2026-10-02T12:16:32.8560053Z       "stderr": ""
+2026-10-02T12:16:32.8589924Z     },
+2026-10-02T12:16:32.8590363Z     "correct": true,
+2026-10-02T12:16:32.8590784Z     "compile_valid": true,
+2026-10-02T12:16:32.8591198Z     "compile": {
+2026-10-02T12:16:32.8591553Z       "n": 12,
+2026-10-02T12:16:32.8591884Z       "wall_s": {
+2026-10-02T12:16:32.8592265Z         "median": 0.015821683999988068,
+2026-10-02T12:16:32.8592999Z         "min": 0.015321881999994957,
+2026-10-02T12:16:32.8593445Z         "max": 0.017041841000008162
+2026-10-02T12:16:32.8593895Z       },
+2026-10-02T12:16:32.8594217Z       "cpu_s": {
+2026-10-02T12:16:32.8594574Z         "median": 0.0,
+2026-10-02T12:16:32.8594942Z         "min": 0.0,
+2026-10-02T12:16:32.8595328Z         "max": 0.0
+2026-10-02T12:16:32.8595660Z       },
+2026-10-02T12:16:32.8596020Z       "maxrss_kib": {
+2026-10-02T12:16:32.8596383Z         "median": 18840.0,
+2026-10-02T12:16:32.8596768Z         "min": 18768,
+2026-10-02T12:16:32.8597130Z         "max": 18896
+2026-10-02T12:16:32.8597504Z       }
+2026-10-02T12:16:32.8597809Z     },
+2026-10-02T12:16:32.8598137Z     "runtime_valid": false
+2026-10-02T12:16:32.8598513Z   },
+2026-10-02T12:16:32.8598852Z   {
+2026-10-02T12:16:32.8599175Z     "workload": "tiny",
+2026-10-02T12:16:32.8599567Z     "tool": "gcc-O2",
+2026-10-02T12:16:32.8600344Z     "accepted": true,
+2026-10-02T12:16:32.8601040Z     "input_sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949",
+2026-10-02T12:16:32.8601799Z     "object_bytes": 1280,
+2026-10-02T12:16:32.8602463Z     "output_sha256": "5e74c99a84b30103ed23aa26c9a300f2e46629c5ea815a2052a57bb4bada81b1",
+2026-10-02T12:16:32.8603441Z     "sections": {
+2026-10-02T12:16:32.8603792Z       "argv": [
+2026-10-02T12:16:32.8604112Z         "size",
+2026-10-02T12:16:32.8604430Z         "-A",
+2026-10-02T12:16:32.8604812Z         "gcc-comparison-evidence/tiny-gcc-O2.o"
+2026-10-02T12:16:32.8605301Z       ],
+2026-10-02T12:16:32.8605612Z       "exit": 0,
+2026-10-02T12:16:32.8607431Z       "stdout": "gcc-comparison-evidence/tiny-gcc-O2.o  :\nsection              size   addr\n.text                   0      0\n.data                   0      0\n.bss                    0      0\n.text.startup           7      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              48      0\nTotal                 126\n\n\n",
+2026-10-02T12:16:32.8609732Z       "stderr": ""
+2026-10-02T12:16:32.8610080Z     },
+2026-10-02T12:16:32.8610400Z     "text_bytes": 7,
+2026-10-02T12:16:32.8610753Z     "link": {
+2026-10-02T12:16:32.8611079Z       "argv": [
+2026-10-02T12:16:32.8611396Z         "gcc",
+2026-10-02T12:16:32.8611717Z         "-no-pie",
+2026-10-02T12:16:32.8612135Z         "gcc-comparison-evidence/tiny-gcc-O2.o",
+2026-10-02T12:16:32.8612660Z         "-o",
+2026-10-02T12:16:32.8613286Z         "gcc-comparison-evidence/tiny-gcc-O2"
+2026-10-02T12:16:32.8613775Z       ],
+2026-10-02T12:16:32.8614090Z       "exit": 0,
+2026-10-02T12:16:32.8614426Z       "stdout": "",
+2026-10-02T12:16:32.8614772Z       "stderr": ""
+2026-10-02T12:16:32.8615097Z     },
+2026-10-02T12:16:32.8615405Z     "validation": {
+2026-10-02T12:16:32.8615740Z       "argv": [
+2026-10-02T12:16:32.8616289Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/tiny-gcc-O2"
+2026-10-02T12:16:32.8616993Z       ],
+2026-10-02T12:16:32.8617311Z       "exit": 0,
+2026-10-02T12:16:32.8617654Z       "stdout": "",
+2026-10-02T12:16:32.8617997Z       "stderr": ""
+2026-10-02T12:16:32.8618332Z     },
+2026-10-02T12:16:32.8618649Z     "correct": true,
+2026-10-02T12:16:32.8619011Z     "compile_valid": true,
+2026-10-02T12:16:32.8619394Z     "compile": {
+2026-10-02T12:16:32.8619727Z       "n": 12,
+2026-10-02T12:16:32.8620054Z       "wall_s": {
+2026-10-02T12:16:32.8620409Z         "median": 0.016726578000003656,
+2026-10-02T12:16:32.8620855Z         "min": 0.01615421500000025,
+2026-10-02T12:16:32.8621266Z         "max": 0.018027069999988043
+2026-10-02T12:16:32.8621678Z       },
+2026-10-02T12:16:32.8621986Z       "cpu_s": {
+2026-10-02T12:16:32.8622315Z         "median": 0.0,
+2026-10-02T12:16:32.8622664Z         "min": 0.0,
+2026-10-02T12:16:32.8624103Z         "max": 0.01
+2026-10-02T12:16:32.8624456Z       },
+2026-10-02T12:16:32.8624778Z       "maxrss_kib": {
+2026-10-02T12:16:32.8625141Z         "median": 21868.0,
+2026-10-02T12:16:32.8625526Z         "min": 21748,
+2026-10-02T12:16:32.8625867Z         "max": 21964
+2026-10-02T12:16:32.8626203Z       }
+2026-10-02T12:16:32.8626502Z     },
+2026-10-02T12:16:32.8626826Z     "runtime_valid": false
+2026-10-02T12:16:32.8627216Z   },
+2026-10-02T12:16:32.8627506Z   {
+2026-10-02T12:16:32.8627828Z     "workload": "integer_mix",
+2026-10-02T12:16:32.8628235Z     "tool": "buster-fast",
+2026-10-02T12:16:32.8628624Z     "accepted": true,
+2026-10-02T12:16:32.8629202Z     "input_sha256": "3fa91e5b719303a6d1f89b3e72803593106931e84a55196141d98b11444a1cc2",
+2026-10-02T12:16:32.8629731Z     "object_bytes": 2864,
+2026-10-02T12:16:32.8630127Z     "output_sha256": "eaa1e00926ac6804fd73e76c5292b4e6bc2f8eb0449a7e2e576a4f5c59d0ce3d",
+2026-10-02T12:16:32.8630547Z     "sections": {
+2026-10-02T12:16:32.8630742Z       "argv": [
+2026-10-02T12:16:32.8630928Z         "size",
+2026-10-02T12:16:32.8631136Z         "-A",
+2026-10-02T12:16:32.8631394Z         "gcc-comparison-evidence/integer_mix-buster-fast.o"
+2026-10-02T12:16:32.8631709Z       ],
+2026-10-02T12:16:32.8632066Z       "exit": 0,
+2026-10-02T12:16:32.8634605Z       "stdout": "gcc-comparison-evidence/integer_mix-buster-fast.o  :\nsection              size   addr\n.text                 265      0\n.rodata                 4      0\n.data                   0      0\n.bss                    0      0\n.tdata                  0      0\n.tbss                   0      0\n.init_array             0      0\n.fini_array             0      0\n.eh_frame              56      0\n.pdata                  0      0\n.xdata                  0      0\n.debug_info             0      0\n.debug_abbrev           0      0\n.debug_line             0      0\n.debug_str              0      0\n.debug_loc              0      0\n.debug_ranges           0      0\n.debug$S                0      0\n.debug$T                0      0\n.debug_addr             0      0\n.debug_str_offsets      0      0\n.debug_line_str         0      0\n.debug_rnglists         0      0\n.debug_loclists         0      0\nTotal                 325\n\n\n",
+2026-10-02T12:16:32.8636934Z       "stderr": ""
+2026-10-02T12:16:32.8637129Z     },
+2026-10-02T12:16:32.8637311Z     "text_bytes": 265,
+2026-10-02T12:16:32.8637562Z     "link": {
+2026-10-02T12:16:32.8637755Z       "argv": [
+2026-10-02T12:16:32.8637938Z         "gcc",
+2026-10-02T12:16:32.8638124Z         "-no-pie",
+2026-10-02T12:16:32.8638388Z         "gcc-comparison-evidence/integer_mix-buster-fast.o",
+2026-10-02T12:16:32.8638700Z         "-o",
+2026-10-02T12:16:32.8638941Z         "gcc-comparison-evidence/integer_mix-buster-fast"
+2026-10-02T12:16:32.8639234Z       ],
+2026-10-02T12:16:32.8639407Z       "exit": 0,
+2026-10-02T12:16:32.8639597Z       "stdout": "",
+2026-10-02T12:16:32.8639794Z       "stderr": ""
+2026-10-02T12:16:32.8639980Z     },
+2026-10-02T12:16:32.8640157Z     "validation": {
+2026-10-02T12:16:32.8640350Z       "argv": [
+2026-10-02T12:16:32.8640696Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/integer_mix-buster-fast"
+2026-10-02T12:16:32.8641102Z       ],
+2026-10-02T12:16:32.8641275Z       "exit": 0,
+2026-10-02T12:16:32.8641470Z       "stdout": "376378803\n",
+2026-10-02T12:16:32.8641690Z       "stderr": ""
+2026-10-02T12:16:32.8641879Z     },
+2026-10-02T12:16:32.8642059Z     "correct": true,
+2026-10-02T12:16:32.8642268Z     "compile_valid": true,
+2026-10-02T12:16:32.8642485Z     "compile": {
+2026-10-02T12:16:32.8642689Z       "n": 12,
+2026-10-02T12:16:32.8643130Z       "wall_s": {
+2026-10-02T12:16:32.8643338Z         "median": 0.019019010499988553,
+2026-10-02T12:16:32.8643599Z         "min": 0.01753173299999844,
+2026-10-02T12:16:32.8643836Z         "max": 0.025289772000007815
+2026-10-02T12:16:32.8644060Z       },
+2026-10-02T12:16:32.8644233Z       "cpu_s": {
+2026-10-02T12:16:32.8644431Z         "median": 0.01,
+2026-10-02T12:16:32.8644671Z         "min": 0.0,
+2026-10-02T12:16:32.8644860Z         "max": 0.01
+2026-10-02T12:16:32.8645052Z       },
+2026-10-02T12:16:32.8645228Z       "maxrss_kib": {
+2026-10-02T12:16:32.8645434Z         "median": 22332.0,
+2026-10-02T12:16:32.8645652Z         "min": 22244,
+2026-10-02T12:16:32.8645851Z         "max": 22420
+2026-10-02T12:16:32.8646052Z       }
+2026-10-02T12:16:32.8646220Z     },
+2026-10-02T12:16:32.8646406Z     "runtime_valid": true,
+2026-10-02T12:16:32.8646624Z     "runtime": {
+2026-10-02T12:16:32.8646812Z       "n": 12,
+2026-10-02T12:16:32.8647004Z       "wall_s": {
+2026-10-02T12:16:32.8647203Z         "median": 0.17401390599998479,
+2026-10-02T12:16:32.8647448Z         "min": 0.17367889600001263,
+2026-10-02T12:16:32.8647781Z         "max": 0.1751179709999917
+2026-10-02T12:16:32.8648017Z       },
+2026-10-02T12:16:32.8648191Z       "cpu_s": {
+2026-10-02T12:16:32.8648378Z         "median": 0.17,
+2026-10-02T12:16:32.8648583Z         "min": 0.17,
+2026-10-02T12:16:32.8648774Z         "max": 0.17
+2026-10-02T12:16:32.8648955Z       },
+2026-10-02T12:16:32.8649127Z       "maxrss_kib": {
+2026-10-02T12:16:32.8649340Z         "median": 1544.0,
+2026-10-02T12:16:32.8649549Z         "min": 1540,
+2026-10-02T12:16:32.8649738Z         "max": 1544
+2026-10-02T12:16:32.8650129Z       }
+2026-10-02T12:16:32.8650406Z     }
+2026-10-02T12:16:32.8650573Z   },
+2026-10-02T12:16:32.8650735Z   {
+2026-10-02T12:16:32.8650913Z     "workload": "integer_mix",
+2026-10-02T12:16:32.8651142Z     "tool": "gcc-O0",
+2026-10-02T12:16:32.8651357Z     "accepted": true,
+2026-10-02T12:16:32.8651710Z     "input_sha256": "3fa91e5b719303a6d1f89b3e72803593106931e84a55196141d98b11444a1cc2",
+2026-10-02T12:16:32.8652130Z     "object_bytes": 1560,
+2026-10-02T12:16:32.8652502Z     "output_sha256": "ec57e25fa1a18739d10b19bb77fb72c467875a9e1b52817a8a6f636808c3580c",
+2026-10-02T12:16:32.8653168Z     "sections": {
+2026-10-02T12:16:32.8653360Z       "argv": [
+2026-10-02T12:16:32.8653541Z         "size",
+2026-10-02T12:16:32.8653720Z         "-A",
+2026-10-02T12:16:32.8653963Z         "gcc-comparison-evidence/integer_mix-gcc-O0.o"
+2026-10-02T12:16:32.8654427Z       ],
+2026-10-02T12:16:32.8654605Z       "exit": 0,
+2026-10-02T12:16:32.8655647Z       "stdout": "gcc-comparison-evidence/integer_mix-gcc-O0.o  :\nsection              size   addr\n.text                  95      0\n.data                   0      0\n.bss                    0      0\n.rodata                 4      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              56      0\nTotal                 226\n\n\n",
+2026-10-02T12:16:32.8656709Z       "stderr": ""
+2026-10-02T12:16:32.8656898Z     },
+2026-10-02T12:16:32.8657081Z     "text_bytes": 95,
+2026-10-02T12:16:32.8657281Z     "link": {
+2026-10-02T12:16:32.8657460Z       "argv": [
+2026-10-02T12:16:32.8657641Z         "gcc",
+2026-10-02T12:16:32.8657825Z         "-no-pie",
+2026-10-02T12:16:32.8658074Z         "gcc-comparison-evidence/integer_mix-gcc-O0.o",
+2026-10-02T12:16:32.8658362Z         "-o",
+2026-10-02T12:16:32.8658586Z         "gcc-comparison-evidence/integer_mix-gcc-O0"
+2026-10-02T12:16:32.8658870Z       ],
+2026-10-02T12:16:32.8659043Z       "exit": 0,
+2026-10-02T12:16:32.8659229Z       "stdout": "",
+2026-10-02T12:16:32.8659425Z       "stderr": ""
+2026-10-02T12:16:32.8659605Z     },
+2026-10-02T12:16:32.8659777Z     "validation": {
+2026-10-02T12:16:32.8659966Z       "argv": [
+2026-10-02T12:16:32.8660282Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/integer_mix-gcc-O0"
+2026-10-02T12:16:32.8660665Z       ],
+2026-10-02T12:16:32.8660839Z       "exit": 0,
+2026-10-02T12:16:32.8661029Z       "stdout": "376378803\n",
+2026-10-02T12:16:32.8661250Z       "stderr": ""
+2026-10-02T12:16:32.8661430Z     },
+2026-10-02T12:16:32.8661604Z     "correct": true,
+2026-10-02T12:16:32.8661809Z     "compile_valid": true,
+2026-10-02T12:16:32.8662025Z     "compile": {
+2026-10-02T12:16:32.8662209Z       "n": 12,
+2026-10-02T12:16:32.8662389Z       "wall_s": {
+2026-10-02T12:16:32.8662592Z         "median": 0.01699406200000908,
+2026-10-02T12:16:32.8663186Z         "min": 0.01645675000000324,
+2026-10-02T12:16:32.8663444Z         "max": 0.017983732000004693
+2026-10-02T12:16:32.8663672Z       },
+2026-10-02T12:16:32.8663846Z       "cpu_s": {
+2026-10-02T12:16:32.8664043Z         "median": 0.0,
+2026-10-02T12:16:32.8664249Z         "min": 0.0,
+2026-10-02T12:16:32.8664440Z         "max": 0.01
+2026-10-02T12:16:32.8664628Z       },
+2026-10-02T12:16:32.8664806Z       "maxrss_kib": {
+2026-10-02T12:16:32.8665015Z         "median": 22928.0,
+2026-10-02T12:16:32.8665228Z         "min": 22756,
+2026-10-02T12:16:32.8665427Z         "max": 23032
+2026-10-02T12:16:32.8665622Z       }
+2026-10-02T12:16:32.8665790Z     },
+2026-10-02T12:16:32.8665981Z     "runtime_valid": true,
+2026-10-02T12:16:32.8666195Z     "runtime": {
+2026-10-02T12:16:32.8666381Z       "n": 12,
+2026-10-02T12:16:32.8666695Z       "wall_s": {
+2026-10-02T12:16:32.8666899Z         "median": 0.10182616399998778,
+2026-10-02T12:16:32.8667143Z         "min": 0.10174139699998364,
+2026-10-02T12:16:32.8667377Z         "max": 0.10195715899999414
+2026-10-02T12:16:32.8667629Z       },
+2026-10-02T12:16:32.8667796Z       "cpu_s": {
+2026-10-02T12:16:32.8667981Z         "median": 0.1,
+2026-10-02T12:16:32.8668359Z         "min": 0.09,
+2026-10-02T12:16:32.8668565Z         "max": 0.1
+2026-10-02T12:16:32.8668746Z       },
+2026-10-02T12:16:32.8668917Z       "maxrss_kib": {
+2026-10-02T12:16:32.8669118Z         "median": 1544.0,
+2026-10-02T12:16:32.8669323Z         "min": 1540,
+2026-10-02T12:16:32.8669514Z         "max": 1544
+2026-10-02T12:16:32.8669698Z       }
+2026-10-02T12:16:32.8669865Z     }
+2026-10-02T12:16:32.8670030Z   },
+2026-10-02T12:16:32.8670191Z   {
+2026-10-02T12:16:32.8670374Z     "workload": "integer_mix",
+2026-10-02T12:16:32.8670613Z     "tool": "gcc-O2",
+2026-10-02T12:16:32.8670816Z     "accepted": true,
+2026-10-02T12:16:32.8671161Z     "input_sha256": "3fa91e5b719303a6d1f89b3e72803593106931e84a55196141d98b11444a1cc2",
+2026-10-02T12:16:32.8671566Z     "object_bytes": 1624,
+2026-10-02T12:16:32.8671926Z     "output_sha256": "4d0677e6d2a10c092c09c54fec23163a6ced8d1f79e11456779264882ab80222",
+2026-10-02T12:16:32.8672535Z     "sections": {
+2026-10-02T12:16:32.8673036Z       "argv": [
+2026-10-02T12:16:32.8673258Z         "size",
+2026-10-02T12:16:32.8673442Z         "-A",
+2026-10-02T12:16:32.8673683Z         "gcc-comparison-evidence/integer_mix-gcc-O2.o"
+2026-10-02T12:16:32.8673972Z       ],
+2026-10-02T12:16:32.8674148Z       "exit": 0,
+2026-10-02T12:16:32.8675268Z       "stdout": "gcc-comparison-evidence/integer_mix-gcc-O2.o  :\nsection              size   addr\n.text                   0      0\n.data                   0      0\n.bss                    0      0\n.rodata.str1.1          4      0\n.text.startup          77      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              48      0\nTotal                 200\n\n\n",
+2026-10-02T12:16:32.8676419Z       "stderr": ""
+2026-10-02T12:16:32.8676609Z     },
+2026-10-02T12:16:32.8676787Z     "text_bytes": 77,
+2026-10-02T12:16:32.8676989Z     "link": {
+2026-10-02T12:16:32.8677167Z       "argv": [
+2026-10-02T12:16:32.8677351Z         "gcc",
+2026-10-02T12:16:32.8677538Z         "-no-pie",
+2026-10-02T12:16:32.8677786Z         "gcc-comparison-evidence/integer_mix-gcc-O2.o",
+2026-10-02T12:16:32.8678082Z         "-o",
+2026-10-02T12:16:32.8678312Z         "gcc-comparison-evidence/integer_mix-gcc-O2"
+2026-10-02T12:16:32.8678593Z       ],
+2026-10-02T12:16:32.8678764Z       "exit": 0,
+2026-10-02T12:16:32.8678948Z       "stdout": "",
+2026-10-02T12:16:32.8679141Z       "stderr": ""
+2026-10-02T12:16:32.8679323Z     },
+2026-10-02T12:16:32.8679496Z     "validation": {
+2026-10-02T12:16:32.8679689Z       "argv": [
+2026-10-02T12:16:32.8680009Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/integer_mix-gcc-O2"
+2026-10-02T12:16:32.8680394Z       ],
+2026-10-02T12:16:32.8680562Z       "exit": 0,
+2026-10-02T12:16:32.8680760Z       "stdout": "376378803\n",
+2026-10-02T12:16:32.8680984Z       "stderr": ""
+2026-10-02T12:16:32.8681164Z     },
+2026-10-02T12:16:32.8681340Z     "correct": true,
+2026-10-02T12:16:32.8681545Z     "compile_valid": true,
+2026-10-02T12:16:32.8681758Z     "compile": {
+2026-10-02T12:16:32.8681943Z       "n": 12,
+2026-10-02T12:16:32.8682122Z       "wall_s": {
+2026-10-02T12:16:32.8682317Z         "median": 0.02008590149999634,
+2026-10-02T12:16:32.8682570Z         "min": 0.019414920000002667,
+2026-10-02T12:16:32.8683185Z         "max": 0.02069540899998401
+2026-10-02T12:16:32.8683436Z       },
+2026-10-02T12:16:32.8683608Z       "cpu_s": {
+2026-10-02T12:16:32.8683802Z         "median": 0.01,
+2026-10-02T12:16:32.8684006Z         "min": 0.0,
+2026-10-02T12:16:32.8684191Z         "max": 0.01
+2026-10-02T12:16:32.8684376Z       },
+2026-10-02T12:16:32.8684553Z       "maxrss_kib": {
+2026-10-02T12:16:32.8684755Z         "median": 24880.0,
+2026-10-02T12:16:32.8684966Z         "min": 24720,
+2026-10-02T12:16:32.8685159Z         "max": 25052
+2026-10-02T12:16:32.8685343Z       }
+2026-10-02T12:16:32.8685516Z     },
+2026-10-02T12:16:32.8685701Z     "runtime_valid": true,
+2026-10-02T12:16:32.8685920Z     "runtime": {
+2026-10-02T12:16:32.8686105Z       "n": 12,
+2026-10-02T12:16:32.8686288Z       "wall_s": {
+2026-10-02T12:16:32.8686632Z         "median": 0.09591165199999807,
+2026-10-02T12:16:32.8686891Z         "min": 0.09572272500000167,
+2026-10-02T12:16:32.8687131Z         "max": 0.09644342999999367
+2026-10-02T12:16:32.8687353Z       },
+2026-10-02T12:16:32.8687523Z       "cpu_s": {
+2026-10-02T12:16:32.8687713Z         "median": 0.09,
+2026-10-02T12:16:32.8687914Z         "min": 0.09,
+2026-10-02T12:16:32.8688103Z         "max": 0.09
+2026-10-02T12:16:32.8688290Z       },
+2026-10-02T12:16:32.8688461Z       "maxrss_kib": {
+2026-10-02T12:16:32.8688657Z         "median": 1544.0,
+2026-10-02T12:16:32.8688881Z         "min": 1520,
+2026-10-02T12:16:32.8689082Z         "max": 1544
+2026-10-02T12:16:32.8689268Z       }
+2026-10-02T12:16:32.8689439Z     }
+2026-10-02T12:16:32.8689608Z   },
+2026-10-02T12:16:32.8689773Z   {
+2026-10-02T12:16:32.8689957Z     "workload": "array_loop",
+2026-10-02T12:16:32.8690328Z     "tool": "buster-fast",
+2026-10-02T12:16:32.8690548Z     "accepted": true,
+2026-10-02T12:16:32.8690901Z     "input_sha256": "072d753f91528ab2c9e5dc60344bb8ae0dd86965243eb3d6d1e77041faf89e81",
+2026-10-02T12:16:32.8691310Z     "object_bytes": 3184,
+2026-10-02T12:16:32.8691672Z     "output_sha256": "89b486ea1c480714017e0ceca2274880e70dfb62009e239d696cf43bded277e8",
+2026-10-02T12:16:32.8692073Z     "sections": {
+2026-10-02T12:16:32.8692262Z       "argv": [
+2026-10-02T12:16:32.8692449Z         "size",
+2026-10-02T12:16:32.8692636Z         "-A",
+2026-10-02T12:16:32.8693074Z         "gcc-comparison-evidence/array_loop-buster-fast.o"
+2026-10-02T12:16:32.8693378Z       ],
+2026-10-02T12:16:32.8693546Z       "exit": 0,
+2026-10-02T12:16:32.8695678Z       "stdout": "gcc-comparison-evidence/array_loop-buster-fast.o  :\nsection              size   addr\n.text                 580      0\n.rodata                 4      0\n.data                   0      0\n.bss                    0      0\n.tdata                  0      0\n.tbss                   0      0\n.init_array             0      0\n.fini_array             0      0\n.eh_frame              56      0\n.pdata                  0      0\n.xdata                  0      0\n.debug_info             0      0\n.debug_abbrev           0      0\n.debug_line             0      0\n.debug_str              0      0\n.debug_loc              0      0\n.debug_ranges           0      0\n.debug$S                0      0\n.debug$T                0      0\n.debug_addr             0      0\n.debug_str_offsets      0      0\n.debug_line_str         0      0\n.debug_rnglists         0      0\n.debug_loclists         0      0\nTotal                 640\n\n\n",
+2026-10-02T12:16:32.8697838Z       "stderr": ""
+2026-10-02T12:16:32.8698021Z     },
+2026-10-02T12:16:32.8698194Z     "text_bytes": 580,
+2026-10-02T12:16:32.8698395Z     "link": {
+2026-10-02T12:16:32.8698571Z       "argv": [
+2026-10-02T12:16:32.8698748Z         "gcc",
+2026-10-02T12:16:32.8698932Z         "-no-pie",
+2026-10-02T12:16:32.8699193Z         "gcc-comparison-evidence/array_loop-buster-fast.o",
+2026-10-02T12:16:32.8699508Z         "-o",
+2026-10-02T12:16:32.8699748Z         "gcc-comparison-evidence/array_loop-buster-fast"
+2026-10-02T12:16:32.8700038Z       ],
+2026-10-02T12:16:32.8700210Z       "exit": 0,
+2026-10-02T12:16:32.8700396Z       "stdout": "",
+2026-10-02T12:16:32.8700587Z       "stderr": ""
+2026-10-02T12:16:32.8700769Z     },
+2026-10-02T12:16:32.8700945Z     "validation": {
+2026-10-02T12:16:32.8701136Z       "argv": [
+2026-10-02T12:16:32.8701470Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/array_loop-buster-fast"
+2026-10-02T12:16:32.8701868Z       ],
+2026-10-02T12:16:32.8702043Z       "exit": 0,
+2026-10-02T12:16:32.8702238Z       "stdout": "123944448\n",
+2026-10-02T12:16:32.8702458Z       "stderr": ""
+2026-10-02T12:16:32.8702646Z     },
+2026-10-02T12:16:32.8702969Z     "correct": true,
+2026-10-02T12:16:32.8703177Z     "compile_valid": true,
+2026-10-02T12:16:32.8703389Z     "compile": {
+2026-10-02T12:16:32.8703581Z       "n": 12,
+2026-10-02T12:16:32.8703760Z       "wall_s": {
+2026-10-02T12:16:32.8703955Z         "median": 0.022657940499996698,
+2026-10-02T12:16:32.8704333Z         "min": 0.01824226799999451,
+2026-10-02T12:16:32.8704575Z         "max": 0.03052707600002691
+2026-10-02T12:16:32.8704802Z       },
+2026-10-02T12:16:32.8704973Z       "cpu_s": {
+2026-10-02T12:16:32.8705159Z         "median": 0.01,
+2026-10-02T12:16:32.8705356Z         "min": 0.0,
+2026-10-02T12:16:32.8705542Z         "max": 0.02
+2026-10-02T12:16:32.8705721Z       },
+2026-10-02T12:16:32.8705893Z       "maxrss_kib": {
+2026-10-02T12:16:32.8706094Z         "median": 22338.0,
+2026-10-02T12:16:32.8706302Z         "min": 22136,
+2026-10-02T12:16:32.8706494Z         "max": 22588
+2026-10-02T12:16:32.8706681Z       }
+2026-10-02T12:16:32.8706848Z     },
+2026-10-02T12:16:32.8707032Z     "runtime_valid": true,
+2026-10-02T12:16:32.8707240Z     "runtime": {
+2026-10-02T12:16:32.8707421Z       "n": 12,
+2026-10-02T12:16:32.8707732Z       "wall_s": {
+2026-10-02T12:16:32.8707923Z         "median": 0.22709896799999285,
+2026-10-02T12:16:32.8708168Z         "min": 0.2263590830000055,
+2026-10-02T12:16:32.8708403Z         "max": 0.23118690100000094
+2026-10-02T12:16:32.8708623Z       },
+2026-10-02T12:16:32.8708792Z       "cpu_s": {
+2026-10-02T12:16:32.8708980Z         "median": 0.22,
+2026-10-02T12:16:32.8709177Z         "min": 0.22,
+2026-10-02T12:16:32.8709367Z         "max": 0.22
+2026-10-02T12:16:32.8709557Z       },
+2026-10-02T12:16:32.8709729Z       "maxrss_kib": {
+2026-10-02T12:16:32.8709929Z         "median": 1544.0,
+2026-10-02T12:16:32.8710138Z         "min": 1540,
+2026-10-02T12:16:32.8710328Z         "max": 1544
+2026-10-02T12:16:32.8710510Z       }
+2026-10-02T12:16:32.8710676Z     }
+2026-10-02T12:16:32.8710847Z   },
+2026-10-02T12:16:32.8711012Z   {
+2026-10-02T12:16:32.8711193Z     "workload": "array_loop",
+2026-10-02T12:16:32.8711424Z     "tool": "gcc-O0",
+2026-10-02T12:16:32.8711626Z     "accepted": true,
+2026-10-02T12:16:32.8711984Z     "input_sha256": "072d753f91528ab2c9e5dc60344bb8ae0dd86965243eb3d6d1e77041faf89e81",
+2026-10-02T12:16:32.8712400Z     "object_bytes": 1832,
+2026-10-02T12:16:32.8712930Z     "output_sha256": "d716d38d5bc54a66390ddad0f5083c7ae9574a84356bda4570e454b21fbda1fa",
+2026-10-02T12:16:32.8713335Z     "sections": {
+2026-10-02T12:16:32.8713520Z       "argv": [
+2026-10-02T12:16:32.8713698Z         "size",
+2026-10-02T12:16:32.8713874Z         "-A",
+2026-10-02T12:16:32.8714099Z         "gcc-comparison-evidence/array_loop-gcc-O0.o"
+2026-10-02T12:16:32.8714379Z       ],
+2026-10-02T12:16:32.8714550Z       "exit": 0,
+2026-10-02T12:16:32.8715573Z       "stdout": "gcc-comparison-evidence/array_loop-gcc-O0.o  :\nsection              size   addr\n.text                 307      0\n.data                   0      0\n.bss                    0      0\n.rodata                 4      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              56      0\nTotal                 438\n\n\n",
+2026-10-02T12:16:32.8716628Z       "stderr": ""
+2026-10-02T12:16:32.8716812Z     },
+2026-10-02T12:16:32.8716986Z     "text_bytes": 307,
+2026-10-02T12:16:32.8717191Z     "link": {
+2026-10-02T12:16:32.8717372Z       "argv": [
+2026-10-02T12:16:32.8717550Z         "gcc",
+2026-10-02T12:16:32.8717733Z         "-no-pie",
+2026-10-02T12:16:32.8717972Z         "gcc-comparison-evidence/array_loop-gcc-O0.o",
+2026-10-02T12:16:32.8718258Z         "-o",
+2026-10-02T12:16:32.8718482Z         "gcc-comparison-evidence/array_loop-gcc-O0"
+2026-10-02T12:16:32.8718764Z       ],
+2026-10-02T12:16:32.8718932Z       "exit": 0,
+2026-10-02T12:16:32.8719115Z       "stdout": "",
+2026-10-02T12:16:32.8719305Z       "stderr": ""
+2026-10-02T12:16:32.8719487Z     },
+2026-10-02T12:16:32.8719659Z     "validation": {
+2026-10-02T12:16:32.8719848Z       "argv": [
+2026-10-02T12:16:32.8720167Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/array_loop-gcc-O0"
+2026-10-02T12:16:32.8720551Z       ],
+2026-10-02T12:16:32.8720726Z       "exit": 0,
+2026-10-02T12:16:32.8720928Z       "stdout": "123944448\n",
+2026-10-02T12:16:32.8721149Z       "stderr": ""
+2026-10-02T12:16:32.8721330Z     },
+2026-10-02T12:16:32.8721625Z     "correct": true,
+2026-10-02T12:16:32.8721844Z     "compile_valid": true,
+2026-10-02T12:16:32.8722061Z     "compile": {
+2026-10-02T12:16:32.8722246Z       "n": 12,
+2026-10-02T12:16:32.8722429Z       "wall_s": {
+2026-10-02T12:16:32.8722628Z         "median": 0.018082156999994936,
+2026-10-02T12:16:32.8723020Z         "min": 0.017627263999997922,
+2026-10-02T12:16:32.8723261Z         "max": 0.023312172999993663
+2026-10-02T12:16:32.8723493Z       },
+2026-10-02T12:16:32.8723676Z       "cpu_s": {
+2026-10-02T12:16:32.8723867Z         "median": 0.0,
+2026-10-02T12:16:32.8724068Z         "min": 0.0,
+2026-10-02T12:16:32.8724259Z         "max": 0.01
+2026-10-02T12:16:32.8724441Z       },
+2026-10-02T12:16:32.8724617Z       "maxrss_kib": {
+2026-10-02T12:16:32.8724822Z         "median": 24146.0,
+2026-10-02T12:16:32.8725033Z         "min": 24076,
+2026-10-02T12:16:32.8725365Z         "max": 24304
+2026-10-02T12:16:32.8725552Z       }
+2026-10-02T12:16:32.8725713Z     },
+2026-10-02T12:16:32.8725895Z     "runtime_valid": true,
+2026-10-02T12:16:32.8726112Z     "runtime": {
+2026-10-02T12:16:32.8726297Z       "n": 12,
+2026-10-02T12:16:32.8726482Z       "wall_s": {
+2026-10-02T12:16:32.8726676Z         "median": 0.10341944300000705,
+2026-10-02T12:16:32.8726921Z         "min": 0.10301169699999946,
+2026-10-02T12:16:32.8727157Z         "max": 0.10925299400000199
+2026-10-02T12:16:32.8727380Z       },
+2026-10-02T12:16:32.8727552Z       "cpu_s": {
+2026-10-02T12:16:32.8727739Z         "median": 0.1,
+2026-10-02T12:16:32.8727939Z         "min": 0.1,
+2026-10-02T12:16:32.8728125Z         "max": 0.1
+2026-10-02T12:16:32.8728307Z       },
+2026-10-02T12:16:32.8728487Z       "maxrss_kib": {
+2026-10-02T12:16:32.8728691Z         "median": 1544.0,
+2026-10-02T12:16:32.8728900Z         "min": 1516,
+2026-10-02T12:16:32.8729088Z         "max": 1544
+2026-10-02T12:16:32.8729273Z       }
+2026-10-02T12:16:32.8729439Z     }
+2026-10-02T12:16:32.8729603Z   },
+2026-10-02T12:16:32.8729765Z   {
+2026-10-02T12:16:32.8729948Z     "workload": "array_loop",
+2026-10-02T12:16:32.8730175Z     "tool": "gcc-O2",
+2026-10-02T12:16:32.8730373Z     "accepted": true,
+2026-10-02T12:16:32.8730738Z     "input_sha256": "072d753f91528ab2c9e5dc60344bb8ae0dd86965243eb3d6d1e77041faf89e81",
+2026-10-02T12:16:32.8731161Z     "object_bytes": 2120,
+2026-10-02T12:16:32.8731529Z     "output_sha256": "7f3cc01745bf3ba1311f7bbdb721f0ee6c3a11e481e9452fe35e6178469ebadb",
+2026-10-02T12:16:32.8731937Z     "sections": {
+2026-10-02T12:16:32.8732129Z       "argv": [
+2026-10-02T12:16:32.8732313Z         "size",
+2026-10-02T12:16:32.8732495Z         "-A",
+2026-10-02T12:16:32.8732931Z         "gcc-comparison-evidence/array_loop-gcc-O2.o"
+2026-10-02T12:16:32.8733221Z       ],
+2026-10-02T12:16:32.8733388Z       "exit": 0,
+2026-10-02T12:16:32.8734560Z       "stdout": "gcc-comparison-evidence/array_loop-gcc-O2.o  :\nsection              size   addr\n.text                   0      0\n.data                   0      0\n.bss                    0      0\n.rodata.str1.1          4      0\n.text.startup         359      0\n.rodata.cst16          16      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              64      0\nTotal                 514\n\n\n",
+2026-10-02T12:16:32.8735788Z       "stderr": ""
+2026-10-02T12:16:32.8735971Z     },
+2026-10-02T12:16:32.8736150Z     "text_bytes": 359,
+2026-10-02T12:16:32.8736346Z     "link": {
+2026-10-02T12:16:32.8736522Z       "argv": [
+2026-10-02T12:16:32.8736698Z         "gcc",
+2026-10-02T12:16:32.8736879Z         "-no-pie",
+2026-10-02T12:16:32.8737119Z         "gcc-comparison-evidence/array_loop-gcc-O2.o",
+2026-10-02T12:16:32.8737409Z         "-o",
+2026-10-02T12:16:32.8737632Z         "gcc-comparison-evidence/array_loop-gcc-O2"
+2026-10-02T12:16:32.8737910Z       ],
+2026-10-02T12:16:32.8738080Z       "exit": 0,
+2026-10-02T12:16:32.8738271Z       "stdout": "",
+2026-10-02T12:16:32.8738464Z       "stderr": ""
+2026-10-02T12:16:32.8738647Z     },
+2026-10-02T12:16:32.8738825Z     "validation": {
+2026-10-02T12:16:32.8739151Z       "argv": [
+2026-10-02T12:16:32.8739486Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/array_loop-gcc-O2"
+2026-10-02T12:16:32.8739869Z       ],
+2026-10-02T12:16:32.8740040Z       "exit": 0,
+2026-10-02T12:16:32.8740234Z       "stdout": "123944448\n",
+2026-10-02T12:16:32.8740461Z       "stderr": ""
+2026-10-02T12:16:32.8740647Z     },
+2026-10-02T12:16:32.8740819Z     "correct": true,
+2026-10-02T12:16:32.8741026Z     "compile_valid": true,
+2026-10-02T12:16:32.8741240Z     "compile": {
+2026-10-02T12:16:32.8741425Z       "n": 12,
+2026-10-02T12:16:32.8741602Z       "wall_s": {
+2026-10-02T12:16:32.8741804Z         "median": 0.02720255699999541,
+2026-10-02T12:16:32.8742052Z         "min": 0.02662491399999567,
+2026-10-02T12:16:32.8742291Z         "max": 0.02788221000000135
+2026-10-02T12:16:32.8742514Z       },
+2026-10-02T12:16:32.8742970Z       "cpu_s": {
+2026-10-02T12:16:32.8743170Z         "median": 0.015,
+2026-10-02T12:16:32.8743384Z         "min": 0.01,
+2026-10-02T12:16:32.8743583Z         "max": 0.02
+2026-10-02T12:16:32.8743770Z       },
+2026-10-02T12:16:32.8743946Z       "maxrss_kib": {
+2026-10-02T12:16:32.8744150Z         "median": 28028.0,
+2026-10-02T12:16:32.8744361Z         "min": 27884,
+2026-10-02T12:16:32.8744591Z         "max": 28104
+2026-10-02T12:16:32.8744778Z       }
+2026-10-02T12:16:32.8744942Z     },
+2026-10-02T12:16:32.8745116Z     "runtime_valid": true,
+2026-10-02T12:16:32.8745327Z     "runtime": {
+2026-10-02T12:16:32.8745515Z       "n": 12,
+2026-10-02T12:16:32.8745692Z       "wall_s": {
+2026-10-02T12:16:32.8745884Z         "median": 0.03779930599999659,
+2026-10-02T12:16:32.8746125Z         "min": 0.03762464999999793,
+2026-10-02T12:16:32.8746357Z         "max": 0.03818218000000684
+2026-10-02T12:16:32.8746578Z       },
+2026-10-02T12:16:32.8746748Z       "cpu_s": {
+2026-10-02T12:16:32.8746941Z         "median": 0.03,
+2026-10-02T12:16:32.8747141Z         "min": 0.03,
+2026-10-02T12:16:32.8747328Z         "max": 0.03
+2026-10-02T12:16:32.8747511Z       },
+2026-10-02T12:16:32.8747690Z       "maxrss_kib": {
+2026-10-02T12:16:32.8747898Z         "median": 1544.0,
+2026-10-02T12:16:32.8748105Z         "min": 1544,
+2026-10-02T12:16:32.8748294Z         "max": 1544
+2026-10-02T12:16:32.8748478Z       }
+2026-10-02T12:16:32.8748646Z     }
+2026-10-02T12:16:32.8748813Z   },
+2026-10-02T12:16:32.8748974Z   {
+2026-10-02T12:16:32.8749156Z     "workload": "many_functions",
+2026-10-02T12:16:32.8749402Z     "tool": "buster-fast",
+2026-10-02T12:16:32.8749620Z     "accepted": true,
+2026-10-02T12:16:32.8749966Z     "input_sha256": "10d012b7256274c0b6628959ac0c70aac76300a8ec13f159bb7f9d20f67ca751",
+2026-10-02T12:16:32.8750383Z     "object_bytes": 56832,
+2026-10-02T12:16:32.8750744Z     "output_sha256": "c1607b3e097d8b83e9bca5fb6e254b4ed2497795746298f324bd216516b02404",
+2026-10-02T12:16:32.8751143Z     "sections": {
+2026-10-02T12:16:32.8751342Z       "argv": [
+2026-10-02T12:16:32.8751526Z         "size",
+2026-10-02T12:16:32.8751709Z         "-A",
+2026-10-02T12:16:32.8751974Z         "gcc-comparison-evidence/many_functions-buster-fast.o"
+2026-10-02T12:16:32.8752294Z       ],
+2026-10-02T12:16:32.8752472Z       "exit": 0,
+2026-10-02T12:16:32.8754914Z       "stdout": "gcc-comparison-evidence/many_functions-buster-fast.o  :\nsection               size   addr\n.text                26438      0\n.rodata                  4      0\n.data                    0      0\n.bss                     0      0\n.tdata                   0      0\n.tbss                    0      0\n.init_array              0      0\n.fini_array              0      0\n.eh_frame             8248      0\n.pdata                   0      0\n.xdata                   0      0\n.debug_info              0      0\n.debug_abbrev            0      0\n.debug_line              0      0\n.debug_str               0      0\n.debug_loc               0      0\n.debug_ranges            0      0\n.debug$S                 0      0\n.debug$T                 0      0\n.debug_addr              0      0\n.debug_str_offsets       0      0\n.debug_line_str          0      0\n.debug_rnglists          0      0\n.debug_loclists          0      0\nTotal                34690\n\n\n",
+2026-10-02T12:16:32.8757117Z       "stderr": ""
+2026-10-02T12:16:32.8757304Z     },
+2026-10-02T12:16:32.8757479Z     "text_bytes": 26438,
+2026-10-02T12:16:32.8757687Z     "link": {
+2026-10-02T12:16:32.8757866Z       "argv": [
+2026-10-02T12:16:32.8758052Z         "gcc",
+2026-10-02T12:16:32.8758230Z         "-no-pie",
+2026-10-02T12:16:32.8758492Z         "gcc-comparison-evidence/many_functions-buster-fast.o",
+2026-10-02T12:16:32.8758809Z         "-o",
+2026-10-02T12:16:32.8759053Z         "gcc-comparison-evidence/many_functions-buster-fast"
+2026-10-02T12:16:32.8759355Z       ],
+2026-10-02T12:16:32.8759524Z       "exit": 0,
+2026-10-02T12:16:32.8759714Z       "stdout": "",
+2026-10-02T12:16:32.8759906Z       "stderr": ""
+2026-10-02T12:16:32.8760218Z     },
+2026-10-02T12:16:32.8760392Z     "validation": {
+2026-10-02T12:16:32.8760581Z       "argv": [
+2026-10-02T12:16:32.8760938Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/many_functions-buster-fast"
+2026-10-02T12:16:32.8761359Z       ],
+2026-10-02T12:16:32.8761528Z       "exit": 0,
+2026-10-02T12:16:32.8761720Z       "stdout": "4047286272\n",
+2026-10-02T12:16:32.8761941Z       "stderr": ""
+2026-10-02T12:16:32.8762129Z     },
+2026-10-02T12:16:32.8762302Z     "correct": true,
+2026-10-02T12:16:32.8762508Z     "compile_valid": true,
+2026-10-02T12:16:32.8762851Z     "compile": {
+2026-10-02T12:16:32.8763039Z       "n": 12,
+2026-10-02T12:16:32.8763222Z       "wall_s": {
+2026-10-02T12:16:32.8763423Z         "median": 0.028356127500003936,
+2026-10-02T12:16:32.8763687Z         "min": 0.023398542999984784,
+2026-10-02T12:16:32.8763930Z         "max": 0.0349316250000129
+2026-10-02T12:16:32.8764153Z       },
+2026-10-02T12:16:32.8764323Z       "cpu_s": {
+2026-10-02T12:16:32.8764522Z         "median": 0.01,
+2026-10-02T12:16:32.8764725Z         "min": 0.01,
+2026-10-02T12:16:32.8764917Z         "max": 0.02
+2026-10-02T12:16:32.8765097Z       },
+2026-10-02T12:16:32.8765275Z       "maxrss_kib": {
+2026-10-02T12:16:32.8765484Z         "median": 24384.0,
+2026-10-02T12:16:32.8765695Z         "min": 24312,
+2026-10-02T12:16:32.8765900Z         "max": 24640
+2026-10-02T12:16:32.8766087Z       }
+2026-10-02T12:16:32.8766255Z     },
+2026-10-02T12:16:32.8766431Z     "runtime_valid": true,
+2026-10-02T12:16:32.8766642Z     "runtime": {
+2026-10-02T12:16:32.8766821Z       "n": 12,
+2026-10-02T12:16:32.8766999Z       "wall_s": {
+2026-10-02T12:16:32.8767192Z         "median": 0.08951319150000359,
+2026-10-02T12:16:32.8767434Z         "min": 0.0892627480000101,
+2026-10-02T12:16:32.8767666Z         "max": 0.09206333500000596
+2026-10-02T12:16:32.8767885Z       },
+2026-10-02T12:16:32.8768055Z       "cpu_s": {
+2026-10-02T12:16:32.8768250Z         "median": 0.08,
+2026-10-02T12:16:32.8768448Z         "min": 0.08,
+2026-10-02T12:16:32.8768641Z         "max": 0.09
+2026-10-02T12:16:32.8768823Z       },
+2026-10-02T12:16:32.8768994Z       "maxrss_kib": {
+2026-10-02T12:16:32.8769198Z         "median": 1576.0,
+2026-10-02T12:16:32.8769404Z         "min": 1572,
+2026-10-02T12:16:32.8769593Z         "max": 1640
+2026-10-02T12:16:32.8769777Z       }
+2026-10-02T12:16:32.8769942Z     }
+2026-10-02T12:16:32.8770108Z   },
+2026-10-02T12:16:32.8770269Z   {
+2026-10-02T12:16:32.8770452Z     "workload": "many_functions",
+2026-10-02T12:16:32.8770703Z     "tool": "gcc-O0",
+2026-10-02T12:16:32.8770900Z     "accepted": true,
+2026-10-02T12:16:32.8771247Z     "input_sha256": "10d012b7256274c0b6628959ac0c70aac76300a8ec13f159bb7f9d20f67ca751",
+2026-10-02T12:16:32.8771653Z     "object_bytes": 33112,
+2026-10-02T12:16:32.8772019Z     "output_sha256": "885ce5c78f49efb6b3abf1d18cd942e483b00193c5530126758c4e9e2ffbcef8",
+2026-10-02T12:16:32.8772429Z     "sections": {
+2026-10-02T12:16:32.8772616Z       "argv": [
+2026-10-02T12:16:32.8772930Z         "size",
+2026-10-02T12:16:32.8773116Z         "-A",
+2026-10-02T12:16:32.8773356Z         "gcc-comparison-evidence/many_functions-gcc-O0.o"
+2026-10-02T12:16:32.8773680Z       ],
+2026-10-02T12:16:32.8774163Z       "exit": 0,
+2026-10-02T12:16:32.8775360Z       "stdout": "gcc-comparison-evidence/many_functions-gcc-O0.o  :\nsection               size   addr\n.text                10004      0\n.data                    0      0\n.bss                     0      0\n.rodata                  4      0\n.comment                39      0\n.note.GNU-stack          0      0\n.note.gnu.property      32      0\n.eh_frame             8248      0\nTotal                18327\n\n\n",
+2026-10-02T12:16:32.8776763Z       "stderr": ""
+2026-10-02T12:16:32.8777053Z     },
+2026-10-02T12:16:32.8777314Z     "text_bytes": 10004,
+2026-10-02T12:16:32.8777690Z     "link": {
+2026-10-02T12:16:32.8778001Z       "argv": [
+2026-10-02T12:16:32.8778301Z         "gcc",
+2026-10-02T12:16:32.8778598Z         "-no-pie",
+2026-10-02T12:16:32.8778942Z         "gcc-comparison-evidence/many_functions-gcc-O0.o",
+2026-10-02T12:16:32.8779518Z         "-o",
+2026-10-02T12:16:32.8779881Z         "gcc-comparison-evidence/many_functions-gcc-O0"
+2026-10-02T12:16:32.8780339Z       ],
+2026-10-02T12:16:32.8780622Z       "exit": 0,
+2026-10-02T12:16:32.8780901Z       "stdout": "",
+2026-10-02T12:16:32.8781264Z       "stderr": ""
+2026-10-02T12:16:32.8791139Z     },
+2026-10-02T12:16:32.8791411Z     "validation": {
+2026-10-02T12:16:32.8791628Z       "argv": [
+2026-10-02T12:16:32.8791999Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/many_functions-gcc-O0"
+2026-10-02T12:16:32.8792427Z       ],
+2026-10-02T12:16:32.8792609Z       "exit": 0,
+2026-10-02T12:16:32.8793106Z       "stdout": "4047286272\n",
+2026-10-02T12:16:32.8793515Z       "stderr": ""
+2026-10-02T12:16:32.8793824Z     },
+2026-10-02T12:16:32.8794117Z     "correct": true,
+2026-10-02T12:16:32.8794443Z     "compile_valid": true,
+2026-10-02T12:16:32.8794810Z     "compile": {
+2026-10-02T12:16:32.8795119Z       "n": 12,
+2026-10-02T12:16:32.8795416Z       "wall_s": {
+2026-10-02T12:16:32.8795722Z         "median": 0.08995772299999771,
+2026-10-02T12:16:32.8796111Z         "min": 0.08939944599998739,
+2026-10-02T12:16:32.8796515Z         "max": 0.09093193399999677
+2026-10-02T12:16:32.8796935Z       },
+2026-10-02T12:16:32.8797261Z       "cpu_s": {
+2026-10-02T12:16:32.8797607Z         "median": 0.08,
+2026-10-02T12:16:32.8797968Z         "min": 0.07,
+2026-10-02T12:16:32.8798334Z         "max": 0.08
+2026-10-02T12:16:32.8798682Z       },
+2026-10-02T12:16:32.8799016Z       "maxrss_kib": {
+2026-10-02T12:16:32.8799392Z         "median": 31626.0,
+2026-10-02T12:16:32.8799778Z         "min": 31544,
+2026-10-02T12:16:32.8800120Z         "max": 31828
+2026-10-02T12:16:32.8800459Z       }
+2026-10-02T12:16:32.8800765Z     },
+2026-10-02T12:16:32.8801086Z     "runtime_valid": true,
+2026-10-02T12:16:32.8801481Z     "runtime": {
+2026-10-02T12:16:32.8801818Z       "n": 12,
+2026-10-02T12:16:32.8802178Z       "wall_s": {
+2026-10-02T12:16:32.8802526Z         "median": 0.08519658099999106,
+2026-10-02T12:16:32.8803220Z         "min": 0.08439336200001435,
+2026-10-02T12:16:32.8803623Z         "max": 0.08546308800001157
+2026-10-02T12:16:32.8803963Z       },
+2026-10-02T12:16:32.8804157Z       "cpu_s": {
+2026-10-02T12:16:32.8804366Z         "median": 0.08,
+2026-10-02T12:16:32.8804586Z         "min": 0.08,
+2026-10-02T12:16:32.8804786Z         "max": 0.08
+2026-10-02T12:16:32.8804975Z       },
+2026-10-02T12:16:32.8805152Z       "maxrss_kib": {
+2026-10-02T12:16:32.8805360Z         "median": 1560.0,
+2026-10-02T12:16:32.8805573Z         "min": 1556,
+2026-10-02T12:16:32.8805769Z         "max": 1560
+2026-10-02T12:16:32.8805957Z       }
+2026-10-02T12:16:32.8806125Z     }
+2026-10-02T12:16:32.8806295Z   },
+2026-10-02T12:16:32.8806463Z   {
+2026-10-02T12:16:32.8806654Z     "workload": "many_functions",
+2026-10-02T12:16:32.8806902Z     "tool": "gcc-O2",
+2026-10-02T12:16:32.8807110Z     "accepted": true,
+2026-10-02T12:16:32.8807468Z     "input_sha256": "10d012b7256274c0b6628959ac0c70aac76300a8ec13f159bb7f9d20f67ca751",
+2026-10-02T12:16:32.8807903Z     "object_bytes": 32240,
+2026-10-02T12:16:32.8808514Z     "output_sha256": "d2d93ddda1027217cb61538eb07e90edd86d63a0b552674faa534daeedc1b51c",
+2026-10-02T12:16:32.8808951Z     "sections": {
+2026-10-02T12:16:32.8809144Z       "argv": [
+2026-10-02T12:16:32.8809330Z         "size",
+2026-10-02T12:16:32.8809515Z         "-A",
+2026-10-02T12:16:32.8809766Z         "gcc-comparison-evidence/many_functions-gcc-O2.o"
+2026-10-02T12:16:32.8810075Z       ],
+2026-10-02T12:16:32.8810251Z       "exit": 0,
+2026-10-02T12:16:32.8811417Z       "stdout": "gcc-comparison-evidence/many_functions-gcc-O2.o  :\nsection               size   addr\n.text                 4093      0\n.data                    0      0\n.bss                     0      0\n.rodata.str1.1           4      0\n.text.startup         1846      0\n.comment                39      0\n.note.GNU-stack          0      0\n.note.gnu.property      32      0\n.eh_frame             5176      0\nTotal                11190\n\n\n",
+2026-10-02T12:16:32.8813035Z       "stderr": ""
+2026-10-02T12:16:32.8813266Z     },
+2026-10-02T12:16:32.8813454Z     "text_bytes": 5939,
+2026-10-02T12:16:32.8813678Z     "link": {
+2026-10-02T12:16:32.8813867Z       "argv": [
+2026-10-02T12:16:32.8814064Z         "gcc",
+2026-10-02T12:16:32.8814256Z         "-no-pie",
+2026-10-02T12:16:32.8814518Z         "gcc-comparison-evidence/many_functions-gcc-O2.o",
+2026-10-02T12:16:32.8814826Z         "-o",
+2026-10-02T12:16:32.8815062Z         "gcc-comparison-evidence/many_functions-gcc-O2"
+2026-10-02T12:16:32.8815351Z       ],
+2026-10-02T12:16:32.8815527Z       "exit": 0,
+2026-10-02T12:16:32.8815719Z       "stdout": "",
+2026-10-02T12:16:32.8815916Z       "stderr": ""
+2026-10-02T12:16:32.8816106Z     },
+2026-10-02T12:16:32.8816287Z     "validation": {
+2026-10-02T12:16:32.8816478Z       "argv": [
+2026-10-02T12:16:32.8816821Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/many_functions-gcc-O2"
+2026-10-02T12:16:32.8817223Z       ],
+2026-10-02T12:16:32.8817400Z       "exit": 0,
+2026-10-02T12:16:32.8817599Z       "stdout": "4047286272\n",
+2026-10-02T12:16:32.8818648Z       "stderr": ""
+2026-10-02T12:16:32.8818873Z     },
+2026-10-02T12:16:32.8819055Z     "correct": true,
+2026-10-02T12:16:32.8819270Z     "compile_valid": true,
+2026-10-02T12:16:32.8819614Z     "compile": {
+2026-10-02T12:16:32.8819805Z       "n": 12,
+2026-10-02T12:16:32.8819992Z       "wall_s": {
+2026-10-02T12:16:32.8820318Z         "median": 0.25572332999999503,
+2026-10-02T12:16:32.8820569Z         "min": 0.2540900079999915,
+2026-10-02T12:16:32.8820886Z         "max": 0.2701533149999875
+2026-10-02T12:16:32.8821110Z       },
+2026-10-02T12:16:32.8821290Z       "cpu_s": {
+2026-10-02T12:16:32.8821490Z         "median": 0.24000000000000002,
+2026-10-02T12:16:32.8821729Z         "min": 0.24,
+2026-10-02T12:16:32.8821928Z         "max": 0.26
+2026-10-02T12:16:32.8822116Z       },
+2026-10-02T12:16:32.8822292Z       "maxrss_kib": {
+2026-10-02T12:16:32.8822499Z         "median": 37852.0,
+2026-10-02T12:16:32.8822920Z         "min": 37616,
+2026-10-02T12:16:32.8823143Z         "max": 37996
+2026-10-02T12:16:32.8823336Z       }
+2026-10-02T12:16:32.8823510Z     },
+2026-10-02T12:16:32.8823696Z     "runtime_valid": true,
+2026-10-02T12:16:32.8823917Z     "runtime": {
+2026-10-02T12:16:32.8824104Z       "n": 12,
+2026-10-02T12:16:32.8824294Z       "wall_s": {
+2026-10-02T12:16:32.8824495Z         "median": 0.06276914049999505,
+2026-10-02T12:16:32.8824744Z         "min": 0.06257431599999563,
+2026-10-02T12:16:32.8824985Z         "max": 0.06292510200000834
+2026-10-02T12:16:32.8825215Z       },
+2026-10-02T12:16:32.8825391Z       "cpu_s": {
+2026-10-02T12:16:32.8825591Z         "median": 0.06,
+2026-10-02T12:16:32.8825799Z         "min": 0.05,
+2026-10-02T12:16:32.8825994Z         "max": 0.06
+2026-10-02T12:16:32.8826183Z       },
+2026-10-02T12:16:32.8826368Z       "maxrss_kib": {
+2026-10-02T12:16:32.8826575Z         "median": 1552.0,
+2026-10-02T12:16:32.8826789Z         "min": 1520,
+2026-10-02T12:16:32.8826982Z         "max": 1552
+2026-10-02T12:16:32.8827174Z       }
+2026-10-02T12:16:32.8827341Z     }
+2026-10-02T12:16:32.8827511Z   },
+2026-10-02T12:16:32.8827676Z   {
+2026-10-02T12:16:32.8828030Z     "workload": "scalar_float",
+2026-10-02T12:16:32.8828289Z     "tool": "buster-fast",
+2026-10-02T12:16:32.8828512Z     "accepted": true,
+2026-10-02T12:16:32.8828870Z     "input_sha256": "10f3be543c99eece23585273ebc2204bd79972174d4ae571018fef718bf500f6",
+2026-10-02T12:16:32.8829289Z     "object_bytes": 2896,
+2026-10-02T12:16:32.8829662Z     "output_sha256": "9bd444409be8f89e71e5ceda634325fb621777a2aadb0d75cb1a8d0b73818c7a",
+2026-10-02T12:16:32.8830078Z     "sections": {
+2026-10-02T12:16:32.8830272Z       "argv": [
+2026-10-02T12:16:32.8830457Z         "size",
+2026-10-02T12:16:32.8830664Z         "-A",
+2026-10-02T12:16:32.8830923Z         "gcc-comparison-evidence/scalar_float-buster-fast.o"
+2026-10-02T12:16:32.8831238Z       ],
+2026-10-02T12:16:32.8831415Z       "exit": 0,
+2026-10-02T12:16:32.8833836Z       "stdout": "gcc-comparison-evidence/scalar_float-buster-fast.o  :\nsection              size   addr\n.text                 236      0\n.rodata                 7      0\n.data                   8      0\n.bss                    0      0\n.tdata                  0      0\n.tbss                   0      0\n.init_array             0      0\n.fini_array             0      0\n.eh_frame              56      0\n.pdata                  0      0\n.xdata                  0      0\n.debug_info             0      0\n.debug_abbrev           0      0\n.debug_line             0      0\n.debug_str              0      0\n.debug_loc              0      0\n.debug_ranges           0      0\n.debug$S                0      0\n.debug$T                0      0\n.debug_addr             0      0\n.debug_str_offsets      0      0\n.debug_line_str         0      0\n.debug_rnglists         0      0\n.debug_loclists         0      0\nTotal                 307\n\n\n",
+2026-10-02T12:16:32.8836159Z       "stderr": ""
+2026-10-02T12:16:32.8836355Z     },
+2026-10-02T12:16:32.8836541Z     "text_bytes": 236,
+2026-10-02T12:16:32.8836745Z     "link": {
+2026-10-02T12:16:32.8836927Z       "argv": [
+2026-10-02T12:16:32.8837113Z         "gcc",
+2026-10-02T12:16:32.8837306Z         "-no-pie",
+2026-10-02T12:16:32.8837572Z         "gcc-comparison-evidence/scalar_float-buster-fast.o",
+2026-10-02T12:16:32.8837887Z         "-o",
+2026-10-02T12:16:32.8838137Z         "gcc-comparison-evidence/scalar_float-buster-fast"
+2026-10-02T12:16:32.8838436Z       ],
+2026-10-02T12:16:32.8838613Z       "exit": 0,
+2026-10-02T12:16:32.8838802Z       "stdout": "",
+2026-10-02T12:16:32.8838997Z       "stderr": ""
+2026-10-02T12:16:32.8839183Z     },
+2026-10-02T12:16:32.8839359Z     "validation": {
+2026-10-02T12:16:32.8839549Z       "argv": [
+2026-10-02T12:16:32.8839892Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/scalar_float-buster-fast"
+2026-10-02T12:16:32.8840616Z       ],
+2026-10-02T12:16:32.8840791Z       "exit": 0,
+2026-10-02T12:16:32.8840996Z       "stdout": "0.99999999994448896\n",
+2026-10-02T12:16:32.8841254Z       "stderr": ""
+2026-10-02T12:16:32.8841438Z     },
+2026-10-02T12:16:32.8841615Z     "correct": true,
+2026-10-02T12:16:32.8841830Z     "compile_valid": true,
+2026-10-02T12:16:32.8842053Z     "compile": {
+2026-10-02T12:16:32.8842241Z       "n": 12,
+2026-10-02T12:16:32.8842425Z       "wall_s": {
+2026-10-02T12:16:32.8842629Z         "median": 0.02312845549998599,
+2026-10-02T12:16:32.8843158Z         "min": 0.017959640999976045,
+2026-10-02T12:16:32.8843407Z         "max": 0.02523682599999688
+2026-10-02T12:16:32.8843641Z       },
+2026-10-02T12:16:32.8843825Z       "cpu_s": {
+2026-10-02T12:16:32.8844021Z         "median": 0.01,
+2026-10-02T12:16:32.8844230Z         "min": 0.0,
+2026-10-02T12:16:32.8844575Z         "max": 0.02
+2026-10-02T12:16:32.8844766Z       },
+2026-10-02T12:16:32.8844950Z       "maxrss_kib": {
+2026-10-02T12:16:32.8845160Z         "median": 22382.0,
+2026-10-02T12:16:32.8845376Z         "min": 22272,
+2026-10-02T12:16:32.8845573Z         "max": 22524
+2026-10-02T12:16:32.8845774Z       }
+2026-10-02T12:16:32.8845946Z     },
+2026-10-02T12:16:32.8846134Z     "runtime_valid": true,
+2026-10-02T12:16:32.8846364Z     "runtime": {
+2026-10-02T12:16:32.8846697Z       "n": 12,
+2026-10-02T12:16:32.8846889Z       "wall_s": {
+2026-10-02T12:16:32.8847089Z         "median": 0.3141232404999954,
+2026-10-02T12:16:32.8847336Z         "min": 0.31395329799997285,
+2026-10-02T12:16:32.8847579Z         "max": 0.3177991390000159
+2026-10-02T12:16:32.8847799Z       },
+2026-10-02T12:16:32.8847973Z       "cpu_s": {
+2026-10-02T12:16:32.8848165Z         "median": 0.31,
+2026-10-02T12:16:32.8848373Z         "min": 0.31,
+2026-10-02T12:16:32.8848567Z         "max": 0.31
+2026-10-02T12:16:32.8848751Z       },
+2026-10-02T12:16:32.8848934Z       "maxrss_kib": {
+2026-10-02T12:16:32.8849138Z         "median": 1588.0,
+2026-10-02T12:16:32.8849347Z         "min": 1560,
+2026-10-02T12:16:32.8849540Z         "max": 1588
+2026-10-02T12:16:32.8849729Z       }
+2026-10-02T12:16:32.8849900Z     }
+2026-10-02T12:16:32.8850198Z   },
+2026-10-02T12:16:32.8850366Z   {
+2026-10-02T12:16:32.8850554Z     "workload": "scalar_float",
+2026-10-02T12:16:32.8850791Z     "tool": "gcc-O0",
+2026-10-02T12:16:32.8851004Z     "accepted": true,
+2026-10-02T12:16:32.8851363Z     "input_sha256": "10f3be543c99eece23585273ebc2204bd79972174d4ae571018fef718bf500f6",
+2026-10-02T12:16:32.8851793Z     "object_bytes": 1704,
+2026-10-02T12:16:32.8852172Z     "output_sha256": "daa153737480f8c7bf73e463ad06c804f80e3a534e25c41b29c2325cf76a07b8",
+2026-10-02T12:16:32.8852587Z     "sections": {
+2026-10-02T12:16:32.8852915Z       "argv": [
+2026-10-02T12:16:32.8853102Z         "size",
+2026-10-02T12:16:32.8853286Z         "-A",
+2026-10-02T12:16:32.8853531Z         "gcc-comparison-evidence/scalar_float-gcc-O0.o"
+2026-10-02T12:16:32.8853822Z       ],
+2026-10-02T12:16:32.8853997Z       "exit": 0,
+2026-10-02T12:16:32.8855033Z       "stdout": "gcc-comparison-evidence/scalar_float-gcc-O0.o  :\nsection              size   addr\n.text                 112      0\n.data                   8      0\n.bss                    0      0\n.rodata                24      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              56      0\nTotal                 271\n\n\n",
+2026-10-02T12:16:32.8856113Z       "stderr": ""
+2026-10-02T12:16:32.8856303Z     },
+2026-10-02T12:16:32.8856485Z     "text_bytes": 112,
+2026-10-02T12:16:32.8856690Z     "link": {
+2026-10-02T12:16:32.8856872Z       "argv": [
+2026-10-02T12:16:32.8857056Z         "gcc",
+2026-10-02T12:16:32.8857243Z         "-no-pie",
+2026-10-02T12:16:32.8857502Z         "gcc-comparison-evidence/scalar_float-gcc-O0.o",
+2026-10-02T12:16:32.8857799Z         "-o",
+2026-10-02T12:16:32.8858032Z         "gcc-comparison-evidence/scalar_float-gcc-O0"
+2026-10-02T12:16:32.8858320Z       ],
+2026-10-02T12:16:32.8858493Z       "exit": 0,
+2026-10-02T12:16:32.8858682Z       "stdout": "",
+2026-10-02T12:16:32.8858878Z       "stderr": ""
+2026-10-02T12:16:32.8859064Z     },
+2026-10-02T12:16:32.8859245Z     "validation": {
+2026-10-02T12:16:32.8859438Z       "argv": [
+2026-10-02T12:16:32.8859767Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/scalar_float-gcc-O0"
+2026-10-02T12:16:32.8860164Z       ],
+2026-10-02T12:16:32.8860338Z       "exit": 0,
+2026-10-02T12:16:32.8860537Z       "stdout": "0.99999999994448896\n",
+2026-10-02T12:16:32.8860790Z       "stderr": ""
+2026-10-02T12:16:32.8860977Z     },
+2026-10-02T12:16:32.8861153Z     "correct": true,
+2026-10-02T12:16:32.8861360Z     "compile_valid": true,
+2026-10-02T12:16:32.8861579Z     "compile": {
+2026-10-02T12:16:32.8861768Z       "n": 12,
+2026-10-02T12:16:32.8861953Z       "wall_s": {
+2026-10-02T12:16:32.8862155Z         "median": 0.017859960999999203,
+2026-10-02T12:16:32.8862413Z         "min": 0.017179126999991468,
+2026-10-02T12:16:32.8862659Z         "max": 0.022734917999997606
+2026-10-02T12:16:32.8863119Z       },
+2026-10-02T12:16:32.8863294Z       "cpu_s": {
+2026-10-02T12:16:32.8863496Z         "median": 0.01,
+2026-10-02T12:16:32.8863710Z         "min": 0.0,
+2026-10-02T12:16:32.8863904Z         "max": 0.01
+2026-10-02T12:16:32.8864092Z       },
+2026-10-02T12:16:32.8864323Z       "maxrss_kib": {
+2026-10-02T12:16:32.8864697Z         "median": 23588.0,
+2026-10-02T12:16:32.8864925Z         "min": 23500,
+2026-10-02T12:16:32.8865124Z         "max": 23768
+2026-10-02T12:16:32.8865319Z       }
+2026-10-02T12:16:32.8865488Z     },
+2026-10-02T12:16:32.8865670Z     "runtime_valid": true,
+2026-10-02T12:16:32.8865892Z     "runtime": {
+2026-10-02T12:16:32.8866086Z       "n": 12,
+2026-10-02T12:16:32.8866273Z       "wall_s": {
+2026-10-02T12:16:32.8866474Z         "median": 0.23598503400000936,
+2026-10-02T12:16:32.8866726Z         "min": 0.23576829000000998,
+2026-10-02T12:16:32.8866970Z         "max": 0.2376641430000177
+2026-10-02T12:16:32.8867198Z       },
+2026-10-02T12:16:32.8867371Z       "cpu_s": {
+2026-10-02T12:16:32.8867560Z         "median": 0.23,
+2026-10-02T12:16:32.8867764Z         "min": 0.23,
+2026-10-02T12:16:32.8867962Z         "max": 0.23
+2026-10-02T12:16:32.8868352Z       },
+2026-10-02T12:16:32.8868527Z       "maxrss_kib": {
+2026-10-02T12:16:32.8868733Z         "median": 1588.0,
+2026-10-02T12:16:32.8868943Z         "min": 1564,
+2026-10-02T12:16:32.8869135Z         "max": 1588
+2026-10-02T12:16:32.8869319Z       }
+2026-10-02T12:16:32.8869486Z     }
+2026-10-02T12:16:32.8869654Z   },
+2026-10-02T12:16:32.8869824Z   {
+2026-10-02T12:16:32.8870004Z     "workload": "scalar_float",
+2026-10-02T12:16:32.8870238Z     "tool": "gcc-O2",
+2026-10-02T12:16:32.8870441Z     "accepted": true,
+2026-10-02T12:16:32.8870796Z     "input_sha256": "10f3be543c99eece23585273ebc2204bd79972174d4ae571018fef718bf500f6",
+2026-10-02T12:16:32.8871208Z     "object_bytes": 1888,
+2026-10-02T12:16:32.8871576Z     "output_sha256": "ee77779448ed94da57b95f06c186eb13e2507c82eb2d188ea665da138f218722",
+2026-10-02T12:16:32.8871985Z     "sections": {
+2026-10-02T12:16:32.8872175Z       "argv": [
+2026-10-02T12:16:32.8872360Z         "size",
+2026-10-02T12:16:32.8872544Z         "-A",
+2026-10-02T12:16:32.8873015Z         "gcc-comparison-evidence/scalar_float-gcc-O2.o"
+2026-10-02T12:16:32.8873311Z       ],
+2026-10-02T12:16:32.8873487Z       "exit": 0,
+2026-10-02T12:16:32.8874669Z       "stdout": "gcc-comparison-evidence/scalar_float-gcc-O2.o  :\nsection              size   addr\n.text                   0      0\n.data                   8      0\n.bss                    0      0\n.rodata.str1.1          7      0\n.text.startup          83      0\n.rodata.cst8           16      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              48      0\nTotal                 233\n\n\n",
+2026-10-02T12:16:32.8875926Z       "stderr": ""
+2026-10-02T12:16:32.8876118Z     },
+2026-10-02T12:16:32.8876295Z     "text_bytes": 83,
+2026-10-02T12:16:32.8876508Z     "link": {
+2026-10-02T12:16:32.8876691Z       "argv": [
+2026-10-02T12:16:32.8876876Z         "gcc",
+2026-10-02T12:16:32.8877064Z         "-no-pie",
+2026-10-02T12:16:32.8877320Z         "gcc-comparison-evidence/scalar_float-gcc-O2.o",
+2026-10-02T12:16:32.8877623Z         "-o",
+2026-10-02T12:16:32.8877856Z         "gcc-comparison-evidence/scalar_float-gcc-O2"
+2026-10-02T12:16:32.8878149Z       ],
+2026-10-02T12:16:32.8878330Z       "exit": 0,
+2026-10-02T12:16:32.8878520Z       "stdout": "",
+2026-10-02T12:16:32.8878711Z       "stderr": ""
+2026-10-02T12:16:32.8878895Z     },
+2026-10-02T12:16:32.8879070Z     "validation": {
+2026-10-02T12:16:32.8879262Z       "argv": [
+2026-10-02T12:16:32.8879585Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/scalar_float-gcc-O2"
+2026-10-02T12:16:32.8879975Z       ],
+2026-10-02T12:16:32.8880147Z       "exit": 0,
+2026-10-02T12:16:32.8880343Z       "stdout": "0.99999999994448896\n",
+2026-10-02T12:16:32.8880598Z       "stderr": ""
+2026-10-02T12:16:32.8880783Z     },
+2026-10-02T12:16:32.8880955Z     "correct": true,
+2026-10-02T12:16:32.8881162Z     "compile_valid": true,
+2026-10-02T12:16:32.8881384Z     "compile": {
+2026-10-02T12:16:32.8881570Z       "n": 12,
+2026-10-02T12:16:32.8881758Z       "wall_s": {
+2026-10-02T12:16:32.8881955Z         "median": 0.02158537999999055,
+2026-10-02T12:16:32.8882332Z         "min": 0.019755244000009498,
+2026-10-02T12:16:32.8882578Z         "max": 0.02681500899998923
+2026-10-02T12:16:32.8882940Z       },
+2026-10-02T12:16:32.8883124Z       "cpu_s": {
+2026-10-02T12:16:32.8883321Z         "median": 0.01,
+2026-10-02T12:16:32.8883526Z         "min": 0.01,
+2026-10-02T12:16:32.8883721Z         "max": 0.02
+2026-10-02T12:16:32.8883909Z       },
+2026-10-02T12:16:32.8884087Z       "maxrss_kib": {
+2026-10-02T12:16:32.8884294Z         "median": 25684.0,
+2026-10-02T12:16:32.8884506Z         "min": 25504,
+2026-10-02T12:16:32.8884702Z         "max": 25904
+2026-10-02T12:16:32.8884893Z       }
+2026-10-02T12:16:32.8885061Z     },
+2026-10-02T12:16:32.8885241Z     "runtime_valid": true,
+2026-10-02T12:16:32.8885459Z     "runtime": {
+2026-10-02T12:16:32.8885655Z       "n": 12,
+2026-10-02T12:16:32.8885843Z       "wall_s": {
+2026-10-02T12:16:32.8886039Z         "median": 0.09594222900000204,
+2026-10-02T12:16:32.8886415Z         "min": 0.09573107099998879,
+2026-10-02T12:16:32.8886657Z         "max": 0.09639278499997772
+2026-10-02T12:16:32.8886883Z       },
+2026-10-02T12:16:32.8887058Z       "cpu_s": {
+2026-10-02T12:16:32.8887248Z         "median": 0.09,
+2026-10-02T12:16:32.8887453Z         "min": 0.09,
+2026-10-02T12:16:32.8887648Z         "max": 0.09
+2026-10-02T12:16:32.8887836Z       },
+2026-10-02T12:16:32.8888015Z       "maxrss_kib": {
+2026-10-02T12:16:32.8888222Z         "median": 1588.0,
+2026-10-02T12:16:32.8888434Z         "min": 1588,
+2026-10-02T12:16:32.8888628Z         "max": 1588
+2026-10-02T12:16:32.8888812Z       }
+2026-10-02T12:16:32.8888980Z     }
+2026-10-02T12:16:32.8889154Z   },
+2026-10-02T12:16:32.8889320Z   {
+2026-10-02T12:16:32.8889508Z     "workload": "basic_c_operations",
+2026-10-02T12:16:32.8889766Z     "tool": "buster-fast",
+2026-10-02T12:16:32.8889985Z     "accepted": true,
+2026-10-02T12:16:32.8890343Z     "input_sha256": "7f930ebda53ab297b4c98fa564d4d052f169e227f9c1f98bd2aa90a22b861111",
+2026-10-02T12:16:32.8890767Z     "object_bytes": 26912,
+2026-10-02T12:16:32.8891148Z     "output_sha256": "ef962e9fd2fab22d4d0b8923c57157a8618b1aa82afd653748ebfa18a1abdc4c",
+2026-10-02T12:16:32.8891561Z     "sections": {
+2026-10-02T12:16:32.8891752Z       "argv": [
+2026-10-02T12:16:32.8891937Z         "size",
+2026-10-02T12:16:32.8892124Z         "-A",
+2026-10-02T12:16:32.8892399Z         "gcc-comparison-evidence/basic_c_operations-buster-fast.o"
+2026-10-02T12:16:32.8892862Z       ],
+2026-10-02T12:16:32.8893045Z       "exit": 0,
+2026-10-02T12:16:32.8895333Z       "stdout": "gcc-comparison-evidence/basic_c_operations-buster-fast.o  :\nsection                 size   addr\n.text                  17547      0\n.rodata                   70      0\n.data                     40      0\n.bss                 1048588      0\n.tdata                     0      0\n.tbss                      0      0\n.init_array                0      0\n.fini_array                0      0\n.eh_frame               1464      0\n.pdata                     0      0\n.xdata                     0      0\n.debug_info                0      0\n.debug_abbrev              0      0\n.debug_line                0      0\n.debug_str                 0      0\n.debug_loc                 0      0\n.debug_ranges              0      0\n.debug$S                   0      0\n.debug$T                   0      0\n.debug_addr                0      0\n.debug_str_offsets         0      0\n.debug_line_str            0      0\n.debug_rnglists            0      0\n.debug_loclists            0      0\nTotal                1067709\n\n\n",
+2026-10-02T12:16:32.8897795Z       "stderr": ""
+2026-10-02T12:16:32.8897983Z     },
+2026-10-02T12:16:32.8898168Z     "text_bytes": 17547,
+2026-10-02T12:16:32.8898377Z     "link": {
+2026-10-02T12:16:32.8898558Z       "argv": [
+2026-10-02T12:16:32.8898742Z         "gcc",
+2026-10-02T12:16:32.8898930Z         "-no-pie",
+2026-10-02T12:16:32.8899216Z         "gcc-comparison-evidence/basic_c_operations-buster-fast.o",
+2026-10-02T12:16:32.8899558Z         "-o",
+2026-10-02T12:16:32.8899829Z         "gcc-comparison-evidence/basic_c_operations-buster-fast"
+2026-10-02T12:16:32.8900298Z       ],
+2026-10-02T12:16:32.8900481Z       "exit": 0,
+2026-10-02T12:16:32.8900670Z       "stdout": "",
+2026-10-02T12:16:32.8900864Z       "stderr": ""
+2026-10-02T12:16:32.8901048Z     },
+2026-10-02T12:16:32.8901223Z     "validation": {
+2026-10-02T12:16:32.8901415Z       "argv": [
+2026-10-02T12:16:32.8901781Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/basic_c_operations-buster-fast"
+2026-10-02T12:16:32.8902214Z       ],
+2026-10-02T12:16:32.8902386Z       "exit": 0,
+2026-10-02T12:16:32.8902572Z       "stdout": "",
+2026-10-02T12:16:32.8902892Z       "stderr": ""
+2026-10-02T12:16:32.8903082Z     },
+2026-10-02T12:16:32.8903258Z     "correct": true,
+2026-10-02T12:16:32.8903466Z     "compile_valid": true,
+2026-10-02T12:16:32.8903683Z     "compile": {
+2026-10-02T12:16:32.8903872Z       "n": 12,
+2026-10-02T12:16:32.8904196Z       "wall_s": {
+2026-10-02T12:16:32.8904393Z         "median": 0.024752239999997983,
+2026-10-02T12:16:32.8904645Z         "min": 0.023640978000003088,
+2026-10-02T12:16:32.8904894Z         "max": 0.031144796000006636
+2026-10-02T12:16:32.8905121Z       },
+2026-10-02T12:16:32.8905293Z       "cpu_s": {
+2026-10-02T12:16:32.8905485Z         "median": 0.01,
+2026-10-02T12:16:32.8905701Z         "min": 0.01,
+2026-10-02T12:16:32.8905899Z         "max": 0.02
+2026-10-02T12:16:32.8906085Z       },
+2026-10-02T12:16:32.8906264Z       "maxrss_kib": {
+2026-10-02T12:16:32.8906469Z         "median": 24150.0,
+2026-10-02T12:16:32.8906683Z         "min": 23944,
+2026-10-02T12:16:32.8906881Z         "max": 24256
+2026-10-02T12:16:32.8907072Z       }
+2026-10-02T12:16:32.8907241Z     },
+2026-10-02T12:16:32.8907426Z     "runtime_valid": false
+2026-10-02T12:16:32.8907636Z   },
+2026-10-02T12:16:32.8907801Z   {
+2026-10-02T12:16:32.8907997Z     "workload": "basic_c_operations",
+2026-10-02T12:16:32.8908250Z     "tool": "gcc-O0",
+2026-10-02T12:16:32.8908461Z     "accepted": true,
+2026-10-02T12:16:32.8908819Z     "input_sha256": "7f930ebda53ab297b4c98fa564d4d052f169e227f9c1f98bd2aa90a22b861111",
+2026-10-02T12:16:32.8909241Z     "object_bytes": 14600,
+2026-10-02T12:16:32.8909614Z     "output_sha256": "f5bfc718a1dc87473d6ee2445d451e55c9327273d083435e23cd83b36fcf77e5",
+2026-10-02T12:16:32.8910019Z     "sections": {
+2026-10-02T12:16:32.8910214Z       "argv": [
+2026-10-02T12:16:32.8910402Z         "size",
+2026-10-02T12:16:32.8910586Z         "-A",
+2026-10-02T12:16:32.8910849Z         "gcc-comparison-evidence/basic_c_operations-gcc-O0.o"
+2026-10-02T12:16:32.8911176Z       ],
+2026-10-02T12:16:32.8911353Z       "exit": 0,
+2026-10-02T12:16:32.8912453Z       "stdout": "gcc-comparison-evidence/basic_c_operations-gcc-O0.o  :\nsection                 size   addr\n.text                   7103      0\n.data                     48      0\n.bss                 1048616      0\n.rodata                   98      0\n.comment                  39      0\n.note.GNU-stack            0      0\n.note.gnu.property        32      0\n.eh_frame               1480      0\nTotal                1057416\n\n\n",
+2026-10-02T12:16:32.8913763Z       "stderr": ""
+2026-10-02T12:16:32.8913950Z     },
+2026-10-02T12:16:32.8914129Z     "text_bytes": 7103,
+2026-10-02T12:16:32.8914332Z     "link": {
+2026-10-02T12:16:32.8914512Z       "argv": [
+2026-10-02T12:16:32.8914698Z         "gcc",
+2026-10-02T12:16:32.8914883Z         "-no-pie",
+2026-10-02T12:16:32.8915146Z         "gcc-comparison-evidence/basic_c_operations-gcc-O0.o",
+2026-10-02T12:16:32.8915462Z         "-o",
+2026-10-02T12:16:32.8915707Z         "gcc-comparison-evidence/basic_c_operations-gcc-O0"
+2026-10-02T12:16:32.8916011Z       ],
+2026-10-02T12:16:32.8916184Z       "exit": 0,
+2026-10-02T12:16:32.8916372Z       "stdout": "",
+2026-10-02T12:16:32.8916568Z       "stderr": ""
+2026-10-02T12:16:32.8916752Z     },
+2026-10-02T12:16:32.8916929Z     "validation": {
+2026-10-02T12:16:32.8917122Z       "argv": [
+2026-10-02T12:16:32.8917483Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/basic_c_operations-gcc-O0"
+2026-10-02T12:16:32.8917909Z       ],
+2026-10-02T12:16:32.8918201Z       "exit": 0,
+2026-10-02T12:16:32.8918396Z       "stdout": "",
+2026-10-02T12:16:32.8918588Z       "stderr": ""
+2026-10-02T12:16:32.8918771Z     },
+2026-10-02T12:16:32.8918945Z     "correct": true,
+2026-10-02T12:16:32.8919152Z     "compile_valid": true,
+2026-10-02T12:16:32.8919367Z     "compile": {
+2026-10-02T12:16:32.8919551Z       "n": 12,
+2026-10-02T12:16:32.8919731Z       "wall_s": {
+2026-10-02T12:16:32.8919927Z         "median": 0.050420733999999356,
+2026-10-02T12:16:32.8920201Z         "min": 0.04930757199997515,
+2026-10-02T12:16:32.8920444Z         "max": 0.05109668000000056
+2026-10-02T12:16:32.8920675Z       },
+2026-10-02T12:16:32.8920851Z       "cpu_s": {
+2026-10-02T12:16:32.8921042Z         "median": 0.04,
+2026-10-02T12:16:32.8921252Z         "min": 0.03,
+2026-10-02T12:16:32.8921448Z         "max": 0.04
+2026-10-02T12:16:32.8921634Z       },
+2026-10-02T12:16:32.8922018Z       "maxrss_kib": {
+2026-10-02T12:16:32.8922224Z         "median": 29404.0,
+2026-10-02T12:16:32.8922437Z         "min": 29296,
+2026-10-02T12:16:32.8922645Z         "max": 29572
+2026-10-02T12:16:32.8922973Z       }
+2026-10-02T12:16:32.8923141Z     },
+2026-10-02T12:16:32.8923318Z     "runtime_valid": false
+2026-10-02T12:16:32.8923525Z   },
+2026-10-02T12:16:32.8923689Z   {
+2026-10-02T12:16:32.8923877Z     "workload": "basic_c_operations",
+2026-10-02T12:16:32.8924127Z     "tool": "gcc-O2",
+2026-10-02T12:16:32.8924330Z     "accepted": true,
+2026-10-02T12:16:32.8924681Z     "input_sha256": "7f930ebda53ab297b4c98fa564d4d052f169e227f9c1f98bd2aa90a22b861111",
+2026-10-02T12:16:32.8925097Z     "object_bytes": 3424,
+2026-10-02T12:16:32.8925465Z     "output_sha256": "a19a3355d532147e9170d10946c0b1cbfd344a8a63f1ae5a2c53f3c4a2a71221",
+2026-10-02T12:16:32.8925871Z     "sections": {
+2026-10-02T12:16:32.8926062Z       "argv": [
+2026-10-02T12:16:32.8926246Z         "size",
+2026-10-02T12:16:32.8926436Z         "-A",
+2026-10-02T12:16:32.8926690Z         "gcc-comparison-evidence/basic_c_operations-gcc-O2.o"
+2026-10-02T12:16:32.8927001Z       ],
+2026-10-02T12:16:32.8927178Z       "exit": 0,
+2026-10-02T12:16:32.8928287Z       "stdout": "gcc-comparison-evidence/basic_c_operations-gcc-O2.o  :\nsection                 size   addr\n.text                    518      0\n.data                      0      0\n.bss                 1048612      0\n.text.startup            380      0\n.comment                  39      0\n.note.GNU-stack            0      0\n.note.gnu.property        32      0\n.eh_frame                176      0\nTotal                1049757\n\n\n",
+2026-10-02T12:16:32.8929448Z       "stderr": ""
+2026-10-02T12:16:32.8929641Z     },
+2026-10-02T12:16:32.8929818Z     "text_bytes": 898,
+2026-10-02T12:16:32.8930020Z     "link": {
+2026-10-02T12:16:32.8930201Z       "argv": [
+2026-10-02T12:16:32.8930385Z         "gcc",
+2026-10-02T12:16:32.8930570Z         "-no-pie",
+2026-10-02T12:16:32.8930835Z         "gcc-comparison-evidence/basic_c_operations-gcc-O2.o",
+2026-10-02T12:16:32.8931156Z         "-o",
+2026-10-02T12:16:32.8931401Z         "gcc-comparison-evidence/basic_c_operations-gcc-O2"
+2026-10-02T12:16:32.8931701Z       ],
+2026-10-02T12:16:32.8931883Z       "exit": 0,
+2026-10-02T12:16:32.8932071Z       "stdout": "",
+2026-10-02T12:16:32.8932265Z       "stderr": ""
+2026-10-02T12:16:32.8932450Z     },
+2026-10-02T12:16:32.8932632Z     "validation": {
+2026-10-02T12:16:32.8932952Z       "argv": [
+2026-10-02T12:16:32.8933313Z         "/home/runner/work/buster/buster/gcc-comparison-evidence/basic_c_operations-gcc-O2"
+2026-10-02T12:16:32.8933732Z       ],
+2026-10-02T12:16:32.8933909Z       "exit": 0,
+2026-10-02T12:16:32.8934097Z       "stdout": "",
+2026-10-02T12:16:32.8934287Z       "stderr": ""
+2026-10-02T12:16:32.8934469Z     },
+2026-10-02T12:16:32.8934647Z     "correct": true,
+2026-10-02T12:16:32.8934856Z     "compile_valid": true,
+2026-10-02T12:16:32.8935074Z     "compile": {
+2026-10-02T12:16:32.8935257Z       "n": 12,
+2026-10-02T12:16:32.8935447Z       "wall_s": {
+2026-10-02T12:16:32.8935646Z         "median": 0.05652445850000731,
+2026-10-02T12:16:32.8936015Z         "min": 0.05586735200000703,
+2026-10-02T12:16:32.8936256Z         "max": 0.05755154399997764
+2026-10-02T12:16:32.8936480Z       },
+2026-10-02T12:16:32.8936655Z       "cpu_s": {
+2026-10-02T12:16:32.8936850Z         "median": 0.05,
+2026-10-02T12:16:32.8937055Z         "min": 0.04,
+2026-10-02T12:16:32.8937255Z         "max": 0.05
+2026-10-02T12:16:32.8937440Z       },
+2026-10-02T12:16:32.8937617Z       "maxrss_kib": {
+2026-10-02T12:16:32.8937819Z         "median": 30990.0,
+2026-10-02T12:16:32.8938032Z         "min": 30764,
+2026-10-02T12:16:32.8938229Z         "max": 31068
+2026-10-02T12:16:32.8938418Z       }
+2026-10-02T12:16:32.8938591Z     },
+2026-10-02T12:16:32.8938777Z     "runtime_valid": false
+2026-10-02T12:16:32.8938985Z   }
+2026-10-02T12:16:32.8939160Z ]
+2026-10-02T12:16:32.9026028Z ##[group]Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+2026-10-02T12:16:32.9026647Z with:
+2026-10-02T12:16:32.9026867Z   name: gcc-comparison-2274-37005475203-1
+2026-10-02T12:16:32.9027308Z   path: gcc-comparison-evidence
+build/CMakeCache.txt
+build/compile_commands.json
+
+2026-10-02T12:16:32.9027742Z   retention-days: 30
+2026-10-02T12:16:32.9027967Z   if-no-files-found: error
+2026-10-02T12:16:32.9028207Z   compression-level: 6
+2026-10-02T12:16:32.9028426Z   overwrite: false
+2026-10-02T12:16:32.9028639Z   include-hidden-files: false
+2026-10-02T12:16:32.9028871Z env:
+2026-10-02T12:16:32.9029067Z   CMAKE_BUILD_PARALLEL_LEVEL: 2
+2026-10-02T12:16:32.9029303Z   BUSTER_TEST_JOBS: 1
+2026-10-02T12:16:32.9029512Z ##[endgroup]
+2026-10-02T12:16:33.0898204Z (node:4444) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-10-02T12:16:33.0899390Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-10-02T12:16:33.2883466Z Multiple search paths detected. Calculating the least common ancestor of all paths
+2026-10-02T12:16:33.2884643Z The least common ancestor is /home/runner/work/buster/buster. This will be the root directory of the artifact
+2026-10-02T12:16:33.2885209Z With the provided path, there will be 1257 files uploaded
+2026-10-02T12:16:33.2889376Z Artifact name is valid!
+2026-10-02T12:16:33.2889815Z Root directory input is valid!
+2026-10-02T12:16:33.5109198Z Beginning upload of artifact content to blob storage
+2026-10-02T12:16:34.1104543Z (node:4444) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+2026-10-02T12:16:34.1842086Z Uploaded bytes 451176
+2026-10-02T12:16:34.2016493Z Finished uploading artifact content to blob storage!
+2026-10-02T12:16:34.2017903Z SHA256 digest of uploaded artifact zip is 47c04b2c3f12e26c1346c4dbde0face10643dbc7a0256e364495a5686fec94ec
+2026-10-02T12:16:34.2019800Z Finalizing artifact upload
+2026-10-02T12:16:34.3970713Z Artifact gcc-comparison-2274-37005475203-1.zip successfully finalized. Artifact ID 11225068516
+2026-10-02T12:16:34.3972633Z Artifact gcc-comparison-2274-37005475203-1 has been successfully uploaded! Final size is 451176 bytes. Artifact ID is 11225068516
+2026-10-02T12:16:34.3979830Z Artifact download URL: https://github.com/buster14a/buster/actions/runs/37005475203/artifacts/11225068516
+2026-10-02T12:16:34.4378959Z Post job cleanup.
+2026-10-02T12:16:34.5312109Z [command]/usr/bin/git version
+2026-10-02T12:16:34.5364096Z git version 2.55.0
+2026-10-02T12:16:34.5408810Z Temporarily overriding HOME='/home/runner/work/_temp/d41ac2b2-1e23-4ec6-967d-2a065d949eee' before making global git config changes
+2026-10-02T12:16:34.5410142Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-02T12:16:34.5415077Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/buster/buster
+2026-10-02T12:16:34.5469548Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-02T12:16:34.5519608Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-02T12:16:34.5879435Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-02T12:16:34.5927508Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-02T12:16:34.6489507Z Cleaning up orphan processes
+2026-10-02T12:16:34.6801798Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
