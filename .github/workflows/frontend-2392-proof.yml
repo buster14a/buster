@@ -1,0 +1,116 @@
+name: Frontend bug batch failure-first proof
+on:
+  push:
+    branches: [codex/2392-frontend-hosted-proof]
+permissions:
+  contents: read
+concurrency:
+  group: frontend-2392-hosted-proof
+  cancel-in-progress: false
+jobs:
+  proof:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Record exact inputs and bootstrap driver
+        run: |
+          mkdir -p proof
+          git rev-parse HEAD | tee proof/transport-head.txt
+          clang --version | tee proof/clang.txt
+          gcc --version | tee proof/gcc.txt
+          sha256sum src/buster/lib/compiler/frontend/c/c_parse.c src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c > proof/candidate-sources.sha256
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-frontend-build"
+          git fetch --depth=1 origin 7afde682de1beb595c779192c9519b7524afb412
+      - name: Preserve baseline production self-host fixed point
+        run: |
+          set -o pipefail
+          git checkout 7afde682de1beb595c779192c9519b7524afb412 -- src/buster/lib/compiler/frontend/c/c_parse.c src/buster/lib/compiler/frontend/c/c_gen.c
+          "$RUNNER_TEMP/buster-frontend-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-frontend-build" test_self_host --config Release 2>&1 | tee proof/baseline-self-host.log
+      - name: Require new regressions to fail on baseline
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/buster-frontend-build" build --config Release -t ide
+          set +e
+          build/Release/ide test --module=c_frontend_tests --verbose=1 --ci=1 > proof/baseline-frontend.log 2>&1
+          baseline_status=$?
+          set -e
+          cat proof/baseline-frontend.log
+          test "$baseline_status" -eq 1
+          grep -F 'c_test_for_declaration_constraints' proof/baseline-frontend.log
+          grep -F 'c_test_positional_initializer_relocations' proof/baseline-frontend.log
+          grep -F 'Unit tests' proof/baseline-frontend.log
+      - name: Restore source-identical candidate and run frontend regressions
+        run: |
+          set -o pipefail
+          git checkout HEAD -- src/buster/lib/compiler/frontend/c/c_parse.c src/buster/lib/compiler/frontend/c/c_gen.c
+          sha256sum --check proof/candidate-sources.sha256
+          "$RUNNER_TEMP/buster-frontend-build" build --config Release -t ide
+          build/Release/ide test --module=c_frontend_tests --verbose=1 --ci=1 2>&1 | tee proof/candidate-frontend.log
+          "$RUNNER_TEMP/buster-frontend-build" test_self_host --config Release 2>&1 | tee proof/candidate-self-host.log
+      - name: Independent reference contracts
+        run: |
+          set -o pipefail
+          cat > proof/loop-aggregate.c <<'SOURCE'
+          int main(void) {
+              int total = 0;
+              for (struct { int x; int y; } s = {0, 3}; s.x < 2; s.x++) total += s.y;
+              for (union { int x; int y; } u = {0}; u.x < 2; u.x++) total += u.x;
+              return total != 7;
+          }
+          SOURCE
+          cat > proof/loop-restricted.c <<'SOURCE'
+          int main(void) {
+              for (static int x = 0; x < 1; ) return x;
+              return 0;
+          }
+          SOURCE
+          cat > proof/initializer-overrides.c <<'SOURCE'
+          int a, b, c, d;
+          int *p[2] = {[1]=&a,[0]=&b,&c};
+          int *z[2] = {[1]=&a,[0]=&b,0};
+          struct Pair {int *x,*y;};
+          struct Pair s = {.y=&a,.x=&b,&c};
+          int *n[2][2] = {[1]={&a,&b},[0]={&c,&d},0};
+          struct Whole {int h;struct Pair i;};
+          struct Whole w = {.i={&a,&b},.h=0,{0}};
+          int main(void) {
+              return p[0]!=&b || p[1]!=&c || z[0]!=&b || z[1]!=0 ||
+                     s.x!=&b || s.y!=&c || n[0][0]!=&c || n[0][1]!=&d ||
+                     n[1][0]!=0 || n[1][1]!=&b || w.i.x!=0 || w.i.y!=0;
+          }
+          SOURCE
+          for cc in clang gcc; do
+              for std in c17 c23; do
+                  "$cc" -std="$std" -pedantic-errors proof/loop-aggregate.c -o proof/reference-loop
+                  proof/reference-loop
+                  "$cc" -std="$std" proof/initializer-overrides.c -o proof/reference-initializers
+                  proof/reference-initializers
+              done
+              if "$cc" -std=c17 -pedantic-errors -fsyntax-only proof/loop-restricted.c > proof/"$cc"-c17-refusal.txt 2>&1; then
+                  echo 'Expected the independent strict C17 reference to refuse static storage in the for declaration.'
+                  exit 1
+              fi
+              "$cc" -std=c23 -pedantic-errors proof/loop-restricted.c -o proof/reference-c23
+              proof/reference-c23
+          done
+          for mode in none mir-stack fast quality; do
+              for form in -ffrontend-ssa -fno-frontend-ssa; do
+                  for source in loop-aggregate initializer-overrides; do
+                      build/Release/ide cc -std=c23 -g0 -fverify-codegen -fregister-allocator="$mode" "$form" proof/"$source".c -o proof/buster-witness
+                      proof/buster-witness
+                  done
+              done
+          done
+      - name: Retain proof evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: frontend-bug-proof-${{ github.sha }}
+          path: proof/
+          retention-days: 14
+          if-no-files-found: error
