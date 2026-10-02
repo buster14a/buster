@@ -11547,6 +11547,36 @@ BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, C
 
 BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
+    // A complex constructor's arguments are typed by the same explicit
+    // frame stack as casts. It has no declaration entity to answer a leaf.
+    if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETERS)
+    {
+        frame->type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
+        frame->stage = C_TYPE_PARSE_STAGE_PARAMETER_RESULT;
+        if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+            .result = frame->result, .preprocess = frame->preprocess, .arena = frame->arena, .scope = frame->scope,
+            .start = frame->index + 1, .end = frame->close, .kind = C_TYPE_PARSE_FRAME_SIZEOF}))
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        return;
+    }
+    if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETER_RESULT)
+    {
+        CTypeId second = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
+        CTypeKind first_kind = c_parse_expression_value_kind(frame->result, frame->type);
+        CTypeKind second_kind = c_parse_expression_value_kind(frame->result, second);
+        bool valid = c_parse_expression_real_kind(first_kind) && c_parse_expression_real_kind(second_kind) &&
+                     (!c_parse_expression_integer_kind(first_kind) || !c_parse_expression_integer_kind(second_kind));
+        CTypeId arithmetic = valid ? c_parse_expression_arithmetic_type(frame->result, frame->preprocess->target,
+            frame->type, second, 0, 0) : C_TYPE_ID_INVALID;
+        CTypeKind real = c_parse_expression_value_kind(frame->result, arithmetic);
+        CTypeKind complex = real == C_TYPE_FLOAT16 ? C_TYPE_FLOAT16_COMPLEX : real == C_TYPE_FLOAT ? C_TYPE_FLOAT_COMPLEX :
+                            real == C_TYPE_DOUBLE ? C_TYPE_DOUBLE_COMPLEX : real == C_TYPE_LONG_DOUBLE ? C_TYPE_LONG_DOUBLE_COMPLEX : C_TYPE_INVALID;
+        CTypeId type = complex != C_TYPE_INVALID ? c_parse_expression_scalar_type(frame->result, complex) : C_TYPE_ID_INVALID;
+        if (type.value < frame->result->type_count)
+            type = c_parse_direct_expression_postfix(frame->arena, *frame->preprocess, frame->result, type, frame->close + 1, frame->end);
+        c_type_parse_frame_complete(machine, type, frame->end, type.value < frame->result->type_count);
+        return;
+    }
     if (frame->stage == C_TYPE_PARSE_STAGE_FINISH)
     {
         CTypeId source = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
@@ -11633,6 +11663,31 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
             }
             return;
         }
+    }
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN && frame->start + 1 < frame->end &&
+        frame->preprocess->tokens[frame->start].kind == C_TOKEN_IDENTIFIER &&
+        c_symbol_builtin_from_spelling(c_token_spelling(frame->preprocess->spelling_base, frame->preprocess->tokens[frame->start])) ==
+            C_SYMBOL_BUILTIN_COMPLEX &&
+        c_token_is_punctuator(&frame->preprocess->tokens[frame->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_parse_matching_delimiter_indexed(frame->result, *frame->preprocess, frame->start + 1);
+        u32 separator = close < frame->end
+            ? c_parse_constraint_expression_end(frame->result, *frame->preprocess, frame->start + 2, close) : frame->end;
+        bool valid = close < frame->end && frame->start + 2 < separator && separator < close && separator + 1 < close &&
+            c_parse_constraint_expression_end(frame->result, *frame->preprocess, separator + 1, close) == close;
+        if (valid)
+        {
+            frame->close = close;
+            frame->index = separator;
+            frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
+            if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                .result = frame->result, .preprocess = frame->preprocess, .arena = frame->arena, .scope = frame->scope,
+                .start = frame->start + 2, .end = separator, .kind = C_TYPE_PARSE_FRAME_SIZEOF}))
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        }
+        else
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        return;
     }
     CTypeId type = c_parse_expression_leaf_without_cast(frame->arena, *frame->preprocess, frame->result, frame->scope, frame->start, frame->end);
     c_type_parse_frame_complete(machine, type, frame->end, type.value != C_ID_UNDERLYING_INVALID);
@@ -27340,7 +27395,6 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_INVALID_ALIGNMENT, message);
         }
     }
-    c_parse_validate_integer_transform_calls(machine, result, preprocess);
     c_parse_validate_bit_field_widths(machine, arena, result, preprocess);
     c_parse_validate_deferred_assertions(machine, arena, result, preprocess);
     c_parse_validate_alias_targets(arena, result, preprocess);
@@ -28265,10 +28319,15 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     };
     c_parse_validate_unattached_cleanup_attributes(&result, preprocess);
     c_parse_validate_bfloat16_builtin_calls(&machine, arena, &result, preprocess);
-    if (validate_lowering_constraints && !result.diagnostic_count)
+    if (validate_lowering_constraints)
     {
         c_parse_index_scope_children(&result, arena);
-        c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);
+        c_parse_index_declarations(&result, arena);
+        // Signature constraints also apply when another semantic error, such
+        // as a nonconstant enumerator, has already produced a diagnostic.
+        c_parse_validate_integer_transform_calls(&machine, &result, preprocess);
+        if (!result.diagnostic_count)
+            c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);
     }
     result.analysis_complete = true;
     // The literal memo stays published: lowering reads the recorded bytes
