@@ -202,7 +202,8 @@ audit replays the database row for `ide.c` through the Clang frontend only
 when a function defined outside `src/buster/tests/` carries `optnone`. The
 `optnone_audit` CMake target runs it on the same canonical unsanitized
 optimized Clang tree as `clang_analyze`, in the same superbuild step (the
-direct matrix schedules the command beside `clang_analyze` too). A production
+direct matrix schedules the command beside `clang_analyze` too). Both use
+`tree_checks` in `build.c` as their sole tree-check registration. A production
 header that defines functions must be included before the test region, as
 `simd.h` is.
 
@@ -346,7 +347,9 @@ sanitized Release, the unity Release tree that also runs `clang_analyze` and
 covering two configurations, then the rest — because Ninja admits ready edges
 from a shared pool in declaration order and a fresh CI checkout has no
 `.ninja_log` for its critical-path scheduler to learn from. Set
-`BUSTER_MATRIX_DIRECT=1` only to diagnose the retained legacy scheduler,
+`BUSTER_MATRIX_DIRECT=1` to exercise the retained direct scheduler; the
+best-effort Intel macOS source path also selects it. Keep both schedulers
+covered when changing matrix registration (#1598),
 `BUSTER_MATRIX_NO_TREE_ORDER=1` to restore the previous declaration order, and
 `BUSTER_MATRIX_THREADS=<n>` to state a CPU budget instead of the detected one
 (`get_nprocs()` ignores CPU affinity, so `taskset` alone cannot reproduce a
@@ -397,6 +400,29 @@ code generation but cost 0.065% of instructions on a unity self-compile
 (29.5037 G -> 29.5227 G) with no wall-clock difference above run-to-run noise
 and no change to the parser benchmark. CI opts out of both because it profiles
 nothing and pays the compile time.
+
+Whole-tree checks are registered once in the `tree_checks` table in `build.c`.
+The direct scheduler iterates it and invokes the existing check actions;
+`generate` serializes its names as `BUSTER_TREE_CHECKS`, and CMake declares one
+target per name. The superbuild manifest carries the same names as
+`BUSTER_SUPERBUILD_TREE_CHECKS` and its canonical post-test step builds that list.
+Keep a new check's command dispatch/action implemented; an unsupported table
+entry fails the direct preflight instead of disappearing on that scheduler.
+CMake configuration asks the native host build driver to validate membership
+and cardinality; missing, duplicate and unknown names fail, including a
+passthrough override that would drop a check. Cross-target configuration uses
+that host driver, never the target compiler. Preserve check implementation,
+phase observation, canonical-tree eligibility and dependency order.
+
+`./build.sh tree_checks_self_test` exercises the actual direct actions and
+serialized superbuild list, with independent required names and missing,
+unknown, duplicate and repeated-definition controls. The normal combination
+matrix preflight also runs it and validates a real generated manifest's
+canonical check configuration. A self-test is command-plan evidence; actual
+graph and payload execution remain the hosted matrix, including a hosted
+`BUSTER_MATRIX_DIRECT=1` reproduction. `tree_checks_validate NAME...` is the
+thin graph-validation command used by CMake.
+
 Clang static analysis runs only against unsanitized Release. The native driver
 now freezes deterministic module shards and requires complete fail-closed
 aggregation; CI also exercises the authoritative split-source Clang database.
@@ -460,7 +486,7 @@ drives the simulator), `bench_all` (desktop only — runs `ide bench`),
 `test_self_host` (Linux and Windows x86-64, and macOS), `test_mode_matrix`
 (same platforms), `run_ide`,
 `test_ide`, `debug_ide`,
-`buster_shaders`, `apk` (Android), `clang_analyze`. Rendering backends and
+`buster_shaders`, `apk` (Android), `clang_analyze`, `optnone_audit`. Rendering backends and
 shader compilation are retained as opt-in infrastructure and default off. The
 Vulkan SDK (`VULKAN_SDK` env) is required only when Vulkan or Slang shader
 compilation is explicitly enabled.

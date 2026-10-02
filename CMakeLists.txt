@@ -2396,37 +2396,41 @@ else()
     )
 endif()
 
+# build.c registers whole-tree checks once and owns list validation. This is
+# only graph declaration: the native host driver also runs for cross targets.
 if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
     if (EXISTS "${BUSTER_CLANG_ANALYZE_DRIVER}")
-        add_custom_target(clang_analyze
-            COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}"
-                clang_analyze
-                "${CMAKE_BINARY_DIR}/compile_commands.json"
-                --config "$<CONFIG>"
-                --quiet
+        if (NOT DEFINED BUSTER_TREE_CHECKS)
+            set(BUSTER_TREE_CHECKS "")
+        endif()
+        execute_process(
+            COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}" tree_checks_validate ${BUSTER_TREE_CHECKS}
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            USES_TERMINAL
-            COMMENT "Running clang --analyze"
-            VERBATIM
+            RESULT_VARIABLE BUSTER_TREE_CHECK_VALIDATION_RESULT
+            ERROR_VARIABLE BUSTER_TREE_CHECK_VALIDATION_ERROR
+            TIMEOUT 30
         )
-        # See docs/agents/build.md: no production function of the unity ide may
-        # inherit the test region's optnone (#1376).
-        add_custom_target(optnone_audit
-            COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}"
-                optnone_audit
-                "${CMAKE_BINARY_DIR}"
-                --config "$<CONFIG>"
-                --quiet
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            USES_TERMINAL
-            COMMENT "Auditing optnone in the unity ide"
-            VERBATIM
-        )
+        if (NOT "${BUSTER_TREE_CHECK_VALIDATION_RESULT}" STREQUAL "0")
+            message(FATAL_ERROR "Invalid build-driver tree checks: ${BUSTER_TREE_CHECK_VALIDATION_ERROR}")
+        endif()
+        foreach(BUSTER_TREE_CHECK IN LISTS BUSTER_TREE_CHECKS)
+            add_custom_target(${BUSTER_TREE_CHECK}
+                COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}"
+                    ${BUSTER_TREE_CHECK}
+                    "${CMAKE_BINARY_DIR}"
+                    --config "$<CONFIG>"
+                    --quiet
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                USES_TERMINAL
+                COMMENT "Running ${BUSTER_TREE_CHECK}"
+                VERBATIM
+            )
+        endforeach()
     else()
-        message(STATUS "clang_analyze target disabled: ${BUSTER_CLANG_ANALYZE_DRIVER} not found")
+        message(STATUS "tree check targets disabled: ${BUSTER_CLANG_ANALYZE_DRIVER} not found")
     endif()
 elseif (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG)
-    message(STATUS "clang_analyze target disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF")
+    message(STATUS "tree check targets disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF")
 endif()
 
 # Separate application/component graphs keep graphics out of the compiler.

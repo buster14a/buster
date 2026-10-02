@@ -15,6 +15,8 @@
 //                                                comparison, and the
 //                                                provenance-checked artifact
 //                                                fan-out worker
+//   tree_checks, tree_checks_*                 shared tree-check registration,
+//                                                scheduler/graph validation
 //   tools/clang_analyze.c                       analyzer shards and aggregation
 //   cmake_profile_summary_*,                    diagnostics: build summaries
 //   ninja_log_summary_*, time_trace_summary_*,   and the compile/test time
@@ -106,6 +108,8 @@ typedef enum BuildCommand
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_CLANG_ANALYZE,
     BUILD_COMMAND_OPTNONE_AUDIT,
+    BUILD_COMMAND_TREE_CHECKS_VALIDATE,
+    BUILD_COMMAND_TREE_CHECKS_SELF_TEST,
     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
     BUILD_COMMAND_NINJA_LOG_SUMMARY,
     BUILD_COMMAND_TIME_TRACE_SUMMARY,
@@ -1719,6 +1723,83 @@ BUSTER_GLOBAL_LOCAL String8 generate_config(Generate generate)
     return result;
 }
 
+// Whole-tree checks have one registration (#1598). The direct scheduler uses
+// their existing actions; generate and the superbuild serialize these names
+// into the CMake graph. CMake delegates membership validation to this driver.
+typedef struct BuildTreeCheck BuildTreeCheck;
+struct BuildTreeCheck
+{
+    String8 name;
+    BuildCommand command;
+};
+
+BUSTER_GLOBAL_LOCAL BuildTreeCheck const tree_checks[] = {
+    {.name = S8_INITIALIZER("clang_analyze"), .command = BUILD_COMMAND_CLANG_ANALYZE},
+    {.name = S8_INITIALIZER("optnone_audit"), .command = BUILD_COMMAND_OPTNONE_AUDIT},
+};
+
+BUSTER_GLOBAL_LOCAL bool tree_checks_list_valid(SliceString8 names)
+{
+    bool valid = names.length == BUSTER_ARRAY_LENGTH(tree_checks);
+    bool seen[BUSTER_ARRAY_LENGTH(tree_checks)] = {0};
+    for (u64 name_i = 0; valid && name_i < names.length; name_i += 1)
+    {
+        u64 check_i = BUSTER_ARRAY_LENGTH(tree_checks);
+        for (u64 candidate_i = 0; candidate_i < BUSTER_ARRAY_LENGTH(tree_checks); candidate_i += 1)
+        {
+            if (string_equal(names.pointer[name_i], tree_checks[candidate_i].name))
+            {
+                check_i = candidate_i;
+            }
+        }
+        valid = check_i < BUSTER_ARRAY_LENGTH(tree_checks) && !seen[check_i];
+        if (valid)
+        {
+            seen[check_i] = true;
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL SliceString8 tree_checks_names(Arena* arena)
+{
+    String8* names = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(tree_checks));
+    for (u64 check_i = 0; check_i < BUSTER_ARRAY_LENGTH(tree_checks); check_i += 1)
+    {
+        names[check_i] = tree_checks[check_i].name;
+    }
+    SliceString8 result = {.pointer = names, .length = BUSTER_ARRAY_LENGTH(tree_checks)};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 tree_checks_name_list(Arena* arena, String8 separator)
+{
+    String8 parts[2 * BUSTER_ARRAY_LENGTH(tree_checks)];
+    u64 part_count = 0;
+    for (u64 check_i = 0; check_i < BUSTER_ARRAY_LENGTH(tree_checks); check_i += 1)
+    {
+        if (check_i)
+        {
+            parts[part_count++] = separator;
+        }
+        parts[part_count++] = tree_checks[check_i].name;
+    }
+    String8 result = string_join_arena(arena, (SliceString8){.pointer = parts, .length = part_count}, true);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult tree_checks_self_test(Arena* arena);
+
+BUSTER_GLOBAL_LOCAL ProcessResult tree_checks_validate_main(Arena* arena, SliceString8 names)
+{
+    bool valid = tree_checks_list_valid(names) && tree_checks_self_test(arena) == PROCESS_RESULT_SUCCESS;
+    if (!valid)
+    {
+        string_print(S8("error: tree checks must contain every registered name exactly once; missing, duplicate or unknown check\n"));
+    }
+    return valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
 BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate generate)
 {
     remove_path_recursive(arena, generate.build_directory);
@@ -1759,6 +1840,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     String8 check_optional_warnings = cmake_flag(arena, S8("BUSTER_CHECK_OPTIONAL_WARNINGS"), generate.check_optional_warnings);
     String8 developer_targets = cmake_flag(arena, S8("BUSTER_DEVELOPER_TARGETS"), generate.developer_targets);
     String8 build_driver = cmake_string(arena, S8("BUSTER_BUILD_DRIVER"), build_running_driver(arena));
+    String8 tree_check_list = cmake_string(arena, S8("BUSTER_TREE_CHECKS"), tree_checks_name_list(arena, S8(";")));
     // State the production default on every generation so a prior cached ON
     // cannot survive the policy change. User passthrough arguments remain
     // later and therefore retain their explicit override semantics.
@@ -1799,6 +1881,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     os_argument_builder_append(b, check_optional_warnings);
     os_argument_builder_append(b, developer_targets);
     os_argument_builder_append(b, build_driver);
+    os_argument_builder_append(b, tree_check_list);
 
     if (generate_cc_contains(generate, cc_command, S8("zig")))
     {
@@ -6388,6 +6471,21 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_d
                 .use_process_environment = 1,
             },
     };
+}
+
+BUSTER_GLOBAL_LOCAL bool tree_checks_schedule_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
+{
+    bool valid = tree_checks_list_valid(tree_checks_names(arena));
+    for (u64 check_i = 0; valid && check_i < BUSTER_ARRAY_LENGTH(tree_checks); check_i += 1)
+    {
+        switch (tree_checks[check_i].command)
+        {
+            case BUILD_COMMAND_CLANG_ANALYZE: clang_analyze_command_add(arena, build_directory, options); break;
+            case BUILD_COMMAND_OPTNONE_AUDIT: optnone_audit_command_add(arena, build_directory, options); break;
+            default: valid = false; break;
+        }
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL void cmake_profile_summary_add(Arena* arena, BuildStep* step, String8 profile, u64 limit)
@@ -23152,6 +23250,8 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         case BUILD_COMMAND_CLANG_ANALYZE:
         case BUILD_COMMAND_OPTNONE_AUDIT:
+        case BUILD_COMMAND_TREE_CHECKS_VALIDATE:
+        case BUILD_COMMAND_TREE_CHECKS_SELF_TEST:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
@@ -23183,6 +23283,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_CLANG_ANALYZE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TREE_CHECKS_VALIDATE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TREE_CHECKS_SELF_TEST, .owns_arguments = true},
         {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
         {.command = BUILD_COMMAND_BUILD, .owns_arguments = false},
         {.command = BUILD_COMMAND_GENERATE, .owns_arguments = false},
@@ -24743,6 +24845,44 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_low_core_allocation_tests(vo
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool tree_checks_manifest_valid(String8 manifest)
+{
+    String8 prefix = S8("set(BUSTER_SUPERBUILD_TREE_CHECKS ");
+    u64 start = string_first_sequence(manifest, prefix);
+    bool valid = start != BUSTER_STRING_NO_MATCH && (start == 0 || manifest.pointer[start - 1] == '\n');
+    String8 names[BUSTER_ARRAY_LENGTH(tree_checks) + 1];
+    u64 count = 0;
+    if (valid)
+    {
+        u64 cursor = start + prefix.length;
+        while (cursor < manifest.length && manifest.pointer[cursor] != ')' && valid)
+        {
+            u64 token_start = cursor;
+            while (cursor < manifest.length && manifest.pointer[cursor] != ' ' && manifest.pointer[cursor] != ')')
+            {
+                cursor += 1;
+            }
+            valid = cursor > token_start && count < BUSTER_ARRAY_LENGTH(names);
+            if (valid)
+            {
+                names[count++] = (String8){.pointer = manifest.pointer + token_start, .length = cursor - token_start};
+                if (cursor < manifest.length && manifest.pointer[cursor] == ' ')
+                {
+                    cursor += 1;
+                }
+            }
+        }
+        valid = valid && cursor + 1 < manifest.length && manifest.pointer[cursor] == ')' && manifest.pointer[cursor + 1] == '\n' &&
+                tree_checks_list_valid((SliceString8){.pointer = names, .length = count});
+        if (valid)
+        {
+            String8 tail = {.pointer = manifest.pointer + cursor + 2, .length = manifest.length - cursor - 2};
+            valid = string_first_sequence(tail, prefix) == BUSTER_STRING_NO_MATCH;
+        }
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* arena)
 {
     ProcessResult low_core_result = matrix_superbuild_low_core_allocation_tests();
@@ -24852,6 +24992,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
             .combination_count = 1,
             .parallel_jobs = 1,
             .unity_only = 1,
+            .unity_analysis_scheduled = 1,
         },
         {
             .build_directory = S8("build/gcc-debug"),
@@ -24877,7 +25018,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
                                                               false, false);
     ByteSlice manifest_bytes = file_read(arena, manifest_path, (FileReadOptions){.map_required = 0});
     String8 manifest = BYTE_SLICE_TO_STRING(8, manifest_bytes);
-    bool manifest_fields_valid = manifest_written && manifest.pointer &&
+    bool manifest_fields_valid = manifest_written && manifest.pointer && tree_checks_manifest_valid(manifest) &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_ANALYZE_CONFIG Release)")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_ANALYZE_CONFIG )")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_BUILD_DRIVER [==[/absolute/build-driver]==])")) !=
                                      BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_PROVENANCE_RECORD")) != BUSTER_STRING_NO_MATCH &&
@@ -24972,6 +25115,9 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
                       string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_USES_INNER_NINJA {u32})\n"), self_host.uses_inner_ninja));
     string8_list_push(arena, &lines,
                       string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_PRODUCER_CLEAN_REQUIRED {u32})\n"), self_host.producer_clean_required));
+
+    string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_TREE_CHECKS {S8})\n"), tree_checks_name_list(arena, S8(" "))));
 
     u32 previous_test_tree = tree_count;
     String8 previous_test_task = {0};
@@ -25085,6 +25231,67 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(manifest));
 }
 
+BUSTER_GLOBAL_LOCAL ProcessResult tree_checks_self_test(Arena* arena)
+{
+    // Independent golden names exercise required coverage, not just the table's
+    // own serialization. Reordering is allowed; omissions and extras are not.
+    String8 expected[] = {S8("clang_analyze"), S8("optnone_audit")};
+    String8 reordered[] = {S8("optnone_audit"), S8("clang_analyze")};
+    String8 unknown[] = {S8("clang_analyze"), S8("unknown_tree_check")};
+    String8 duplicate[] = {S8("clang_analyze"), S8("clang_analyze")};
+    SliceString8 missing = {.pointer = expected, .length = 1};
+    bool valid = tree_checks_list_valid((SliceString8)BUSTER_ARRAY_TO_SLICE(expected)) &&
+                 tree_checks_list_valid((SliceString8)BUSTER_ARRAY_TO_SLICE(reordered)) &&
+                 !tree_checks_list_valid(missing) && !tree_checks_list_valid((SliceString8){0}) &&
+                 !tree_checks_list_valid((SliceString8)BUSTER_ARRAY_TO_SLICE(unknown)) &&
+                 !tree_checks_list_valid((SliceString8)BUSTER_ARRAY_TO_SLICE(duplicate));
+
+    String8 actual_manifest = string_format(arena, S8("set(BUSTER_SUPERBUILD_TREE_CHECKS {S8})\n"), tree_checks_name_list(arena, S8(" ")));
+    valid = valid && tree_checks_manifest_valid(actual_manifest) &&
+            tree_checks_manifest_valid(S8("set(BUSTER_SUPERBUILD_TREE_CHECKS optnone_audit clang_analyze)\n")) &&
+            !tree_checks_manifest_valid(S8("set(BUSTER_SUPERBUILD_TREE_CHECKS clang_analyze)\n")) &&
+            !tree_checks_manifest_valid(S8("set(BUSTER_SUPERBUILD_TREE_CHECKS clang_analyze unknown_tree_check)\n")) &&
+            !tree_checks_manifest_valid(S8("set(BUSTER_SUPERBUILD_TREE_CHECKS clang_analyze clang_analyze)\n")) &&
+            !tree_checks_manifest_valid(S8("set(BUSTER_SUPERBUILD_TREE_CHECKS )\n")) &&
+            !tree_checks_manifest_valid(S8("set(BUSTER_SUPERBUILD_TREE_CHECKS clang_analyze optnone_audit)\n"
+                                          "set(BUSTER_SUPERBUILD_TREE_CHECKS clang_analyze)\n"));
+
+    // Construct the real direct actions without leaving test commands in the
+    // live graph. Their arguments and step boundaries remain unchanged.
+    BuildGraph saved_graph = program.build_graph;
+    program.build_graph = (BuildGraph){0};
+    String8 directory = S8("build/tree-check fixture");
+    CmakeBuildOptions options = {.config = S8("Release"), .optimize = 1, .optimize_set = 1, .quiet = 1};
+    bool scheduled = tree_checks_schedule_add(arena, directory, options);
+    BuildGraph direct_graph = program.build_graph;
+    program.build_graph = saved_graph;
+    u64 check_count = 0;
+    String8 actual_names[BUSTER_ARRAY_LENGTH(tree_checks) + 1];
+    for (BuildStep* step = direct_graph.first_step; step && valid; step = step->next)
+    {
+        ProcessRun* run = step->first_process;
+        valid = run && !run->next && !run->callback && check_count < BUSTER_ARRAY_LENGTH(actual_names) && run->arguments.length == 6 &&
+                string_equal(run->arguments.pointer[2], directory) && string_equal(run->arguments.pointer[3], S8("--config")) &&
+                string_equal(run->arguments.pointer[4], S8("Release")) && string_equal(run->arguments.pointer[5], S8("--quiet")) &&
+                run->spawn_options.use_process_environment;
+        if (valid)
+        {
+            actual_names[check_count++] = run->arguments.pointer[1];
+        }
+    }
+    SliceString8 actual = {.pointer = actual_names, .length = check_count};
+    valid = valid && scheduled && tree_checks_list_valid(actual);
+    if (valid)
+    {
+        // Mutate the actual scheduler output, independently of registration.
+        valid = check_count == 2 && !tree_checks_list_valid((SliceString8){.pointer = actual_names, .length = check_count - 1});
+        actual_names[1] = S8("unknown_tree_check");
+        valid = valid && !tree_checks_list_valid(actual);
+    }
+    string_print(S8("Tree check registration self-test: {S8}\n"), valid ? S8("PASS") : S8("FAIL"));
+    return valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
 BUSTER_GLOBAL_LOCAL void matrix_superbuild_generate_add(Arena* arena, BuildStep* step, String8 build_directory, String8 manifest_path)
 {
     String8 manifest_argument = cmake_string(arena, S8("BUSTER_SUPERBUILD_MATRIX_FILE"), manifest_path);
@@ -25177,7 +25384,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         {
             return PROCESS_RESULT_FAILED;
         }
-        if (!clang_analyze_self_test(arena) || !optnone_audit_self_test(arena))
+        if (!clang_analyze_self_test(arena) || !optnone_audit_self_test(arena) || tree_checks_self_test(arena) != PROCESS_RESULT_SUCCESS)
         {
             return PROCESS_RESULT_FAILED;
         }
@@ -25644,8 +25851,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
 
         if (coverage_obligations.unity_analysis_scheduled && combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize)
         {
-            clang_analyze_command_add(arena, combination.build_directory, combination.options);
-            optnone_audit_command_add(arena, combination.build_directory, combination.options);
+            if (!tree_checks_schedule_add(arena, combination.build_directory, combination.options))
+            {
+                string_print(S8("error: unimplemented registered tree check\n"));
+                return PROCESS_RESULT_FAILED;
+            }
         }
     }
     if (coverage_obligations.self_host_scheduled)
@@ -40804,6 +41014,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
         [BUILD_COMMAND_OPTNONE_AUDIT] = S8_INITIALIZER("optnone_audit"),
+        [BUILD_COMMAND_TREE_CHECKS_VALIDATE] = S8_INITIALIZER("tree_checks_validate"),
+        [BUILD_COMMAND_TREE_CHECKS_SELF_TEST] = S8_INITIALIZER("tree_checks_self_test"),
         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
         [BUILD_COMMAND_TIME_TRACE_SUMMARY] = S8_INITIALIZER("time_trace_summary"),
@@ -40937,6 +41149,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
             case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
             case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TREE_CHECKS_VALIDATE: result = tree_checks_validate_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TREE_CHECKS_SELF_TEST: result = owned_arguments.length ? PROCESS_RESULT_FAILED : tree_checks_self_test(arena); break;
             case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
@@ -42151,6 +42365,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             test_cpython_action_add(arena, test_cpython_options);
         }
         break;
+        case BUILD_COMMAND_TREE_CHECKS_VALIDATE:
+        case BUILD_COMMAND_TREE_CHECKS_SELF_TEST:
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
