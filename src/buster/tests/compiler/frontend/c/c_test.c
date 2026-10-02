@@ -19835,7 +19835,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
         "int assignment_subscript(void) { return get_words()[1] = 11; }\n"
         "int compound_subscript(void) { return get_words()[1] += 2; }\n"
         "int address_compound(void) { int a = 1; int x = (*&a += 3); return x * 10 + a; }\n"
-        "int address_simple(void) { int a = 1; return (*&a = 7) * 10 + a; }\n"
+        "int address_simple(void) { int a = 1; int x = (*&a = 7); return x * 10 + a; }\n"
         "int address_argument(void) { int a = 1; int x = identity(*&a += 3); return x * 10 + a; }\n"
         "int address_call(void) { return *&get()->m += 2; }\n"
         "#define CHECK(name, expected, stored) do { gm.m = 3; calls = 0; int actual = name(); failed |= actual != (expected) || gm.m != (stored) || calls != 1; } while (0)\n"
