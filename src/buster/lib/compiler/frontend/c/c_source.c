@@ -1,7 +1,7 @@
 // Source loading, lexing, and preprocessing — the first stage of the
 // frontend, entered through c_preprocess near the bottom of the file. It
 // turns a root file into the flat CToken stream every later stage walks:
-// translation (line splices and carriage returns folded out), lexing,
+// translation (dialect trigraphs, line splices and carriage returns), lexing,
 // directive handling, include resolution (real files and the builtin
 // resource headers), macro expansion, and the source metrics behind the
 // SOURCE table. c_prewarm at the bottom fills the lazily built tables on
@@ -21,11 +21,13 @@
 //   c_preprocess_site_location                 recovery (CSourceSite in c.h)
 //   c_identifier_start ..                      character classes and the
 //   c_literal_plain_run_end                    prewarmed run tables
-//   c_translate_source                         phase-1/2 translation with
+//   c_source_allocation_plan, c_translate_source checked source bounds and
+//                                              phase-1/2 translation with
 //                                              SWAR/AVX-512/scalar variants
 //                                              kept in differential agreement
 //   c_source_metrics_add,                      the SOURCE table counters and
 //   c_source_metrics_file_row                  the per-file attribution rows
+//   c_ucn_decode, c_ucn_identifier_allowed      dialect-owned identifier escapes
 //   c_lex_validate_word_utf8                   bounded word encoding checks
 //   c_lex_scan_one, c_lex_scalar               the scalar lexer
 //   c_lex_compact_tables_build,                the SIMD lexer (Validark
@@ -52,7 +54,8 @@
 //   c_preprocess_expand                        arguments, stringify, paste,
 //                                              direct plain production
 //                                              (c_macro_produce_plain_tasks),
-//                                              rescan and context floors
+//                                              rescan, generation ENABLE
+//                                              ownership and context floors
 //   CPpClassMasks, c_pp_class_masks_build,     the per-64-token class
 //   c_pp_line_end_masked,                      projection of a lexed run's
 //   c_pp_parenthesis_depth                     shape sidecar, and what the
@@ -65,7 +68,8 @@
 //                                              evaluator
 //   c_conditional_* ,                          #if evaluation including
 //   c_integer_expression_evaluate              __has_* feature tests
-//   c_preprocess_pragma_*                      pragmas: once, pack, push/pop
+//   c_preprocess_pragma_*,                     pragmas: once, pack, push/pop
+//   c_preprocess_expansion_pragma              macro effects at the rescan cursor
 //   c_include_read .. c_include_name           include resolution and the
 //                                              builtin resource headers
 //   CIncludeGuardState, CIncludeFileTable      shared #import, #pragma once,
@@ -751,6 +755,422 @@ BUSTER_C_INTERNAL bool c_identifier_continue(char8 character)
     return c_identifier_start(character) || c_ascii_digit(character);
 }
 
+// Identifier UCNs have a dialect-owned Annex D policy. Raw UTF-8 remains
+// encoding-validated without imposing these source-escape range restrictions.
+// C99 uses N1256 Annex D; C11/C17 use N1570 Annex D. These are authored
+// inclusive ranges, not a modern Unicode category or normalization database.
+typedef struct CUcnRange CUcnRange;
+struct CUcnRange
+{
+    u32 first;
+    u32 last;
+};
+
+BUSTER_C_INTERNAL CUcnRange const c_ucn_c99_ranges[] = {
+    {0x00AA, 0x00AA},
+    {0x00B5, 0x00B5},
+    {0x00B7, 0x00B7},
+    {0x00BA, 0x00BA},
+    {0x00C0, 0x00D6},
+    {0x00D8, 0x00F6},
+    {0x00F8, 0x01F5},
+    {0x01FA, 0x0217},
+    {0x0250, 0x02A8},
+    {0x02B0, 0x02B8},
+    {0x02BB, 0x02BB},
+    {0x02BD, 0x02C1},
+    {0x02D0, 0x02D1},
+    {0x02E0, 0x02E4},
+    {0x037A, 0x037A},
+    {0x0386, 0x0386},
+    {0x0388, 0x038A},
+    {0x038C, 0x038C},
+    {0x038E, 0x03A1},
+    {0x03A3, 0x03CE},
+    {0x03D0, 0x03D6},
+    {0x03DA, 0x03DA},
+    {0x03DC, 0x03DC},
+    {0x03DE, 0x03DE},
+    {0x03E0, 0x03E0},
+    {0x03E2, 0x03F3},
+    {0x0401, 0x040C},
+    {0x040E, 0x044F},
+    {0x0451, 0x045C},
+    {0x045E, 0x0481},
+    {0x0490, 0x04C4},
+    {0x04C7, 0x04C8},
+    {0x04CB, 0x04CC},
+    {0x04D0, 0x04EB},
+    {0x04EE, 0x04F5},
+    {0x04F8, 0x04F9},
+    {0x0531, 0x0556},
+    {0x0559, 0x0559},
+    {0x0561, 0x0587},
+    {0x05B0, 0x05B9},
+    {0x05BB, 0x05BD},
+    {0x05BF, 0x05BF},
+    {0x05C1, 0x05C2},
+    {0x05D0, 0x05EA},
+    {0x05F0, 0x05F2},
+    {0x0621, 0x063A},
+    {0x0640, 0x0652},
+    {0x0660, 0x0669},
+    {0x0670, 0x06B7},
+    {0x06BA, 0x06BE},
+    {0x06C0, 0x06CE},
+    {0x06D0, 0x06DC},
+    {0x06E5, 0x06E8},
+    {0x06EA, 0x06ED},
+    {0x06F0, 0x06F9},
+    {0x0901, 0x0903},
+    {0x0905, 0x0939},
+    {0x093D, 0x094D},
+    {0x0950, 0x0952},
+    {0x0958, 0x0963},
+    {0x0966, 0x096F},
+    {0x0981, 0x0983},
+    {0x0985, 0x098C},
+    {0x098F, 0x0990},
+    {0x0993, 0x09A8},
+    {0x09AA, 0x09B0},
+    {0x09B2, 0x09B2},
+    {0x09B6, 0x09B9},
+    {0x09BE, 0x09C4},
+    {0x09C7, 0x09C8},
+    {0x09CB, 0x09CD},
+    {0x09DC, 0x09DD},
+    {0x09DF, 0x09E3},
+    {0x09E6, 0x09F1},
+    {0x0A02, 0x0A02},
+    {0x0A05, 0x0A0A},
+    {0x0A0F, 0x0A10},
+    {0x0A13, 0x0A28},
+    {0x0A2A, 0x0A30},
+    {0x0A32, 0x0A33},
+    {0x0A35, 0x0A36},
+    {0x0A38, 0x0A39},
+    {0x0A3E, 0x0A42},
+    {0x0A47, 0x0A48},
+    {0x0A4B, 0x0A4D},
+    {0x0A59, 0x0A5C},
+    {0x0A5E, 0x0A5E},
+    {0x0A66, 0x0A6F},
+    {0x0A74, 0x0A74},
+    {0x0A81, 0x0A83},
+    {0x0A85, 0x0A8B},
+    {0x0A8D, 0x0A8D},
+    {0x0A8F, 0x0A91},
+    {0x0A93, 0x0AA8},
+    {0x0AAA, 0x0AB0},
+    {0x0AB2, 0x0AB3},
+    {0x0AB5, 0x0AB9},
+    {0x0ABD, 0x0AC5},
+    {0x0AC7, 0x0AC9},
+    {0x0ACB, 0x0ACD},
+    {0x0AD0, 0x0AD0},
+    {0x0AE0, 0x0AE0},
+    {0x0AE6, 0x0AEF},
+    {0x0B01, 0x0B03},
+    {0x0B05, 0x0B0C},
+    {0x0B0F, 0x0B10},
+    {0x0B13, 0x0B28},
+    {0x0B2A, 0x0B30},
+    {0x0B32, 0x0B33},
+    {0x0B36, 0x0B39},
+    {0x0B3D, 0x0B43},
+    {0x0B47, 0x0B48},
+    {0x0B4B, 0x0B4D},
+    {0x0B5C, 0x0B5D},
+    {0x0B5F, 0x0B61},
+    {0x0B66, 0x0B6F},
+    {0x0B82, 0x0B83},
+    {0x0B85, 0x0B8A},
+    {0x0B8E, 0x0B90},
+    {0x0B92, 0x0B95},
+    {0x0B99, 0x0B9A},
+    {0x0B9C, 0x0B9C},
+    {0x0B9E, 0x0B9F},
+    {0x0BA3, 0x0BA4},
+    {0x0BA8, 0x0BAA},
+    {0x0BAE, 0x0BB5},
+    {0x0BB7, 0x0BB9},
+    {0x0BBE, 0x0BC2},
+    {0x0BC6, 0x0BC8},
+    {0x0BCA, 0x0BCD},
+    {0x0BE7, 0x0BEF},
+    {0x0C01, 0x0C03},
+    {0x0C05, 0x0C0C},
+    {0x0C0E, 0x0C10},
+    {0x0C12, 0x0C28},
+    {0x0C2A, 0x0C33},
+    {0x0C35, 0x0C39},
+    {0x0C3E, 0x0C44},
+    {0x0C46, 0x0C48},
+    {0x0C4A, 0x0C4D},
+    {0x0C60, 0x0C61},
+    {0x0C66, 0x0C6F},
+    {0x0C82, 0x0C83},
+    {0x0C85, 0x0C8C},
+    {0x0C8E, 0x0C90},
+    {0x0C92, 0x0CA8},
+    {0x0CAA, 0x0CB3},
+    {0x0CB5, 0x0CB9},
+    {0x0CBE, 0x0CC4},
+    {0x0CC6, 0x0CC8},
+    {0x0CCA, 0x0CCD},
+    {0x0CDE, 0x0CDE},
+    {0x0CE0, 0x0CE1},
+    {0x0CE6, 0x0CEF},
+    {0x0D02, 0x0D03},
+    {0x0D05, 0x0D0C},
+    {0x0D0E, 0x0D10},
+    {0x0D12, 0x0D28},
+    {0x0D2A, 0x0D39},
+    {0x0D3E, 0x0D43},
+    {0x0D46, 0x0D48},
+    {0x0D4A, 0x0D4D},
+    {0x0D60, 0x0D61},
+    {0x0D66, 0x0D6F},
+    {0x0E01, 0x0E3A},
+    {0x0E40, 0x0E5B},
+    {0x0E81, 0x0E82},
+    {0x0E84, 0x0E84},
+    {0x0E87, 0x0E88},
+    {0x0E8A, 0x0E8A},
+    {0x0E8D, 0x0E8D},
+    {0x0E94, 0x0E97},
+    {0x0E99, 0x0E9F},
+    {0x0EA1, 0x0EA3},
+    {0x0EA5, 0x0EA5},
+    {0x0EA7, 0x0EA7},
+    {0x0EAA, 0x0EAB},
+    {0x0EAD, 0x0EAE},
+    {0x0EB0, 0x0EB9},
+    {0x0EBB, 0x0EBD},
+    {0x0EC0, 0x0EC4},
+    {0x0EC6, 0x0EC6},
+    {0x0EC8, 0x0ECD},
+    {0x0ED0, 0x0ED9},
+    {0x0EDC, 0x0EDD},
+    {0x0F00, 0x0F00},
+    {0x0F18, 0x0F19},
+    {0x0F20, 0x0F33},
+    {0x0F35, 0x0F35},
+    {0x0F37, 0x0F37},
+    {0x0F39, 0x0F39},
+    {0x0F3E, 0x0F47},
+    {0x0F49, 0x0F69},
+    {0x0F71, 0x0F84},
+    {0x0F86, 0x0F8B},
+    {0x0F90, 0x0F95},
+    {0x0F97, 0x0F97},
+    {0x0F99, 0x0FAD},
+    {0x0FB1, 0x0FB7},
+    {0x0FB9, 0x0FB9},
+    {0x10A0, 0x10C5},
+    {0x10D0, 0x10F6},
+    {0x1E00, 0x1E9B},
+    {0x1EA0, 0x1EF9},
+    {0x1F00, 0x1F15},
+    {0x1F18, 0x1F1D},
+    {0x1F20, 0x1F45},
+    {0x1F48, 0x1F4D},
+    {0x1F50, 0x1F57},
+    {0x1F59, 0x1F59},
+    {0x1F5B, 0x1F5B},
+    {0x1F5D, 0x1F5D},
+    {0x1F5F, 0x1F7D},
+    {0x1F80, 0x1FB4},
+    {0x1FB6, 0x1FBC},
+    {0x1FBE, 0x1FBE},
+    {0x1FC2, 0x1FC4},
+    {0x1FC6, 0x1FCC},
+    {0x1FD0, 0x1FD3},
+    {0x1FD6, 0x1FDB},
+    {0x1FE0, 0x1FEC},
+    {0x1FF2, 0x1FF4},
+    {0x1FF6, 0x1FFC},
+    {0x203F, 0x2040},
+    {0x207F, 0x207F},
+    {0x2102, 0x2102},
+    {0x2107, 0x2107},
+    {0x210A, 0x2113},
+    {0x2115, 0x2115},
+    {0x2118, 0x211D},
+    {0x2124, 0x2124},
+    {0x2126, 0x2126},
+    {0x2128, 0x2128},
+    {0x212A, 0x2131},
+    {0x2133, 0x2138},
+    {0x2160, 0x2182},
+    {0x3005, 0x3007},
+    {0x3021, 0x3029},
+    {0x3041, 0x3093},
+    {0x309B, 0x309C},
+    {0x30A1, 0x30F6},
+    {0x30FB, 0x30FC},
+    {0x3105, 0x312C},
+    {0x4E00, 0x9FA5},
+    {0xAC00, 0xD7A3},
+};
+
+BUSTER_C_INTERNAL CUcnRange const c_ucn_c99_digits[] = {
+    {0x0660, 0x0669},
+    {0x06F0, 0x06F9},
+    {0x0966, 0x096F},
+    {0x09E6, 0x09EF},
+    {0x0A66, 0x0A6F},
+    {0x0AE6, 0x0AEF},
+    {0x0B66, 0x0B6F},
+    {0x0BE7, 0x0BEF},
+    {0x0C66, 0x0C6F},
+    {0x0CE6, 0x0CEF},
+    {0x0D66, 0x0D6F},
+    {0x0E50, 0x0E59},
+    {0x0ED0, 0x0ED9},
+    {0x0F20, 0x0F33},
+};
+
+BUSTER_C_INTERNAL CUcnRange const c_ucn_c11_ranges[] = {
+    {0x00A8, 0x00A8},
+    {0x00AA, 0x00AA},
+    {0x00AD, 0x00AD},
+    {0x00AF, 0x00AF},
+    {0x00B2, 0x00B5},
+    {0x00B7, 0x00BA},
+    {0x00BC, 0x00BE},
+    {0x00C0, 0x00D6},
+    {0x00D8, 0x00F6},
+    {0x00F8, 0x167F},
+    {0x1681, 0x180D},
+    {0x180F, 0x1FFF},
+    {0x200B, 0x200D},
+    {0x202A, 0x202E},
+    {0x203F, 0x2040},
+    {0x2054, 0x2054},
+    {0x2060, 0x218F},
+    {0x2460, 0x24FF},
+    {0x2776, 0x2793},
+    {0x2C00, 0x2DFF},
+    {0x2E80, 0x2FFF},
+    {0x3004, 0x3007},
+    {0x3021, 0x302F},
+    {0x3031, 0xD7FF},
+    {0xF900, 0xFD3D},
+    {0xFD40, 0xFDCF},
+    {0xFDF0, 0xFE44},
+    {0xFE47, 0xFFFD},
+};
+
+BUSTER_C_INTERNAL bool c_ucn_in_ranges(u32 value, CUcnRange const* ranges, u64 count)
+{
+    u64 low = 0;
+    u64 high = count;
+    while (low < high)
+    {
+        u64 middle = low + (high - low) / 2;
+        if (ranges[middle].last < value)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < count && ranges[low].first <= value;
+}
+
+BUSTER_C_INTERNAL bool c_ucn_enabled(CPreprocessDialect dialect)
+{
+    return dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_GNU99 ||
+           dialect == C_PREPROCESS_DIALECT_C11 || dialect == C_PREPROCESS_DIALECT_GNU11 ||
+           dialect == C_PREPROCESS_DIALECT_C17 || dialect == C_PREPROCESS_DIALECT_GNU17;
+}
+
+BUSTER_C_INTERNAL bool c_ucn_identifier_allowed(u32 value, CPreprocessDialect dialect, bool initial)
+{
+    bool allowed;
+    if (dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_GNU99)
+    {
+        allowed = c_ucn_in_ranges(value, c_ucn_c99_ranges, BUSTER_ARRAY_LENGTH(c_ucn_c99_ranges)) &&
+                  (!initial || !c_ucn_in_ranges(value, c_ucn_c99_digits, BUSTER_ARRAY_LENGTH(c_ucn_c99_digits)));
+    }
+    else
+    {
+        allowed = c_ucn_in_ranges(value, c_ucn_c11_ranges, BUSTER_ARRAY_LENGTH(c_ucn_c11_ranges)) ||
+                  (value >= 0x10000 && value <= 0xEFFFD && (value & 0xFFFF) <= 0xFFFD);
+        if (initial)
+        {
+            allowed = allowed && !(value >= 0x0300 && value <= 0x036F) && !(value >= 0x1DC0 && value <= 0x1DFF) &&
+                      !(value >= 0x20D0 && value <= 0x20FF) && !(value >= 0xFE20 && value <= 0xFE2F);
+        }
+    }
+    return allowed;
+}
+
+typedef enum CUcnStatus
+{
+    C_UCN_VALID,
+    C_UCN_MALFORMED,
+    C_UCN_SURROGATE,
+    C_UCN_OUT_OF_RANGE,
+    C_UCN_FORBIDDEN,
+} CUcnStatus;
+
+typedef struct CUcn CUcn;
+struct CUcn
+{
+    u32 value;
+    u32 length;
+    CUcnStatus status;
+};
+
+BUSTER_C_INTERNAL bool c_ucn_prefix(String8 source, u64 offset)
+{
+    return offset < source.length && source.pointer[offset] == '\\' && source.length - offset >= 2 &&
+           (source.pointer[offset + 1] == 'u' || source.pointer[offset + 1] == 'U');
+}
+
+// The caller has established the prefix. Consume only the available hex
+// prefix on malformed input, so the following newline or token retains its
+// own source position and every diagnostic path makes progress.
+BUSTER_C_INTERNAL CUcn c_ucn_decode(String8 source, u64 offset)
+{
+    CUcn result = {.length = 2};
+    u32 digits = source.pointer[offset + 1] == 'u' ? 4 : 8;
+    while (result.length < digits + 2 && result.length < source.length - offset)
+    {
+        u32 character = source.pointer[offset + result.length];
+        u32 digit = character >= '0' && character <= '9' ? character - '0' :
+                    character >= 'a' && character <= 'f' ? character - 'a' + 10 :
+                    character >= 'A' && character <= 'F' ? character - 'A' + 10 : 16;
+        if (digit == 16)
+        {
+            break;
+        }
+        result.value = (result.value << 4) | digit;
+        result.length += 1;
+    }
+    if (result.length != digits + 2)
+    {
+        result.status = C_UCN_MALFORMED;
+    }
+    else if (result.value > 0x10FFFF)
+    {
+        result.status = C_UCN_OUT_OF_RANGE;
+    }
+    else if (result.value >= 0xD800 && result.value <= 0xDFFF)
+    {
+        result.status = C_UCN_SURROGATE;
+    }
+    else if (result.value < 0xA0 && result.value != '$' && result.value != '@' && result.value != 0x60)
+    {
+        result.status = C_UCN_FORBIDDEN;
+    }
+    return result;
+}
+
 // One byte per character value: nonzero for an ASCII identifier continuation.
 // High bytes stop the fast run for bounded UTF-8 validation in the lexer;
 // the identifier run scan ANDs eight entries per step
@@ -855,7 +1275,7 @@ BUSTER_C_INTERNAL bool c_horizontal_whitespace(char8 character)
     }
 }
 
-BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 source, u64 offset)
+BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 source, u64 offset, bool trigraphs)
 {
     while (offset + 8 <= source.length)
     {
@@ -866,7 +1286,13 @@ BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 
         u64 backslash = word ^ UINT64_C(0x5C5C5C5C5C5C5C5C);
         u64 low = UINT64_C(0x0101010101010101);
         u64 high = UINT64_C(0x8080808080808080);
-        u64 found = (((carriage - low) & ~carriage) | ((newline - low) & ~newline) | ((backslash - low) & ~backslash)) & high;
+        u64 found = ((carriage - low) & ~carriage) | ((newline - low) & ~newline) | ((backslash - low) & ~backslash);
+        if (trigraphs)
+        {
+            u64 question = word ^ UINT64_C(0x3F3F3F3F3F3F3F3F);
+            found |= (question - low) & ~question;
+        }
+        found &= high;
         if (found)
         {
             break;
@@ -876,7 +1302,7 @@ BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 
     while (offset < source.length)
     {
         char8 probe = source.pointer[offset];
-        if (probe == '\r' || probe == '\n' || probe == '\\')
+        if (probe == '\r' || probe == '\n' || probe == '\\' || (trigraphs && probe == '?'))
         {
             break;
         }
@@ -886,7 +1312,7 @@ BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 
 }
 
 #if BUSTER_C_TRANSLATE_AVX512
-BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offset)
+BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offset, bool trigraphs)
 {
     Simd512 carriage_return = simd512_splat('\r');
     Simd512 line_feed = simd512_splat('\n');
@@ -897,6 +1323,10 @@ BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offse
         Simd512 chunk = simd512_load(source.pointer + offset);
         Mask64 stop_mask = simd512_equal_byte(chunk, carriage_return) | simd512_equal_byte(chunk, line_feed) |
                            simd512_equal_byte(chunk, backslash);
+        if (trigraphs)
+        {
+            stop_mask |= simd512_equal_byte(chunk, simd512_splat('?'));
+        }
         if (stop_mask)
         {
             offset += mask64_first_set(stop_mask);
@@ -909,7 +1339,7 @@ BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offse
     }
     if (!stopped)
     {
-        offset = c_translate_plain_run_end_swar(source, offset);
+        offset = c_translate_plain_run_end_swar(source, offset, trigraphs);
     }
     return offset;
 }
@@ -924,12 +1354,12 @@ bool c_test_space_null_empty_tokens(Arena* arena)
     return !token.length && !copied.length && token.offset == copied.offset;
 }
 
-BUSTER_C_INTERNAL u64 c_translate_plain_run_end_scalar(String8 source, u64 offset)
+BUSTER_C_INTERNAL u64 c_translate_plain_run_end_scalar(String8 source, u64 offset, bool trigraphs)
 {
     while (offset < source.length)
     {
         char8 probe = source.pointer[offset];
-        if (probe == '\r' || probe == '\n' || probe == '\\')
+        if (probe == '\r' || probe == '\n' || probe == '\\' || (trigraphs && probe == '?'))
         {
             break;
         }
@@ -940,46 +1370,94 @@ BUSTER_C_INTERNAL u64 c_translate_plain_run_end_scalar(String8 source, u64 offse
 
 bool c_test_translate_plain_run_paths_agree(String8 source)
 {
-    if (source.length && !source.pointer)
+    bool result = !source.length || source.pointer;
+    for (u32 mode = 0; result && mode < 2; mode += 1)
     {
-        return false;
-    }
-    u64 offset = 0;
-    for (;;)
-    {
-        u64 scalar_end = c_translate_plain_run_end_scalar(source, offset);
-        if (c_translate_plain_run_end_swar(source, offset) != scalar_end)
+        bool trigraphs = mode != 0;
+        for (u64 offset = 0; result; offset += 1)
         {
-            return false;
-        }
+            u64 scalar_end = c_translate_plain_run_end_scalar(source, offset, trigraphs);
+            result = c_translate_plain_run_end_swar(source, offset, trigraphs) == scalar_end;
 #if BUSTER_C_TRANSLATE_AVX512
-        if (c_translate_plain_run_end_avx512(source, offset) != scalar_end)
-        {
-            return false;
-        }
+            result = result && c_translate_plain_run_end_avx512(source, offset, trigraphs) == scalar_end;
 #endif
-        if (offset == source.length)
-        {
-            break;
+            if (offset == source.length)
+            {
+                break;
+            }
         }
-        offset += 1;
     }
-    return true;
+    return result;
 }
 #endif
+
+// Validate the source size before constructing any source-derived allocation
+// count or reading the source pointer. Rejected plans leave the output alone.
+BUSTER_C_INTERNAL bool c_source_allocation_plan(u64 length, CSourceAllocationPlan* plan)
+{
+    bool valid = length <= C_SOURCE_MAXIMUM_LENGTH;
+    if (valid)
+    {
+        // All additions follow the u32 source bound. These compile-time
+        // checks also keep the corresponding arena byte products in u64.
+        BUSTER_CT_CHECK(C_SOURCE_MAXIMUM_LENGTH + 2 <= UINT64_MAX / sizeof(IrSourceCheckpoint));
+        BUSTER_CT_CHECK(C_SOURCE_MAXIMUM_LENGTH + 2 <= UINT64_MAX / sizeof(u32));
+        BUSTER_CT_CHECK(C_SOURCE_MAXIMUM_LENGTH + 17 <= UINT64_MAX / sizeof(CToken));
+        BUSTER_CT_CHECK(C_SOURCE_MAXIMUM_LENGTH + 1 <= (UINT64_MAX - BUSTER_MB(1)) / (2 * sizeof(CDiagnostic)));
+        *plan = (CSourceAllocationPlan){
+            .translated_capacity = length + 1,
+            .checkpoint_capacity = length + 2,
+        };
+    }
+    return valid;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_source_allocation_plan(u64 length, CSourceAllocationPlan* plan)
+{
+    return c_source_allocation_plan(length, plan);
+}
+#endif
+
+// GNU modes preserve literal question-mark sequences. C23 removed trigraphs;
+// the supported earlier strict C modes require their phase-one replacement.
+BUSTER_C_INTERNAL bool c_translate_trigraphs_enabled(CPreprocessDialect dialect)
+{
+    return dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_C11 || dialect == C_PREPROCESS_DIALECT_C17;
+}
+
+BUSTER_C_INTERNAL char8 c_translate_trigraph_character(char8 third)
+{
+    char8 result = 0;
+    switch (third)
+    {
+    case '=': result = '#'; break;
+    case '/': result = '\\'; break;
+    case '\'': result = '^'; break;
+    case '(': result = '['; break;
+    case ')': result = ']'; break;
+    case '!': result = '|'; break;
+    case '<': result = '{'; break;
+    case '>': result = '}'; break;
+    case '-': result = '~'; break;
+    default: break;
+    }
+    return result;
+}
 
 // force_scalar keeps the byte-at-a-time run loop as the whole implementation,
 // which is what c_lex_reference lexes through so the differential gate
 // compares the chunk fast path against it.
-BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar)
+BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar,
+                                                      bool trigraphs, CSourceAllocationPlan const* plan)
 {
     CTranslatedSource result = {0};
-    if (source.length <= UINT32_MAX - 2)
+    if (plan)
     {
-        char8* translated = space ? c_space_allocate(space, source.length + 1) : arena_allocate(arena, char8, source.length + 1);
+        char8* translated = space ? c_space_allocate(space, plan->translated_capacity) : arena_allocate(arena, char8, plan->translated_capacity);
         result.translated_offset = space ? c_space_offset(space, translated) : 0;
-        IrSourceCheckpoint* checkpoints = arena_allocate(arena, IrSourceCheckpoint, source.length + 2);
-        u32* checkpoint_offsets = arena_allocate(arena, u32, source.length + 2);
+        IrSourceCheckpoint* checkpoints = arena_allocate(arena, IrSourceCheckpoint, plan->checkpoint_capacity);
+        u32* checkpoint_offsets = arena_allocate(arena, u32, plan->checkpoint_capacity);
         u32 checkpoint_count = 0;
         u64 input = 0;
         u64 output = 0;
@@ -1009,6 +1487,12 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                     Mask64 line_feed = simd512_equal_byte(chunk, simd512_splat('\n'));
                     Mask64 backslash = simd512_equal_byte(chunk, simd512_splat('\\'));
                     u64 stops = carriage | (backslash & ((line_feed | carriage) >> 1)) | (backslash & (UINT64_C(1) << 63));
+                    if (trigraphs)
+                    {
+                        // Stop at the first question mark, including the last
+                        // lanes whose raw triple belongs to the next chunk.
+                        stops |= simd512_equal_byte(chunk, simd512_splat('?'));
+                    }
                     u64 limit = stops ? (u64)__builtin_ctzll(stops) : 64;
                     if (!limit)
                     {
@@ -1072,8 +1556,8 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 }
             }
 #endif
-            // A run containing no '\r', '\n', or '\\' keeps line/column linear,
-            // so it copies through whole and only those three bytes reach the exact
+            // A run containing no newline, backslash or enabled trigraph
+            // candidate keeps line/column linear; editing bytes reach the exact
             // scalar handling below. Native AVX-512 hosts classify 64 bytes at a
             // time; every fallback retains the previous eight-byte SWAR scan.
             u64 plain_end = input;
@@ -1084,7 +1568,7 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 while (plain_end < source.length)
                 {
                     char8 character = source.pointer[plain_end];
-                    if (character == '\r' || character == '\n' || character == '\\')
+                    if (character == '\r' || character == '\n' || character == '\\' || (trigraphs && character == '?'))
                     {
                         break;
                     }
@@ -1094,9 +1578,9 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             else
             {
 #if BUSTER_C_TRANSLATE_AVX512
-                plain_end = c_translate_plain_run_end_avx512(source, input);
+                plain_end = c_translate_plain_run_end_avx512(source, input, trigraphs);
 #else
-                plain_end = c_translate_plain_run_end_swar(source, input);
+                plain_end = c_translate_plain_run_end_swar(source, input, trigraphs);
 #endif
             }
             if (plain_end > input)
@@ -1120,6 +1604,19 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 continue;
             }
             char8 character = source.pointer[input];
+            u64 character_length = 1;
+            if (trigraphs && character == '?' && source.length - input >= 3 && source.pointer[input + 1] == '?')
+            {
+                char8 replacement = c_translate_trigraph_character(source.pointer[input + 2]);
+                if (replacement)
+                {
+                    // Consume raw input only: phase-two splicing must not
+                    // create another phase-one replacement opportunity.
+                    character = replacement;
+                    character_length = 3;
+                    run_broken = true;
+                }
+            }
             u64 newline_length = 0;
             if (character == '\r')
             {
@@ -1129,16 +1626,17 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             {
                 newline_length = 1;
             }
-            if (character == '\\' && input + 1 < source.length)
+            if (character == '\\' && character_length < source.length - input)
             {
                 u64 splice_length = 0;
-                if (source.pointer[input + 1] == '\n')
+                if (source.pointer[input + character_length] == '\n')
                 {
-                    splice_length = 2;
+                    splice_length = character_length + 1;
                 }
-                else if (source.pointer[input + 1] == '\r')
+                else if (source.pointer[input + character_length] == '\r')
                 {
-                    splice_length = input + 2 < source.length && source.pointer[input + 2] == '\n' ? 3 : 2;
+                    splice_length = character_length + 1 < source.length - input && source.pointer[input + character_length + 1] == '\n'
+                        ? character_length + 2 : character_length + 1;
                 }
                 if (splice_length)
                 {
@@ -1158,7 +1656,6 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 };
                 checkpoint_offsets[checkpoint_count] = (u32)output;
                 checkpoint_count += 1;
-                run_broken = false;
             }
             if (newline_length)
             {
@@ -1171,8 +1668,9 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             else
             {
                 translated[output++] = character;
-                input += 1;
-                column += 1;
+                input += character_length;
+                column += (u32)character_length;
+                run_broken = character_length != 1;
             }
         }
         translated[output] = 0;
@@ -1185,7 +1683,7 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
         checkpoint_count += 1;
         if (space)
         {
-            // The translated copy only shrinks (splices delete bytes); hand the
+            // Translation only shrinks (trigraphs/splices delete bytes); hand the
             // unused tail back so the next spelling packs against it.
             c_space_shrink(space, source.length - output);
         }
@@ -1689,6 +2187,7 @@ struct CLexState
 {
     CLexResult* result;
     CTranslatedSource translated;
+    CPreprocessDialect dialect;
     // The result's arena. Diagnostic rows grow in diagnostic_arena, which is
     // rewound or destroyed once lexing ends and the rows are copied out, so
     // anything a row points at -- a formatted message -- lives here instead.
@@ -1956,6 +2455,35 @@ BUSTER_C_INTERNAL void c_lex_validate_word_utf8(CLexState* state, u64 offset, u6
     }
 }
 
+// UCN syntax/range diagnostics belong to the original backslash. Translation
+// checkpoints recover its physical column even after trigraphs or splicing.
+BUSTER_C_INTERNAL u64 c_lex_ucn(CLexState* state, u64 offset, bool initial)
+{
+    CUcn name = c_ucn_decode(state->translated.source, offset);
+    String8 message = {0};
+    if (name.status == C_UCN_MALFORMED)
+    {
+        message = S8("malformed universal character name in identifier");
+    }
+    else if (name.status == C_UCN_SURROGATE)
+    {
+        message = S8("surrogate universal character name in identifier");
+    }
+    else if (name.status == C_UCN_OUT_OF_RANGE)
+    {
+        message = S8("universal character name exceeds Unicode range in identifier");
+    }
+    else if (name.status == C_UCN_FORBIDDEN || !c_ucn_identifier_allowed(name.value, state->dialect, initial))
+    {
+        message = S8("universal character name is not allowed in this identifier position");
+    }
+    if (message.length)
+    {
+        c_diagnostic_push(state, offset, C_DIAGNOSTIC_INVALID_CHARACTER, message);
+    }
+    return offset + name.length;
+}
+
 // One item of the scalar lexer: a whitespace byte, a newline, a comment, or a
 // token, starting at `offset` and returning the offset just past it. The
 // compaction emitter escapes here for shapes its masks do not model. Long
@@ -2102,18 +2630,31 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         }
         return offset;
     }
-    if (c_identifier_start(character))
+    bool ucn = c_ucn_enabled(state->dialect);
+    if (c_identifier_start(character) || (ucn && c_ucn_prefix(translated.source, offset)))
     {
         u64 start = offset;
-        offset = c_identifier_run_end(translated.source, offset + (character < 0x80));
-        if (BUSTER_UNLIKELY(offset < translated.source.length && translated.source.pointer[offset] >= 0x80))
+        offset = c_identifier_run_end(translated.source, offset + (character < 0x80 && character != '\\'));
+        while (offset < translated.source.length)
         {
-            u64 first_high = offset;
-            while (offset < translated.source.length && c_identifier_continue(translated.source.pointer[offset]))
+            if (ucn && c_ucn_prefix(translated.source, offset))
             {
-                offset += 1;
+                offset = c_lex_ucn(state, offset, offset == start);
+                offset = c_identifier_run_end(translated.source, offset);
             }
-            c_lex_validate_word_utf8(state, first_high, offset);
+            else if (translated.source.pointer[offset] >= 0x80)
+            {
+                u64 first_high = offset;
+                do
+                {
+                    offset += 1;
+                } while (offset < translated.source.length && c_identifier_continue(translated.source.pointer[offset]));
+                c_lex_validate_word_utf8(state, first_high, offset);
+            }
+            else
+            {
+                break;
+            }
         }
         c_token_push(result, translated, start, offset, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
         if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
@@ -2132,6 +2673,11 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
             bool exponent_sign = (character == '+' || character == '-') && offset > start &&
                                  (translated.source.pointer[offset - 1] == 'e' || translated.source.pointer[offset - 1] == 'E' ||
                                   translated.source.pointer[offset - 1] == 'p' || translated.source.pointer[offset - 1] == 'P');
+            if (ucn && c_ucn_prefix(translated.source, offset))
+            {
+                offset = c_lex_ucn(state, offset, false);
+                continue;
+            }
             if (!c_identifier_continue(character) && character != '.' && character != '\'' && !exponent_sign)
             {
                 break;
@@ -2809,6 +3355,28 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
             }
         }
 
+        // A UCN joins the word before its backslash. Escape at that word's
+        // start rather than emitting its ASCII prefix as a separate token.
+        // Comments and literal payloads retain their existing byte rules.
+        if (BUSTER_UNLIKELY(backslash && c_ucn_enabled(state->dialect)))
+        {
+            u64 ucn_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8('u')) |
+                           (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8('U'));
+            u64 names = backslash & ucn_next & ~comment_span & ~literal_span & c_lex_mask_below(defer_at);
+            if (names)
+            {
+                u64 first = (u64)__builtin_ctzll(names);
+                u64 candidate = first;
+                if (first && ((word | number_span) & (UINT64_C(1) << (first - 1))))
+                {
+                    u64 owners = (identifier_starts | number_starts) & c_lex_mask_below(first);
+                    BUSTER_CHECK(owners);
+                    candidate = (u64)(63 - __builtin_clzll(owners));
+                }
+                trigger_at = BUSTER_MIN(trigger_at, candidate);
+            }
+        }
+
         u64 token_starts = identifier_starts | number_starts | string_starts | character_starts | operator_starts | newline_starts;
         // Bytes owned by no token: whitespace outside a literal, and comment
         // text other than the newlines a block comment contains.
@@ -3088,12 +3656,36 @@ u64 c_test_lex_punctuator_nfa_mismatches(void)
 }
 #endif
 
-BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar)
+BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar, bool trigraphs, CPreprocessDialect dialect)
 {
     CLexResult result = {0};
+    CSourceAllocationPlan plan;
     if (arena && (!source.length || source.pointer))
     {
-        CTranslatedSource translated = c_translate_source(arena, space, source, force_scalar);
+        bool source_supported = c_source_allocation_plan(source.length, &plan);
+        if (source_supported && space)
+        {
+            // Each include shares the same u32 spelling offsets. A source
+            // may fit by itself while the preceding spellings leave too
+            // little representable space for its copy and terminator.
+            source_supported = space->used <= UINT32_MAX && plan.translated_capacity <= UINT32_MAX - space->used;
+        }
+        if (!source_supported)
+        {
+            // Preserve a small, well-formed EOF stream for preprocessing's
+            // frame walk, but never let an unread source appear successful.
+            // The empty spelling/checkpoint owns the include diagnostic's
+            // map offset without inspecting the caller's source pointer.
+            c_source_allocation_plan(0, &plan);
+        }
+        CTranslatedSource translated = c_translate_source(arena, source_supported ? space : 0, source_supported ? source : (String8){0}, force_scalar, trigraphs, &plan);
+        if (!source_supported && space)
+        {
+            // Reuse the previous spelling's final byte as the empty source's
+            // location anchor; a full spelling space cannot allocate even
+            // another terminator. No token spelling reads this empty range.
+            translated.translated_offset = space->used ? (u32)BUSTER_MIN(space->used - 1, (u64)UINT32_MAX - 1) : 0;
+        }
         result.translated_source = translated.source;
         result.spelling_base = space ? space->base : translated.source.pointer;
         result.checkpoints = translated.checkpoints;
@@ -3105,10 +3697,25 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
         // One token per byte bounds the stream including the end marker exactly as
         // the scalar loop needs; sixteen more absorb the tail rows of the emitter's
         // full-width interleaved stores, which the next window overwrites.
-        u64 token_capacity = translated.source.length + 1 + 16;
+        u64 token_capacity = source_supported ? translated.source.length + 17 : 1;
         result.tokens = arena_allocate(arena, CToken, token_capacity);
         result.token_shapes = arena_allocate(arena, CTokenShape, token_capacity);
-        if (translated.source.length <= UINT64_MAX / sizeof(CDiagnostic) - 1)
+        if (!source_supported)
+        {
+            c_token_push(&result, translated, 0, 0, C_TOKEN_END_OF_FILE, C_PUNCTUATOR_NONE);
+            result.diagnostics = arena_allocate(arena, CDiagnostic, 1);
+            result.diagnostic_count = 1;
+            IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
+            C_DIAGNOSTIC_RESERVATION_CENSUS(LEX, 1);
+            result.diagnostics[0] = (CDiagnostic){
+                .message = source.length > C_SOURCE_MAXIMUM_LENGTH ? S8("C source exceeds the 4294967293-byte translation limit")
+                                                                   : S8("C source exceeds the remaining 32-bit spelling-offset space"),
+                .location = c_lex_local_location(&result, 0),
+                .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                .severity = C_DIAGNOSTIC_ERROR,
+            };
+        }
+        else if (translated.source.length <= UINT64_MAX / sizeof(CDiagnostic) - 1)
         {
             u64 diagnostic_bytes = (translated.source.length + 1) * sizeof(CDiagnostic);
             if (diagnostic_bytes <= (UINT64_MAX - BUSTER_MB(1)) / 2)
@@ -3119,6 +3726,7 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     CLexState state = {
                         .result = &result,
                         .translated = translated,
+                        .dialect = dialect,
                         .arena = arena,
                         .diagnostic_reserve_size = diagnostic_bytes * 2 + BUSTER_MB(1),
                         .maximum_diagnostic_count = translated.source.length + 1,
@@ -3171,21 +3779,34 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
     return result;
 }
 
-BUSTER_C_INTERNAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, String8 source)
+BUSTER_C_INTERNAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, String8 source, bool trigraphs, CPreprocessDialect dialect)
 {
-    return c_lex_dispatch(arena, space, source, false);
+    return c_lex_dispatch(arena, space, source, false, trigraphs, dialect);
 }
+
+#if BUSTER_INCLUDE_TESTS
+CLexResult c_test_lex_dialect(Arena* arena, String8 source, CPreprocessDialect dialect, bool force_scalar)
+{
+    return c_lex_dispatch(arena, 0, source, force_scalar, c_translate_trigraphs_enabled(dialect), dialect);
+}
+
+CLexResult c_test_lex_include_source(Arena* arena, String8 source)
+{
+    CSpellingSpace space = c_space_local(arena, 1024);
+    return c_lex_space(arena, &space, source, false, C_PREPROCESS_DIALECT_GNU17);
+}
+#endif
 
 CLexResult c_lex(Arena* arena, String8 source)
 {
-    return c_lex_dispatch(arena, 0, source, false);
+    return c_lex_dispatch(arena, 0, source, false, false, C_PREPROCESS_DIALECT_GNU17);
 }
 
 // The scalar reference loop, whatever the host: the differential gate asserts
 // the dispatched lexer agrees with it byte for byte.
 CLexResult c_lex_reference(Arena* arena, String8 source)
 {
-    return c_lex_dispatch(arena, 0, source, true);
+    return c_lex_dispatch(arena, 0, source, true, false, C_PREPROCESS_DIALECT_GNU17);
 }
 
 typedef struct CMacro CMacro;
@@ -3214,6 +3835,9 @@ struct CMacroDefinition
     // definition every use is ordinary, so this also retains the exact
     // replacement-capacity dot product. Null when there are no parameters.
     u32* parameter_expand_count;
+    // Push/pop restores a definition generation, including its active rescan
+    // ownership. A name can have several generations on the task stack.
+    u32 generation;
     u32 replacement_count;
     // The replacement tokens that name no parameter: the fixed half of that
     // capacity.
@@ -3223,6 +3847,7 @@ struct CMacroDefinition
     bool function_like;
     bool variadic;
     bool pragma_like;
+    bool header_query;
     // Does the list hold a `##`, and a `#` that stringifies a parameter?
     // 78,3% of the expansions of a unity build have neither and 99,97% have
     // no `#` at all, and that is the whole difference between substituting
@@ -3230,6 +3855,9 @@ struct CMacroDefinition
     // row for a paste pass with nothing to do.
     bool has_paste;
     bool has_stringify;
+    // Dynamic builtins belong to the saved definition just like replacement
+    // tokens, so push/pop restores their synthesized behavior too.
+    u8 builtin;
 };
 
 #define C_MACRO_PARAMETER_NONE UINT32_MAX
@@ -3257,8 +3885,8 @@ struct CMacro
     u32 symbol;
     CMacroDefinition definition;
     u32 by_symbol_capacity;
+    u32 next_generation;
     bool disabled;
-    u8 builtin;
     // Head-of-list state for the lazy builtin macros: the main preprocess
     // loop stores the current frame and token offset here each iteration
     // (two stores, no location recovery), and __LINE__/__FILE__ recover the
@@ -3621,8 +4249,73 @@ BUSTER_C_INTERNAL bool c_symbol_middle_equal(String8 stored, String8 name)
     return stored_word == name_word;
 }
 
+// Identifier identity uses decoded UTF-8, while tokens keep their original
+// spelling until macro # and ## have finished. Only escaped names allocate;
+// encoded output never exceeds the length of its original UCN spelling.
+BUSTER_C_INTERNAL String8 c_symbol_ucn_name(CSymbolTable* table, String8 name)
+{
+    String8 canonical = name;
+    u64 first = string_first_code_unit(name, '\\');
+    if (BUSTER_UNLIKELY(first < name.length))
+    {
+        char8* bytes = arena_allocate(table->arena, char8, name.length);
+        memcpy(bytes, name.pointer, first);
+        u64 output = first;
+        u64 offset = first;
+        bool decoded = false;
+        bool valid = true;
+        while (offset < name.length && valid)
+        {
+            if (c_ucn_prefix(name, offset))
+            {
+                CUcn ucn = c_ucn_decode(name, offset);
+                valid = ucn.status == C_UCN_VALID;
+                if (valid)
+                {
+                    u32 value = ucn.value;
+                    if (value < 0x80)
+                    {
+                        bytes[output++] = (char8)value;
+                    }
+                    else if (value < 0x800)
+                    {
+                        bytes[output++] = (char8)(0xC0 | (value >> 6));
+                        bytes[output++] = (char8)(0x80 | (value & 0x3F));
+                    }
+                    else if (value < 0x10000)
+                    {
+                        bytes[output++] = (char8)(0xE0 | (value >> 12));
+                        bytes[output++] = (char8)(0x80 | ((value >> 6) & 0x3F));
+                        bytes[output++] = (char8)(0x80 | (value & 0x3F));
+                    }
+                    else
+                    {
+                        bytes[output++] = (char8)(0xF0 | (value >> 18));
+                        bytes[output++] = (char8)(0x80 | ((value >> 12) & 0x3F));
+                        bytes[output++] = (char8)(0x80 | ((value >> 6) & 0x3F));
+                        bytes[output++] = (char8)(0x80 | (value & 0x3F));
+                    }
+                    offset += ucn.length;
+                    decoded = true;
+                }
+            }
+            else
+            {
+                bytes[output++] = name.pointer[offset++];
+            }
+        }
+        if (valid && decoded)
+        {
+            canonical = (String8){.pointer = bytes, .length = output};
+            table->has_ucn_names = true;
+        }
+    }
+    return canonical;
+}
+
 BUSTER_C_SHARED u32 c_symbol_intern(CSymbolTable* table, String8 name)
 {
+    name = c_symbol_ucn_name(table, name);
     WORK_LEDGER_RECORD(LOOKUP_SYMBOL_INTERNS, 1);
     WORK_LEDGER_RECORD(LOOKUP_SYMBOL_INTERN_BYTES_HASHED, name.length);
     CSymbolKey key = c_symbol_key(name);
@@ -4200,6 +4893,7 @@ struct CMacroExpansionTask
     CMacro* macro;
     CPpToken token;
     CMacroExpansionTaskKind kind;
+    u32 generation;
 };
 
 // Contexts suspend strictly LIFO. Pending parent tasks remain below a child's
@@ -4217,6 +4911,9 @@ struct CMacroExpansionTaskStack
     u64 capacity;
 };
 
+// Expose the row-storage bound to GCC before narrowing into the count bitfield.
+#define C_MACRO_ARGUMENT_COUNT_MASK (UINT64_MAX >> 1)
+
 typedef struct CMacroArgument CMacroArgument;
 struct CMacroArgument
 {
@@ -4225,7 +4922,10 @@ struct CMacroArgument
     CPpToken* tokens;
     CPpToken* expanded_tokens;
     u64 token_count;
-    u64 expanded_token_count;
+    // A token row occupies 16 bytes, so its count cannot need the top bit.
+    // Omission remains distinct from emptiness without growing this record.
+    u64 expanded_token_count : 63;
+    u64 omitted : 1;
 };
 
 typedef struct CMacroExpansionContinuation CMacroExpansionContinuation;
@@ -4251,6 +4951,10 @@ struct CMacroExpansionContinuation
     u32 argument_index;
 };
 
+typedef struct CPreprocessPragmaContext CPreprocessPragmaContext;
+BUSTER_C_INTERNAL bool c_preprocess_expansion_pragma(CPreprocessPragmaContext* pragma_context,
+                                                       char8 const* base, CPpToken marker, CPpStampTable const* stamps, CMacroExpansionTaskStack const* tasks);
+
 typedef struct CMacroReplacementToken CMacroReplacementToken;
 struct CMacroReplacementToken
 {
@@ -4258,7 +4962,7 @@ struct CMacroReplacementToken
     bool placemarker;
     // This item is the `##` of GNU's `, ## __VA_ARGS__` comma-deletion
     // idiom: a paste written between a literal comma and the variadic
-    // parameter.  With empty varargs the placemarker path deletes the comma;
+    // parameter. With omitted varargs the placemarker path deletes the comma;
     // with tokens present GNU performs no paste at all -- the comma stays
     // and the arguments follow -- where a real paste of `,` against the
     // first argument token cannot form one preprocessing token and would
@@ -4375,7 +5079,11 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
             (*first)->by_symbol[symbol] = macro;
         }
     }
+    macro->next_generation += 1;
+    macro->disabled = false;
+    // A new definition also clears any previous dynamic builtin kind.
     macro->definition = (CMacroDefinition){
+        .generation = macro->next_generation,
         .replacement = replacement,
         .replacement_count = replacement_count,
         .parameters = parameters,
@@ -4384,9 +5092,6 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
         .variadic = variadic,
         .defined = true,
     };
-    // A later ordinary or command-line definition replaces a dynamic builtin
-    // as a macro, not merely its replacement tokens.
-    macro->builtin = C_MACRO_BUILTIN_NONE;
     macro->definition.plain_count = replacement_count;
     // Allocated for every parameter list, empty replacement included: a
     // `#define F(x)` with no replacement tokens still reaches the capacity
@@ -4403,7 +5108,7 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
         for (u32 index = 0; index < replacement_count; index += 1)
         {
             CToken token = replacement[index];
-            s32 found = token.kind == C_TOKEN_IDENTIFIER && function_like ? c_macro_parameter_index(macro, c_token_spelling(spelling_base, token)) : -1;
+            s32 found = token.kind == C_TOKEN_IDENTIFIER && function_like ? c_macro_parameter_index(macro, token.symbol ? symbols->names[token.symbol] : c_symbol_ucn_name(symbols, c_token_spelling(spelling_base, token))) : -1;
             parameter_index[index] = found >= 0 ? (u32)found : C_MACRO_PARAMETER_NONE;
             if (found >= 0)
             {
@@ -4437,7 +5142,7 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
 BUSTER_C_INTERNAL void c_macro_define_object_text(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro** first, CMacro** last, String8 name,
                                                     String8 replacement_text)
 {
-    CLexResult lex = c_lex_space(arena, space, replacement_text);
+    CLexResult lex = c_lex_space(arena, space, replacement_text, false, C_PREPROCESS_DIALECT_GNU17);
     c_symbols_intern_tokens(symbols, lex.spelling_base, lex.tokens, lex.token_shapes, lex.token_count);
     u32 replacement_count = 0;
     while (replacement_count < lex.token_count && lex.tokens[replacement_count].kind != C_TOKEN_NEWLINE &&
@@ -4552,19 +5257,27 @@ BUSTER_C_INTERNAL void c_macro_expansion_tasks_reserve(Arena* arena, CMacroExpan
 // One capacity check for the whole batch. Reversing the stored tokens keeps
 // the next token at the top; an optional ENABLE marker sits below the batch.
 // No pointer into task storage escapes this helper or survives another push.
-BUSTER_C_INTERNAL void c_macro_expansion_tasks_push(Arena* arena, CMacroExpansionTaskStack* tasks, CPpToken const* tokens, u64 token_count, CMacro* macro)
+BUSTER_C_INTERNAL void c_macro_expansion_tasks_push(Arena* arena, CMacroExpansionTaskStack* tasks, CPpToken const* tokens, u64 token_count, CMacro* macro, u32 generation)
 {
     c_macro_expansion_tasks_reserve(arena, tasks, token_count, macro != 0);
     u64 output = tasks->count;
     if (macro)
     {
-        tasks->data[output++] = (CMacroExpansionTask){.macro = macro, .kind = C_MACRO_EXPANSION_ENABLE};
+        tasks->data[output++] = (CMacroExpansionTask){.macro = macro, .kind = C_MACRO_EXPANSION_ENABLE, .generation = generation};
     }
     for (u64 index = token_count; index; index -= 1)
     {
         tasks->data[output++] = (CMacroExpansionTask){.token = tokens[index - 1], .kind = C_MACRO_EXPANSION_TOKEN};
     }
     tasks->count = output;
+}
+
+BUSTER_C_INTERNAL void c_macro_enable_definition(CMacroExpansionTask task)
+{
+    if (task.macro->definition.generation == task.generation)
+    {
+        task.macro->disabled = false;
+    }
 }
 
 // Collecting an invocation's arguments is also where an argument recovers the
@@ -4579,7 +5292,7 @@ BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, char8 const* s
 {
     while (tasks->count > task_base && tasks->data[tasks->count - 1].kind == C_MACRO_EXPANSION_ENABLE)
     {
-        tasks->data[--tasks->count].macro->disabled = false;
+        c_macro_enable_definition(tasks->data[--tasks->count]);
     }
     bool invoked = tasks->count > task_base && tasks->data[tasks->count - 1].kind == C_MACRO_EXPANSION_TOKEN &&
                    c_token_is_punctuator(&tasks->data[tasks->count - 1].token.token, C_PUNCTUATOR_LEFT_PARENTHESIS);
@@ -4602,7 +5315,7 @@ BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, char8 const* s
             CMacroExpansionTask task = tasks->data[--tasks->count];
             if (task.kind == C_MACRO_EXPANSION_ENABLE)
             {
-                task.macro->disabled = false;
+                c_macro_enable_definition(task);
             }
             else
             {
@@ -4659,7 +5372,15 @@ BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, char8 const* s
         {
             if (macro->definition.variadic && argument_count + 1 == macro->definition.parameter_count)
             {
+                arguments[argument_count].omitted = true;
                 argument_count += 1;
+            }
+            else if (macro->definition.variadic && macro->definition.parameter_count == 1 && !arguments[0].token_count)
+            {
+                // With no fixed parameter, `M()` has no distinguishing comma.
+                // GNU modes treat it as omitted; standard modes retain it as
+                // an explicitly empty argument, matching GCC and Clang.
+                arguments[0].omitted = c_preprocess_dialect_is_gnu(result->dialect);
             }
             if (argument_count != macro->definition.parameter_count)
             {
@@ -4750,12 +5471,14 @@ BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgume
 BUSTER_C_INTERNAL u32 c_preprocess_builtin_line(CMacro* first);
 BUSTER_C_INTERNAL CSourceLocation c_preprocess_recover_location(struct CPreprocessSourceFrame* frame, u32 file, CToken token);
 
-BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* first, u8 builtin, u32 stamp)
+BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* first, u8 builtin, u32 stamp, u32 line)
 {
     if (builtin == C_MACRO_BUILTIN_LINE)
     {
         char8* digits = c_space_allocate(space, 11);
-        u32 value = c_preprocess_builtin_line(first);
+        // The invocation stamp owns the line, including argument tokens
+        // on another physical line within the same expansion batch.
+        u32 value = line ? line : c_preprocess_builtin_line(first);
         u32 length = 0;
         do
         {
@@ -4815,28 +5538,28 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
 // Only builtins and definitions writing `#` or `##` stage a list here; a
 // paste-free, stringify-free definition is produced into its task batch by
 // c_macro_produce_plain_tasks without one.
-BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* space, CMacro* first, CMacro* macro, CMacroArgument* arguments,
+BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* space, CMacro* first, CMacro* macro, CMacroDefinition const* definition, CMacroArgument* arguments,
                                                     CPpToken invocation, CPpStampTable const* stamps, CPreprocessResult* result, CPpToken** tokens_out,
                                                     u32* token_count_out)
 {
     char8 const* base = space->base;
     u32 stamp = invocation.stamp;
     CSourceLocation location = c_pp_stamp_location(stamps, stamp);
-    u8 const* definition_spaces = macro->definition.replacement_space;
-    u32 const* parameter_indices = macro->definition.parameter_index;
+    u8 const* definition_spaces = definition->replacement_space;
+    u32 const* parameter_indices = definition->parameter_index;
     bool ok = true;
-    if (macro->builtin)
+    if (definition->builtin)
     {
         CPpToken* builtin_token = arena_allocate(arena, CPpToken, 1);
-        builtin_token[0] = c_macro_builtin_token(space, first, macro->builtin, stamp);
+        builtin_token[0] = c_macro_builtin_token(space, first, definition->builtin, stamp, location.line);
         builtin_token[0].preceded_by_space = invocation.preceded_by_space;
         *tokens_out = builtin_token;
         *token_count_out = 1;
     }
     else
     {
-        u64 capacity = macro->definition.replacement_count + 1;
-        for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
+        u64 capacity = definition->replacement_count + 1;
+        for (u32 replacement_index = 0; replacement_index < definition->replacement_count; replacement_index += 1)
         {
             u32 parameter_index = parameter_indices[replacement_index];
             if (parameter_index != C_MACRO_PARAMETER_NONE && arguments)
@@ -4847,12 +5570,12 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
         }
         CMacroReplacementToken* materialized = arena_allocate(arena, CMacroReplacementToken, capacity);
         u32 materialized_count = 0;
-        for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
+        for (u32 replacement_index = 0; replacement_index < definition->replacement_count; replacement_index += 1)
         {
-            CToken replacement = macro->definition.replacement[replacement_index];
+            CToken replacement = definition->replacement[replacement_index];
             bool replacement_space = replacement_index ? !definition_spaces || definition_spaces[replacement_index] != 0 : invocation.preceded_by_space;
-            if (macro->definition.function_like && c_token_is_punctuator(&replacement, C_PUNCTUATOR_HASH) &&
-                replacement_index + 1 < macro->definition.replacement_count)
+            if (definition->function_like && c_token_is_punctuator(&replacement, C_PUNCTUATOR_HASH) &&
+                replacement_index + 1 < definition->replacement_count)
             {
                 u32 parameter_index = parameter_indices[replacement_index + 1];
                 if (parameter_index != C_MACRO_PARAMETER_NONE)
@@ -4873,12 +5596,12 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 // spelling: a `##` written between a literal comma and the
                 // variadic parameter.  The paste loop below reads the mark.
                 bool comma_paste = false;
-                if (macro->definition.variadic && c_macro_is_paste(replacement) && replacement_index &&
-                    replacement_index + 1 < macro->definition.replacement_count &&
-                    c_token_is_punctuator(&macro->definition.replacement[replacement_index - 1], C_PUNCTUATOR_COMMA))
+                if (definition->variadic && c_macro_is_paste(replacement) && replacement_index &&
+                    replacement_index + 1 < definition->replacement_count &&
+                    c_token_is_punctuator(&definition->replacement[replacement_index - 1], C_PUNCTUATOR_COMMA))
                 {
                     u32 next_parameter = parameter_indices[replacement_index + 1];
-                    comma_paste = next_parameter != C_MACRO_PARAMETER_NONE && next_parameter + 1 == macro->definition.parameter_count;
+                    comma_paste = next_parameter != C_MACRO_PARAMETER_NONE && next_parameter + 1 == definition->parameter_count;
                 }
                 materialized[materialized_count++] = (CMacroReplacementToken){
                     .token = {.token = replacement, .stamp = stamp & C_PP_STAMP_MASK, .foreign = true, .preceded_by_space = replacement_space},
@@ -4887,8 +5610,8 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 continue;
             }
             CMacroArgument argument = arguments[parameter_index];
-            bool raw_argument = (replacement_index && c_macro_is_paste(macro->definition.replacement[replacement_index - 1])) ||
-                                (replacement_index + 1 < macro->definition.replacement_count && c_macro_is_paste(macro->definition.replacement[replacement_index + 1]));
+            bool raw_argument = (replacement_index && c_macro_is_paste(definition->replacement[replacement_index - 1])) ||
+                                (replacement_index + 1 < definition->replacement_count && c_macro_is_paste(definition->replacement[replacement_index + 1]));
             CPpToken* argument_tokens = raw_argument ? argument.tokens : argument.expanded_tokens;
             u64 argument_token_count = raw_argument ? argument.token_count : argument.expanded_token_count;
             if (!argument_token_count)
@@ -4939,7 +5662,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
             CMacroReplacementToken* left = &materialized[pasted_count - 1];
             if (right.placemarker)
             {
-                if (item.comma_paste)
+                if (item.comma_paste && arguments[definition->parameter_count - 1].omitted)
                 {
                     left->placemarker = true;
                 }
@@ -4978,10 +5701,10 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
             }
             joined[joined_length] = 0;
             TemporalArena paste_temporary = scratch_begin(&arena, 1);
-            CLexResult lex = c_lex(paste_temporary.arena, (String8){
-                                                              .pointer = joined,
-                                                              .length = joined_length,
-                                                          });
+            CLexResult lex = c_lex_dispatch(paste_temporary.arena, 0, (String8){
+                                                                          .pointer = joined,
+                                                                          .length = joined_length,
+                                                                      }, false, false, result->dialect);
             // The oversized-token diagnostics count here: a pasted identifier or
             // number past the length field's reach fails as an invalid paste
             // instead of storing a sentinel only literals may carry.
@@ -5057,21 +5780,26 @@ BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* m
     if (string_equal(macro->name, S8("_Pragma")))
     {
         String8 first_spelling = token_count == 1 ? c_token_spelling(base, tokens[0].token) : (String8){0};
+        u64 prefix_length = first_spelling.length >= 3 && first_spelling.pointer[0] == 'L' ? 1 : 0;
         // Text past the length field's reach stays length 0 like any other
         // malformed operand: the marker is dropped, and no real pragma body
         // approaches 64 KB.
-        if (token_count == 1 && tokens[0].token.kind == C_TOKEN_STRING_LITERAL && first_spelling.length >= 2 &&
-            first_spelling.length - 2 < C_TOKEN_LENGTH_OVERSIZED)
+        if (token_count == 1 && tokens[0].token.kind == C_TOKEN_STRING_LITERAL && first_spelling.length >= prefix_length + 2 &&
+            first_spelling.pointer[prefix_length] == '"' && first_spelling.pointer[first_spelling.length - 1] == '"' &&
+            first_spelling.length - prefix_length - 2 < C_TOKEN_LENGTH_OVERSIZED)
         {
             String8 inner = {
-                .pointer = first_spelling.pointer + 1,
-                .length = first_spelling.length - 2,
+                .pointer = first_spelling.pointer + prefix_length + 1,
+                .length = first_spelling.length - prefix_length - 2,
             };
             char8* spelling = c_space_allocate(space, inner.length + 1);
             u64 output = 0;
             for (u64 index = 0; index < inner.length; index += 1)
             {
-                if (inner.pointer[index] == '\\' && index + 1 < inner.length)
+                // C's destringization removes escapes only for a quote or
+                // backslash. Other escape spellings remain pragma text.
+                if (inner.pointer[index] == '\\' && index + 1 < inner.length &&
+                    (inner.pointer[index + 1] == '\\' || inner.pointer[index + 1] == '"'))
                 {
                     index += 1;
                 }
@@ -5081,33 +5809,35 @@ BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* m
             result.token.offset = c_space_offset(space, spelling);
             result.token.length = (u16)output;
         }
-        return result;
     }
-    u64 length = 0;
-    for (u64 token_index = 0; token_index < token_count; token_index += 1)
+    else
     {
-        length += c_token_length(base, tokens[token_index].token) + (token_index != 0);
-    }
-    if (length && length < C_TOKEN_LENGTH_OVERSIZED)
-    {
-        char8* spelling = c_space_allocate(space, length + 1);
-        u64 output = 0;
+        u64 length = 0;
         for (u64 token_index = 0; token_index < token_count; token_index += 1)
         {
-            String8 token_spelling = c_token_spelling(base, tokens[token_index].token);
-            if (token_index)
-            {
-                spelling[output++] = ' ';
-            }
-            if (token_spelling.length)
-            {
-                memcpy(spelling + output, token_spelling.pointer, token_spelling.length);
-            }
-            output += token_spelling.length;
+            length += c_token_length(base, tokens[token_index].token) + (token_index != 0);
         }
-        spelling[output] = 0;
-        result.token.offset = c_space_offset(space, spelling);
-        result.token.length = (u16)output;
+        if (length && length < C_TOKEN_LENGTH_OVERSIZED)
+        {
+            char8* spelling = c_space_allocate(space, length + 1);
+            u64 output = 0;
+            for (u64 token_index = 0; token_index < token_count; token_index += 1)
+            {
+                String8 token_spelling = c_token_spelling(base, tokens[token_index].token);
+                if (token_index)
+                {
+                    spelling[output++] = ' ';
+                }
+                if (token_spelling.length)
+                {
+                    memcpy(spelling + output, token_spelling.pointer, token_spelling.length);
+                }
+                output += token_spelling.length;
+            }
+            spelling[output] = 0;
+            result.token.offset = c_space_offset(space, spelling);
+            result.token.length = (u16)output;
+        }
     }
     return result;
 }
@@ -5133,8 +5863,28 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
     while (!child && continuation->argument_index < continuation->argument_count)
     {
         CMacroArgument* argument = continuation->arguments + continuation->argument_index;
-        bool used_expanded = continuation->macro->definition.pragma_like ||
-                             continuation->macro->definition.parameter_expand_count[continuation->argument_index] != 0;
+        CMacroDefinition const* definition = &continuation->macro->definition;
+        if (definition->header_query && argument->token_count >= 3 &&
+            c_token_is_punctuator(&argument->tokens[0].token, C_PUNCTUATOR_LESS) &&
+            c_token_is_punctuator(&argument->tokens[argument->token_count - 1].token, C_PUNCTUATOR_GREATER))
+        {
+            // Header names are recognized before ordinary argument prescan.
+            // Keep this on the builtin's continuation so aliases encountered
+            // during rescanning receive the same literal-operand policy.
+            bool literal_header = !argument->tokens[0].foreign && !argument->tokens[argument->token_count - 1].foreign;
+            for (u64 token_index = 0; token_index < argument->token_count; token_index += 1)
+            {
+                // Punctuators do not expand, so the endpoint bits also carry
+                // literal provenance through the builtin's replacement. A
+                // wrapper may already have removed an empty macro argument;
+                // its surviving offsets cannot prove the original span.
+                if (literal_header || (token_index && token_index + 1 < argument->token_count))
+                {
+                    argument->tokens[token_index].no_expand = true;
+                }
+            }
+        }
+        bool used_expanded = definition->pragma_like || definition->parameter_expand_count[continuation->argument_index] != 0;
         bool needs_expansion = false;
         for (u64 token_index = 0; used_expanded && token_index < argument->token_count && !needs_expansion; token_index += 1)
         {
@@ -5153,12 +5903,12 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
                 .continuation = continuation,
                 .task_base = tasks->count,
             };
-            c_macro_expansion_tasks_push(arena, tasks, argument->tokens, argument->token_count, 0);
+            c_macro_expansion_tasks_push(arena, tasks, argument->tokens, argument->token_count, 0, 0);
         }
         else
         {
             argument->expanded_tokens = argument->tokens;
-            argument->expanded_token_count = argument->token_count;
+            argument->expanded_token_count = argument->token_count & C_MACRO_ARGUMENT_COUNT_MASK;
             continuation->argument_index += 1;
         }
     }
@@ -5174,23 +5924,23 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
 // from the batch end, the reverse order c_macro_expansion_tasks_push stores.
 // Sources are the definition and argument arrays, never task storage, so
 // nothing here reads rows the reservation may have moved.
-BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansionTaskStack* tasks, CMacro* macro, CMacroArgument const* arguments,
+BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansionTaskStack* tasks, CMacro* macro, CMacroDefinition const* definition, CMacroArgument const* arguments,
                                                     CPpToken invocation)
 {
     u32 stamp = invocation.stamp;
-    u8 const* definition_spaces = macro->definition.replacement_space;
-    u32 const* parameter_indices = macro->definition.parameter_index;
-    u32 parameter_count = arguments ? macro->definition.parameter_count : 0;
-    u64 token_count = macro->definition.plain_count;
+    u8 const* definition_spaces = definition->replacement_space;
+    u32 const* parameter_indices = definition->parameter_index;
+    u32 parameter_count = arguments ? definition->parameter_count : 0;
+    u64 token_count = definition->plain_count;
     for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
     {
-        token_count += (u64)macro->definition.parameter_expand_count[parameter_index] * arguments[parameter_index].expanded_token_count;
+        token_count += (u64)definition->parameter_expand_count[parameter_index] * arguments[parameter_index].expanded_token_count;
     }
     c_macro_expansion_tasks_reserve(arena, tasks, token_count, true);
     CMacroExpansionTask* batch = tasks->data + tasks->count;
-    batch[0] = (CMacroExpansionTask){.macro = macro, .kind = C_MACRO_EXPANSION_ENABLE};
+    batch[0] = (CMacroExpansionTask){.macro = macro, .kind = C_MACRO_EXPANSION_ENABLE, .generation = definition->generation};
     CMacroExpansionTask* cursor = batch + 1 + token_count;
-    for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
+    for (u32 replacement_index = 0; replacement_index < definition->replacement_count; replacement_index += 1)
     {
         bool replacement_space = replacement_index ? !definition_spaces || definition_spaces[replacement_index] != 0 : invocation.preceded_by_space;
         u32 parameter_index = parameter_indices[replacement_index];
@@ -5199,7 +5949,7 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
             cursor -= 1;
             *cursor = (CMacroExpansionTask){
                 .token = {
-                    .token = macro->definition.replacement[replacement_index],
+                    .token = definition->replacement[replacement_index],
                     .stamp = stamp & C_PP_STAMP_MASK,
                     .foreign = true,
                     .preceded_by_space = replacement_space,
@@ -5235,33 +5985,36 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
 // is invalid (an edge `##`, a paste that forms no token), diagnosed there.
 // A pragma-like definition has no replacement list to build; a plain one is
 // produced into its batch directly; builtins, `#` and `##` stage first.
-BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, CSpellingSpace* space, CMacro* first_macro, CMacro* macro, CMacroArgument* arguments,
+BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, CSpellingSpace* space, CMacro* first_macro, CMacro* macro, CMacroDefinition const* definition, CMacroArgument* arguments,
                                             u32 argument_count, CPpToken invocation, CPpStampTable const* stamps, CPreprocessResult* result,
-                                            CMacroExpansionContext* target, CMacroExpansionTaskStack* tasks)
+                                            CMacroExpansionTaskStack* tasks)
 {
     bool ok = true;
-    if (macro->definition.pragma_like)
+    if (definition->pragma_like)
     {
         if (argument_count == 1)
         {
             CPpToken pragma = c_macro_pragma_token(space, macro, arguments[0], invocation);
-            c_preprocess_output_push(arena, &target->first_output, &target->last_output, pragma, &target->output_count);
+            // Argument prescan retains the marker. The same task path executes
+            // direct and substituted markers once they reach the outer rescan.
+            macro->disabled = macro->disabled || definition->generation == macro->definition.generation;
+            c_macro_expansion_tasks_push(arena, tasks, &pragma, 1, macro, definition->generation);
         }
     }
-    else if (!macro->builtin && !macro->definition.has_paste && !macro->definition.has_stringify)
+    else if (!definition->builtin && !definition->has_paste && !definition->has_stringify)
     {
-        macro->disabled = true;
-        c_macro_produce_plain_tasks(arena, tasks, macro, arguments, invocation);
+        macro->disabled = macro->disabled || definition->generation == macro->definition.generation;
+        c_macro_produce_plain_tasks(arena, tasks, macro, definition, arguments, invocation);
     }
     else
     {
         CPpToken* replacement_tokens = 0;
         u32 replacement_count = 0;
-        ok = c_macro_replacement_tokens(arena, space, first_macro, macro, arguments, invocation, stamps, result, &replacement_tokens, &replacement_count);
+        ok = c_macro_replacement_tokens(arena, space, first_macro, macro, definition, arguments, invocation, stamps, result, &replacement_tokens, &replacement_count);
         if (ok)
         {
-            macro->disabled = true;
-            c_macro_expansion_tasks_push(arena, tasks, replacement_tokens, replacement_count, macro);
+            macro->disabled = macro->disabled || definition->generation == macro->definition.generation;
+            c_macro_expansion_tasks_push(arena, tasks, replacement_tokens, replacement_count, macro, definition->generation);
         }
     }
     return ok;
@@ -5273,7 +6026,7 @@ BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, CSpellingSpace* space, 
 BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
                                              struct CPreprocessSourceFrame* frame, u32 file, CPpStampTable* stamps, CPpToken* input, u32 input_count,
                                              CPreprocessTokenNode** first_output, CPreprocessTokenNode** last_output, u64* output_count, u32 expansion_limit,
-                                             CPreprocessResult* result)
+                                             CPreprocessResult* result, CPreprocessPragmaContext* pragma_context)
 {
     CMacroExpansionContext* context = arena_allocate(arena, CMacroExpansionContext, 1);
     *context = (CMacroExpansionContext){
@@ -5283,7 +6036,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
     };
     CMacroExpansionTask local_tasks[C_MACRO_EXPANSION_LOCAL_TASK_CAPACITY];
     CMacroExpansionTaskStack tasks = {.data = local_tasks, .capacity = BUSTER_ARRAY_LENGTH(local_tasks)};
-    c_macro_expansion_tasks_push(arena, &tasks, input, input_count, 0);
+    c_macro_expansion_tasks_push(arena, &tasks, input, input_count, 0, 0);
     u32 expansion_count = 0;
     bool ok = true;
     bool done = false;
@@ -5303,7 +6056,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
             {
                 CMacroArgument* argument = continuation->arguments + continuation->argument_index;
                 argument->expanded_tokens = arena_allocate(arena, CPpToken, context->output_count);
-                argument->expanded_token_count = context->output_count;
+                argument->expanded_token_count = context->output_count & C_MACRO_ARGUMENT_COUNT_MASK;
                 u64 expanded_index = 0;
                 for (CPreprocessTokenNode* node = context->first_output; node; node = node->next)
                 {
@@ -5318,8 +6071,10 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                 else
                 {
                     context = continuation->parent;
-                    ok = c_macro_materialize(arena, space, first_macro, continuation->macro, continuation->arguments, continuation->argument_count,
-                                             continuation->invocation, stamps, result, context, &tasks);
+                    ok = c_macro_materialize(arena, space, first_macro, continuation->macro,
+                                             &continuation->macro->definition,
+                                             continuation->arguments, continuation->argument_count,
+                                             continuation->invocation, stamps, result, &tasks);
                     done = !ok;
                 }
             }
@@ -5329,11 +6084,16 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
             CMacroExpansionTask task = tasks.data[--tasks.count];
             if (task.kind == C_MACRO_EXPANSION_ENABLE)
             {
-                task.macro->disabled = false;
+                c_macro_enable_definition(task);
             }
             else
             {
                 CPpToken token = task.token;
+                if (token.token.kind == C_TOKEN_PRAGMA && !context->parent &&
+                    c_preprocess_expansion_pragma(pragma_context, space->base, token, stamps, &tasks))
+                {
+                    continue;
+                }
                 CMacro* macro = token.token.kind == C_TOKEN_IDENTIFIER && !token.no_expand
                                     ? c_macro_find_token(first_macro, symbols, space->base, &token.token)
                                     : 0;
@@ -5401,13 +6161,13 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                             }
                             else
                             {
-                                ok = c_macro_materialize(arena, space, first_macro, macro, arguments, argument_count, token, stamps, result, context, &tasks);
+                                ok = c_macro_materialize(arena, space, first_macro, macro, &macro->definition, arguments, argument_count, token, stamps, result, &tasks);
                                 done = !ok;
                             }
                         }
                         else
                         {
-                            ok = c_macro_materialize(arena, space, first_macro, macro, arguments, argument_count, token, stamps, result, context, &tasks);
+                            ok = c_macro_materialize(arena, space, first_macro, macro, &macro->definition, arguments, argument_count, token, stamps, result, &tasks);
                             done = !ok;
                         }
                     }
@@ -5923,7 +6683,8 @@ BUSTER_C_INTERNAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions o
                                                 String8* source_out, FileMapRead* map_out, CIncludeSearchOrigin origin,
                                                 CIncludeSearchOrigin* origin_out);
 
-BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* tokens, u32 token_count, String8* name_out, bool* quoted_out);
+BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* tokens, u32 token_count, bool preserve_characters,
+                                        String8* name_out, bool* quoted_out);
 
 BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch)
 {
@@ -6171,9 +6932,11 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         }
         CToken* arguments = arena_allocate(arena, CToken, argument_count);
         u32 argument_index = 0;
+        bool literal_header = open->next && open->next->token.no_expand;
         for (scan = open->next; scan != close; scan = scan->next)
         {
             arguments[argument_index++] = scan->token.token;
+            literal_header = literal_header && scan->token.no_expand;
         }
         bool supported = false;
         if (has_include || has_include_next)
@@ -6182,7 +6945,7 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             bool quoted = false;
             String8 resolved_path = {0};
             String8 resolved_source = {0};
-            supported = c_include_name(arena, base, arguments, argument_count, &include_name, &quoted) &&
+            supported = c_include_name(arena, base, arguments, argument_count, literal_header, &include_name, &quoted) &&
                         options &&
                         (has_include_next ? c_include_resolve_next(arena, *options, include_name, &resolved_path, &resolved_source, 0, including_origin, 0)
                                           : c_include_resolve(arena, *options, including_path, include_name, quoted, &resolved_path, &resolved_source, 0, 0));
@@ -6289,7 +7052,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     if (valid)
     {
         valid = c_preprocess_expand(arena, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
-                                    &last_expanded, &expanded_count, expansion_limit, result);
+                                    &last_expanded, &expanded_count, expansion_limit, result, 0);
     }
     if (valid)
     {
@@ -7004,7 +7767,6 @@ u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_i
     return low ? preprocess->pack_changes[low - 1].alignment : 0;
 }
 
-typedef struct CPreprocessPragmaContext CPreprocessPragmaContext;
 struct CPreprocessPragmaContext
 {
     Arena* arena;
@@ -7081,6 +7843,7 @@ BUSTER_C_INTERNAL void c_macro_clear_definition(CMacro* macro)
         return;
     }
     macro->definition = (CMacroDefinition){0};
+    macro->disabled = false;
 }
 
 BUSTER_C_INTERNAL void c_macro_pop_definition(CPreprocessPragmaContext context, String8 name)
@@ -7102,6 +7865,7 @@ BUSTER_C_INTERNAL void c_macro_pop_definition(CPreprocessPragmaContext context, 
         CMacro* macro = entry->macro;
         macro->definition = entry->definition;
         macro->disabled = false;
+        // An in-flight pop recomputes this generation's active ENABLE state.
     }
 }
 
@@ -7259,6 +8023,54 @@ BUSTER_C_INTERNAL void c_preprocess_pragma_marker(CPreprocessPragmaContext conte
         token_count += 1;
     }
     c_preprocess_handle_pragma(context, lex.spelling_base, lex.tokens, token_count);
+}
+
+// Macro-state pragmas take effect at the outer rescan cursor. Argument prescan
+// preserves markers, so each substituted occurrence executes in that cursor's
+// order. Other markers stay in the output for their token-position reader.
+BUSTER_C_INTERNAL bool c_preprocess_expansion_pragma(CPreprocessPragmaContext* pragma_context,
+                                                       char8 const* base, CPpToken marker, CPpStampTable const* stamps, CMacroExpansionTaskStack const* tasks)
+{
+    bool handled = false;
+    if (pragma_context && marker.token.length)
+    {
+        CLexResult lex = c_lex(pragma_context->arena, c_token_spelling(base, marker.token));
+        u32 token_count = 0;
+        while (token_count < lex.token_count && lex.tokens[token_count].kind != C_TOKEN_NEWLINE && lex.tokens[token_count].kind != C_TOKEN_END_OF_FILE)
+        {
+            token_count += 1;
+        }
+        bool pop = token_count && c_token_spelling_equal(lex.spelling_base, lex.tokens[0], S8("pop_macro"));
+        handled = pop || (token_count && c_token_spelling_equal(lex.spelling_base, lex.tokens[0], S8("push_macro")));
+        if (handled)
+        {
+            String8 name = {0};
+            CMacro* popped_macro = 0;
+            if (pop && c_preprocess_pragma_macro_name(lex.spelling_base, lex.tokens, token_count, &name))
+            {
+                popped_macro = c_macro_find(*pragma_context->first_macro, c_symbol_intern(pragma_context->symbols, name));
+            }
+            CPreprocessPragmaContext context = *pragma_context;
+            context.current_location = c_pp_stamp_location(stamps, marker.stamp);
+            c_preprocess_handle_pragma(context, lex.spelling_base, lex.tokens, token_count);
+            if (popped_macro)
+            {
+                // Only the restored generation's ENABLE markers disable it.
+                // Inspect all active batches without consuming any task or
+                // changing an argument context's floor.
+                for (u64 index = 0; index < tasks->count; index += 1)
+                {
+                    CMacroExpansionTask task = tasks->data[index];
+                    if (task.kind == C_MACRO_EXPANSION_ENABLE && task.macro == popped_macro &&
+                        task.generation == popped_macro->definition.generation)
+                    {
+                        popped_macro->disabled = true;
+                    }
+                }
+            }
+        }
+    }
+    return handled;
 }
 
 // Materialize an expanded line into the output stream. Foreign tokens (their
@@ -8181,8 +8993,10 @@ BUSTER_C_INTERNAL bool c_include_resolve_next(Arena* arena, CPreprocessOptions o
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* tokens, u32 token_count, String8* name_out, bool* quoted_out)
+BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* tokens, u32 token_count, bool preserve_characters,
+                                        String8* name_out, bool* quoted_out)
 {
+    bool recognized = false;
     if (token_count == 1 && tokens[0].kind == C_TOKEN_STRING_LITERAL && tokens[0].length >= 2)
     {
         String8 spelling = c_token_spelling(base, tokens[0]);
@@ -8191,35 +9005,55 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
             .length = spelling.length - 2,
         };
         *quoted_out = true;
-        return true;
+        recognized = true;
     }
-    if (token_count >= 3 && c_token_is_punctuator(&tokens[0], C_PUNCTUATOR_LESS) && c_token_is_punctuator(&tokens[token_count - 1], C_PUNCTUATOR_GREATER))
+    else if (token_count >= 3 && c_token_is_punctuator(&tokens[0], C_PUNCTUATOR_LESS) && c_token_is_punctuator(&tokens[token_count - 1], C_PUNCTUATOR_GREATER))
     {
-        u64 length = 0;
-        for (u32 index = 1; index + 1 < token_count; index += 1)
+        u64 end = (u64)tokens[0].offset + 1;
+        for (u32 index = 1; preserve_characters && index < token_count; index += 1)
         {
-            length += c_token_length(base, tokens[index]);
+            // Wrapper arguments may already have been prescanned. Preserve a
+            // source span only when every surviving spelling still belongs
+            // to that span; synthesized replacements combine as tokens.
+            preserve_characters = tokens[index].offset >= end && tokens[index].offset <= tokens[token_count - 1].offset;
+            end = (u64)tokens[index].offset + c_token_length(base, tokens[index]);
         }
-        char8* name = arena_allocate(arena, char8, length + 1);
-        u64 output = 0;
-        for (u32 index = 1; index + 1 < token_count; index += 1)
+        if (preserve_characters)
         {
-            String8 spelling = c_token_spelling(base, tokens[index]);
-            if (spelling.length)
+            // Direct header-name characters belong to one translated source
+            // span. Token concatenation would erase spaces, tabs and comments
+            // that are actual filename characters in this lexical context.
+            *name_out = (String8){.pointer = c_token_spelling(base, tokens[0]).pointer + 1,
+                                 .length = tokens[token_count - 1].offset - tokens[0].offset - 1};
+        }
+        else
+        {
+            u64 length = 0;
+            for (u32 index = 1; index + 1 < token_count; index += 1)
             {
-                memcpy(name + output, spelling.pointer, spelling.length);
+                length += c_token_length(base, tokens[index]);
             }
-            output += spelling.length;
+            char8* name = arena_allocate(arena, char8, length + 1);
+            u64 output = 0;
+            for (u32 index = 1; index + 1 < token_count; index += 1)
+            {
+                String8 spelling = c_token_spelling(base, tokens[index]);
+                if (spelling.length)
+                {
+                    memcpy(name + output, spelling.pointer, spelling.length);
+                }
+                output += spelling.length;
+            }
+            name[output] = 0;
+            *name_out = (String8){
+                .pointer = name,
+                .length = output,
+            };
         }
-        name[output] = 0;
-        *name_out = (String8){
-            .pointer = name,
-            .length = output,
-        };
         *quoted_out = false;
-        return true;
+        recognized = true;
     }
-    return false;
+    return recognized;
 }
 
 BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable* symbols, CLexResult lex, u64* token_index, CMacro** first_macro, CMacro** last_macro,
@@ -8255,7 +9089,7 @@ BUSTER_C_INTERNAL void c_preprocess_command_definition(Arena* arena, CSpellingSp
     String8 prefix = S8("#define ");
     // Separate the synthetic directive terminator from a trailing backslash so translation cannot splice the replacement away.
     String8 text = string_format(arena, S8("{S8}{S8} {S8} \n"), prefix, definition.name, definition.value);
-    CLexResult lex = c_lex_space(arena, space, text);
+    CLexResult lex = c_lex_space(arena, space, text, false, result->dialect);
     for (u64 diagnostic_index = 0; diagnostic_index < lex.diagnostic_count; diagnostic_index += 1)
     {
         c_preprocess_diagnostic_copy(arena, result, lex.diagnostics[diagnostic_index]);
@@ -8273,7 +9107,7 @@ BUSTER_C_INTERNAL void c_preprocess_command_undefinition(Arena* arena, CSpelling
 {
     String8 prefix = S8("#undef ");
     String8 text = string_format(arena, S8("{S8}{S8}\n"), prefix, name);
-    CLexResult lex = c_lex_space(arena, space, text);
+    CLexResult lex = c_lex_space(arena, space, text, false, result->dialect);
     for (u64 diagnostic_index = 0; diagnostic_index < lex.diagnostic_count; diagnostic_index += 1)
     {
         c_preprocess_diagnostic_copy(arena, result, lex.diagnostics[diagnostic_index]);
@@ -8330,9 +9164,9 @@ BUSTER_C_INTERNAL void c_preprocess_command_operations(Arena* arena, CSpellingSp
 BUSTER_C_INTERNAL void c_preprocess_builtins(Arena* arena, CSymbolTable* symbols, CMacro** first_macro, CMacro** last_macro, String8 path, CSourceLocation location)
 {
     CMacro* line_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__LINE__"), 0, 0, 0, 0, false, false);
-    line_macro->builtin = C_MACRO_BUILTIN_LINE;
+    line_macro->definition.builtin = C_MACRO_BUILTIN_LINE;
     CMacro* file_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__FILE__"), 0, 0, 0, 0, false, false);
-    file_macro->builtin = C_MACRO_BUILTIN_FILE;
+    file_macro->definition.builtin = C_MACRO_BUILTIN_FILE;
     (*first_macro)->builtin_line = location.line;
     (*first_macro)->builtin_path = path;
 }
@@ -8424,7 +9258,7 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
                 valid = false;
                 break;
             }
-            String8 parameter = c_token_spelling(lex.spelling_base, token);
+            String8 parameter = token.symbol ? symbols->names[token.symbol] : c_symbol_ucn_name(symbols, c_token_spelling(lex.spelling_base, token));
             for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
             {
                 valid = valid && !string_equal(parameters[parameter_index], parameter);
@@ -8545,7 +9379,7 @@ BUSTER_C_INTERNAL void c_preprocess_undefine_directive(Arena* arena, CSymbolTabl
         else
         {
             CMacro* macro = c_macro_find_token(first_macro, symbols, lex.spelling_base, &name);
-            if (macro && (allow_builtin || !macro->builtin))
+            if (macro && (allow_builtin || !macro->definition.builtin))
             {
                 macro->definition.defined = false;
             }
@@ -8587,13 +9421,14 @@ BUSTER_C_SHARED bool c_preprocess_dialect_is_c23(CPreprocessDialect dialect)
     return dialect == C_PREPROCESS_DIALECT_GNU23 || dialect == C_PREPROCESS_DIALECT_C23;
 }
 
-// C23 spells the underscore keywords through aliases; the respell runs at
-// the end of preprocessing while the spelling space is still open, so each
-// respelled token points at prelude bytes copied under an expansion map
-// entry that preserves its recovered source location.
-BUSTER_C_INTERNAL void c_preprocess_respell_c23(CSpellingSpace* space, CSourceMap* map, CPreprocessResult* result)
+// After macro replacement, canonical identifier bytes and C23 underscore
+// aliases travel to consumers that retain names as well as symbol ids. Fuse
+// both respellings in the existing final pass; ordinary pre-C23 units whose
+// names contain no UCNs do not enter it. Expansion stamps retain raw columns.
+BUSTER_C_INTERNAL void c_preprocess_respell_identifiers(CSpellingSpace* space, CSourceMap* map, CPreprocessResult* result)
 {
-    if (!c_preprocess_dialect_is_c23(result->dialect))
+    bool c23 = c_preprocess_dialect_is_c23(result->dialect);
+    if (!c23 && (!result->symbols || !result->symbols->has_ucn_names))
     {
         return;
     }
@@ -8608,23 +9443,27 @@ BUSTER_C_INTERNAL void c_preprocess_respell_c23(CSpellingSpace* space, CSourceMa
         }
         String8 spelling = c_token_spelling(base, *token);
         String8 respelled = {0};
-        if (string_equal(spelling, S8("bool")))
+        if (result->symbols && token->symbol && result->symbols->names[token->symbol].length != spelling.length)
+        {
+            respelled = result->symbols->names[token->symbol];
+        }
+        else if (c23 && string_equal(spelling, S8("bool")))
         {
             respelled = S8("_Bool");
         }
-        else if (string_equal(spelling, S8("alignas")))
+        else if (c23 && string_equal(spelling, S8("alignas")))
         {
             respelled = S8("_Alignas");
         }
-        else if (string_equal(spelling, S8("alignof")))
+        else if (c23 && string_equal(spelling, S8("alignof")))
         {
             respelled = S8("_Alignof");
         }
-        else if (string_equal(spelling, S8("static_assert")))
+        else if (c23 && string_equal(spelling, S8("static_assert")))
         {
             respelled = S8("_Static_assert");
         }
-        else if (string_equal(spelling, S8("thread_local")))
+        else if (c23 && string_equal(spelling, S8("thread_local")))
         {
             respelled = S8("_Thread_local");
         }
@@ -8705,7 +9544,9 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessResult) == 184);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceMapRecovery) == 80);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceMap) == 32);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 64);
+// has_ucn_names is a value field copied with the table; its six pointer
+// fields still follow the explicit rehoming rules below.
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 608 + 8 * BUSTER_INCLUDE_TESTS);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
@@ -9038,7 +9879,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                   .start = 0,
                                   .kind = IR_SOURCE_REGION_STAMP,
                               });
-    CLexResult root_lex = c_lex_space(arena, space, source);
+    // Preprocessed input already completed phase one; synthesized spellings
+    // and command definitions likewise lex with replacement disabled.
+    bool trigraphs = !options.already_preprocessed && c_translate_trigraphs_enabled(options.dialect);
+    CLexResult root_lex = c_lex_space(arena, space, source, trigraphs, options.dialect);
     CSourceMetricsFileSet metrics_files = {0};
     c_source_metrics_add(&result.detail->source_lexed, &root_lex.metrics);
     {
@@ -9139,7 +9983,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             .kind = C_TOKEN_PUNCTUATOR,
             .punctuator = C_PUNCTUATOR_RIGHT_PARENTHESIS,
         };
-        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, feature_name, feature_replacement, 4, feature_parameters, 1, true, false);
+        CMacro* feature_macro = c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, feature_name, feature_replacement, 4, feature_parameters, 1, true, false);
+        feature_macro->definition.header_query = string_equal(feature_name, S8("__has_include")) || string_equal(feature_name, S8("__has_include_next"));
     }
     String8* pragma_parameters = arena_allocate(arena, String8, 1);
     pragma_parameters[0] = S8("value");
@@ -9337,7 +10182,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         // The documented cost: a program that calls fesetround and then
         // reads FLT_ROUNDS sees a stale 1, exactly as it did under GCC
         // before the builtin existed.
-        CLexResult flt_rounds_lex = c_lex_space(arena, space, S8("1"));
+        CLexResult flt_rounds_lex = c_lex_space(arena, space, S8("1"), false, options.dialect);
         c_symbols_intern_tokens(symbol_table, flt_rounds_lex.spelling_base, flt_rounds_lex.tokens, flt_rounds_lex.token_shapes, flt_rounds_lex.token_count);
         CMacro* flt_rounds_macro =
             c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__builtin_flt_rounds"), flt_rounds_lex.tokens, 1, 0, 0, true, false);
@@ -9427,8 +10272,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         C_DEFINE_TYPE_MACRO("_MSC_VER", S8("1940"));
         C_DEFINE_TYPE_MACRO("_MSC_FULL_VER", S8("194000000"));
         C_DEFINE_TYPE_MACRO("_MSC_EXTENSIONS", S8("1"));
-        C_DEFINE_TYPE_MACRO("__inline", S8("static inline"));
-        C_DEFINE_TYPE_MACRO("__forceinline", S8("static inline"));
+        // These function specifiers do not supply a storage class. UCRT
+        // declarations already spell static or extern where required.
+        C_DEFINE_TYPE_MACRO("__inline", S8("inline"));
+        C_DEFINE_TYPE_MACRO("__forceinline", S8("inline"));
         C_DEFINE_TYPE_MACRO("SORTPP_PASS", S8("1"));
         C_DEFINE_TYPE_MACRO("_WIN64", S8("1"));
         if (options.target.cpu_arch == CPU_ARCH_X86_64)
@@ -9600,7 +10447,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         .lex = root_lex,
         .class_masks = root_class_masks,
         .path = options.source_path.length ? options.source_path : S8("."),
-        .identity = c_include_file_identity(options.source_path.length ? options.source_path : S8("."), (FileIdentity){0}),
+        .identity = c_include_file_identity(options.source_path.length ? options.source_path : S8("."), options.source_identity),
         .logical_path = options.source_path.length ? options.source_path : S8("."),
         .line_start = true,
     };
@@ -9791,7 +10638,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                         line_expanded = c_preprocess_expand(arena, space, symbol_table, first_macro, 0, 0, &stamps,
                                                             c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end),
                                                             (u32)(line_end - token_index), &first_line, &last_line, &line_token_count,
-                                                            expansion_limit, &result);
+                                                            expansion_limit, &result, 0);
                         line_tokens = arena_allocate(arena, CToken, line_token_count);
                         u32 line_index = 0;
                         for (CPreprocessTokenNode* node = first_line; node; node = node->next)
@@ -9871,19 +10718,19 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                     String8 include_name = {0};
                     bool quoted = false;
                     u32 raw_include_count = (u32)(line_end - token_index);
-                    bool include_expanded = c_include_name(arena, base, lex.tokens + token_index, raw_include_count, &include_name, &quoted);
+                    bool include_expanded = c_include_name(arena, base, lex.tokens + token_index, raw_include_count, true, &include_name, &quoted);
                     if (!include_expanded)
                     {
                         include_expanded = c_preprocess_expand(arena, space, symbol_table, first_macro, 0, 0, &stamps,
                                                                c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end), raw_include_count,
-                                                               &first_include, &last_include, &include_token_count, expansion_limit, &result);
+                                                               &first_include, &last_include, &include_token_count, expansion_limit, &result, 0);
                         CToken* include_tokens = arena_allocate(arena, CToken, include_token_count);
                         u32 include_index = 0;
                         for (CPreprocessTokenNode* node = first_include; node; node = node->next)
                         {
                             include_tokens[include_index++] = node->token.token;
                         }
-                        include_expanded = include_expanded && c_include_name(arena, base, include_tokens, include_index, &include_name, &quoted);
+                        include_expanded = include_expanded && c_include_name(arena, base, include_tokens, include_index, false, &include_name, &quoted);
                     }
                     if (!include_expanded)
                     {
@@ -9926,7 +10773,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                             }
                             else
                             {
-                                bool include_once = include_file->once;
+                                // The root is entered before the table exists;
+                                // compare it lazily instead of allocating a
+                                // once table for every include-free source.
+                                bool include_once = include_file->once ||
+                                                    (is_import && (include_file->included || c_include_file_identity_equal(include_file, root_frame.identity)));
                                 if (is_import)
                                 {
                                     // Mark before descending so a recursive
@@ -9944,7 +10795,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                     CMacro* guard_macro = guard_symbol ? c_macro_find(first_macro, guard_symbol) : 0;
                                     include_once = guard_macro && guard_macro->definition.defined;
                                 }
-                                CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source);
+                                include_file->included = true;
+                                CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source, trigraphs, options.dialect);
                                 // A suppressed include lexed nothing and adds
                                 // zeroes; its path was already counted by the
                                 // inclusion that did the lexing, and its
@@ -10019,7 +10871,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                         pragma_expanded = c_preprocess_expand(arena, space, symbol_table, first_macro, 0, 0, &stamps,
                                                               c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end),
                                                               (u32)(line_end - token_index), &first_pragma, &last_pragma, &pragma_token_count,
-                                                              expansion_limit, &result);
+                                                              expansion_limit, &result, 0);
                         expanded_pragma_count = c_preprocess_tokens_from_nodes(first_pragma, arena, &pragma_tokens);
                     }
                     if (pragma_expanded)
@@ -10087,9 +10939,21 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 }
             }
         }
-        while (parenthesis_depth && logical_end < lex.token_count && lex.tokens[logical_end].kind == C_TOKEN_NEWLINE)
+        while (logical_end < lex.token_count && lex.tokens[logical_end].kind == C_TOKEN_NEWLINE && !options.already_preprocessed)
         {
             u64 next_line_start = logical_end + 1;
+            // Before an invocation has opened, an ordinary newline run is
+            // whitespace between the macro's rescan tail and a following `(`.
+            // Skip the run once; directives keep their separate ordered batch.
+            while (next_line_start < lex.token_count && lex.tokens[next_line_start].kind == C_TOKEN_NEWLINE)
+            {
+                next_line_start += 1;
+            }
+            if (!parenthesis_depth &&
+                (next_line_start >= lex.token_count || !c_token_is_punctuator(&lex.tokens[next_line_start], C_PUNCTUATOR_LEFT_PARENTHESIS)))
+            {
+                break;
+            }
             if (next_line_start < lex.token_count && c_token_is_punctuator(&lex.tokens[next_line_start], C_PUNCTUATOR_HASH))
             {
                 u64 directive_index = next_line_start + 1;
@@ -10318,7 +11182,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             CPreprocessTokenNode* last_line = 0;
             u64 line_output_count = 0;
             expansion_ok = c_preprocess_expand(arena, space, symbol_table, first_macro, source_frame, token_file, &stamps, wrapped_tokens, wrapped_count, &first_line, &last_line,
-                                               &line_output_count, expansion_limit, &result);
+                                               &line_output_count, expansion_limit, &result, &pragma_context);
             if (expansion_ok)
             {
                 c_preprocess_process_expanded_line(pragma_context, space, &map, &stamps, first_line, line_output_count, &token_stream, &output_count);
@@ -10381,7 +11245,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // Respelling queries the published prefix and may append regions (moving
     // their backing array). Rebuild keys only for that appended tail; without
     // it, a second publication would retain an identical key array in the TU.
-    c_preprocess_respell_c23(space, &map, &result);
+    c_preprocess_respell_identifiers(space, &map, &result);
     c_source_map_publish_appended(arena, recovery, &map);
     u32 page_count = (u32)((space->used >> IR_SOURCE_MAP_PAGE_SHIFT) + 1);
     u32* pages = arena_allocate(arena, u32, page_count);
@@ -10424,7 +11288,34 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
 CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)
 {
     C_CENSUS_PHASE_BEGIN(PREPROCESS);
-    CPreprocessResult result = c_preprocess_run(arena, source, options);
+    CPreprocessResult result;
+    CSourceAllocationPlan plan;
+    if (arena && !c_source_allocation_plan(source.length, &plan))
+    {
+        // Reject before phase setup and any source-derived capacity sums.
+        // A sentinel length is sufficient to exercise this path: no byte of
+        // the source is read and no source-sized storage is requested.
+        result = (CPreprocessResult){
+            .target = options.target,
+            .dialect = options.dialect < C_PREPROCESS_DIALECT_COUNT ? options.dialect : C_PREPROCESS_DIALECT_GNU17,
+        };
+        result.detail = arena_allocate(arena, CPreprocessDetail, 1);
+        *result.detail = (CPreprocessDetail){
+            .data_layout = target_data_layout_is_valid(options.data_layout) ? options.data_layout : target_data_layout(options.target),
+        };
+        result.files = arena_allocate(arena, String8, 1);
+        result.files[0] = string_duplicate_arena(arena, options.source_path.length ? options.source_path : S8("."), false);
+        result.file_count = 1;
+        result.diagnostic_capacity = 1;
+        result.diagnostics = arena_allocate(arena, CDiagnostic, 1);
+        C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, 1);
+        c_preprocess_diagnostic_push(arena, &result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                                     S8("C source exceeds the 4294967293-byte translation limit"));
+    }
+    else
+    {
+        result = c_preprocess_run(arena, source, options);
+    }
     C_CENSUS_PHASE_END();
     return result;
 }

@@ -509,9 +509,15 @@ class GitHub:
             "X-GitHub-Api-Version": "2022-11-28",
             "Content-Type": "application/json",
         })
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = response.read()
-        return json.loads(payload) if payload else None
+        if method == "GET":
+            result = integration.github_read_json(request, path)
+        else:
+            # Publication remains single-attempt: a lost response may hide a
+            # completed write, so blindly replaying it is not safe.
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = response.read()
+            result = json.loads(payload) if payload else None
+        return result
 
     def all(self, path: str, **query) -> list:
         result = []
@@ -634,11 +640,15 @@ def main(argv=None) -> int:
             api = GitHub(arguments.repository, os.environ["GH_TOKEN"])
             report = invalidate_stale(api, arguments.new_main, arguments.details_url)
         print(canonical_json(report), end="")
-        return 0
+        code = 0
+    except integration.APIReadError as error:
+        print("native-retirement merge admission needs retry: " + str(error), file=sys.stderr)
+        code = 75
     except (AdmissionError, integration.IntegrationError, KeyError, OSError,
             TypeError, ValueError) as error:
         print("native-retirement merge admission failure: " + str(error), file=sys.stderr)
-        return 1
+        code = 1
+    return code
 
 
 if __name__ == "__main__":

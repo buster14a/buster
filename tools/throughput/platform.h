@@ -21,6 +21,13 @@
  * the program the caller placed in slot 7, as "./<leaf>" from that cwd, after the
  * child rechecked that file's identity (tp_process_program_same). Without a
  * ruleset the timer starts before the fork, as before.
+ *
+ * A POSIX child that fails a step before or at exec reports that step
+ * (TpLaunchStage) and its errno as a TpLaunchFailure, so TpProcess carries
+ * launch_stage and launch_error instead of a bare exit 125: a released child
+ * over a close-on-exec, nonblocking error pipe read after the reap, a layout
+ * child that refuses over its ready report (TpProcess.refused). A program
+ * that starts and itself exits 125 reports nothing.
  */
 #ifndef BUSTER_THROUGHPUT_PLATFORM_H
 #define BUSTER_THROUGHPUT_PLATFORM_H
@@ -61,6 +68,86 @@ typedef struct TpProcessObservation
     int valid;
 } TpProcessObservation;
 
+/* Child-side failures are distinct from a program that legitimately exits 125.
+ * Every POSIX child step that can fail before or at exec has a stage: the
+ * plain launch's steps, the layout child's handshake parking, normalization,
+ * slot placement, sandbox entry and program recheck, and the bound-input
+ * launch's descriptor sealing. TP_LAUNCH_REPORT stays last: it is the parent's
+ * own verdict on a malformed or missing report, never sent by a child. */
+typedef enum TpLaunchStage
+{
+    TP_LAUNCH_NONE,
+    TP_LAUNCH_PARK,
+    TP_LAUNCH_GROUP,
+    TP_LAUNCH_STDOUT,
+    TP_LAUNCH_STDERR,
+    TP_LAUNCH_DIRECTORY,
+    TP_LAUNCH_CPU,
+    TP_LAUNCH_STDIN,
+    TP_LAUNCH_NORMALIZE,
+    TP_LAUNCH_SLOTS,
+    TP_LAUNCH_WORK_SLOT,
+    TP_LAUNCH_SANDBOX,
+    TP_LAUNCH_PROGRAM,
+    TP_LAUNCH_READY,
+    TP_LAUNCH_SIGNAL,
+    TP_LAUNCH_DESCRIPTORS,
+    TP_LAUNCH_EXEC,
+    TP_LAUNCH_REPORT
+} TpLaunchStage;
+
+static inline char const* tp_launch_stage_name(TpLaunchStage stage)
+{
+    char const* result = "unknown";
+    switch (stage)
+    {
+    case TP_LAUNCH_NONE: result = "none"; break;
+    case TP_LAUNCH_PARK: result = "handshake-park"; break;
+    case TP_LAUNCH_GROUP: result = "process-group"; break;
+    case TP_LAUNCH_STDOUT: result = "stdout"; break;
+    case TP_LAUNCH_STDERR: result = "stderr"; break;
+    case TP_LAUNCH_DIRECTORY: result = "working-directory"; break;
+    case TP_LAUNCH_CPU: result = "cpu-affinity"; break;
+    case TP_LAUNCH_STDIN: result = "stdin"; break;
+    case TP_LAUNCH_NORMALIZE: result = "normalize"; break;
+    case TP_LAUNCH_SLOTS: result = "slots"; break;
+    case TP_LAUNCH_WORK_SLOT: result = "work-slot"; break;
+    case TP_LAUNCH_SANDBOX: result = "sandbox"; break;
+    case TP_LAUNCH_PROGRAM: result = "program-identity"; break;
+    case TP_LAUNCH_READY: result = "ready-pipe"; break;
+    case TP_LAUNCH_SIGNAL: result = "restore-signal"; break;
+    case TP_LAUNCH_DESCRIPTORS: result = "descriptors"; break;
+    case TP_LAUNCH_EXEC: result = "exec"; break;
+    case TP_LAUNCH_REPORT: result = "error-pipe"; break;
+    }
+    return result;
+}
+
+/* The packet a POSIX child sends: on the layout handshake (stage NONE and
+ * error 0 when placed and sandboxed) and on the close-on-exec error pipe
+ * after a failed step. It is below PIPE_BUF, so a single write is atomic. */
+typedef struct TpLaunchFailure
+{
+    int32_t stage, error;
+} TpLaunchFailure;
+
+/* Records the first failed step only; a later step never overwrites it. */
+static inline void tp_launch_fail(TpLaunchFailure* failure, TpLaunchStage stage, int error)
+{
+    if (!failure->error)
+    {
+        failure->stage = (int32_t)stage;
+        failure->error = error > 0 ? (int32_t)error : (int32_t)EIO;
+    }
+}
+
+/* A child's failure packet names a child stage and a positive errno. */
+static inline int tp_launch_failure_valid(TpLaunchFailure failure)
+{
+    int valid = failure.stage > TP_LAUNCH_NONE && failure.stage < TP_LAUNCH_REPORT && failure.error > 0;
+    return valid;
+}
+
 typedef struct TpProcess
 {
     double wall_seconds, user_seconds, system_seconds, peak_rss_bytes;
@@ -75,6 +162,10 @@ typedef struct TpProcess
     /* A layout child refused before exec: it could not be set up, placed or
      * sandboxed, and launch_error is the errno it reported. */
     int refused;
+    /* The child step that failed with launch_error (TP_LAUNCH_NONE when the
+     * error, if any, is the parent's own), or TP_LAUNCH_REPORT when the
+     * child's report was malformed or missing. */
+    TpLaunchStage launch_stage;
 } TpProcess;
 
 #ifdef __linux__
@@ -602,7 +693,7 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         result.running_fraction[i] = NAN;
         result.counter_errors[i] = counters ? ENOSYS : 0;
     }
-    int ready[2] = {-1, -1}, armed[2] = {-1, -1};
+    int ready[2] = {-1, -1}, armed[2] = {-1, -1}, launch[2] = {-1, -1};
     int log = -1, layout = 0;
 #ifdef __linux__
     if (inputs)
@@ -628,7 +719,14 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     else
 #endif
     if (!inputs && log_path) log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    int ok = log >= 0 && pipe(ready) == 0;
+    /* The child reports one small packet (TpLaunchFailure) when a step before
+     * or at exec fails. CLOEXEC distinguishes a real exit 125; nonblocking
+     * reads cannot inherit a descendant wait. */
+    int ok = log >= 0 && pipe(ready) == 0 && pipe(launch) == 0 &&
+             fcntl(launch[0], F_SETFL, O_NONBLOCK) == 0 &&
+             fcntl(launch[1], F_SETFL, O_NONBLOCK) == 0 &&
+             fcntl(launch[0], F_SETFD, FD_CLOEXEC) == 0 &&
+             fcntl(launch[1], F_SETFD, FD_CLOEXEC) == 0;
 #ifdef __linux__
     ok = ok && (!layout || pipe2(armed, O_CLOEXEC) == 0);
 #endif
@@ -677,10 +775,12 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     if (pid == 0)
     {
         close(ready[1]);
-        int go = ready[0], parked_ends = 1;
+        close(launch[0]);
+        TpLaunchFailure failure = {TP_LAUNCH_NONE, 0};
+        int go = ready[0], failed = launch[1], delivered = 0;
 #ifdef __linux__
         int report = -1;
-        /* Under a layout both handshake ends are parked above the slots
+        /* Under a layout the three handshake ends are parked above the slots
          * first, so placing the slots cannot overwrite them. An end that
          * cannot be parked stays where it is and the child places nothing:
          * it still reports its refusal and exits. */
@@ -688,41 +788,44 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         {
             close(armed[0]);
             go = fcntl(ready[0], F_DUPFD_CLOEXEC, BQ_RETIREMENT_ROW_SLOT_HIGH);
+            if (go < 0) tp_launch_fail(&failure, TP_LAUNCH_PARK, errno);
             report = go >= 0 ? fcntl(armed[1], F_DUPFD_CLOEXEC, BQ_RETIREMENT_ROW_SLOT_HIGH) : -1;
-            parked_ends = go >= 0 && report >= 0;
+            if (go >= 0 && report < 0) tp_launch_fail(&failure, TP_LAUNCH_PARK, errno);
+            failed = report >= 0 ? fcntl(launch[1], F_DUPFD_CLOEXEC, BQ_RETIREMENT_ROW_SLOT_HIGH) : -1;
+            if (report >= 0 && failed < 0) tp_launch_fail(&failure, TP_LAUNCH_PARK, errno);
             if (go >= 0) close(ready[0]);
             else go = ready[0];
             if (report >= 0) close(armed[1]);
             else report = armed[1];
+            if (failed >= 0) close(launch[1]);
+            else failed = launch[1];
         }
 #endif
-        int child_ok = go >= 0 && parked_ends && setpgid(0, 0) == 0 && dup2(log, STDOUT_FILENO) >= 0 &&
-            dup2(log, STDERR_FILENO) >= 0;
+        if (!failure.error && setpgid(0, 0) != 0) tp_launch_fail(&failure, TP_LAUNCH_GROUP, errno);
+        if (!failure.error && dup2(log, STDOUT_FILENO) < 0) tp_launch_fail(&failure, TP_LAUNCH_STDOUT, errno);
+        if (!failure.error && dup2(log, STDERR_FILENO) < 0) tp_launch_fail(&failure, TP_LAUNCH_STDERR, errno);
         close(log);
-        if (child_ok && directory)
-        {
-            child_ok = chdir(directory) == 0;
-        }
+        if (!failure.error && directory && chdir(directory) != 0) tp_launch_fail(&failure, TP_LAUNCH_DIRECTORY, errno);
 #ifdef __linux__
-        if (child_ok && inputs) child_ok = fchdir(inputs->directory) == 0;
+        if (!failure.error && inputs && fchdir(inputs->directory) != 0)
+            tp_launch_fail(&failure, TP_LAUNCH_DIRECTORY, errno);
 #endif
-        if (child_ok && cpu >= 0)
+        if (!failure.error && cpu >= 0)
         {
 #ifdef __linux__
             cpu_set_t set;
             CPU_ZERO(&set);
             if (cpu >= CPU_SETSIZE)
             {
-                child_ok = 0;
-                errno = EINVAL;
+                tp_launch_fail(&failure, TP_LAUNCH_CPU, EINVAL);
             }
             else
             {
                 CPU_SET(cpu, &set);
-                child_ok = sched_setaffinity(0, sizeof(set), &set) == 0;
+                if (sched_setaffinity(0, sizeof(set), &set) != 0) tp_launch_fail(&failure, TP_LAUNCH_CPU, errno);
             }
 #else
-            child_ok = 0;
+            tp_launch_fail(&failure, TP_LAUNCH_CPU, ENOSYS);
 #endif
         }
 #ifdef __linux__
@@ -732,22 +835,27 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
              * stdin, the normalized state (bq_retirement_sandbox_normalize),
              * the four slots (the ruleset parked), cwd the work slot, then no
              * new privileges, Landlock and the seccomp filter. The child then
-             * reports 0, or the errno of the first step that failed, and
-             * closes its end at once, so the parent never waits on a child
-             * that stopped before reporting. */
-            int32_t failure = child_ok ? 0 : tp_process_errno();
-            int input = !failure ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
-            if (!failure && !(input >= 0 && dup2(input, STDIN_FILENO) == STDIN_FILENO)) failure = tp_process_errno();
+             * reports a clean packet, or the stage and errno of the first step
+             * that failed, and closes its end at once, so the parent never
+             * waits on a child that stopped before reporting. A delivered
+             * refusal is not repeated on the error pipe. */
+            int input = !failure.error ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
+            if (!failure.error && !(input >= 0 && dup2(input, STDIN_FILENO) == STDIN_FILENO))
+                tp_launch_fail(&failure, TP_LAUNCH_STDIN, errno);
             if (input >= 0) close(input);
-            if (!failure && !bq_retirement_sandbox_normalize(0077, inputs->memory_bytes)) failure = tp_process_errno();
+            if (!failure.error && !bq_retirement_sandbox_normalize(0077, inputs->memory_bytes))
+                tp_launch_fail(&failure, TP_LAUNCH_NORMALIZE, errno);
             int const held[4] = {inputs->executable, inputs->sources[0], inputs->sources[1], inputs->directory};
-            int parked = !failure ? bq_retirement_sandbox_slots(held, (uint32_t)inputs->side, inputs->ruleset) : -1;
-            if (!failure && parked < 0) failure = tp_process_errno();
-            if (!failure && fchdir(BQ_RETIREMENT_ROW_SLOT_WORK) != 0) failure = tp_process_errno();
-            if (!failure && !bq_retirement_sandbox_enter(parked)) failure = tp_process_errno();
-            if (!failure && inputs->program && !tp_process_program_same(inputs->program)) failure = tp_process_errno();
+            int parked = !failure.error ? bq_retirement_sandbox_slots(held, (uint32_t)inputs->side, inputs->ruleset) : -1;
+            if (!failure.error && parked < 0) tp_launch_fail(&failure, TP_LAUNCH_SLOTS, errno);
+            if (!failure.error && fchdir(BQ_RETIREMENT_ROW_SLOT_WORK) != 0)
+                tp_launch_fail(&failure, TP_LAUNCH_WORK_SLOT, errno);
+            if (!failure.error && !bq_retirement_sandbox_enter(parked)) tp_launch_fail(&failure, TP_LAUNCH_SANDBOX, errno);
+            if (!failure.error && inputs->program && !tp_process_program_same(inputs->program))
+                tp_launch_fail(&failure, TP_LAUNCH_PROGRAM, errno);
             ssize_t written = write(report, &failure, sizeof(failure));
-            child_ok = !failure && written == (ssize_t)sizeof(failure);
+            delivered = failure.error && written == (ssize_t)sizeof(failure);
+            if (written != (ssize_t)sizeof(failure)) tp_launch_fail(&failure, TP_LAUNCH_READY, written < 0 ? errno : EIO);
             close(report);
         }
 #endif
@@ -757,10 +865,12 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
         {
             received = read(go, &byte, 1);
         } while (received < 0 && errno == EINTR);
+        if (!failure.error && received != 1) tp_launch_fail(&failure, TP_LAUNCH_READY, received < 0 ? errno : EIO);
         close(go);
-        if (child_ok && received == 1)
+        if (!failure.error && !layout && sigaction(SIGPIPE, &previous_pipe, NULL) != 0)
+            tp_launch_fail(&failure, TP_LAUNCH_SIGNAL, errno);
+        if (!failure.error)
         {
-            if (!layout) sigaction(SIGPIPE, &previous_pipe, NULL);
 #ifdef __linux__
             if (layout && inputs->program)
                 syscall(SYS_execveat, AT_FDCWD, args[0], args, inputs->environment, AT_SYMLINK_NOFOLLOW);
@@ -771,21 +881,37 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
                  * may leak into the child. Fail closed on an older kernel. */
 #ifdef SYS_close_range
                 int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
-                child_ok = input >= 0 && dup2(input, STDIN_FILENO) >= 0 &&
-                    syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC) == 0;
+                if (!(input >= 0 && dup2(input, STDIN_FILENO) >= 0)) tp_launch_fail(&failure, TP_LAUNCH_STDIN, errno);
+                if (!failure.error && syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC) != 0)
+                    tp_launch_fail(&failure, TP_LAUNCH_DESCRIPTORS, errno);
                 if (input >= 0) close(input);
-                if (child_ok) fexecve(inputs->executable, args, inputs->environment);
+                if (!failure.error) fexecve(inputs->executable, args, inputs->environment);
+#else
+                tp_launch_fail(&failure, TP_LAUNCH_DESCRIPTORS, ENOSYS);
 #endif
             }
             else
 #endif
             execv(args[0], args);
+            tp_launch_fail(&failure, TP_LAUNCH_EXEC, errno);
         }
-        /* No buffered parent streams are flushed after a failed exec. */
+        /* No allocation or buffered streams after fork. The packet is below
+         * PIPE_BUF and its empty pipe is nonblocking; interrupted writes retry. */
+        if (!delivered)
+        {
+            ssize_t reported;
+            do
+            {
+                reported = write(failed, &failure, sizeof(failure));
+            } while (reported < 0 && errno == EINTR);
+        }
+        close(failed);
         _exit(125);
     }
     if (ok)
     {
+        close(launch[1]);
+        launch[1] = -1;
         tp_active_pid = (sig_atomic_t)pid;
         close(ready[0]);
         ready[0] = -1;
@@ -828,18 +954,19 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
 #ifdef __linux__
         /* A layout child reports once it is placed and sandboxed; only then
          * does the timer start, so neither the placement nor the sandbox
-         * entry is measured. The report is 0, or the errno of the step that
-         * failed: the child refused (TpProcess.refused), with that errno as
-         * the launch error. The wait also watches the cancellation
-         * descriptor and is bounded by the launch's timeout (at least one
-         * second): a cancellation is reported as such, a child that never
-         * reports as ETIMEDOUT and one that exits without a report as
-         * ECHILD. */
+         * entry is measured. The report is a clean TpLaunchFailure, or the
+         * stage and errno of the step that failed: the child refused
+         * (TpProcess.refused), with that stage and errno as the launch's. The
+         * wait also watches the cancellation descriptor and is bounded by the
+         * launch's timeout (at least one second): a cancellation is reported
+         * as such, a child that never reports as ETIMEDOUT, one that exits
+         * without a report as ECHILD and a malformed report as EIO, the last
+         * two at TP_LAUNCH_REPORT. */
         if (layout)
         {
             close(armed[1]);
             armed[1] = -1;
-            int32_t reported = -1;
+            TpLaunchFailure reported = {-1, -1};
             size_t received = 0;
             int cancel_fd = inputs->cancellation >= 3 ? inputs->cancellation : -1, expired = 0, stopped = 0;
             uint64_t bound = (uint64_t)(timeout_seconds ? timeout_seconds : 1u) * UINT64_C(1000000000);
@@ -871,12 +998,16 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
             }
             close(armed[0]);
             armed[0] = -1;
-            if (identity_ok && !(received == sizeof(reported) && reported == 0))
+            int whole = received == sizeof(reported);
+            if (identity_ok && !(whole && reported.stage == TP_LAUNCH_NONE && reported.error == 0))
             {
                 identity_ok = 0;
-                result.refused = received == sizeof(reported) && reported > 0;
+                result.refused = whole && tp_launch_failure_valid(reported);
                 result.cancelled = stopped;
-                result.launch_error = result.refused ? reported : stopped ? 0 : expired ? ETIMEDOUT : ECHILD;
+                result.launch_stage = result.refused ? (TpLaunchStage)reported.stage :
+                    !stopped && !expired ? TP_LAUNCH_REPORT : TP_LAUNCH_NONE;
+                result.launch_error = result.refused ? reported.error : stopped ? 0 : expired ? ETIMEDOUT :
+                    whole ? EIO : ECHILD;
             }
             start = timestamp_take();
             if (identity_ok && observation)
@@ -990,6 +1121,30 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
             result.peak_rss_bytes = (double)usage.ru_maxrss * 1024.0;
 #endif
         }
+        /* The error pipe explains a released child only: a child the parent
+         * never released (a refusal, a cancellation, a failed identity or
+         * report) fails its ready read as a consequence, not a cause, and the
+         * parent already holds the reason. A cancellation or the parent's
+         * own error keeps its result. */
+        if (waited == pid && sent == 1 && !result.cancelled && !result.launch_error)
+        {
+            TpLaunchFailure failure = {0, 0};
+            ssize_t received;
+            do
+            {
+                received = read(launch[0], &failure, sizeof(failure));
+            } while (received < 0 && errno == EINTR);
+            if (received == (ssize_t)sizeof(failure) && tp_launch_failure_valid(failure))
+            {
+                result.launch_stage = (TpLaunchStage)failure.stage;
+                result.launch_error = failure.error;
+            }
+            else if (received != 0)
+            {
+                result.launch_stage = TP_LAUNCH_REPORT;
+                result.launch_error = received < 0 ? errno : EIO;
+            }
+        }
         /* Clean any helper that outlived the compiler (including failures).
          * All measured compiler work is required to have finished at exit. */
         (void)kill(-pid, SIGKILL);
@@ -1039,6 +1194,8 @@ static TpProcess tp_process_observe_inputs(char* const* args, char const* direct
     {
         close(ready[1]);
     }
+    if (launch[0] >= 0) close(launch[0]);
+    if (launch[1] >= 0) close(launch[1]);
     if (int_owned) sigaction(SIGINT, &previous_int, NULL);
     if (term_owned) sigaction(SIGTERM, &previous_term, NULL);
     if (pipe_handler_set)

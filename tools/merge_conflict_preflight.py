@@ -91,6 +91,7 @@ GENERATED_RETIREMENT_PATHS = frozenset((
 ))
 RETIREMENT_TRUST_PATHS = frozenset((
     ".github/workflows/api-migration-policy.yml",
+    ".github/workflows/native-retirement-admission.yml",
     ".github/workflows/native-retirement-contract.yml",
     ".github/workflows/native-retirement-integration.yml",
     ".github/workflows/native-retirement-automation.yml",
@@ -1258,15 +1259,23 @@ def _github_merge_group_event(repo: Path, api: GitHubApi, event: dict, report_di
     head_sha = group.get("head_sha")
     head_ref = group.get("head_ref")
     base_ref = group.get("base_ref")
+    base_sha = group.get("base_sha")
     if not isinstance(head_sha, str) or not HEX_OBJECT.fullmatch(head_sha):
         raise PreflightError("merge_group event has an invalid head_sha")
     if not isinstance(head_ref, str) or not head_ref.startswith("refs/"):
         raise PreflightError("merge_group event has an invalid head_ref")
     if not isinstance(base_ref, str) or not base_ref.startswith("refs/heads/"):
         raise PreflightError("merge_group event has an invalid base_ref")
+    if not isinstance(base_sha, str) or not HEX_OBJECT.fullmatch(base_sha):
+        raise PreflightError("merge_group event has an invalid base_sha")
     local_main = "refs/merge-conflict-preflight/main"
     local_head = "refs/merge-conflict-preflight/merge-group"
     main = _fetch_ref(repo, base_ref, local_main)
+    if main != base_sha:
+        raise PreflightError(
+            f"merge-group base is not live main: event {base_sha}, main {main}; "
+            "wait for the queued predecessor or rebuild the group"
+        )
     fetched_head = _fetch_ref(repo, head_ref, local_head)
     if fetched_head != head_sha:
         raise PreflightError(
@@ -1277,9 +1286,10 @@ def _github_merge_group_event(repo: Path, api: GitHubApi, event: dict, report_di
         retirement_event="merge_group", retirement_api=api)
     current_main = _fetch_ref(repo, base_ref, local_main)
     if current_main != main:
-        report = analyze(
-            repo, current_main, fetched_head, api.previous_status(fetched_head, context),
-            retirement_event="merge_group", retirement_api=api)
+        raise PreflightError(
+            f"main moved during merge-group preflight: base {base_sha}, main {current_main}; "
+            "refusing a stale result"
+        )
     output = report_dir / f"merge-group-{fetched_head}.json"
     _write_report(report, output, summary, "Merge-group conflict preflight")
     api.publish_status(fetched_head, report, context, _target_url())

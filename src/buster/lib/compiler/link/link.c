@@ -7,7 +7,8 @@
 // target/format family: static and dynamic ELF64 for x86-64 and AArch64,
 // hosted PE64, imports-free UEFI PE64, Mach-O, and Android ELF. The
 // writers share the helpers above them — AArch64 branch range checks and
-// veneers, ELF .eh_frame table construction, PE export/import plumbing,
+// veneers, ELF .eh_frame table construction (duplicate initial locations are
+// refused by link_elf_eh_frame_header_write), PE export/import plumbing,
 // CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
 // ids — but each owns its image layout whole, because the formats agree
 // on almost nothing. A position-independent image (NativeImageKind SHARED
@@ -17,10 +18,16 @@
 // states the relocation and preemption rules. link_elf_version_plan_build and
 // link_elf_copy_plan_build are the symbol-version and copy-slot construction
 // it shares with the x86-64 dynamic writer.
+// link_comdat_associations_resolve follows object-local associative paths in
+// bounded linear work after group arbitration; state marks detect cycles and
+// replay each unresolved path without allocating an auxiliary stack.
 // link_validate_linker_arguments refuses unconsumed options before any writer.
 // Before x86-64 Linux writer selection,
 // link_elf_without_unused_got_marker removes only unreferenced reserved markers
 // from a private symbol/relocation view; the input object is never changed.
+//
+// link_elf_tls_index_build seals exact TLS companion sites in link scratch;
+// executable import classification and patching reuse them without rescans.
 //
 // link_objects places every input section of its own name that is spelled as
 // a C identifier after the ordinary sections of its kind, one name at a time,
@@ -1536,13 +1543,6 @@ BUSTER_GLOBAL_LOCAL u32 link_pe_export_group_scalar(NativeExecutableLinkOptions 
 }
 
 
-typedef enum LinkComdatState
-{
-    LINK_COMDAT_STATE_UNKNOWN,
-    LINK_COMDAT_STATE_KEEP,
-    LINK_COMDAT_STATE_DISCARD,
-} LinkComdatState;
-
 typedef struct LinkComdatPlan LinkComdatPlan;
 struct LinkComdatPlan
 {
@@ -1811,6 +1811,102 @@ BUSTER_GLOBAL_LOCAL bool link_comdat_record_valid(ObjectFile* object, u32 index)
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+#define BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(field) do { if (counts) counts->field += 1; } while (0)
+#define BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT , 0
+#else
+#define BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(field) ((void)0)
+#define BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT
+#endif
+
+// Group arbitration has settled every non-associative root; record validation
+// has checked parent bounds and excluded self-association. Each unknown row
+// has one immutable object-local parent, so a marked path can be replayed from
+// its start without saving a stack. Every association is read at most twice.
+BUSTER_GLOBAL_LOCAL LinkError link_comdat_associations_resolve(ObjectComdat const* comdats, u32 count, u8* states
+#if BUSTER_INCLUDE_TESTS
+                                                               , LinkComdatAssociationCounts* counts
+#endif
+)
+{
+    LinkError error = LINK_ERROR_NONE;
+    for (u32 start = 0; error == LINK_ERROR_NONE && start < count; start += 1)
+    {
+        BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(row_scans);
+        if (states[start] == LINK_COMDAT_STATE_UNKNOWN)
+        {
+            u32 current = start;
+            while (states[current] == LINK_COMDAT_STATE_UNKNOWN)
+            {
+                u32 parent = comdats[current].associated;
+                BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(parent_reads);
+                u8 decision = states[parent];
+                if (decision == LINK_COMDAT_STATE_KEEP || decision == LINK_COMDAT_STATE_DISCARD)
+                {
+                    // Ordinary forward chains and stars already know their
+                    // parent's answer: one read/write, no mark or replay.
+                    states[current] = decision;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(resolved_writes);
+                }
+                else
+                {
+                    states[current] = LINK_COMDAT_STATE_VISITING;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(path_marks);
+                    current = parent;
+                }
+            }
+            u8 decision = states[current];
+            if (decision == LINK_COMDAT_STATE_VISITING)
+            {
+                error = LINK_ERROR_INVALID_INPUT;
+            }
+            else
+            {
+                current = start;
+                while (states[current] == LINK_COMDAT_STATE_VISITING)
+                {
+                    u32 parent = comdats[current].associated;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(parent_reads);
+                    states[current] = decision;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(resolved_writes);
+                    current = parent;
+                }
+            }
+        }
+    }
+    return error;
+}
+
+#if BUSTER_INCLUDE_TESTS
+LinkError link_comdat_associations_resolve_test(ObjectFile* object, u8* states, LinkComdatAssociationCounts* counts)
+{
+    LinkError error = LINK_ERROR_NONE;
+    if (counts) *counts = (LinkComdatAssociationCounts){0};
+    if (!object || (object->comdat_count && (!object->comdats || !states)) ||
+        (object->section_count && !object->sections) || (object->relocation_count && !object->relocations))
+    {
+        error = LINK_ERROR_INVALID_INPUT;
+    }
+    for (u32 index = 0; error == LINK_ERROR_NONE && index < object->comdat_count; index += 1)
+    {
+        if (!link_comdat_record_valid(object, index) ||
+            (object->comdats[index].selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE
+                 ? states[index] != LINK_COMDAT_STATE_UNKNOWN
+                 : states[index] != LINK_COMDAT_STATE_KEEP && states[index] != LINK_COMDAT_STATE_DISCARD))
+        {
+            error = LINK_ERROR_INVALID_INPUT;
+        }
+    }
+    if (error == LINK_ERROR_NONE)
+    {
+        error = link_comdat_associations_resolve(object->comdats, object->comdat_count, states, counts);
+    }
+    return error;
+}
+#endif
+
+#undef BUSTER_LINK_COMDAT_ASSOCIATION_RECORD
+
 BUSTER_GLOBAL_LOCAL LinkError link_comdat_plan_build(Arena* arena, ObjectFile* objects, u32 object_count,
                                                      LinkComdatPlan* plan, String8* error_symbol)
 {
@@ -1921,41 +2017,17 @@ BUSTER_GLOBAL_LOCAL LinkError link_comdat_plan_build(Arena* arena, ObjectFile* o
                 }
             }
         }
-        bool progress = true;
-        for (u64 pass = 0; error == LINK_ERROR_NONE && progress && pass < plan->count; pass += 1)
+        for (u32 object_index = 0; error == LINK_ERROR_NONE && object_index < object_count; object_index += 1)
         {
-            progress = false;
-            for (u32 object_index = 0; object_index < object_count; object_index += 1)
-            {
-                ObjectFile* object = objects + object_index;
-                u64 base = plan->object_offsets[object_index];
-                for (u32 comdat_index = 0; comdat_index < object->comdat_count; comdat_index += 1)
-                {
-                    ObjectComdat* comdat = object->comdats + comdat_index;
-                    u64 state_index = base + comdat_index;
-                    if (comdat->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE &&
-                        plan->states[state_index] == LINK_COMDAT_STATE_UNKNOWN)
-                    {
-                        u8 parent = plan->states[base + comdat->associated];
-                        if (parent != LINK_COMDAT_STATE_UNKNOWN)
-                        {
-                            plan->states[state_index] = parent;
-                            progress = true;
-                        }
-                    }
-                }
-            }
-        }
-        for (u64 index = 0; error == LINK_ERROR_NONE && index < plan->count; index += 1)
-        {
-            if (plan->states[index] == LINK_COMDAT_STATE_UNKNOWN)
-            {
-                error = LINK_ERROR_INVALID_INPUT;
-            }
+            ObjectFile* object = objects + object_index;
+            error = link_comdat_associations_resolve(object->comdats, object->comdat_count,
+                plan->states + plan->object_offsets[object_index] BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT);
         }
     }
     return error;
 }
+
+#undef BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT
 
 BUSTER_GLOBAL_LOCAL bool link_comdat_is_discarded(LinkComdatPlan* plan, u32 object_index, u32 comdat)
 {
@@ -3015,49 +3087,157 @@ BUSTER_GLOBAL_LOCAL u64 link_elf_thread_local_offset(ObjectFile* object, ObjectS
     return symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
 }
 
-// Whether this relocation is the __tls_get_addr call of a general- or
-// local-dynamic sequence the relaxations above rewrote. General dynamic's
-// halves come out of one selected row eight bytes apart, in that order, so the
-// TLSGD site is the whole test, whether the call is direct or goes through the
-// GOT slot (-fno-plt). A local-dynamic call follows its TLSLD field by five
-// bytes when direct and six through the GOT slot.
-// The name check only keeps the scan off every other rel32 in the object.
-BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(ObjectFile* object, ObjectRelocation* relocation, ObjectSymbol* symbol)
+// Sparse exact TLSGD/TLSLD site identities, shared by import planning and
+// relocation application after initializer stripping. Scratch belongs to the
+// link's export-index arena; no table is allocated without a helper and sites.
+typedef struct LinkElfTlsSite LinkElfTlsSite;
+struct LinkElfTlsSite
 {
-    u32 general_delta = BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET;
-    u32 local_delta = BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET;
-    u32 local_indirect_delta = BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET;
-    bool direct = relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32;
-    bool indirect = object_relocation_kind_is_x86_got(relocation->kind);
-    bool result = false;
-    if ((direct || indirect) && string_equal(symbol->name, S8("__tls_get_addr")))
+    u64 offset;
+    u32 section;
+    u8 kinds;
+    u8 reserved[3];
+};
+typedef struct LinkElfTlsIndex LinkElfTlsIndex;
+struct LinkElfTlsIndex
+{
+    LinkElfTlsSite* sites;
+    u64 capacity;
+#if BUSTER_INCLUDE_TESTS
+    u64 build_rows;
+    u64 queries;
+    u64 probes;
+#endif
+};
+enum
+{
+    LINK_ELF_TLS_SITE_GENERAL = 1,
+    LINK_ELF_TLS_SITE_LOCAL = 2,
+};
+
+BUSTER_GLOBAL_LOCAL LinkElfTlsSite* link_elf_tls_site(LinkElfTlsIndex* index, u32 section, u64 offset, bool insert)
+{
+    LinkElfTlsSite* result = 0;
+    if (index->capacity)
     {
-        for (u32 index = 0; !result && index < object->relocation_count; index += 1)
+        u64 key[] = {section, offset};
+        u64 mask = index->capacity - 1;
+        u64 bucket = buster_hash_64((u8*)key, sizeof(key)) & mask;
+        for (u64 probe = 0; !result && probe < index->capacity; probe += 1)
         {
-            ObjectRelocation* candidate = object->relocations + index;
-            u64 delta = candidate->kind == OBJECT_RELOCATION_X86_64_TLSGD ? general_delta
-                        : candidate->kind == OBJECT_RELOCATION_X86_64_TLSLD ? (direct ? local_delta : local_indirect_delta)
-                                                                           : 0;
-            result = delta && candidate->section == relocation->section && candidate->offset <= UINT64_MAX - delta &&
-                     candidate->offset + delta == relocation->offset;
+            LinkElfTlsSite* site = index->sites + bucket;
+#if BUSTER_INCLUDE_TESTS
+            index->probes += 1;
+#endif
+            if (!site->kinds)
+            {
+                result = insert ? site : 0;
+                break;
+            }
+            else if (site->section == section && site->offset == offset)
+            {
+                result = site;
+            }
+            bucket = (bucket + 1) & mask;
         }
     }
     return result;
 }
 
-// Whether every reference to this symbol is a __tls_get_addr call the
-// relaxations delete, so an executable has no use for the name at all.  A
-// -fno-plt object reaches the function only through a GOT load, which leaves
-// it typed as data, and importing it would then ask the loader for a copy
-// relocation of a function.
-BUSTER_GLOBAL_LOCAL bool link_elf_symbol_only_relaxed_tls_get_addr(ObjectFile* object, u32 symbol_index)
+BUSTER_GLOBAL_LOCAL bool link_elf_tls_index_build(Arena* temporary, ObjectFile* object, LinkElfTlsIndex* index)
+{
+    *index = (LinkElfTlsIndex){0};
+    bool has_helper = false;
+    for (u32 symbol = 0; !has_helper && symbol < object->symbol_count; symbol += 1)
+    {
+        has_helper = string_equal(object->symbols[symbol].name, S8("__tls_get_addr"));
+    }
+    u64 count = 0;
+    for (u32 row = 0; has_helper && row < object->relocation_count; row += 1)
+    {
+        ObjectRelocationKind kind = object->relocations[row].kind;
+        count += kind == OBJECT_RELOCATION_X86_64_TLSGD || kind == OBJECT_RELOCATION_X86_64_TLSLD;
+#if BUSTER_INCLUDE_TESTS
+        index->build_rows += 1;
+#endif
+    }
+    bool valid = true;
+    if (count)
+    {
+        // u32 relocation_count bounds capacity at 2^33 slots. Each slot is
+        // 16 bytes, so rounding and the arena's u64 byte size cannot overflow.
+        u64 capacity = 1;
+        while (capacity < count * 2) capacity *= 2;
+        u64 bytes = capacity * sizeof(*index->sites) + BUSTER_ALIGN_OF(LinkElfTlsSite);
+        valid = temporary->position <= temporary->reserved_size && bytes <= temporary->reserved_size - temporary->position;
+        if (valid)
+        {
+            index->sites = arena_allocate_zeroed(temporary, LinkElfTlsSite, capacity);
+            index->capacity = capacity;
+            for (u32 row = 0; valid && row < object->relocation_count; row += 1)
+            {
+                ObjectRelocation* relocation = object->relocations + row;
+                u8 kinds = relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ? LINK_ELF_TLS_SITE_GENERAL
+                           : relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ? LINK_ELF_TLS_SITE_LOCAL : 0;
+#if BUSTER_INCLUDE_TESTS
+                index->build_rows += 1;
+#endif
+                if (kinds)
+                {
+                    LinkElfTlsSite* site = link_elf_tls_site(index, relocation->section, relocation->offset, true);
+                    valid = site != 0;
+                    if (valid)
+                    {
+                        site->section = relocation->section;
+                        site->offset = relocation->offset;
+                        site->kinds |= kinds;
+                    }
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+// Subtract only after checking the helper offset. This is equivalent to the
+// old checked candidate-offset addition, even near UINT64_MAX. Row ordering,
+// duplicate sites and the candidate symbol do not change boolean membership.
+BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(LinkElfTlsIndex* index, ObjectRelocation* relocation, ObjectSymbol* symbol)
+{
+    bool direct = relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32;
+    bool indirect = object_relocation_kind_is_x86_got(relocation->kind);
+    bool result = false;
+    if (index->capacity && (direct || indirect) && string_equal(symbol->name, S8("__tls_get_addr")))
+    {
+        u32 deltas[] = {BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET,
+                        direct ? BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET
+                               : BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET};
+        u8 kinds[] = {LINK_ELF_TLS_SITE_GENERAL, LINK_ELF_TLS_SITE_LOCAL};
+        for (u32 kind = 0; !result && kind < BUSTER_ARRAY_LENGTH(deltas); kind += 1)
+        {
+            if (relocation->offset >= deltas[kind])
+            {
+#if BUSTER_INCLUDE_TESTS
+                index->queries += 1;
+#endif
+                LinkElfTlsSite* site = link_elf_tls_site(index, relocation->section, relocation->offset - deltas[kind], false);
+                result = site && (site->kinds & kinds[kind]);
+            }
+        }
+    }
+    return result;
+}
+
+// Every reference must be a relaxed call. A genuine call, address or debug
+// reference retains the import; no references remains vacuously true.
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_only_relaxed_tls_get_addr(LinkElfTlsIndex* index, ObjectFile* object, u32 symbol_index)
 {
     ObjectSymbol* symbol = object->symbols + symbol_index;
     bool result = string_equal(symbol->name, S8("__tls_get_addr"));
-    for (u32 index = 0; result && index < object->relocation_count; index += 1)
+    for (u32 row = 0; result && row < object->relocation_count; row += 1)
     {
-        ObjectRelocation* relocation = object->relocations + index;
-        result = relocation->symbol != symbol_index || link_elf_relocation_is_relaxed_tls_get_addr(object, relocation, symbol);
+        ObjectRelocation* relocation = object->relocations + row;
+        result = relocation->symbol != symbol_index || link_elf_relocation_is_relaxed_tls_get_addr(index, relocation, symbol);
     }
     return result;
 }
@@ -3634,7 +3814,10 @@ BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_coun
         LinkElfEhFrameEntry* entry = table->entries + entry_index;
         u64 output = header_offset + 12 + (u64)entry_index * 8;
         u64 fde_address = unwind_address + entry->fde_offset;
-        if (!link_elf_signed_difference(entry->function_address, header_address, &relative))
+        // A duplicate key makes the selected CFA program depend on unwinder
+        // search order. Refuse legacy or foreign ambiguous FDEs (issue 1233).
+        if ((entry_index && entry->function_address == table->entries[entry_index - 1].function_address) ||
+            !link_elf_signed_difference(entry->function_address, header_address, &relative))
         {
             return false;
         }
@@ -5078,7 +5261,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .eh_frame_header_offset = eh_frame_header_offset,
                                       .eh_frame_header_size = eh_frame_header_size,
                                   });
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -5622,7 +5805,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     object = &hosted_object;
     ObjectFile stripped_object = {0};
     LinkInitializerPlan plan = {0};
-    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+    LinkElfTlsIndex tls_index = {0};
+    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan) ||
+        !link_elf_tls_index_build(exports->arena, &stripped_object, &tls_index))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;
@@ -5647,7 +5832,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         import_indices[symbol_index] = UINT32_MAX;
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (!link_elf_symbol_needs_dynamic_import(exports, symbol) || link_elf_symbol_only_relaxed_tls_get_addr(object, symbol_index))
+        if (!link_elf_symbol_needs_dynamic_import(exports, symbol) || link_elf_symbol_only_relaxed_tls_get_addr(&tls_index, object, symbol_index))
         {
             continue;
         }
@@ -6124,7 +6309,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // the TLSGD or TLSLD field just before is what makes this call that
         // call rather than a written one, and an image this linker produces
         // has no dynamic thread-local storage for a real call to reach.
-        if (link_elf_relocation_is_relaxed_tls_get_addr(object, relocation, symbol))
+        if (link_elf_relocation_is_relaxed_tls_get_addr(&tls_index, relocation, symbol))
         {
             continue;
         }
@@ -6472,7 +6657,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         memcpy(layout_section_offsets, section_offsets, sizeof(section_offsets));
     }
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -6586,6 +6771,7 @@ struct LinkElfPicImage
 {
     ObjectFile* object;
     LinkElfIndex* exports;
+    LinkElfTlsIndex tls_index;
     // Per symbol.
     u8* classes;
     u32* dynamic_indices;
@@ -6824,7 +7010,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
         {
             link_elf_pic_fail(image, LINK_ERROR_RELOCATION, (String8){0});
         }
-        else if (debug || (!image->shared && link_elf_relocation_is_relaxed_tls_get_addr(object, relocation, symbol)))
+        else if (debug || (!image->shared && link_elf_relocation_is_relaxed_tls_get_addr(&image->tls_index, relocation, symbol)))
         {
             action = LINK_ELF_PIC_ACTION_SKIP;
         }
@@ -7296,6 +7482,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                 result.symbol = entry_name;
             }
         }
+    }
+    if (result.error == LINK_ERROR_NONE && !shared && !link_elf_tls_index_build(exports->arena, object, &image.tls_index))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
     }
     if (result.error == LINK_ERROR_NONE)
     {
@@ -8096,7 +8286,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
                                       .eh_frame_header_offset = eh_frame_header_offset,
                                       .eh_frame_header_size = eh_frame_header_size,
                                   });
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -14080,6 +14270,27 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool link_elf_test_tls_membership(Arena* temporary, ObjectFile* object, bool* matches,
+                                  u64* build_rows, u64* queries, u64* probes)
+{
+    LinkElfTlsIndex index = {0};
+    bool valid = object && (!object->symbol_count || object->symbols) && (!object->relocation_count || (object->relocations && matches));
+    if (valid)
+    {
+        valid = link_elf_tls_index_build(temporary, object, &index);
+        for (u32 row = 0; valid && row < object->relocation_count; row += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + row;
+            matches[row] = relocation->symbol < object->symbol_count &&
+                           link_elf_relocation_is_relaxed_tls_get_addr(&index, relocation, object->symbols + relocation->symbol);
+        }
+    }
+    *build_rows = index.build_rows;
+    *queries = index.queries;
+    *probes = index.probes;
+    return valid;
+}
+
 NativeExecutableLinkResult link_elf_test_executable(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     TemporalArena scope = arena_begin_temporal(temporary);

@@ -11,6 +11,7 @@
 // assertions are reserved for internal invariants.
 
 #include <buster/lib/arena.h>
+#include <buster/lib/file.h>
 #include <buster/lib/compiler/ir/model.h>
 #include <buster/lib/target.h>
 #include <buster/lib/compiler/frontend/c/c_census.h>
@@ -277,6 +278,7 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
     C_DIAGNOSTIC_INVALID_UTF8,
     C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
+    C_DIAGNOSTIC_SOURCE_TOO_LARGE,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -533,6 +535,9 @@ struct CPreprocessOptions
     String8* include_paths;
     String8* system_include_paths;
     String8 source_path;
+    // Identity of the descriptor that supplied source, when available.
+    // In-memory callers retain the path namespace by leaving this invalid.
+    FileIdentity source_identity;
     Target target;
     TargetDataLayout data_layout;
     u32 macro_operation_count;
@@ -820,6 +825,9 @@ struct CArrayBound
     // adjusted to a const pointer (C17 6.7.6.3p7), so `int a[const 2]` is
     // not modifiable although its elements are.
     bool is_const;
+    // Bounds made while parsing a parameter (nested prototypes included).
+    // Definition parameters receive the additional signature-scope check.
+    bool is_parameter_declarator;
 };
 
 typedef struct CType CType;
@@ -1589,6 +1597,9 @@ struct CParseResult
     // True only after the selected analysis entry point completed its passes.
     // Resource-limit exits can otherwise look like a successful empty model.
     bool analysis_complete;
+    // Set only on protected constant-query copies. Machineless operand copies
+    // retain it so deferred token ranges cannot enter recursive type readers.
+    bool protected_type_constant_query;
 };
 
 // CParseResult is the compatibility name for the semantic model.  New phase

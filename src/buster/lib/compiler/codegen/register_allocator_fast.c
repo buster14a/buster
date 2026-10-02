@@ -3945,7 +3945,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         for (u32 slot_index = 0; coalesce_slots && slot_index < function->stack_slot_count; slot_index += 1)
         {
             slot_fixed[slot_index] |= (u8)(slot_addressed[slot_index] && !address_safe[slot_index]);
-            slot_fixed[slot_index] |= (u8)(function->stack_slot_memory_flags && function->stack_slot_memory_flags[slot_index] != 0);
+            slot_fixed[slot_index] |= (u8)(function->stack_slot_memory_flags && function->stack_slot_memory_flags[slot_index] != MACHINE_STACK_SLOT_MEMORY_NONVOLATILE);
             slot_fixed[slot_index] |= (u8)(function->outgoing_bytes && slot_index == function->outgoing_slot);
         }
         u32 shareable_slots = 0;

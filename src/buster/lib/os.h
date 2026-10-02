@@ -191,6 +191,7 @@ typedef enum ProcessSpawnFailure
     PROCESS_SPAWN_FAILURE_HANDLE_LIST,
     PROCESS_SPAWN_FAILURE_SPAWN,
     PROCESS_SPAWN_FAILURE_UNSUPPORTED,
+    PROCESS_SPAWN_FAILURE_WORKING_DIRECTORY,
 } ProcessSpawnFailure;
 
 typedef struct ProcessSpawnResult ProcessSpawnResult;
@@ -261,7 +262,8 @@ struct ProcessWaitResult
     u8 termination_requested;
     u8 forcibly_terminated;
     // The returned in-memory streams are prefixes because at least one bound
-    // was reached. capture_failed additionally makes result a plain failure.
+    // was reached. capture_failed additionally makes result a plain failure;
+    // POSIX transport/close failures set it as well; a deadline alone does not.
     u8 capture_limit_exceeded;
     u8 output_truncated;
     u8 capture_failed;

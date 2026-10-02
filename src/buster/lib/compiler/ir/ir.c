@@ -3270,7 +3270,7 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
 {
     IrType* root = ir_type_from_id(&program->types, root_type);
     bool result;
-    if (!root || !root->layout.resolved || !root->layout.size || root->layout.size > 16)
+    if (!root || !root->layout.resolved || root->layout.size > 16)
     {
         result = false;
     }
@@ -4032,14 +4032,20 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 classes[1] = IR_ABI_CLASS_FLOAT;
             }
             bool whole_vector = classes[0] == IR_ABI_CLASS_FLOAT && classes[1] == IR_ABI_CLASS_FLOAT_UP;
-            value.part_count = whole_vector ? 1u : (u32)((size + 7) / 8);
-            for (u32 part = 0; part < value.part_count; part += 1)
+            u32 eightbyte_count = whole_vector ? 1u : (u32)((size + 7) / 8);
+            for (u32 part = 0; part < eightbyte_count; part += 1)
             {
-                value.parts[part] = (IrAbiPart){
-                    .abi_class = whole_vector ? IR_ABI_CLASS_VECTOR : classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
-                    .value_offset = part * 8,
-                    .size = whole_vector ? 16u : (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-                };
+                // NO_CLASS padding occupies storage, never an argument or
+                // result register. Compact live pieces without changing their
+                // offsets in the aggregate's complete object representation.
+                if (whole_vector || classes[part] != IR_ABI_CLASS_NONE)
+                {
+                    value.parts[value.part_count++] = (IrAbiPart){
+                        .abi_class = whole_vector ? IR_ABI_CLASS_VECTOR : classes[part],
+                        .value_offset = part * 8,
+                        .size = whole_vector ? 16u : (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                    };
+                }
             }
         }
     }
@@ -5765,14 +5771,19 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
             instruction->binary_operation == IR_BINARY_INTEGER_EQUAL || instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL ||
             instruction->binary_operation == IR_BINARY_FLOAT_EQUAL || instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL ||
             (instruction->binary_operation >= IR_BINARY_SIGNED_LESS && instruction->binary_operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
+        bool float_operation =
+            (instruction->binary_operation >= IR_BINARY_FLOAT_ADD && instruction->binary_operation <= IR_BINARY_FLOAT_DIVIDE) ||
+            instruction->binary_operation == IR_BINARY_FLOAT_EQUAL || instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL ||
+            (instruction->binary_operation >= IR_BINARY_FLOAT_LESS && instruction->binary_operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
+        bool matching_scalar_family = operand_type &&
+                                      (float_operation ? operand_type->kind == IR_TYPE_FLOAT : operand_type->kind == IR_TYPE_INTEGER);
         bool vector_operation = ir_vector_operation_semantics(IR_OPCODE_BINARY, instruction->binary_operation) == IR_VECTOR_SEMANTICS_GENERIC;
         bool vector_comparison = instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL &&
                                  instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
         bool matching_operands = left && right && left->canonical_type.value == right->canonical_type.value;
-        bool valid_arithmetic = arithmetic && result_type && (result_type->kind == IR_TYPE_INTEGER || result_type->kind == IR_TYPE_FLOAT) &&
-                                matching_operands && left->canonical_type.value == instruction->canonical_type.value;
-        bool valid_comparison = comparison && result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type &&
-                                (operand_type->kind == IR_TYPE_INTEGER || operand_type->kind == IR_TYPE_FLOAT);
+        bool valid_arithmetic = arithmetic && matching_scalar_family && result_type && matching_operands &&
+                                left->canonical_type.value == instruction->canonical_type.value;
+        bool valid_comparison = comparison && matching_scalar_family && result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands;
         bool valid_boolean = (instruction->binary_operation == IR_BINARY_BOOLEAN_AND || instruction->binary_operation == IR_BINARY_BOOLEAN_OR) &&
                              result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands &&
                              left->canonical_type.value == instruction->canonical_type.value &&
@@ -5857,10 +5868,15 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     else if (instruction->opcode == IR_OPCODE_AGGREGATE)
     {
         IrType* aggregate = ir_type_from_id(&program->types, instruction->canonical_type);
+        // A zero-size record is one semantic value regardless of how many
+        // zero-size fields spell it. Its canonical constructor therefore has
+        // no operands, just as it has no object bytes to load or store.
+        bool complete = aggregate && aggregate->layout.resolved && !aggregate->layout.size && !instruction->operand_count;
+        complete |= aggregate && (aggregate->kind == IR_TYPE_UNION ? instruction->operand_count <= 1
+                                                                    : instruction->operand_count == aggregate->field_count);
         bool valid = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
                      instruction->operand_count == instruction->immediate_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-                     function->values[instruction->result.value].category == IR_VALUE_VALUE &&
-                     (aggregate->kind == IR_TYPE_UNION ? instruction->operand_count <= 1 : instruction->operand_count == aggregate->field_count);
+                     function->values[instruction->result.value].category == IR_VALUE_VALUE && complete;
         for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
         {
             u64 field_index = instruction->immediates[operand_index];

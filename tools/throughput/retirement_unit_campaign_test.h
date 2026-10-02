@@ -1551,9 +1551,9 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
 }
 
 /* A layout child that fails before it reports: it reports the failing
- * step's errno and closes its end, so the launch returns at once as a
- * refusal with that errno (TpProcess.refused), never waits for a report
- * that cannot come and starts no timer. mode 0: a CPU beyond CPU_SETSIZE;
+ * step's stage and errno and closes its end, so the launch returns at once
+ * as a refusal with that stage and errno (TpProcess.refused), never waits
+ * for a report that cannot come and starts no timer. mode 0: a CPU beyond CPU_SETSIZE;
  * 1: a CPU the process may not use (sched_setaffinity refuses); 2: a ruleset
  * descriptor that is no Landlock ruleset (landlock_restrict_self refuses in
  * the child); 3: descriptors capped at the parking floor, so the child
@@ -1587,12 +1587,13 @@ static void test_unit_campaign_layout_refusal(TestUnitCampaign* fixture, unsigne
     uint64_t spent = tp_process_monotonic_ns() - begun;
     if (capped) CHECK(setrlimit(RLIMIT_NOFILE, &files) == 0);
     int expected = mode == 2 ? EBADFD : EINVAL;
-    if (!(process.refused && process.launch_error == expected))
-        fprintf(stderr, "unit campaign layout refusal %u: refused %d error %d exit %d\n", mode, process.refused,
-                process.launch_error, process.exit_code);
+    TpLaunchStage stage = mode == 2 ? TP_LAUNCH_SANDBOX : mode == 3 ? TP_LAUNCH_PARK : TP_LAUNCH_CPU;
+    if (!(process.refused && process.launch_error == expected && process.launch_stage == stage))
+        fprintf(stderr, "unit campaign layout refusal %u: refused %d error %d stage %s exit %d\n", mode,
+                process.refused, process.launch_error, tp_launch_stage_name(process.launch_stage), process.exit_code);
     CHECK(log >= 3 && ruleset >= 3 && usable && (mode != 3 || capped) && process.refused &&
-          process.launch_error == expected && !observed.valid && !process.timed_out && !process.cancelled &&
-          spent < UINT64_C(2000000000));
+          process.launch_error == expected && process.launch_stage == stage && !observed.valid &&
+          !process.timed_out && !process.cancelled && spent < UINT64_C(2000000000));
     if (ruleset >= 0) CHECK(close(ruleset) == 0);
     if (log >= 0) CHECK(close(log) == 0 && unlinkat(fixture->cwd, "refusal.log", 0) == 0);
 }
@@ -1649,7 +1650,8 @@ static void test_unit_campaign_layout(TestUnitCampaign* fixture)
                  3 + side, bound);
         if (strcmp(text, expected)) fprintf(stderr, "unit campaign layout child %u saw:\n%s", side, text);
         CHECK(log >= 3 && ruleset >= 3 && observed.valid && !process.launch_error && !process.refused &&
-              !process.exit_code && !process.signal_number && !strcmp(text, expected));
+              process.launch_stage == TP_LAUNCH_NONE && !process.exit_code && !process.signal_number &&
+              !strcmp(text, expected));
         /* A binary slot that is not the side's is refused before any child. */
         argv[0] = side ? "/proc/self/fd/3" : "/proc/self/fd/4";
         TpProcess refused = log >= 3 && ruleset >= 3 ?
@@ -1939,7 +1941,8 @@ static void test_unit_campaign_runtime_rule(TestUnitCampaign* fixture)
     TpProcessObservation observed = {0};
     TpProcess process = ruleset >= 3 ?
         tp_process_observe_inputs(command.arguments, NULL, NULL, 30, fixture->cpu, 0, &observed, &inputs) : (TpProcess){0};
-    CHECK(ruleset >= 3 && process.refused && process.launch_error == ESTALE && !observed.valid);
+    CHECK(ruleset >= 3 && process.refused && process.launch_error == ESTALE &&
+          process.launch_stage == TP_LAUNCH_PROGRAM && !observed.valid);
     if (ruleset >= 0) CHECK(close(ruleset) == 0);
     if (log >= 0) CHECK(close(log) == 0 && unlinkat(fixture->cwd, "runtime-rule.log", 0) == 0);
     test_unit_campaign_step_remove(fixture, step, "runtime-rule-a");

@@ -63,6 +63,19 @@ of the 300 s budget. `ci_vs_dev_shell_test.py` took about 50 s,
 suites is what restores headroom; see #2021 for the before/after step
 durations.
 
+The VS-shell suite admits at most two independent PowerShell probe owners per
+batch. All seven controls still run as separate processes with private scripts,
+logs and environment outputs; each retains its 120-second deadline measured
+from its own launch and its existing ten-second cleanup deadline. This bounds
+PowerShell startup pressure while the other two suite lanes compile their
+fixtures. A timed-out owner remains a failure and does not suppress later
+controls. Cleanup attempts every registered child even if one cleanup fails,
+then propagates that error. `VS_PROBE_START`/`VS_PROBE_END` records retain slot,
+case, outcome and duration. Host-independent scheduling controls cover the
+owner limit, complete inventory after timeout, launch failure, cleanup failure
+and original deadline accounting. Hosted Windows execution remains the verdict
+on startup latency; the scheduler alone is not a measured speedup.
+
 ## Bounded independent cases (#2034)
 
 Windows admits two independent behavior cases through one persistent worker
@@ -97,6 +110,15 @@ uses the original system `taskkill /T /F`; Unix uses isolated process groups.
 Direct children retain the ten-second cleanup deadline. Workers finish before
 module state is restored; the registry releases native handles between runs.
 These are controlled fixture trees, not containment for detached programs.
+
+The cancellation control releases its coordinator when child readiness succeeds
+or fails. Readiness uses the existing child launch-relative deadline; the
+coordinator has no earlier timer that can silently skip cancellation during
+startup. Setup failures release and join the coordinator, reap owned children
+before removing fixtures, and retain the inner case output and summary in the
+assertion diagnostic. Controls cover readiness delayed beyond five seconds and
+a child exiting before publishing its descendant marker, without assertion
+retries or changes to the production child/suite deadlines.
 
 The retained log includes environment, test and child JSON, plus
 `BOOTSTRAP_LAUNCH`, `BOOTSTRAP_COLLECTION` and ordered `BOOTSTRAP_CASE_SUMMARY`

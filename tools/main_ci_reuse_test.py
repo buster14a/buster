@@ -2,6 +2,10 @@
 """Network-free source and current-run tests for main CI reuse."""
 
 import copy
+import contextlib
+import io
+import json
+import urllib.error
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -50,7 +54,7 @@ def job(name, run_id, *, status="completed", conclusion="success"):
             "run_attempt": 1, "head_sha": SHA, "status": status,
             "conclusion": conclusion,
             "steps": [{"name": step, "status": "completed", "conclusion": "success"}
-                      for step in sorted(required)]}
+                      for step in sorted(required)] if conclusion != "skipped" else []}
 
 
 class FakeAPI:
@@ -102,7 +106,7 @@ class FakeAPI:
         raise AssertionError(path)
 
     def pages(self, path, field, **query):
-        if path == "actions/runs" and field == "workflow_runs":
+        if path == f"actions/workflows/{reuse.WORKFLOW_ID}/runs" and field == "workflow_runs":
             return [copy.deepcopy(self.source)]
         if path == f"actions/runs/{SOURCE_ID}/attempts/1/jobs" and field == "jobs":
             return copy.deepcopy(self.jobs)
@@ -131,6 +135,17 @@ class MainCIReuseTests(unittest.TestCase):
         self.assertEqual(receipt["source_run_id"], SOURCE_ID)
         self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 13)
         self.assertRegex(reuse.receipt_digest(receipt), r"[0-9a-f]{64}\Z")
+
+    def test_dispatch_split_layout_cannot_change_the_main_reuse_inventory(self):
+        self.assertEqual(inventory.combination_jobs(), inventory.COMBINATION_JOBS)
+        self.assertEqual(len(inventory.combination_jobs()), 21)
+        self.assertEqual(len(inventory.combination_jobs("split")), 27)
+        self.assertEqual(len(reuse.RETAINED_NAMES), 13)
+        self.assertIn("Windows x86-64 checks", reuse.RETAINED_NAMES)
+        self.assertNotIn("Windows x86-64 sanitized-debug", reuse.RETAINED_NAMES)
+        self.api.jobs = [job(name, SOURCE_ID) for name in inventory.combination_jobs("split")]
+        with self.assertRaises(AdmissionError):
+            self.admit()
 
     def test_wrong_identity_policy_and_event_fall_back(self):
         cases = (("current", "head_sha", "d" * 40),
@@ -293,11 +308,16 @@ class MainCIReuseTests(unittest.TestCase):
                                GITHUB_SHA=SHA, GITHUB_RUN_ID=str(CURRENT_ID),
                                GITHUB_RUN_ATTEMPT="1", GH_TOKEN="fixture",
                                GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(root / "summary"))
-            with mock.patch.dict(os.environ, environment), mock.patch.object(reuse, "GitHub", side_effect=OSError("API offline")):
+            receipt = self.admit()
+            with mock.patch.dict(os.environ, environment), \
+                    mock.patch.object(reuse, "local_workflow_blob", return_value=BLOB), \
+                    mock.patch.object(reuse, "GitHub", side_effect=OSError("API offline")):
                 with mock.patch.object(sys, "argv", ["main_ci_reuse.py", "decide", "--output", str(root / "receipt")]):
                     self.assertEqual(reuse.cli(), 0)
                 self.assertEqual(output.read_text(), "reuse=false\n")
-                with mock.patch.object(sys, "argv", ["main_ci_reuse.py", "finish", "--output", str(root / "receipt")]):
+                with mock.patch.object(sys, "argv", ["main_ci_reuse.py", "finish", "--output", str(root / "receipt"),
+                                                     "--expected-receipt", json.dumps(receipt),
+                                                     "--expected-digest", reuse.receipt_digest(receipt)]):
                     self.assertEqual(reuse.cli(), 1)
 
     def test_real_pagination_reader_rejects_partial_or_moving_totals(self):
@@ -327,6 +347,466 @@ class MainCIReuseTests(unittest.TestCase):
         self.assertIn("name: Main CI reuse decision", text)
         self.assertIn("main_ci_reuse.py finish", text)
         self.assertIn("needs.reuse.outputs.reuse == 'true'", text)
+        self.assertIn("receipt: ${{ steps.admit.outputs.receipt }}", text)
+        self.assertIn("SOURCE_RECEIPT: ${{ needs.reuse.outputs.receipt }}", text)
+        self.assertIn('--expected-receipt "$SOURCE_RECEIPT"', text)
+        self.assertIn("steps.retain.outcome == 'success'", text)
+        self.assertIn("name: Retain main CI reuse decision", text)
+
+
+class MainCIReuseFinishTests(unittest.TestCase):
+    def setUp(self):
+        self.api = FakeAPI()
+        self.sleeps = mock.patch.object(reuse.time, "sleep").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def invoke(self, phase, handoff=None, *, stale=False):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "result.json"
+            if stale:
+                path.write_text('{"status":"verified","receipt":{"stale":true}}')
+            environment = {"GITHUB_REPOSITORY": reuse.REPOSITORY,
+                           "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main",
+                           "GITHUB_SHA": SHA, "GITHUB_RUN_ID": str(CURRENT_ID),
+                           "GITHUB_RUN_ATTEMPT": "1", "GH_TOKEN": "fixture-secret",
+                           "GITHUB_OUTPUT": str(root / "outputs"),
+                           "GITHUB_STEP_SUMMARY": str(root / "summary")}
+            argv = ["main_ci_reuse.py", phase, "--output", str(path)]
+            if handoff is not None:
+                argv += ["--expected-receipt", handoff["receipt"],
+                         "--expected-digest", handoff["receipt_digest"]]
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(reuse, "local_workflow_blob", return_value=BLOB), \
+                    mock.patch.object(reuse, "GitHub", return_value=self.api), \
+                    mock.patch.object(reuse, "datetime", wraps=datetime) as clock, \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                clock.now.return_value = NOW
+                code = reuse.cli()
+            report = json.loads(path.read_text())
+            outputs = (root / "outputs").read_text() if (root / "outputs").exists() else ""
+            return code, report, dict(line.split("=", 1) for line in outputs.splitlines()), \
+                stdout.getvalue() + stderr.getvalue() + (root / "summary").read_text()
+
+    def decide(self):
+        code, report, handoff, _ = self.invoke("decide")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "verified")
+        self.assertEqual(handoff["reuse"], "true")
+        return handoff
+
+    def assert_refused(self, result, stage=None):
+        code, report, outputs, text = result
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "failed")
+        self.assertNotIn("receipt", report)
+        self.assertNotIn("reuse", outputs)
+        self.assertNotIn("Main CI reuse verified", text)
+        self.assertNotIn("Queue validation verified", text)
+        if stage is not None:
+            self.assertEqual(report["diagnostics"]["stage"], stage)
+
+    def list_sequence(self, sequence):
+        original = self.api.pages
+        reads = iter(sequence)
+
+        def pages(path, field, **query):
+            if path == reuse.DISCOVERY_PATH:
+                self.assertEqual(query, {"event": "merge_group", "head_sha": SHA})
+                item = next(reads)
+                if isinstance(item, Exception):
+                    raise item
+                return copy.deepcopy(item)
+            return original(path, field, **query)
+        return mock.patch.object(self.api, "pages", side_effect=pages)
+
+    def unexpanded_jobs(self):
+        self.api.main_jobs = [row for row in self.api.main_jobs if row["name"] not in reuse.REUSED_NAMES]
+        for index, name in enumerate((reuse.UNEXPANDED_REUSE_NAME, reuse.UNEXPANDED_REUSE_NAME,
+                                      "UEFI firmware boot")):
+            row = job(name, CURRENT_ID, conclusion="skipped")
+            row.update(id=4000 + index, steps=[], runner_id=None)
+            self.api.main_jobs.append(row)
+
+    def test_two_phase_handoff_binds_main_and_source(self):
+        handoff = self.decide()
+        receipt = json.loads(handoff["receipt"])
+        self.assertEqual(receipt["main_run_id"], CURRENT_ID)
+        self.assertEqual(receipt["source_run_id"], SOURCE_ID)
+        self.assertEqual(receipt["source_branch"], BRANCH)
+        code, report, outputs, _ = self.invoke("finish", handoff)
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "verified")
+        self.assertEqual(len(report["receipt"]["main_jobs"]), 13)
+        self.assertEqual(outputs, {})
+
+    def test_transient_empty_listing_is_recollected_after_direct_lookup(self):
+        handoff = self.decide()
+        calls = []
+        original_get = self.api.get
+        def get(path, **query):
+            calls.append(("get", path))
+            return original_get(path, **query)
+        with self.list_sequence([[], [self.api.source]]), mock.patch.object(self.api, "get", side_effect=get):
+            # Capture the order without replacing the observation logic.
+            pages = self.api.pages
+            def listed(path, field, **query):
+                calls.append(("list", path))
+                return pages(path, field, **query)
+            with mock.patch.object(self.api, "pages", side_effect=listed):
+                code, report, _, _ = self.invoke("finish", handoff)
+        self.assertEqual(code, 0)
+        self.assertLess(calls.index(("get", f"actions/runs/{SOURCE_ID}")),
+                        calls.index(("list", reuse.DISCOVERY_PATH)))
+        snapshots = report["diagnostics"]["discovery"]
+        self.assertEqual([row["candidate_count"] for row in snapshots], [0, 1])
+        self.assertEqual(snapshots[0]["error"]["code"], "missing-source")
+        self.sleeps.assert_called_once_with(1)
+
+    def test_persistent_missing_list_fails_and_overwrites_stale_receipt(self):
+        handoff = self.decide()
+        with self.list_sequence([[], [], []]):
+            result = self.invoke("finish", handoff, stale=True)
+        self.assert_refused(result, "source-discovery")
+        report = result[1]
+        self.assertEqual(report["error"]["code"], "missing-source")
+        self.assertEqual(report["expected_source_run_id"], SOURCE_ID)
+        self.assertEqual(len(report["diagnostics"]["discovery"]), 3)
+        self.assertEqual(self.sleeps.call_args_list, [mock.call(1), mock.call(2)])
+
+    def test_duplicate_or_replacement_run_never_retries_or_selects_green(self):
+        handoff = self.decide()
+        replacement = dict(self.api.source, id=SOURCE_ID + 10)
+        for rows, code in (([self.api.source, replacement], "ambiguous-source"),
+                           ([replacement], "source-replaced"),
+                           ([self.api.source, self.api.source], "ambiguous-source")):
+            with self.subTest(code=code), self.list_sequence([rows]):
+                result = self.invoke("finish", handoff)
+                self.assert_refused(result, "source-discovery")
+                self.assertEqual(result[1]["error"]["code"], code)
+        self.sleeps.assert_not_called()
+
+    def test_source_attempt_failure_and_identity_changes_refuse_before_discovery(self):
+        for field, value in (("run_attempt", 2), ("run_attempt", True),
+                             ("status", "in_progress"), ("conclusion", "failure"),
+                             ("conclusion", "cancelled"), ("head_sha", "d" * 40),
+                             ("workflow_id", 99), ("event", "push"),
+                             ("head_branch", BRANCH + "-replaced"),
+                             ("updated_at", NOW.isoformat())):
+            with self.subTest(field=field, value=value):
+                self.api = FakeAPI()
+                handoff = self.decide()
+                self.api.source[field] = value
+                with mock.patch.object(self.api, "pages", wraps=self.api.pages) as pages:
+                    self.assert_refused(self.invoke("finish", handoff), "bound-source")
+                    pages.assert_not_called()
+        self.sleeps.assert_not_called()
+
+    def test_moving_pagination_and_transient_http_reads_retry_but_definite_errors_do_not(self):
+        handoff = self.decide()
+        errors = [AdmissionError("API response is truncated or changed during pagination"),
+                  urllib.error.HTTPError("https://api.github.com", 502, "Bad Gateway", {}, None),
+                  urllib.error.HTTPError("https://api.github.com", 429, "Limited", {}, None),
+                  urllib.error.URLError("temporary connection loss")]
+        for error in errors:
+            with self.subTest(error=error), self.list_sequence([error, [self.api.source]]):
+                code, report, _, _ = self.invoke("finish", handoff)
+                self.assertEqual(code, 0)
+                self.assertIn("error", report["diagnostics"]["discovery"][0])
+        self.sleeps.reset_mock()
+        for error in (urllib.error.HTTPError("https://api.github.com", 403, "Forbidden", {}, None),
+                      AdmissionError("API pagination limit reached; refusing partial evidence")):
+            with self.subTest(error=error), self.list_sequence([error]):
+                self.assert_refused(self.invoke("finish", handoff), "source-discovery")
+        self.sleeps.assert_not_called()
+
+    def test_malformed_or_wrong_identity_scoped_listing_fails(self):
+        handoff = self.decide()
+        for rows in ([None], {}, [dict(self.api.source, workflow_id=42)],
+                     [dict(self.api.source, head_sha="d" * 40)]):
+            with self.subTest(rows=rows), self.list_sequence([rows]):
+                self.assert_refused(self.invoke("finish", handoff), "source-discovery")
+        self.sleeps.assert_not_called()
+
+    def test_attempt_movement_during_backoff_does_not_get_another_chance(self):
+        handoff = self.decide()
+        self.sleeps.side_effect = lambda delay: self.api.source.update(run_attempt=2)
+        with self.list_sequence([[], [self.api.source]]):
+            result = self.invoke("finish", handoff)
+        self.assert_refused(result, "bound-source")
+        self.assertEqual(len(result[1]["diagnostics"]["discovery"]), 1)
+        self.assertEqual(result[1]["error"]["code"], "changed-attempt")
+        self.assertEqual(result[1]["diagnostics"]["source_run"]["run_attempt"], 2)
+
+    def test_missing_malformed_and_tampered_handoff_fails_without_api(self):
+        handoff = self.decide()
+        for broken in (None, dict(handoff, receipt="{}"), dict(handoff, receipt="not-json"),
+                       dict(handoff, receipt_digest="fixture-secret"),
+                       dict(handoff, receipt="x" * (reuse.MAX_RECEIPT_BYTES + 1))):
+            with self.subTest(broken=broken is None), mock.patch.object(self.api, "get") as get:
+                result = self.invoke("finish", broken)
+                self.assert_refused(result, "receipt-handoff")
+                self.assertNotIn("fixture-secret", json.dumps(result[1]) + result[3])
+                get.assert_not_called()
+
+    def test_handoff_cannot_cross_main_runs_attempts_workflow_or_source(self):
+        handoff = self.decide()
+        receipt = json.loads(handoff["receipt"])
+        for field, value in (("main_run_id", CURRENT_ID + 1), ("main_attempt", 2),
+                             ("source_run_id", True), ("source_attempt", True),
+                             ("policy", "other-policy"), ("repository", "other/repo"),
+                             ("workflow_id", 44), ("workflow_blob", "d" * 40),
+                             ("head_sha", "e" * 40)):
+            changed = dict(receipt, **{field: value})
+            invalid = {"receipt": json.dumps(changed), "receipt_digest": reuse.receipt_digest(changed)}
+            with self.subTest(field=field), mock.patch.object(self.api, "get") as get:
+                self.assert_refused(self.invoke("finish", invalid), "receipt-handoff")
+                get.assert_not_called()
+
+    def test_changed_artifact_or_job_id_cannot_match_original_digest(self):
+        for kind in ("artifact", "job"):
+            self.api = FakeAPI()
+            handoff = self.decide()
+            if kind == "artifact":
+                self.api.artifacts[0]["digest"] = "sha256:" + "d" * 64
+            else:
+                next(row for row in self.api.jobs if row["name"] in reuse.REUSED_NAMES)["id"] += 9000
+            with self.subTest(kind=kind):
+                self.assert_refused(self.invoke("finish", handoff), "receipt-comparison")
+
+    def test_missing_expired_or_misbound_artifacts_remain_red(self):
+        for field, value in (("expired", True), ("size_in_bytes", 0),
+                             ("digest", "bad"), ("expires_at", NOW.isoformat())):
+            self.api = FakeAPI()
+            handoff = self.decide()
+            self.api.artifacts[0][field] = value
+            with self.subTest(field=field):
+                self.assert_refused(self.invoke("finish", handoff), "source-artifacts")
+        self.api = FakeAPI()
+        handoff = self.decide()
+        self.api.artifacts.pop()
+        self.assert_refused(self.invoke("finish", handoff), "source-artifacts")
+
+    def test_failed_source_or_main_jobs_emit_failure_not_success_receipts(self):
+        for target in ("jobs", "main_jobs"):
+            for conclusion in ("failure", "cancelled", "skipped"):
+                self.api = FakeAPI()
+                handoff = self.decide()
+                getattr(self.api, target)[0]["conclusion"] = conclusion
+                with self.subTest(target=target, conclusion=conclusion):
+                    self.assert_refused(self.invoke("finish", handoff),
+                                        "source-jobs" if target == "jobs" else "main-jobs")
+
+    def test_attempt_moves_during_main_collection(self):
+        handoff = self.decide()
+        original = self.api.pages
+        def pages(path, field, **query):
+            result = original(path, field, **query)
+            if path == f"actions/runs/{CURRENT_ID}/jobs":
+                self.api.source["run_attempt"] = 2
+            return result
+        with mock.patch.object(self.api, "pages", side_effect=pages):
+            self.assert_refused(self.invoke("finish", handoff), "final-source-recheck")
+
+    def test_decision_without_proof_falls_back_and_retains_diagnostics(self):
+        with self.list_sequence([[], [], []]):
+            code, report, outputs, _ = self.invoke("decide")
+        self.assertEqual(code, 0)
+        self.assertEqual(outputs, {"reuse": "false"})
+        self.assertEqual(report["status"], "unavailable")
+        self.assertNotIn("receipt", report)
+        self.assertEqual(report["error"]["code"], "missing-source")
+        self.assertEqual(len(report["diagnostics"]["discovery"]), 3)
+        self.assertEqual(self.sleeps.call_args_list, [mock.call(1), mock.call(2)])
+
+    def test_exception_token_is_redacted_from_diagnostic_and_log(self):
+        handoff = self.decide()
+        with self.list_sequence([OSError("transport fixture-secret\\nwith untrusted text")]):
+            result = self.invoke("finish", handoff)
+        self.assert_refused(result)
+        self.assertNotIn("fixture-secret", json.dumps(result[1]) + result[3])
+        self.assertIn("[redacted]", result[1]["error"]["message"])
+
+    def test_real_unexpanded_matrices_are_skips_not_duplicate_executions(self):
+        handoff = self.decide()
+        self.unexpanded_jobs()
+        code, report, _, _ = self.invoke("finish", handoff)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(report["receipt"]["main_jobs"]), 13)
+        skipped = report["diagnostics"]["skipped_jobs"]
+        self.assertEqual([row["job_id"] for row in skipped], [4000, 4001, 4002])
+        self.assertTrue(all(row["conclusion"] == "skipped" for row in skipped))
+
+    def test_missing_duplicate_or_unrecognized_skip_groups_fail(self):
+        for case in ("missing", "duplicate", "unknown", "none", "duplicate-id"):
+            self.api = FakeAPI()
+            handoff = self.decide()
+            self.unexpanded_jobs()
+            if case == "missing":
+                self.api.main_jobs.pop()
+            elif case == "duplicate":
+                self.api.main_jobs.append(dict(self.api.main_jobs[-2], id=5000))
+            elif case == "unknown":
+                self.api.main_jobs[-2]["name"] = "${{ matrix.unknown }}"
+            elif case == "none":
+                self.api.main_jobs = self.api.main_jobs[:-3]
+            else:
+                self.api.main_jobs[-2]["id"] = self.api.main_jobs[0]["id"]
+            with self.subTest(case=case):
+                self.assert_refused(self.invoke("finish", handoff), "main-jobs")
+
+    def test_skipped_rows_must_not_have_run_or_belong_to_another_attempt(self):
+        for field, value in (("head_sha", "d" * 40), ("run_id", 900), ("run_attempt", 2),
+                             ("run_attempt", True), ("conclusion", "success"),
+                             ("status", "in_progress"), ("steps", [{"name": "ran"}]),
+                             ("runner_id", 123)):
+            self.api = FakeAPI()
+            handoff = self.decide()
+            self.unexpanded_jobs()
+            self.api.main_jobs[-2][field] = value
+            with self.subTest(field=field):
+                self.assert_refused(self.invoke("finish", handoff), "main-jobs")
+
+
+    def assert_fallback(self, result):
+        code, report, outputs, text = result
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(outputs, {"reuse": "false"})
+        self.assertNotIn("receipt", report)
+        self.assertNotIn("Main CI reuse verified", text)
+
+    def test_decision_recollection_preserves_the_full_proof(self):
+        # Replay the previous one-read policy and the new policy on the same
+        # absent-then-complete observation. This is not a hosted timing claim.
+        with mock.patch.object(reuse, "DISCOVERY_DELAYS", ()), self.list_sequence([[]]):
+            self.assert_fallback(self.invoke("decide"))
+        self.sleeps.assert_not_called()
+        with self.list_sequence([[], [self.api.source]]):
+            code, report, outputs, _ = self.invoke("decide")
+        self.assertEqual(code, 0)
+        self.assertEqual(outputs["reuse"], "true")
+        self.assertEqual(report["status"], "verified")
+        self.assertEqual(len(report["receipt"]["source_jobs"]), 19)
+        self.assertEqual(len(report["receipt"]["source_artifacts"]), 19)
+        self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
+        self.sleeps.assert_called_once_with(1)
+
+    def test_decision_recovers_only_inconclusive_discovery_reads(self):
+        errors = (AdmissionError("API response is truncated or changed during pagination"),
+                  reuse.APIReadError(reuse.DISCOVERY_PATH, 429, 4),
+                  reuse.APIReadError(reuse.DISCOVERY_PATH, 503, 4),
+                  reuse.APIReadError(reuse.DISCOVERY_PATH, None, 4))
+        for error in errors:
+            self.sleeps.reset_mock()
+            with self.subTest(error=str(error)), self.list_sequence([error, [self.api.source]]):
+                code, report, outputs, _ = self.invoke("decide")
+            self.assertEqual(code, 0)
+            self.assertEqual(outputs["reuse"], "true")
+            self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
+            self.sleeps.assert_called_once_with(1)
+
+    def test_decision_definite_rejections_do_not_retry(self):
+        cases = ([self.api.source, self.api.source], [None], {},
+                 [dict(self.api.source, head_sha="d" * 40)],
+                 [dict(self.api.source, conclusion="failure")],
+                 [dict(self.api.source, conclusion="cancelled")],
+                 [dict(self.api.source, status="in_progress")],
+                 [dict(self.api.source, run_attempt=2)],
+                 AdmissionError("API pagination limit reached; refusing partial evidence"),
+                 reuse.APIReadError(reuse.DISCOVERY_PATH, 403, 1),
+                 reuse.APIReadError(reuse.DISCOVERY_PATH, 404, 1))
+        for rows in cases:
+            with self.subTest(rows=rows), self.list_sequence([rows]):
+                self.assert_fallback(self.invoke("decide"))
+        self.sleeps.assert_not_called()
+
+    def test_decision_recollection_cannot_admit_late_stale_or_changed_source(self):
+        for field, value in (("updated_at", NOW.isoformat()),
+                             ("updated_at", (NOW - timedelta(hours=3)).isoformat()),
+                             ("head_sha", "d" * 40), ("workflow_id", 99),
+                             ("conclusion", "cancelled"), ("run_attempt", 2)):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            self.api.source[field] = value
+            with self.subTest(field=field, value=value), self.list_sequence([[], [self.api.source]]):
+                self.assert_fallback(self.invoke("decide"))
+            self.sleeps.assert_called_once_with(1)
+
+    def test_decision_run_movement_during_backoff_refuses_positive_outputs(self):
+        for field, value in (("head_sha", "d" * 40), ("run_attempt", 2),
+                             ("event", "workflow_dispatch")):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            self.sleeps.side_effect = lambda delay: self.api.current.update({field: value})
+            with self.subTest(field=field), self.list_sequence([[], [self.api.source]]):
+                self.assert_fallback(self.invoke("decide"))
+            self.sleeps.assert_called_once_with(1)
+        self.sleeps.side_effect = None
+
+    def test_decision_recovered_listing_does_not_retry_missing_coverage(self):
+        for missing in ("job", "step", "artifact", "workflow"):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            if missing == "job":
+                self.api.jobs.pop()
+            elif missing == "step":
+                native = next(row for row in self.api.jobs if row["name"] == "Linux x86-64 native")
+                native["steps"] = [row for row in native["steps"] if
+                                   row["name"] != "Native configuration differential matrix"]
+            elif missing == "artifact":
+                self.api.artifacts.pop()
+            else:
+                original = self.api.get
+                def get(path, **query):
+                    value = original(path, **query)
+                    if path == "contents/" + reuse.WORKFLOW_PATH:
+                        value["sha"] = "d" * 40
+                    return value
+                self.api.get = get
+            with self.subTest(missing=missing), self.list_sequence([[], [self.api.source]]):
+                self.assert_fallback(self.invoke("decide"))
+            self.sleeps.assert_called_once_with(1)
+
+    def test_decision_exhausted_wrapped_reads_fall_back_with_http_diagnostic(self):
+        errors = [reuse.APIReadError(reuse.DISCOVERY_PATH, 503, 4) for _ in range(3)]
+        with self.list_sequence(errors):
+            result = self.invoke("decide")
+        self.assert_fallback(result)
+        self.assertEqual(result[1]["error"]["http_status"], 503)
+        self.assertEqual(len(result[1]["diagnostics"]["discovery"]), 3)
+        self.assertEqual(self.sleeps.call_args_list, [mock.call(1), mock.call(2)])
+
+    def test_production_reader_wrapping_is_recollected_in_both_phases(self):
+        # Exercise GitHub.pages -> get -> github_read_json -> APIReadError,
+        # rather than substituting a raw HTTP error that production wraps.
+        for phase in ("decide", "finish"):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            handoff = self.decide() if phase == "finish" else None
+            real = GitHub(reuse.REPOSITORY, "fixture-secret")
+            original = self.api.pages
+            def pages(path, field, **query):
+                if path == reuse.DISCOVERY_PATH:
+                    return real.pages(path, field, **query)
+                return original(path, field, **query)
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps(
+                {"total_count": 1, "workflow_runs": [self.api.source]}).encode()
+            errors = [urllib.error.HTTPError("https://api.github.com/fixture", 503,
+                                             "Unavailable", {}, None) for _ in range(4)]
+            with self.subTest(phase=phase), mock.patch.object(self.api, "pages", side_effect=pages), \
+                    mock.patch("urllib.request.urlopen", side_effect=errors + [response]) as transport:
+                code, report, outputs, text = self.invoke(phase, handoff)
+            self.assertEqual(code, 0, text)
+            self.assertEqual(report["status"], "verified")
+            self.assertEqual(transport.call_count, 5)
+            self.assertEqual(report["diagnostics"]["discovery"][0]["error"]["http_status"], 503)
+            self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
+            self.assertEqual(self.sleeps.call_args_list,
+                             [mock.call(1), mock.call(2), mock.call(4), mock.call(1)])
 
 
 if __name__ == "__main__":

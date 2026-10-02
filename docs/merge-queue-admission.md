@@ -92,8 +92,8 @@ only as part of the reviewed queue rollout; never remove an existing requirement
 | GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
 | Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
 | API migration policy | api-migration-policy.yml | Bounded API compatibility policy | Exact synthetic group |
-| Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
-| Main integration admission | merge-queue-admission.yml | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
+| Native retirement merge admission | native-retirement-admission.yml (PR/main); trusted reconciler (merge group) | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
+| Main integration admission | merge-queue-admission.yml (PR/main); trusted reconciler (merge group) | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
 
 `CI complete` also runs the [merge-parent preservation guard](merge-parent-preservation.md) over merges introduced by each PR candidate, merge-group candidate, and main push. It uses the event's exact base commit and does not require a feature branch to be updated when `main` advances.
 
@@ -113,12 +113,12 @@ persisted checkout credentials. GitHub's normal fork approval rules still apply.
 
 ## Event-driven reconciliation (#1807)
 
-The same trusted reconciler is the staged producer for
-`Native retirement merge admission` (#1811). While a group's
-`api-migration-policy.yml` still defines the native-admission job, the
-reconciler shadow-evaluates the native gate and publishes nothing. After a
-separate producer-transition PR moves the PR/main job into its own workflow,
-the reconciler publishes an exact-head check with the marker
+The same trusted reconciler is the merge-group producer for
+`Native retirement merge admission` (#1811). The PR/main job lives in
+`native-retirement-admission.yml`, which has no `merge_group` trigger. While a
+group's own `api-migration-policy.yml` still defines the native-admission job
+(`native_owner`), the reconciler only shadow-evaluates the native gate and
+publishes nothing. Otherwise it publishes an exact-head check with the marker
 `buster-native-retirement-admission-v1:<head>`. It requires the queued base to
 be live main and the trusted checkout to be that base, then validates the
 native gate and policy twice with intervening identity checks. Pending never
@@ -127,9 +127,9 @@ check can finish before the six other workflows because it validates its own
 exact-tree publication contract independently. Activation requires shadow
 validation and a live queue trace before relying on the new producer.
 
-The legacy `merge_group` job holds a hosted Ubuntu runner for up to 310 minutes.
-It spends most of that time in `run_gate`'s 30-second sleep loop waiting for the
-predecessor and the six gates. It does almost no verification. The
+The retired legacy `merge_group` job held a hosted Ubuntu runner for up to 310
+minutes. It spent most of that time in `run_gate`'s 30-second sleep loop waiting
+for the predecessor and the six gates, and did almost no verification. The
 `merge-queue-reconcile.yml` workflow replaces that wait with short passes:
 
 - **Triggers.** A completed `merge_group` run of any of the six required
@@ -139,7 +139,8 @@ predecessor and the six gates. It does almost no verification. The
   Every pass enumerates the live `gh-readonly-queue/main/*` refs itself and never
   trusts a delivery payload. Duplicate, out-of-order, missed and coalesced events
   therefore converge to the same result. One global concurrency group
-  serializes passes; each job has a 10-minute limit and never sleeps.
+  serializes passes; each job has a 10-minute limit and never waits on prerequisites.
+  Only transient GET recovery uses bounded backoff, as described below.
 - **Trust.** The job checks out live `main` and runs only that code. It fetches
   group commits as data and never checks out or executes them. The job has read
   scopes plus `checks: write`, and `CheckWriter` can only create or update a
@@ -174,39 +175,85 @@ predecessor and the six gates. It does almost no verification. The
   authority. The CI fail-fast watcher (`recover-ci.py`) accepts only a run that
   carries this exact-head marker, because the run has no workflow check suite.
 - **One producer per group (`group_owner`).** The group's own
-  `merge-queue-admission.yml` decides the producer. While it still declares
-  `merge_group`, the legacy job produces the check. The reconciler then only
-  shadow-evaluates the group and writes nothing. Its uploaded
-  `merge-queue-reconcile-*` artifact records the decision it would have
-  published. This deterministic split lets both versions coexist during rollout
-  without racing.
+  `merge-queue-admission.yml` decides the producer. A group that still declares
+  `merge_group` there (queued before activation) keeps the legacy job; the
+  reconciler then only shadow-evaluates it and writes nothing, recording the
+  decision in its `merge-queue-reconcile-*` artifact and job log. This
+  deterministic split lets both versions coexist during rollout without racing.
+  `run_gate` (`check-group`) remains in the tool only for such groups.
 
 ### Activation and measurement
 
-The reconciler must be on main before any group depends on it. So activation
-takes a second PR, merged after this one lands: it removes `merge_group`
-and the group-only steps from `merge-queue-admission.yml`. Readiness checks on
-pull requests and main pushes keep the same job name. The first group
-containing that PR is the first one reconciled by trusted main. Before merging
-it, compare the shadow artifacts with the legacy verdicts for the same heads.
-After merging, record a live two-entry M → G1 → G2 trace: revisions, run and
-attempt IDs, reconciler passes per group, API reads, admission latency after the
-last gate completes, and the runner minutes that are no longer held. The
-offline fixtures do not substitute for that trace.
+Activation removes `merge_group` and the group-only steps from
+`merge-queue-admission.yml` and moves the native PR/main job out of
+`api-migration-policy.yml` into `native-retirement-admission.yml`. Readiness
+checks on pull requests and main pushes keep the same job names, so the
+required-check inventory (eight checks, app 15368) is unchanged. Both files are
+trust-implementation paths, so the change is a `bootstrap` transition that
+needs a maintainer dispatch of `native-retirement-integration.yml`. The first
+group containing it is reconciled by the older trusted main, which already
+publishes for groups whose own workflows lack the legacy producers.
+
+Land activation only after the shadow decisions match the legacy verdicts for
+the same heads (recorded on #1807). After landing, record a live two-entry
+M → G1 → G2 trace: revisions, run and attempt IDs, reconciler passes per group,
+API reads, admission latency after the last gate completes, and the runner
+minutes that are no longer held. The offline fixtures do not substitute for
+that trace.
 
 Report admission time in three separate parts:
 
 - **Verification work:** a reconciler pass, measured in seconds.
 - **Orchestration wait:** time for a predecessor or gate. After activation, no
-  runner is held during this wait.
+  admission runner is held during this wait.
 - **Build/test queue delay:** runner assignment for the six gates themselves.
 
-This change does not explain or fix host-specific assignment delay (#1805). The
-native-retirement admission producer is tracked in #1818. The rebinding
-workflow keeps #1907's in-job predecessor wait; its runner-held wait remains
-tracked in #1811.
+This change does not explain or fix host-specific assignment delay (#1805).
+The rebinding workflow keeps #1907's in-job predecessor wait (`wait-base`) in
+`Reconstruct candidate closure ephemerally`; that remaining runner-held wait is
+tracked on #1807.
 
 ## Exact identities and fail-closed evidence
+
+### API read recovery and retired groups (#1983)
+
+Both admission clients use `github_read_json` from the already trusted
+`native_retirement_integration.py`. A GET has at most four attempts within a
+30-second elapsed recovery budget, with 1/2/4-second backoff. The helper retries
+500/502/503/504, 429, connection failures and timeouts. A 403 retries only with
+rate-limit evidence. `Retry-After` (seconds or HTTP date) and rate-limit reset
+timing are respected; a delay outside the remaining budget leaves the read
+unresolved instead of retrying early. Other 4xx and malformed JSON fail closed.
+POST/PATCH publication remains single-attempt. Diagnostics name the operation,
+repository-relative API path, status and attempt count without response bodies
+or credentials.
+
+A queue-ref GET additionally retries a 404 within that budget. Persistent 404
+does not itself prove retirement: a successful `git/matching-refs` read must
+prove that the exact ref is absent or names a different head. A failed,
+malformed or ambiguous confirmation remains unresolved. A successful exact-ref
+read showing replacement also retires only the old head. GitHub owns rebuilding;
+no result is carried into a replacement group.
+
+The reconciler records confirmed retirement as `retired`, publishes no admission
+check for that observation, and continues the sweep. Retired groups alone do
+not fail the maintenance run. An evidence/checks GET returning 404 is likewise
+classified as retired only after a fresh exact-ref confirmation; otherwise it
+remains `retry`. Exhausted native-gate API recovery remains `retry`, rather than
+being converted into a terminal policy rejection by the subprocess caller.
+Actual policy or required-check failures retain their terminal denial.
+
+Legacy `check-group` and `wait-base` terminate a retired group's wait with a
+structured `status=retry`, `reason=group-retired` and exit 75. Exhausted API
+reads use the same non-success exit with `reason=api-read`. An obsolete required
+job is never turned green, and downstream native validation cannot proceed
+from that wait. These old jobs can therefore still appear failed for a group
+GitHub has already removed; the distinction is explicit in the report. The
+reconciler maintenance pass is the route that can finish successfully without
+authorizing the obsolete group.
+
+This is a source-only backwards-compatible authority bootstrap: it changes no
+generated state, support manifest, ruleset, required checks or writer grant.
 
 For a group, both admission workflows check out live `main` as independently
 trusted policy, never the speculative `merge_group.base_sha` or candidate-modified
@@ -279,9 +326,20 @@ verified actor inventory.
 The exact two-actor bypass configuration is an administrator-audited deployment
 invariant, not something the read-only workflow can independently prove.
 `check-ruleset` remains strict: a saved administrator response must explicitly
-contain both actors with `always` mode and no others. Audit that response at activation, after every
-ruleset change, and after any emergency recovery. Do not give the admission
-workflow ruleset-write credentials to expose this field.
+contain both actors with `always` mode and no others. When present,
+`current_user_can_bypass` may be `never`, `always` or `pull_requests_only` in
+this offline administrator audit; unknown values fail. The administrator
+must read back the response using an account covered by the reviewed actors
+(Repository admin role 5 or `davidgmbb`). The saved JSON reports the reader's
+capability but does not identify or authenticate the reader; `check-ruleset`
+validates its policy fields, not the provenance of a local file. Record the
+reader account alongside the deployment audit. The read-only admission path
+still rejects every returned caller capability other than `never`, even if
+the full reviewed actor inventory is visible.
+
+Audit that response at activation, after every ruleset change, and after any
+emergency recovery. Do not give the admission workflow ruleset-write credentials
+to expose this field.
 
 The first live group for #956 exposed the former bug: treating a hidden list as
 a standing bypass. The repair preserves trusted-base execution. Consequently,

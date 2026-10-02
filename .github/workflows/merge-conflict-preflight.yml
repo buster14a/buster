@@ -37,7 +37,7 @@ jobs:
       pull-requests: read
       statuses: write
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: ${{ github.event_name == 'merge_group' && 310 || 20 }}
     steps:
       # Push maintenance executes its exact event revision. Every other route
       # retains the independently trusted current-main checkout. The exclusive
@@ -83,6 +83,15 @@ jobs:
           --repository "$GITHUB_REPOSITORY"
           --report-dir evidence/merge-conflict-preflight
           --summary "$GITHUB_STEP_SUMMARY"
+      - name: Wait for the exact queued predecessor
+        if: ${{ github.event_name == 'merge_group' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -B tools/merge_queue_admission.py wait-base
+          --repo-root . --trusted-root .
+          --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY"
+          --sha "$GITHUB_SHA" --wait-seconds 18000
       - name: Analyze exact main/head identities
         if: ${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
         env:

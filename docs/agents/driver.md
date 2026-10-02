@@ -129,7 +129,7 @@ order, but intervals may overlap.
 and canonical-IR lowering are one call), `ir` (`ir_prepare_canonical_module`:
 validation, local promotion and FAST), `codegen`, `object` (object-model
 construction), and `emit` (serialize and publish for `-c`, print for `-S`, the
-single-input link, or a `-E`/LLVM/Wasm/eBPF artifact). A failing phase keeps
+single-input link, or a `-E`/LLVM/Wasm/eBPF/SPIR-V artifact). A failing phase keeps
 the time up to the failure. Assembly units credit everything before `emit` to
 `read`. Phase timings are diagnostic.
 
@@ -354,6 +354,14 @@ pipelines reject them because their toolchains do not use Buster's C frontend.
 
 ## C input phase selection
 
+`--target=spirv-vulkan1.2-compute -c` selects the direct Vulkan 1.2 / SPIR-V 1.5
+compute emitter. It accepts one bounded C kernel and no native link inputs,
+external GPU tool flags, LLVM emission, explicit native allocator, debug/PIC,
+or native verification options. The [compute contract](../spirv-compute.md)
+defines the interface, unsigned integer subset, automatic bounds guard and
+pending physical-device evidence. Existing external `spirv` routes are separate.
+Without `-o`, the direct target publishes `<input-path>.spv`.
+
 A `.c` input and any path under `-x c` begin as raw C source and run the full
 preprocessor. In automatic language mode, `.i` begins as preprocessed C;
 `-x cpp-output` selects that same phase for any suffix, including an
@@ -496,6 +504,39 @@ and irrelevant-member timing rows (with both one and many root references) withi
 are included and timing never gates correctness. `state_bytes` is the name
 arena's used prefix (including superseded growth tables) before destruction,
 not physical RSS or the per-archive scratch peak.
+
+Archive input uses `object_archive_read_link`, a borrowed descriptor reader,
+while `object_archive_read` remains the eager public API. The driver retains
+archive mappings through extraction and releases them on every invocation exit;
+fully admitted objects own their payload and names in the result arena. Descriptor
+capacity follows the actual member-header count rather than archive payload bytes.
+
+GNU/COFF first linker-member and GNU64 indexes, plus BSD/Darwin32/64 ranlib
+indexes, provide definition metadata without reading object payloads. BSD
+extended metadata names are classified after decoding; Mach-O index names lose
+exactly the same leading underscore as the full reader. Unindexed ELF, COFF and
+Mach-O members read only symbol/name metadata. An unrelated foreign-target or
+unsupported-relocation member therefore cannot reject a link. A selected member
+runs the ordinary complete object reader before its object or undefined references
+enter extraction state; refusals name its archive member and actual/requested
+targets. The ordered provider worklist keeps the same member-order, duplicate,
+weak-reference and repeated-archive rules. Provider heads are cleared by their
+original indexed names before scratch release, even if admission replaces a
+descriptor's symbol table.
+
+Selection metadata does not extend the object reader's section or symbol
+vocabulary. An index can request a definition in a section the full reader
+cannot retain; selecting that member still reaches the existing admission or
+unresolved-symbol diagnostic. That unsupported-definition limitation remains
+at the full-reader boundary rather than silently publishing a descriptor as a
+linked object.
+
+`compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
+GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
+no-selected-member archives, a required incompatible member, duplicate providers,
+weak references and repeated occurrences. A separate valid ELF `R_X86_64_SIZE64`
+control verifies that an irrelevant same-target unsupported relocation is deferred
+and its selected member still fails.
 
 An undefined weak ELF reference does not select a static archive member.
 It may bind to a member selected for a separate strong dependency, to a
@@ -686,6 +727,17 @@ diagnostic `native elf64 object exceeds the object writer's limits (...)`,
 and leaves an existing output file untouched. `-v` prints the writer's exact
 work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
 `-c`. See [object emission](../object-emission.md).
+
+## ELF TLS companion lookup
+
+The x86-64 executable writers index TLSGD/TLSLD section/offset sites in link
+scratch after initializer stripping. Import classification and relocation
+planning reuse those exact identities; input relocation order and duplicate
+sites do not determine membership. Shared images retain helper calls. Empty
+cases allocate no table, scratch exhaustion fails before publication, and the
+existing encoding and relocation bounds checks remain mandatory. See the
+[link comparison package](../linker-tls-comparison.md) for work counters,
+object/archive loader controls, latency boundaries and evidence limitations.
 
 ## External ELF debug information
 

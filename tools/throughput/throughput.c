@@ -746,8 +746,9 @@ static int tp_measure(TpConfig const* config, TpJob const* job, char const* comp
         ok = !p->launch_error && !p->timed_out && !p->signal_number && p->exit_code == 0 && p->wall_seconds > 0.0;
         if (!ok)
         {
-            tp_error("sample %s failed: exit=%d signal=%d timeout=%d launch_error=%d; see %s",
-                     sample_id, p->exit_code, p->signal_number, p->timed_out, p->launch_error, log);
+            tp_error("sample %s failed: exit=%d signal=%d timeout=%d launch_error=%d launch_stage=%s; see %s",
+                     sample_id, p->exit_code, p->signal_number, p->timed_out, p->launch_error,
+                     tp_launch_stage_name(p->launch_stage), log);
         }
         fprintf(capabilities, "{\"sample\":"); tp_json_string(capabilities, sample_id);
         fprintf(capabilities, ",\"exit_code\":%d,\"signal\":%d,\"timeout\":%d,\"launch_error\":%d,\"pmu\":{",

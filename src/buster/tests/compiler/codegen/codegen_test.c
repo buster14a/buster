@@ -2079,12 +2079,163 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_reused_home_boundary(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        bool x64 = target.cpu_arch == CPU_ARCH_X86_64;
+        MachineInstruction instructions[10] = {0};
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(instructions); row += 1)
+        {
+            instructions[row].opcode = x64 ? MACHINE_X64_NOP : MACHINE_A64_NOP;
+        }
+        instructions[0].opcode = x64 ? MACHINE_X64_MOV_RI : MACHINE_A64_MOV_RI;
+        instructions[0].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+        instructions[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+        instructions[4] = instructions[0];
+        instructions[4].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1);
+        // A later definition keeps v0's final subject event past the second
+        // block's entry, so its loss of frame validity at row 4 cannot pass
+        // merely because the timeline stopped before that block.
+        instructions[8] = instructions[0];
+        instructions[6].opcode = x64 ? MACHINE_X64_MOV_RR : MACHINE_A64_MOV_RR;
+        instructions[6].operands[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, 1);
+        instructions[6].operands[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1);
+        MachineVirtualRegister virtual_registers[] = {
+            {.definition_point = machine_point_make(0, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+             .flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE},
+            {.definition_point = machine_point_make(4, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+        };
+        MachineBlock blocks[] = {
+            {.first_instruction = 0, .instruction_count = 4},
+            {.first_instruction = 4, .instruction_count = 6},
+        };
+        // The recorder's boundary rule is what makes its output safe when a
+        // later write can return to row 4 through this back edge. The rows
+        // themselves are recording input, rather than an executable program.
+        MachineEdge edges[] = {
+            {.source_block = 0, .destination_block = 1},
+            {.source_block = 1, .destination_block = 1},
+        };
+        MachineDebugValue values[] = {
+            {.pieces = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0)}, .piece_sizes = {8}, .local = {.value = 0},
+             .first_instruction = UINT32_MAX, .kind = MACHINE_DEBUG_VALUE_REFERENCE, .piece_count = 1, .value_size = 8},
+            {.pieces = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1)}, .piece_sizes = {8}, .local = {.value = 1},
+             .first_instruction = UINT32_MAX, .kind = MACHINE_DEBUG_VALUE_REFERENCE, .piece_count = 1, .value_size = 8},
+        };
+        MachineFunction function = {
+            .instructions = instructions,
+            .virtual_registers = virtual_registers,
+            .blocks = blocks,
+            .edges = edges,
+            .debug_values = values,
+            .target = x64 ? machine_target_x86_64() : machine_target_aarch64(),
+            .instruction_count = BUSTER_ARRAY_LENGTH(instructions),
+            .virtual_register_count = BUSTER_ARRAY_LENGTH(virtual_registers),
+            .block_count = BUSTER_ARRAY_LENGTH(blocks),
+            .edge_count = BUSTER_ARRAY_LENGTH(edges),
+            .debug_value_count = BUSTER_ARRAY_LENGTH(values),
+        };
+        MachineEdit edits[] = {
+            {.point = machine_point_make(0, MACHINE_POINT_AFTER), .kind = MACHINE_EDIT_SPILL, .subject = 0, .location = 0},
+            {.point = machine_point_make(4, MACHINE_POINT_AFTER), .kind = MACHINE_EDIT_SPILL, .subject = 1, .location = 0},
+            {.point = machine_point_make(8, MACHINE_POINT_AFTER), .kind = MACHINE_EDIT_SPILL, .subject = 0, .location = 0},
+        };
+        u8 operand_registers[10 * MACHINE_INSTRUCTION_OPERAND_COUNT] = {0};
+        operand_registers[6 * MACHINE_INSTRUCTION_OPERAND_COUNT] = 1;
+        u32 row_offsets[] = {0, 10, 20, 30, 40, 50, 60, 70, 80, 90};
+        IrFunction ir_function = {.symbol = {.value = 7}};
+        for (u32 shared = 0; shared < 2; shared += 1)
+        {
+            u32 virtual_offsets[] = {16, shared ? 16u : 32u};
+            MachineStackPlacement placement = {
+                .edits = edits,
+                .virtual_register_offsets = virtual_offsets,
+                .operand_registers = operand_registers,
+                .edit_count = BUSTER_ARRAY_LENGTH(edits),
+                .valid = true,
+            };
+            s32 first_frame = x64 ? 64 : -32;
+            s32 second_frame = shared ? first_frame : x64 ? 48 : -48;
+            // These are explicit row-point expectations, independently applied
+            // to both recorders. Fresh stores publish from the following row.
+            // Shared-frame validity ends at a block entry or final own event
+            // + 1. Certified registers survive until a physical clobber:
+            // v1 remains in register 0 at row 7, then v0 overwrites it at row 8.
+            // v0's final definition retains register 0 through the final NOP.
+            DebugLocationSeed shared_expected[] = {
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 100, .end = 110,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 110, .end = 140,
+                 .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = first_frame}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 140, .end = 190,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 190, .end = 200,
+                 .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = x64 ? DEBUG_REGISTER_X86_RAX : DEBUG_REGISTER_AARCH64_X0}},
+                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 100, .end = 150,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 150, .end = 170,
+                 .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = second_frame}},
+                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 170, .end = 180,
+                 .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = x64 ? DEBUG_REGISTER_X86_RAX : DEBUG_REGISTER_AARCH64_X0}},
+                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 180, .end = 200,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+            };
+            // Distinct offsets are the negative control: no other virtual
+            // register can overwrite either home, so existing cross-block
+            // frame availability and the final fresh store remain intact.
+            DebugLocationSeed unique_expected[] = {
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 100, .end = 110,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 110, .end = 200,
+                 .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = first_frame}},
+                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 100, .end = 150,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 150, .end = 200,
+                 .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = second_frame}},
+            };
+            DebugLocationSeed* expected = shared ? shared_expected : unique_expected;
+            u32 expected_count = shared ? BUSTER_ARRAY_LENGTH(shared_expected) : BUSTER_ARRAY_LENGTH(unique_expected);
+            DebugLocationSeed indexed_seeds[16] = {0};
+            DebugLocationSeed dense_seeds[16] = {0};
+            CodegenModule indexed = {.debug_locations = indexed_seeds};
+            CodegenModule dense = {.debug_locations = dense_seeds};
+            bool indexed_ok = codegen_test_record_machine_locations(arguments->arena, &indexed, BUSTER_ARRAY_LENGTH(indexed_seeds),
+                                                                    &ir_function, &function, &placement, row_offsets, 100, 200, 80, target);
+            bool dense_ok = codegen_test_record_machine_locations_dense(arguments->arena, &dense, BUSTER_ARRAY_LENGTH(dense_seeds),
+                                                                        &ir_function, &function, &placement, row_offsets, 100, 200, 80, target);
+            BUSTER_TEST(arguments, indexed_ok && indexed.error == CODEGEN_ERROR_NONE);
+            BUSTER_TEST(arguments, dense_ok && dense.error == CODEGEN_ERROR_NONE);
+            BUSTER_TEST(arguments, indexed.debug_location_count == expected_count);
+            BUSTER_TEST(arguments, dense.debug_location_count == expected_count);
+            for (u32 seed_index = 0; seed_index < expected_count; seed_index += 1)
+            {
+                BUSTER_TEST(arguments, seed_index < indexed.debug_location_count &&
+                                       codegen_test_debug_seeds_equal(indexed_seeds + seed_index, expected + seed_index));
+                BUSTER_TEST(arguments, seed_index < dense.debug_location_count &&
+                                       codegen_test_debug_seeds_equal(dense_seeds + seed_index, expected + seed_index));
+            }
+        }
+    }
+    return result;
+}
+
+
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_symbols(arguments);
     UnitTestResult machine_debug = codegen_test_machine_debug_locations(arguments);
     result.succeeded_test_count += machine_debug.succeeded_test_count;
     result.test_count += machine_debug.test_count;
+    UnitTestResult reused_home_debug = codegen_test_machine_debug_reused_home_boundary(arguments);
+    result.succeeded_test_count += reused_home_debug.succeeded_test_count;
+    result.test_count += reused_home_debug.test_count;
     UnitTestResult homeless_debug = codegen_test_machine_debug_homeless_register(arguments);
     result.succeeded_test_count += homeless_debug.succeeded_test_count;
     result.test_count += homeless_debug.test_count;

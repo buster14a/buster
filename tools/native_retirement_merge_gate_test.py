@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 
@@ -21,6 +23,32 @@ gate = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = gate
 SPEC.loader.exec_module(gate)
+
+
+class APIReadTests(unittest.TestCase):
+    def test_native_client_retries_reads_but_never_writes(self):
+        api = gate.GitHub("a/b", "fixture-token")
+        error = urllib.error.HTTPError("https://example.invalid", 502, "fixture", {}, io.BytesIO())
+        with patch.object(gate.urllib.request, "urlopen", side_effect=[error, io.BytesIO(b'{"id":1}')]) as read, \
+                patch.object(gate.integration.time, "sleep") as sleep:
+            self.assertEqual(api.request("actions/runs/1"), {"id": 1})
+            self.assertEqual(read.call_count, 2)
+            sleep.assert_called_once_with(1)
+        for method in ("POST", "PATCH"):
+            error = urllib.error.HTTPError("https://example.invalid", 502, "fixture", {}, io.BytesIO())
+            with self.subTest(method=method), patch.object(gate.urllib.request, "urlopen", side_effect=error) as write, \
+                    patch.object(gate.integration.time, "sleep") as sleep:
+                with self.assertRaises(urllib.error.HTTPError):
+                    api.request("statuses/" + "b" * 40, method=method, body={"state": "pending"})
+                self.assertEqual(write.call_count, 1)
+                sleep.assert_not_called()
+            error.close()
+
+    def test_native_read_exhaustion_is_retry_not_policy_denial(self):
+        with patch.object(gate, "check_event", side_effect=gate.integration.APIReadError("actions/runs/1", 502, 4)):
+            self.assertEqual(gate.main(["check", "--repo-root", ".", "--base", "a" * 40,
+                                       "--head", "b" * 40, "--current-main", "a" * 40,
+                                       "--event", "pull_request"]), 75)
 
 
 def git(repo: Path, *arguments: str, input_text: str | None = None) -> str:
@@ -296,7 +324,7 @@ class AdmissionTests(unittest.TestCase):
     def test_workflows_fetch_creator_bearing_status_rows(self):
         root = Path(__file__).resolve().parents[1]
         for relative, head in (
-            (".github/workflows/api-migration-policy.yml", "HEAD_SHA"),
+            (".github/workflows/native-retirement-admission.yml", "HEAD_SHA"),
             (".github/workflows/native-retirement-rebind.yml", "CANDIDATE_HEAD"),
         ):
             with self.subTest(workflow=relative):
@@ -673,12 +701,14 @@ class WorkflowPolicyTests(unittest.TestCase):
         enforce = "Enforce trusted native-retirement integration"
         # The rebind job admits PRs before reconstruction and groups after
         # their predecessor lands, so each event has its own step (#1893).
-        for name, steps in (("api-migration-policy.yml", {"pull_request": enforce, "merge_group": enforce}),
+        # Native admission has no merge-group job: the trusted reconciler
+        # publishes that check (#1811).
+        for name, steps in (("native-retirement-admission.yml", {"pull_request": enforce}),
                             ("native-retirement-rebind.yml", {
                                 "pull_request": "Reject feature-owned generated state and classify trust transitions",
                                 "merge_group": "Admit the landed merge group with trusted tools"})):
             workflow = (self.root / ".github/workflows" / name).read_text()
-            for event in ("pull_request", "merge_group"):
+            for event in steps:
                 block = workflow.split("      - name: " + steps[event] + "\n", 1)[1].split("      - name:", 1)[0]
                 script = textwrap.dedent(block.split("        run: |\n", 1)[1])
                 with self.subTest(workflow=name, event=event), tempfile.TemporaryDirectory() as directory:
@@ -785,8 +815,8 @@ rm -f "$RUNNER_TEMP/trusted-fetches" "$RUNNER_TEMP/candidate-fetches"
                                       moving.stderr)
 
     def test_admission_and_compatibility_are_independent_required_checks(self):
-        workflow = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
-        policy, admission = workflow.split("  native-retirement-admission:\n", 1)
+        policy = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
+        admission = (self.root / ".github/workflows/native-retirement-admission.yml").read_text()
         self.assertEqual(gate.REQUIRED_CHECK_NAME, "Native retirement merge admission")
         self.assertIn("    name: API migration policy\n", policy)
         self.assertIn("    name: Native retirement merge admission\n", admission)
@@ -794,11 +824,13 @@ rm -f "$RUNNER_TEMP/trusted-fetches" "$RUNNER_TEMP/candidate-fetches"
         self.assertNotIn("tools/native_retirement_merge_gate.py", policy)
         self.assertIn("tools/native_retirement_merge_gate.py", admission)
         self.assertNotIn("tools/api_migration_audit.py", admission)
-        self.assertIn("github.event.merge_group.base_sha", admission)
+        self.assertNotIn("  merge_group:", admission)
+        self.assertNotIn("wait-base", admission)
 
     def test_both_required_jobs_fail_instead_of_skipping_when_ci_is_disabled(self):
-        workflow = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
-        policy, admission = workflow.split("  native-retirement-admission:\n", 1)
+        policy = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
+        admission = (self.root / ".github/workflows/native-retirement-admission.yml").read_text()
+        admission = admission.split("  native-retirement-admission:\n", 1)[1]
         for job in (policy.split("  policy:\n", 1)[1], admission):
             self.assertNotIn("vars.GH_ACTIONS_CI_ENABLED", job.split("    steps:\n", 1)[0])
             guard = job.split("      - name: Require CI admission to be enabled\n", 1)[1]
@@ -813,7 +845,7 @@ rm -f "$RUNNER_TEMP/trusted-fetches" "$RUNNER_TEMP/candidate-fetches"
                     self.assertEqual(result.returncode, 0 if enabled == "true" else 1)
 
     def test_paginated_status_wrapper_preserves_creator_evidence(self):
-        for name in ("api-migration-policy.yml", "native-retirement-rebind.yml"):
+        for name in ("native-retirement-admission.yml", "native-retirement-rebind.yml"):
             workflow = (self.root / ".github/workflows" / name).read_text()
             self.assertIn("gh api --paginate --slurp", workflow)
             script = textwrap.dedent(workflow.split("<<'PY_STATUS'\n", 1)[1].split("          PY_STATUS\n", 1)[0])

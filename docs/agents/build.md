@@ -61,6 +61,12 @@ unique executable names and complete markers, so no process replaces a driver
 another process is constructing or executing. Failed or interrupted entries
 lack a valid marker and are ignored.
 
+Absolute dependency paths may contain lexical `..` components, as TinyCC
+resource paths can when its installation prefix contains them. Cold publication
+and warm validation hash the files at those paths and retain their spelling in
+the manifest. Relative dependency paths containing `../` remain refused before
+they are resolved against the repository root.
+
 The GitHub-hosted workflows are the bootstrap exception: the supplementary
 privacy broker and `.github/workflows/ci.yml` both compile `build.c` with the
 Clang already on the hosted image, because those images ship no TCC and modern
@@ -118,6 +124,22 @@ do not implement workflows, iteration, comparison, parsing, timing, or other
 general scripting in the CMake language when `build.c` can do the work
 directly. Prefer one persistent native build-driver process over chains of
 shell, CMake, and utility subprocesses.
+
+A requested subprocess working directory is mandatory: if the driver cannot
+capture its original directory or enter the requested directory, it returns a
+`PROCESS_SPAWN_FAILURE_WORKING_DIRECTORY` result with the native OS error before
+launching any child. The diagnostic distinguishes capture from entry failure.
+After a successful entry, the existing restore failure still stops the driver,
+since later relative paths would otherwise use the wrong checkout.
+
+Apple source graphs follow the single requested `CMAKE_OSX_ARCHITECTURES` entry,
+including same-OS cross builds; the target architecture selects backend modules
+and tests. A target different from the normalized host architecture disables
+host-native tuning. Universal Apple builds fail during configure with an explicit
+unsupported diagnostic; native single-architecture behavior is unchanged. The
+macOS cross-target object smoke in `tools/build_configuration_test.py` runs in the
+existing hosted compatibility suite and checks the selected module, compile flags,
+and Mach-O object architecture without executing the cross-built object.
 
 Native GNU-family builds compile with `-march=native`
 (`GNU_FAMILY_NATIVE_TARGET` in `CMakeLists.txt`). The only compatibility
@@ -297,7 +319,19 @@ work, use every CPU instead of one each (#892 measured macOS arm64 checks at
 454 s build plus 532 s test in a one-job sanitized tree beside 120 s and 90 s
 compile-only trees). A matrix without test trees, or one whose concurrent
 self-host worker would then exceed the CPU budget, keeps the one-job-per-tree
-allocation (`matrix_superbuild_allocate_jobs`). Larger hosts retain the weighted
+allocation (`matrix_superbuild_allocate_jobs`). With two or more test trees and
+no self-host worker (the hosted checks shards), test phases are serialized:
+each test tree keeps its share as the inner Ninja quota but runs its tests with
+the whole CPU budget, one tree at a time in declaration order (sanitized Debug
+first). The superbuild makes each tree's test target wait for the previous test
+tree's, and the phase plan records that edge as `after`. Builds are not
+serialized, so a test phase can still overlap the remaining compiles; that
+deliberately extends the bounded overlap above to the sanitized Release build
+(up to about twice the CPU count in nominal workers for its duration) in
+exchange for no idle CPUs during the long sanitized Debug test tail. Sanitized
+Clang CI trees run `test_all` through the isolated-process runner
+(`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a four-worker quota into two
+two-worker processes and runs the ordinary invocation below four. Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Clang tests then run concurrently in the same bounded
 pool, with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
@@ -430,6 +464,20 @@ drives the simulator), `bench_all` (desktop only — runs `ide bench`),
 shader compilation are retained as opt-in infrastructure and default off. The
 Vulkan SDK (`VULKAN_SDK` env) is required only when Vulkan or Slang shader
 compilation is explicitly enabled.
+
+## Android SDK packaging inputs
+
+The explicit `BUSTER_ANDROID_BUILD_TOOLS_DIR` and `BUSTER_ANDROID_JAR` overrides
+win. Otherwise packaging selects build-tools by numeric `major.minor.patch`,
+preferring the newest stable version even when a newer preview is installed.
+Without a stable version it uses the newest preview version, then `rc` over
+`beta` over `alpha`, then the largest numeric preview suffix. Unrecognized
+names are ignored. Platform selection first uses the requested `ANDROID_PLATFORM`
+jar when installed, then the largest numeric `android-<API>` jar. Missing valid
+candidates and nonexistent explicit overrides fail configure with an actionable
+SDK diagnostic. The selection requires only CMake 3.17. Controlled mixed-digit,
+preview, override and missing-candidate fixtures run in the same compatibility
+suite as the cwd and Apple architecture regressions.
 
 ## Incremental Android test assets
 

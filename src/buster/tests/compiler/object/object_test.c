@@ -2368,7 +2368,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_elf_ldst(UnitTestArgument
         {
             u32 actual = 0;
             memcpy(&actual, (u8*)executable.address + 4, sizeof(actual));
-            u64 address = (u64)(uintptr_t)executable.address + 32;
+            u64 address = (u64)(uintptr_t)executable.address + os_get_page_size() + symbols[relocation.symbol].value + (u64)relocation.addend;
             BUSTER_TEST(arguments, (actual & ~(UINT32_C(0xfff) << 10)) == bases[case_index]);
             BUSTER_TEST(arguments, ((u64)((actual >> 10) & 4095) << scale) == (address & 4095));
         }
@@ -2381,9 +2381,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_elf_ldst(UnitTestArgument
     return result;
 }
 
+#include <buster/tests/compiler/object/executable_test.c>
+
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    UnitTestResult executable_sections = object_test_executable_sections(arguments);
+    result.test_count += executable_sections.test_count;
+    result.succeeded_test_count += executable_sections.succeeded_test_count;
     UnitTestResult coff_alignment = object_test_coff_section_alignment(arguments);
     result.test_count += coff_alignment.test_count;
     result.succeeded_test_count += coff_alignment.succeeded_test_count;
@@ -4691,7 +4696,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         if (linked_page_executable.error == OBJECT_ERROR_NONE && linked_page_executable.address)
         {
             u8* linked_page_text = (u8*)linked_page_executable.address;
-            u8* linked_page_data_address = linked_page_text + 8;
+            u8* linked_page_data_address = linked_page_text + os_get_page_size();
             u32 expected_linked_page21 = 0;
             u32 actual_linked_page21 = 0;
             u32 actual_linked_pageoff12 = 0;
@@ -4810,7 +4815,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                                                separate_object.relocations != 0);
     if (separate_object_valid)
     {
-        BUSTER_TEST(arguments, separate_object.symbol_count == 2);
+        BUSTER_TEST(arguments, separate_object.symbol_count == 3);
         BUSTER_TEST(arguments, separate_object.sections[OBJECT_SECTION_UNWIND].data.length > 0);
         BUSTER_TEST(arguments, separate_object.symbol_count >= 2 && separate_object.symbols[1].section == OBJECT_SECTION_UNDEFINED);
         BUSTER_TEST(arguments, separate_object.relocation_count == 2);
@@ -4819,7 +4824,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {
             ObjectRelocation* candidate = separate_object.relocations + relocation_index;
             separate_cfi_relocation |=
-                candidate->section == OBJECT_SECTION_UNWIND && candidate->symbol == 0 && candidate->kind == OBJECT_RELOCATION_X86_64_PC32;
+                candidate->section == OBJECT_SECTION_UNWIND && candidate->symbol == 2 && candidate->kind == OBJECT_RELOCATION_X86_64_PC32;
         }
         BUSTER_TEST(arguments, separate_cfi_relocation);
     }
@@ -4886,7 +4891,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     ObjectFile lookup_stress_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &lookup_stress_module,
                                                                   (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX});
     BUSTER_TEST(arguments, lookup_stress_object.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, lookup_stress_object.symbol_count == OBJECT_LOOKUP_STRESS_ENTRY_COUNT + 1);
+    BUSTER_TEST(arguments, lookup_stress_object.symbol_count == OBJECT_LOOKUP_STRESS_ENTRY_COUNT + 2);
     BUSTER_TEST(arguments, lookup_stress_object.relocation_count >= OBJECT_LOOKUP_STRESS_RELOCATION_COUNT);
     if (lookup_stress_object.error == OBJECT_ERROR_NONE && lookup_stress_object.relocation_count >= OBJECT_LOOKUP_STRESS_RELOCATION_COUNT)
     {

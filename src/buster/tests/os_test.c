@@ -734,6 +734,11 @@ void os_test_process_child_run(UnitTestArguments* arguments)
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 process_test_mode = os_get_environment_variable(S8("BUSTER_OS_PROCESS_TEST_MODE"));
+    if (string_equal(process_test_mode, S8("capture-small")))
+    {
+        bool written = os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(S8("owned")));
+        os_exit(written ? 0 : 90);
+    }
     if (string_starts_with_sequence(process_test_mode, S8("flood")))
     {
         u8 output[4096];
@@ -926,6 +931,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_environment_lookup(UnitTestArguments*
     return result;
 }
 
+#include <buster/tests/os_capture_replay_test_internal.h>
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+// Observe a real child's exit without reaping before injecting drain errors.
+// The five-byte payload fits the pipe: failure cannot turn a still-writing
+// child into SIGPIPE and obscure the successful-child regression witness.
+typedef struct OsTestCaptureNativeFault OsTestCaptureNativeFault;
+struct OsTestCaptureNativeFault
+{
+    OsProcessCaptureEvent event;
+    u32 call_index;
+    u64 bytes;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_native(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    OsTestCaptureNativeFault failures[] = {
+        {OS_PROCESS_CAPTURE_EVENT_COUNT, 0, 5},
+        {OS_PROCESS_CAPTURE_WAIT_FAILED, 0, 0},
+        {OS_PROCESS_CAPTURE_READ_FAILED, 0, 0},
+        {OS_PROCESS_CAPTURE_READ_FAILED, 1, 5},
+        {OS_PROCESS_CAPTURE_CLOSE_FAILED, 0, 5},
+        {OS_PROCESS_CAPTURE_EVENT_COUNT, 0, 5},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(failures); index += 1)
+    {
+        u64 arena_position = arguments->arena->position;
+        String8 keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_TEST_JOBS")};
+        String8 values[] = {S8("capture-small"), S8("1")};
+        OsTestEnvironment environment = os_test_environment(arguments->arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
+        String8 argv[] = {program_state->input.arguments.pointer[0], S8("test")};
+        u64 resources_before = os_process_spawn_test_resource_count();
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv), environment.keys, environment.values,
+            (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT});
+        if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+        {
+            siginfo_t observed = {0};
+            int observed_status = 0;
+            u64 deadline = os_now_microseconds() + 30000000;
+            do
+            {
+                observed_status = waitid(P_PID, (id_t)(u64)spawn.handle, &observed, WEXITED | WNOHANG | WNOWAIT);
+                if (!observed.si_pid && (!observed_status || errno == EINTR)) { os_test_sleep_milliseconds(1); }
+            } while (!observed.si_pid && (!observed_status || errno == EINTR) && os_now_microseconds() < deadline);
+            bool child_succeeded = !observed_status && observed.si_pid && observed.si_code == CLD_EXITED && !observed.si_status;
+            BUSTER_TEST(arguments, child_succeeded);
+            bool inject = child_succeeded && failures[index].event != OS_PROCESS_CAPTURE_EVENT_COUNT;
+            if (inject) { os_process_capture_test_fail_on_call(failures[index].event, failures[index].call_index); }
+            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+            if (inject) { BUSTER_TEST(arguments, os_process_capture_test_end()); }
+            BUSTER_TEST(arguments, !waited.timed_out && waited.platform_status == 0);
+            BUSTER_TEST(arguments, waited.result == (inject ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));
+            BUSTER_TEST(arguments, (bool)waited.capture_failed == inject);
+            u64 expected_bytes = failures[index].bytes;
+            BUSTER_TEST(arguments, waited.observed_total == expected_bytes && waited.captured_total == expected_bytes &&
+                waited.streams[STANDARD_STREAM_OUTPUT].length == expected_bytes);
+            if (expected_bytes)
+            {
+                BUSTER_TEST(arguments, memory_compare(waited.streams[STANDARD_STREAM_OUTPUT].pointer, "owned", 5));
+            }
+        }
+        BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
+        arena_set_position(arguments->arena, arena_position);
+    }
+    return result;
+}
+#endif
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -961,6 +1035,11 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, os_test_environment_lookup);
+    BUSTER_TEST_FIXTURE(arguments, os_test_capture_replay);
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, os_test_capture_native);
+#endif
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
     // Test-owned subprocess modes above must dispatch before this fixture.
@@ -2116,6 +2195,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 ProcessWaitResult wait_result = os_process_wait_deadline(arena, spawn, deadline_cases[i].timeout_microseconds);
                 BUSTER_TEST(arguments, (wait_result.timed_out != 0) == deadline_cases[i].expected_timeout);
                 BUSTER_TEST(arguments, wait_result.result == (deadline_cases[i].expected_timeout ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));
+                BUSTER_TEST(arguments, !wait_result.capture_failed);
                 BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length == deadline_cases[i].expected_output_length);
             }
         }

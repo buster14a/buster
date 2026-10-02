@@ -136,6 +136,7 @@
 #include <buster/lib/compiler/gpu/gpu.c>
 #include <buster/lib/compiler/llvm/bitcode.c>
 #include <buster/lib/compiler/ebpf/ebpf.c>
+#include <buster/lib/compiler/spirv/spirv.c>
 #include <buster/lib/compiler/driver/driver.c>
 #include <buster/lib/hash.c>
 #endif

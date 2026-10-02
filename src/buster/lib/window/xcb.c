@@ -1689,7 +1689,7 @@ BUSTER_GLOBAL_LOCAL void wm_x11_window_set_metadata(WmWindowHandle* window, WmWi
         }
 
         xcb_atom_t xdnd_aware = wm_x11_atom(X11_ATOM_XDND_AWARE);
-        if (xdnd_aware)
+        if (xdnd_aware && !window->disable_file_drop)
         {
             u32 xdnd_version = 5;
             xcb_change_property(connection, XCB_PROP_MODE_REPLACE, window->handle, xdnd_aware, XCB_ATOM_ATOM, 32, 1, &xdnd_version);
@@ -1824,8 +1824,14 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
     xcb_generic_event_t* event;
     xcb_connection_t* connection = windowing->connection;
 
-    while ((event = xcb_poll_for_event(connection)))
+    while ((!windowing->native_poll_limit ||
+            (windowing->native_poll_count < windowing->native_poll_limit && wm_bounded_poll_has_headroom(arena))) &&
+           (event = xcb_poll_for_event(connection)))
     {
+        if (windowing->native_poll_limit)
+        {
+            windowing->native_poll_count += 1;
+        }
         u8 event_type = event->response_type & 0x7f;
         if (event_type == 0)
         {
@@ -4086,7 +4092,20 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                     xcb_client_message_event_t* client_message_event = (xcb_client_message_event_t*)event;
                     xcb_atom_t message_type = client_message_event->type;
                     bool message_format_32 = client_message_event->format == 32;
-                    if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_WM_PROTOCOLS) &&
+                    WmWindowHandle* message_window = wm_x11_window_from_xcb(windowing, client_message_event->window);
+                    bool ignore_file_drop = message_window && message_window->disable_file_drop &&
+                                            (message_type == wm_x11_atom(X11_ATOM_XDND_ENTER) ||
+                                             message_type == wm_x11_atom(X11_ATOM_XDND_POSITION) ||
+                                             message_type == wm_x11_atom(X11_ATOM_XDND_LEAVE) ||
+                                             message_type == wm_x11_atom(X11_ATOM_XDND_DROP) ||
+                                             message_type == wm_x11_atom(X11_ATOM_XDND_STATUS) ||
+                                             message_type == wm_x11_atom(X11_ATOM_XDND_FINISHED));
+                    if (ignore_file_drop)
+                    {
+                        // Ignore even directly addressed XDND before source watching,
+                        // property/reply reads, selection conversion, or state changes.
+                    }
+                    else if (message_format_32 && message_type == wm_x11_atom(X11_ATOM_WM_PROTOCOLS) &&
                         client_message_event->data.data32[0] == wm_x11_atom(X11_ATOM_WM_DELETE_WINDOW))
                     {
                         wm_event_push(windowing, (WmEvent){
@@ -4267,7 +4286,7 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
     int screen_id = 0;
     xcb_connection_t* connection = xcb_connect(0, &screen_id);
     BUSTER_LSAN_ENABLE();
-    if (connection)
+    if (connection && !xcb_connection_has_error(connection))
     {
         const xcb_setup_t* setup = xcb_get_setup(connection);
         if (setup)
@@ -4311,12 +4330,16 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
     {
         result = &windowing_handle;
     }
+    else if (connection)
+    {
+        xcb_disconnect(connection);
+    }
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL void wm_platform_deinitialize(WmHandle* windowing)
 {
-    if (windowing->connection)
+    if (windowing && windowing->connection)
     {
         wm_x11_xdnd_reset(windowing);
         if (windowing->xim)
@@ -4342,6 +4365,7 @@ BUSTER_GLOBAL_LOCAL void wm_platform_deinitialize(WmHandle* windowing)
         }
         wm_x11_xkb_deinitialize(windowing);
         xcb_disconnect(windowing->connection);
+        windowing->connection = 0;
         u64 atom_count = BUSTER_ARRAY_LENGTH(atom_names);
         for (u64 i = 0; i < atom_count; i += 1)
         {
@@ -4391,6 +4415,7 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
         *result = (WmWindowHandle){
             .handle = window_id,
             .owner = windowing,
+            .disable_file_drop = create.disable_file_drop,
         };
         wm_x11_window_set_metadata(result, create);
         xcb_map_window(connection, window_id);
@@ -4449,4 +4474,34 @@ bool wm_window_is_visible(WmHandle* windowing)
 {
     BUSTER_UNUSED(windowing);
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_x11_window_set_title(WmHandle* windowing, WmWindowHandle* window, String8 title)
+{
+    bool result = windowing && window && window->owner == windowing && windowing->connection && window->handle &&
+                  !xcb_connection_has_error(windowing->connection);
+    if (result)
+    {
+        xcb_connection_t* connection = windowing->connection;
+        xcb_atom_t net_name = wm_x11_atom(X11_ATOM_NET_WM_NAME);
+        xcb_atom_t utf8 = wm_x11_atom(X11_ATOM_UTF8_STRING);
+        result = net_name != 0 && utf8 != 0;
+        if (result)
+        {
+            xcb_generic_error_t* error = xcb_request_check(connection,
+                xcb_change_property_checked(connection, XCB_PROP_MODE_REPLACE, window->handle, XCB_ATOM_WM_NAME,
+                                            XCB_ATOM_STRING, 8, (u32)title.length, title.pointer));
+            result = error == 0 && !xcb_connection_has_error(connection);
+            free(error);
+            if (result)
+            {
+                error = xcb_request_check(connection,
+                    xcb_change_property_checked(connection, XCB_PROP_MODE_REPLACE, window->handle, net_name, utf8,
+                                                8, (u32)title.length, title.pointer));
+                result = error == 0 && !xcb_connection_has_error(connection);
+                free(error);
+            }
+        }
+    }
+    return result;
 }

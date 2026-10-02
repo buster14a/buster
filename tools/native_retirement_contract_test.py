@@ -413,7 +413,9 @@ class ContractTests(unittest.TestCase):
                        contract.NEXT_SUPPORT_CONTRACT_SHA256,
                        contract.APPLE_CI_SUPPORT_CONTRACT_SHA256,
                        contract.PROPOSED_SUPPORT_CONTRACT_SHA256,
-                       contract.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256):
+                       contract.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
+                       contract.BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
+                       contract.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256):
             with self.subTest(digest=digest):
                 manifest["support_contract_sha256"] = digest
                 self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),

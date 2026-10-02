@@ -20,6 +20,9 @@ TREE_PREFIXES = (
     "build-ci_on-cc_",
     "build-release-ci_on-cc_",
     "build-checks-ci_on-cc_",
+    "build-sanitized-debug-ci_on-cc_",
+    "build-sanitized-release-ci_on-cc_",
+    "build-portability-ci_on-cc_",
 )
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_TOTAL_BYTES = 128 * 1024 * 1024

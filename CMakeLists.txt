@@ -80,17 +80,14 @@ if (DEFINED CMAKE_BUILD_TYPE)
     set(BUSTER_STATUS_CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
 endif()
 
-set(BUSTER_CROSS_COMPILE ${CMAKE_CROSSCOMPILING})
-
-# CMake leaves CMAKE_SYSTEM_PROCESSOR empty for the iOS platform; derive it from
-# the requested architecture so the per-arch codegen module selection still works.
-if (NOT CMAKE_SYSTEM_PROCESSOR)
-    if (CMAKE_OSX_ARCHITECTURES)
-        list(GET CMAKE_OSX_ARCHITECTURES 0 CMAKE_SYSTEM_PROCESSOR)
-    else()
-        set(CMAKE_SYSTEM_PROCESSOR "${CMAKE_HOST_SYSTEM_PROCESSOR}")
-    endif()
+include(cmake/TargetArchitecture.cmake)
+set(BUSTER_TARGET_OSX_ARCHITECTURES "")
+if (DEFINED CMAKE_OSX_ARCHITECTURES)
+    set(BUSTER_TARGET_OSX_ARCHITECTURES "${CMAKE_OSX_ARCHITECTURES}")
 endif()
+buster_target_architecture(CMAKE_SYSTEM_PROCESSOR BUSTER_CROSS_COMPILE
+    "${CMAKE_SYSTEM_NAME}" "${CMAKE_SYSTEM_PROCESSOR}" "${CMAKE_HOST_SYSTEM_PROCESSOR}"
+    "${BUSTER_TARGET_OSX_ARCHITECTURES}" "${CMAKE_CROSSCOMPILING}")
 
 set(C_COMPILER_GNU OFF)
 set(C_COMPILER_APPLE_CLANG OFF)
@@ -122,6 +119,7 @@ if ((C_COMPILER_NAME STREQUAL "zig" OR C_COMPILER_NAME STREQUAL "zig.exe") AND "
 endif()
 
 option(BUSTER_CI "Enable CI mode" OFF)
+option(BUSTER_TEST_PROCESS_PARTITIONS "Run CI unit modules in isolated processes within the test quota" OFF)
 option(BUSTER_LINK_LIBC "Link libc" ON)
 option(BUSTER_UNITY_BUILD "Enable unity builds for optimized non-sanitized Clang configurations" ON)
 option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
@@ -1089,6 +1087,7 @@ buster_register_module(compiler_wasm "${BUSTER_SOURCE_DIR}/compiler/wasm/wasm${C
 buster_register_module(compiler_gpu "${BUSTER_SOURCE_DIR}/compiler/gpu/gpu${COMMON_EXTENSION}")
 buster_register_module(compiler_llvm_bitcode "${BUSTER_SOURCE_DIR}/compiler/llvm/bitcode${COMMON_EXTENSION}")
 buster_register_module(compiler_ebpf "${BUSTER_SOURCE_DIR}/compiler/ebpf/ebpf${COMMON_EXTENSION}")
+buster_register_module(compiler_spirv "${BUSTER_SOURCE_DIR}/compiler/spirv/spirv${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
@@ -1161,6 +1160,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/jit/jit_test.c
     src/buster/tests/compiler/link/link_test.c
     src/buster/tests/compiler/gpu/gpu_test.c
+    src/buster/tests/compiler/spirv/spirv_test.c
     src/buster/tests/compiler/driver/driver_test.c
     src/buster/tests/compiler/driver/object_path_test.c
 )
@@ -1175,6 +1175,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/simd_test.h
     src/buster/tests/string_test.h
     src/buster/tests/os_test.h
+    src/buster/tests/os_capture_replay_test_internal.h
     src/buster/tests/file_test.h
     src/buster/tests/target_test.h
     src/buster/tests/truetype_test.h
@@ -1223,6 +1224,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/jit/jit_test.h
     src/buster/tests/compiler/link/link_test.h
     src/buster/tests/compiler/gpu/gpu_test.h
+    src/buster/tests/compiler/spirv/spirv_test.h
     src/buster/tests/compiler/driver/driver_test.h
     src/buster/tests/compiler/driver/object_path_test.h
 )
@@ -2134,6 +2136,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_gpu
     compiler_llvm_bitcode
     compiler_ebpf
+    compiler_spirv
     compiler_driver
     simd
     file
@@ -2142,6 +2145,8 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     hash
     ${BUSTER_COMPILER_PLATFORM_MODULES}
 )
+
+include(cmake/HotReloadDemo.cmake)
 
 if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
      CMAKE_SYSTEM_PROCESSOR MATCHES
@@ -2182,25 +2187,11 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
         endif()
     endif()
 
-    # Pick the newest installed build-tools unless told otherwise.
-    if (NOT BUSTER_ANDROID_BUILD_TOOLS_DIR)
-        file(GLOB BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES "${BUSTER_ANDROID_SDK}/build-tools/*")
-        if (BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES)
-            list(SORT BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES)
-            list(GET BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES -1 BUSTER_ANDROID_BUILD_TOOLS_DIR)
-        endif()
-    endif()
-
-    # android.jar matching the configured platform (fallback to newest available).
-    string(REGEX MATCH "[0-9]+" BUSTER_ANDROID_API_LEVEL "${ANDROID_PLATFORM}")
-    set(BUSTER_ANDROID_JAR "${BUSTER_ANDROID_SDK}/platforms/android-${BUSTER_ANDROID_API_LEVEL}/android.jar")
-    if (NOT EXISTS "${BUSTER_ANDROID_JAR}")
-        file(GLOB BUSTER_ANDROID_PLATFORM_JARS "${BUSTER_ANDROID_SDK}/platforms/*/android.jar")
-        if (BUSTER_ANDROID_PLATFORM_JARS)
-            list(SORT BUSTER_ANDROID_PLATFORM_JARS)
-            list(GET BUSTER_ANDROID_PLATFORM_JARS -1 BUSTER_ANDROID_JAR)
-        endif()
-    endif()
+    include(cmake/AndroidSdkSelection.cmake)
+    buster_android_build_tools(BUSTER_ANDROID_BUILD_TOOLS_DIR
+        "${BUSTER_ANDROID_SDK}" "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
+    buster_android_platform_jar(BUSTER_ANDROID_JAR
+        "${BUSTER_ANDROID_SDK}" "${ANDROID_PLATFORM}" "${BUSTER_ANDROID_JAR}")
 
     find_program(BUSTER_AAPT2 aapt2 HINTS "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
     find_program(BUSTER_ZIPALIGN zipalign HINTS "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
@@ -2284,6 +2275,22 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
     )
 else()
     if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
+        executable_add(ui_slider_component_tests OFF src/buster/tests/ui_slider_component_test.c
+            MODULES os arena integer string file hash time float ui_core ui_builder
+            SOURCES src/buster/tests/ui_slider_test.c)
+        if (UNIX)
+            target_link_libraries(ui_slider_component_tests PRIVATE m)
+        elseif (WIN32)
+            target_link_libraries(ui_slider_component_tests PRIVATE ws2_32)
+        endif()
+        add_custom_target(test_ui_slider
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:ui_slider_component_tests>"
+            DEPENDS ui_slider_component_tests
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run headless UI slider input regressions"
+            VERBATIM)
+    endif()
+    if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
         # Exercise real UI consumers without adding native window/rendering
         # modules to the headless compiler. The runner owns an inert renderer
         # boundary and the same foundation modules as the measurement tools.
@@ -2310,6 +2317,26 @@ else()
         COMMENT "Run unit tests"
         VERBATIM
     )
+    if (BUSTER_CI)
+        # The native driver owns child quotas, completion proof and cleanup.
+        # These opt-in targets reuse ide and the authoritative sanitizer env.
+        add_custom_target(test_units_partitioned
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+                "${BUSTER_BUILD_DRIVER}" test_units_partitioned "$<TARGET_FILE:ide>"
+            DEPENDS ide
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run isolated unit-test module partitions"
+            VERBATIM
+        )
+        add_custom_target(test_unit_inventory
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+                "BUSTER_TEST_MODULE_GROUP=inventory" "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
+            DEPENDS ide
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Query the unit-test module inventory without executing modules"
+            VERBATIM
+        )
+    endif()
     # Native observer only; this prefix does not change dependencies or test policy.
     set(BUSTER_MATRIX_TEST_OBSERVER)
     if (BUSTER_MATRIX_PHASE_DRIVER)
@@ -2321,10 +2348,14 @@ else()
             "${BUSTER_MATRIX_PHASE_EPOCH}" 0 --)
     endif()
     if (BUSTER_CI)
+        set(BUSTER_CI_TEST_COMMAND "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS})
+        if (BUSTER_TEST_PROCESS_PARTITIONS)
+            set(BUSTER_CI_TEST_COMMAND "${BUSTER_BUILD_DRIVER}" test_units_partitioned "$<TARGET_FILE:ide>")
+        endif()
         add_custom_target(test_all
             COMMAND
             ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
-            ${BUSTER_MATRIX_TEST_OBSERVER} "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
+            ${BUSTER_MATRIX_TEST_OBSERVER} ${BUSTER_CI_TEST_COMMAND}
             DEPENDS ide
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             COMMENT "Run all compiler and library tests"
@@ -2340,6 +2371,11 @@ else()
             COMMENT "Test all"
             VERBATIM
         )
+    endif()
+
+    if (TARGET test_ui_slider)
+        add_dependencies(test_all test_ui_slider)
+        add_dependencies(test_units test_ui_slider)
     endif()
 
     if (TARGET test_ui_utf8)
@@ -2392,3 +2428,7 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
 elseif (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG)
     message(STATUS "clang_analyze target disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF")
 endif()
+
+# Separate application/component graphs keep graphics out of the compiler.
+include(cmake/Raster.cmake)
+include(cmake/ImageBrowser.cmake)

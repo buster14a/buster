@@ -103,6 +103,13 @@ function-pointer data relocations, atomics/threads/TLS/SIMD, inline assembly,
 computed labels and indirect branches, and Component Model packaging. These
 are explicit errors rather than native fallbacks.
 
+Fixed frames share the [checked shadow-stack alignment contract](WASM64.md):
+their base satisfies the maximum actual place alignment, including requirements
+greater than 16 bytes. Odd-sized live dynamic allocations do not misalign a
+callee's fixed objects. Returns and deliberate stack-bound traps restore the
+exact entry pointer rather than the padded frame base; padding consumes the
+same checked stack reserve as fixed and dynamic objects.
+
 The synthetic startup reads Preview 1 arguments and environment into guest
 memory and grows memory if they exceed the initial 64 KiB stack reserve. A
 failed growth or an address/size overflow exits with status 1. This target

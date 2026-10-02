@@ -254,6 +254,26 @@ without facts for identical bitcode and diagnostics.
   across batch pushes that may grow the array. An ENABLE marker remains below
   its replacement batch, and refused identifiers retain `no_expand` on rescans.
   Output nodes and source-stamp ownership are independent of task storage.
+  Ordinary newline runs before a following `(` join the current source
+  batch, so direct names, object aliases and replacement tails find their
+  argument list across whitespace. Directive lines retain their ordered batch
+  boundary. Builtin `__LINE__` uses its invocation stamp, including an argument
+  on a later line of that batch.
+  `_Pragma`/`__pragma` push/pop macro markers survive argument prescan, then
+  execute at the outer rescan cursor before following tokens. A substituted
+  argument executes each surviving marker occurrence, matching Clang/GCC's
+  phase-four behavior. Pack markers retain their output-token positions.
+  ENABLE tasks own definition generations rather than just names: a restored
+  different definition can expand inside an older replacement. A pop restores
+  the generation's disabled state from active ENABLE tasks without consuming
+  them; child argument contexts never execute macro-state effects.
+  The saved definition includes the dynamic `__LINE__`/`__FILE__` builtin kind,
+  so restoring one after an ordinary definition also restores its behavior.
+  `c_macro_conditional_tests` checks these boundaries against literal token
+  expectations, independent hosted Clang/GCC preprocessors and both frontend
+  lowering forms. Its oracle rows record GCC's alias-newline `__LINE__` value
+  separately and omit only GCC's observed nonterminating self-push/pop control;
+  Buster's literal checks and Clang's matching controls remain in place.
   A non-builtin definition without `#` or `##` is written straight into its
   reserved batch by `c_macro_produce_plain_tasks` (exact size from
   `plain_count` and per-parameter use counts); builtins, stringify and paste
@@ -263,10 +283,24 @@ without facts for identical bitcode and diagnostics.
 - Macro placemarkers survive the entire `##` sequence. The replacement loop
   compacts into its existing materialized buffer and removes placemarkers only
   when emitting the rescan tokens. Only the explicitly marked GNU
-  `, ## __VA_ARGS__` operator may delete a comma for an empty argument;
-  named parameters and ordinary macros retain it.
+  `, ## __VA_ARGS__` operator may delete a comma for an omitted variadic
+  argument; an explicitly supplied empty slot retains it. For a macro with
+  only a variadic parameter, an empty invocation is omitted in GNU modes and
+  explicitly empty in standard modes. Fixed-parameter omission retains the
+  GCC/Clang compatibility extension in both mode families. The omission flag
+  occupies one bit of the argument's expanded-count word, preserving its
+  48-byte row. Named fixed parameters and ordinary macros retain the comma.
   `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+  `c_test_variadic_comma_omission` checks omission, explicit emptiness, forwarding,
+  named variadics and ordinary placemarkers in every supported dialect.
+- `_Pragma` destringizes either an ordinary or `L`-prefixed string operand.
+  It strips the optional `L` and the quotes, and removes a backslash only
+  before a quote or another backslash. Macro-generated operands use the same
+  path. Pack markers retain their token-position contract; wide push/pop-macro
+  operations retain their existing ordering. `c_test_wide_pragma_operands`
+  checks both operand forms, macro-produced pack operations, nested alignment
+  restoration and saved macro definitions.
 - Source `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, and `#endif` lines may
   cross an in-progress function-like macro invocation as the GCC/Clang
   compatibility extension. The source driver processes each conditional once
@@ -296,6 +330,41 @@ without facts for identical bitcode and diagnostics.
   association by token range without flattening or copying the translation
   unit, and unselected associations are never evaluated. The nested
   generic-constant cases cover this path (GitHub #797).
+  `c_parse_type_integer_constant` owns an independent
+  `C_CONSTANT_EVALUATION_TYPE` machine over a by-value semantic model. It
+  shares existing rows for reads and seals growable capacities at copied counts,
+  forcing the first append into private storage. Fixed parameter, alignment and
+  diagnostic buffers are copied too; slots after a checkpoint's counts may
+  belong to a later model that shares those buffers. Its
+  aggregate/definition indexes, token/scalar caches, symbol interning and layout
+  work counters are detached. Casts, generic controllers/association types and
+  `typeof` use the same private explicit frames, with machineless scalar reads
+  that cannot define or complete tags. New tag bodies remain unresolved.
+  Absent named struct/union pointers mint incomplete forward rows only in the
+  private model. Scalar type-name attributes are applied once by their owner.
+  Private model growth uses a separate scratch arena from expression frames;
+  its rows survive frame rewinds until stable integer facts have been extracted.
+  Ordinary and pending enumerator bindings precede typedef cast detection.
+  The returned signed magnitude, rank and target width survive the query;
+  temporary type IDs do not. Qualified enum aliases read integer facts through
+  their original tag even when the alias was created before its completion.
+  Existing enumerator folding retains the
+  `C_CONSTANT_EVALUATION_ENUM` compatibility mode on the declaration machine,
+  including its machineless `sizeof` path. Migrating that consumer requires
+  declaration-owned preparation of source-ordered operand facts; this stage
+  adds the protected query without changing enum admission or arithmetic.
+  Its caller supplies the semantic model at the expression's declaration point.
+  Scope alone cannot reconstruct earlier tag completeness from a finished unit;
+  deferred consumers must retain the bindings and layout facts of their operands.
+  Recognized vector-size attributes accept only nonzero literals in the query;
+  other arguments remain unresolved before the legacy recursive folder can run.
+  The copied model retains its protected-query flag through machineless operand
+  copies, so the actual vector reader also refuses indirect arguments in stored
+  array-bound ranges outside the query span. Already declared vector types remain
+  readable.
+  The query accepts no live declaration machine. Its isolation fixture snapshots
+  full shared buffers and indexes on successful and refused queries, including
+  a shortened checkpoint whose buffers contain later type rows (GitHub #1247).
 - Legacy integer constant ranges share the private
   `c_parse_constant_expression_evaluate` walker over original token indices.
   The shape sidecar and parse position index describe that stream; copying a
@@ -398,6 +467,15 @@ without facts for identical bitcode and diagnostics.
   validity oracle, guard-page/window differential cases and driver failures are
   registered in the frontend/driver suites; `basic_c_utf8_identifiers.c` checks
   valid source through every native allocator (GitHub #253).
+- In C99/GNU99 and C11/C17/GNU11/GNU17, identifier UCNs are decoded under
+  the dialect's Annex D policy before symbol interning. Raw and escaped
+  spellings then share canonical UTF-8 identity. Original token spellings
+  survive macro `#` and `##`; only the final fused identifier-respelling
+  pass exposes canonical bytes to semantic/lowering consumers, under stamps
+  retaining the original source location. C23/GNU23/GNU89 identifier-escape
+  admission is unchanged. Literal conversion remains separate; raw UTF-8
+  keeps the encoding-only rule above. See the dialect boundary and registered
+  UCN fixtures in [frontend.md](../frontend.md).
 - Arena ownership is part of the API contract. Returned source, syntax,
   semantic, and IR structures may reference earlier-stage storage; callers must
   retain the translation-unit arena until every downstream consumer finishes.
@@ -670,7 +748,21 @@ without facts for identical bitcode and diagnostics.
   Indexing, pointer offsets/differences and dereferencing use that saved shape;
   pointer-local reads restore their declaration's bounds. Explicit scalar
   pointer casts discard it, even when canonical pointer types match. `sizeof`
-  of a named VLA pointer's dereference reads the cached suffix size.
+  of a VLA pointer's dereference reads the cached suffix size, including
+  computed pointers and `*&array`. Type queries retain frontend-only runtime
+  array shells through type names and `typeof`; they never use the predictor's
+  integer guess as a VLA size. `sizeof(T[n][m])` lowers its bounds through the
+  existing layout continuation, while alignment queries do not evaluate bounds.
+  Pointer-to-VLA casts evaluate their bounds and attach the resulting shape
+  to a flattened canonical pointer. Typedef declarations evaluate bounds where
+  they occur; later objects and type queries reuse those declaration-time
+  values even after a bound variable changes.
+  `compiler_driver_test_vla_runtime_types` checks these sizes, allocation and
+  row casts at O0/O2 in both frontend forms and all four allocators. It also
+  checks nested call arguments and the effects of VLA-valued `typeof` operands.
+  Object and typedef declarations evaluate VLA-valued `typeof` operands before
+  capturing their layout. Nested pointer-to-VLA casts receive a diagnostic
+  until their indirect shape can be retained.
   A saved size does not suppress evaluation of a VLA-typed operand. The
   sizeof continuation evaluates its operand once through the existing
   expression machine, discards the row address, and retains that size.
@@ -835,6 +927,14 @@ without facts for identical bitcode and diagnostics.
   deferred assertions, once per token range however often the definition is
   parsed. Regression:
   `c_test_member_declaration_without_declarator_diagnostics` (GitHub #1661).
+  The same registered test pins GitHub #1250: false literal assertions in
+  structs and unions report once even when several declarators reparse the
+  definition, under C11/C17 and the C23 message-less spelling. True assertions
+  at the beginning, middle and end preserve every member. The issue's nested
+  bit-field record and the trailing struct/union members retain their
+  `sizeof`/`offsetof` answers and canonical-IR layout on x86-64 Linux in both
+  frontend forms; the named target keeps Windows bit-field ABI differences
+  out of that oracle.
 
 ## String literal memo
 

@@ -477,6 +477,9 @@ BUSTER_C_EXTERN String8 c_semantic_call_arity_message(Arena* arena, String8 name
 BUSTER_C_EXTERN CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* arena, CAnalysisResult* analysis,
                                                                       CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
+BUSTER_C_EXTERN u8 c_semantic_integer_rank(CTypeKind kind);
+BUSTER_C_EXTERN CTypeKind c_semantic_integer_kind(u8 rank, bool is_signed);
+BUSTER_C_EXTERN CTypeKind c_semantic_integer_arithmetic_kind(Target target, CTypeKind left, CTypeKind right);
 // GNU vectors retain their written lane count while object size rounds to
 // the next power of two. Alignment follows the target vector ABI.
 BUSTER_C_EXTERN bool c_vector_type_layout(Target target, u64 element_size, u32 logical_byte_size, u64* element_count_out,
@@ -697,6 +700,8 @@ struct CSymbolTable
     u32 slot_capacity;
     u32 name_capacity;
     u32 count;
+    // Cold source spelling normalization enables the fused final respell pass.
+    bool has_ucn_names;
 };
 
 // The names a pass compares an identifier token against by hand, and their
@@ -1188,6 +1193,17 @@ struct CParseExpressionQuery
     u32 flags;
 };
 
+typedef enum CConstantEvaluationMode
+{
+    C_CONSTANT_EVALUATION_NORMAL,
+    // Existing enum folding stays on the declaration machine until its
+    // owner prepares the protected query's type facts.
+    C_CONSTANT_EVALUATION_ENUM,
+    // Query-only type readers: no tag definition, shared cache publication,
+    // or re-entry into the declaration's active type-parse machine.
+    C_CONSTANT_EVALUATION_TYPE,
+} CConstantEvaluationMode;
+
 struct CTypeParseMachine
 {
     CParseExpressionQuery* expression_queries;
@@ -1228,16 +1244,12 @@ struct CTypeParseMachine
     u32 mutation_type_limit;
     u32 expression_task_count;
     u32 expression_task_capacity;
-    // The enum currently evaluating an explicit initializer. Earlier members
-    // are visible before ordinary entity publication; the start bounds lookup
-    // to this definition so an unrelated enum cannot satisfy an identifier.
-    u32 enum_constant_member_start;
+    CConstantEvaluationMode constant_evaluation_mode;
     bool result_valid;
     bool failed;
     bool semantic_constant_queries;
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
-    bool enum_constant_members_active;
     bool type_identity_queries_active;
     // How many GNU `_Alignof(object)` evaluations of an object's alignment
     // records enclose this one, and whether one of them hit

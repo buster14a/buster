@@ -268,6 +268,135 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_call_validation(UnitTestArg
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_binary_fixture(IrBinaryOperation operation, u32 operand_type, u32 result_type)
+{
+    // Independent complete-module data: the arguments, definitions, block
+    // ownership and return stay valid while the BINARY family changes.
+    IrTypeId parameter_types[] = {{.value = operand_type}, {.value = operand_type}};
+    IrType types[] = {
+        {.id = {.value = 0}, .kind = IR_TYPE_INTEGER, .bit_width = 64, .is_signed = true,
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_FLOAT, .bit_width = 64,
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 2}, .kind = IR_TYPE_BOOLEAN, .bit_width = 1,
+         .layout = {.size = 1, .alignment = 1, .resolved = true}},
+        {.id = {.value = 3}, .kind = IR_TYPE_POINTER, .element_type = {.value = 0},
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 4}, .kind = IR_TYPE_VECTOR, .element_type = {.value = 0}, .element_count = 2,
+         .layout = {.size = 16, .alignment = 16, .resolved = true}},
+        {.id = {.value = 5}, .kind = IR_TYPE_VECTOR, .element_type = {.value = 1}, .element_count = 2,
+         .layout = {.size = 16, .alignment = 16, .resolved = true}},
+        {.id = {.value = 6}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = result_type},
+         .parameter_types = parameter_types, .parameter_count = BUSTER_ARRAY_LENGTH(parameter_types)},
+    };
+    u64 argument_indices[] = {0, 1};
+    IrValueId operands[] = {{.value = 0}, {.value = 1}, {.value = 2}};
+    IrValue values[] = {
+        {.canonical_type = {.value = operand_type}, .definition = {.value = 0}, .category = IR_VALUE_VALUE},
+        {.canonical_type = {.value = operand_type}, .definition = {.value = 1}, .category = IR_VALUE_VALUE},
+        {.canonical_type = {.value = result_type}, .definition = {.value = 2}, .category = IR_VALUE_VALUE},
+    };
+    IrInstruction instructions[] = {
+        {.opcode = IR_OPCODE_ARGUMENT, .canonical_type = {.value = operand_type}, .result = {.value = 0},
+         .immediates = argument_indices, .immediate_count = 1, .next = {.value = 1}},
+        {.opcode = IR_OPCODE_ARGUMENT, .canonical_type = {.value = operand_type}, .result = {.value = 1},
+         .immediates = argument_indices + 1, .immediate_count = 1, .next = {.value = 2}},
+        {.opcode = IR_OPCODE_BINARY, .binary_operation = (u8)operation, .canonical_type = {.value = result_type},
+         .result = {.value = 2}, .operands = operands, .operand_count = 2, .next = {.value = 3}},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = result_type}, .result = IR_VALUE_ID_INVALID,
+         .operands = operands + 2, .operand_count = 1, .next = IR_INSTRUCTION_ID_INVALID},
+    };
+    IrBlock block = {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 3},
+                     .sealed = true, .terminated = true};
+    IrFunction function = {.canonical_type = {.value = 6}, .state = IR_FUNCTION_LOWERED, .entry = {.value = 0},
+                           .blocks = &block, .block_count = 1, .instructions = instructions,
+                           .instruction_count = BUSTER_ARRAY_LENGTH(instructions), .values = values,
+                           .value_count = BUSTER_ARRAY_LENGTH(values)};
+    IrModule module = {.functions = &function, .function_count = 1};
+    IrProgram program = {.modules = &module, .module_count = 1,
+                         .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    return ir_validate_canonical_module(&program, &module);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_binary_families(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct IrTestBinaryFamilyCase IrTestBinaryFamilyCase;
+    struct IrTestBinaryFamilyCase
+    {
+        IrBinaryOperation operation;
+        bool floating;
+        bool comparison;
+    };
+    IrTestBinaryFamilyCase cases[] = {
+        {IR_BINARY_INTEGER_ADD, false, false},
+        {IR_BINARY_INTEGER_SUBTRACT, false, false},
+        {IR_BINARY_INTEGER_MULTIPLY, false, false},
+        {IR_BINARY_SIGNED_DIVIDE, false, false},
+        {IR_BINARY_UNSIGNED_DIVIDE, false, false},
+        {IR_BINARY_FLOAT_ADD, true, false},
+        {IR_BINARY_FLOAT_SUBTRACT, true, false},
+        {IR_BINARY_FLOAT_MULTIPLY, true, false},
+        {IR_BINARY_FLOAT_DIVIDE, true, false},
+        {IR_BINARY_SIGNED_REMAINDER, false, false},
+        {IR_BINARY_UNSIGNED_REMAINDER, false, false},
+        {IR_BINARY_SHIFT_LEFT, false, false},
+        {IR_BINARY_SIGNED_SHIFT_RIGHT, false, false},
+        {IR_BINARY_UNSIGNED_SHIFT_RIGHT, false, false},
+        {IR_BINARY_INTEGER_BITWISE_AND, false, false},
+        {IR_BINARY_INTEGER_BITWISE_OR, false, false},
+        {IR_BINARY_INTEGER_BITWISE_XOR, false, false},
+        {IR_BINARY_INTEGER_EQUAL, false, true},
+        {IR_BINARY_INTEGER_NOT_EQUAL, false, true},
+        {IR_BINARY_FLOAT_EQUAL, true, true},
+        {IR_BINARY_FLOAT_NOT_EQUAL, true, true},
+        {IR_BINARY_SIGNED_LESS, false, true},
+        {IR_BINARY_SIGNED_LESS_EQUAL, false, true},
+        {IR_BINARY_SIGNED_GREATER, false, true},
+        {IR_BINARY_SIGNED_GREATER_EQUAL, false, true},
+        {IR_BINARY_UNSIGNED_LESS, false, true},
+        {IR_BINARY_UNSIGNED_LESS_EQUAL, false, true},
+        {IR_BINARY_UNSIGNED_GREATER, false, true},
+        {IR_BINARY_UNSIGNED_GREATER_EQUAL, false, true},
+        {IR_BINARY_FLOAT_LESS, true, true},
+        {IR_BINARY_FLOAT_LESS_EQUAL, true, true},
+        {IR_BINARY_FLOAT_GREATER, true, true},
+        {IR_BINARY_FLOAT_GREATER_EQUAL, true, true},
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(cases) == 33);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 wrong_family = 0; wrong_family < 2; wrong_family += 1)
+        {
+            u32 operand_type = (u32)cases[index].floating ^ wrong_family;
+            u32 result_type = cases[index].comparison ? 2 : operand_type;
+            IrValidationResult validation = ir_test_canonical_binary_fixture(cases[index].operation, operand_type, result_type);
+            BUSTER_TEST(arguments, validation.error == (wrong_family ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE));
+            if (wrong_family)
+            {
+                BUSTER_TEST(arguments, validation.function.value == 0 && validation.block.value == 0 && validation.instruction.value == 2);
+            }
+        }
+    }
+    // Preserve the neighboring operation classes and integer/floating vector
+    // arithmetic and comparison masks through the same full validator.
+    IrBinaryOperation controls[] = {
+        IR_BINARY_BOOLEAN_AND, IR_BINARY_BOOLEAN_OR, IR_BINARY_POINTER_EQUAL, IR_BINARY_POINTER_NOT_EQUAL,
+        IR_BINARY_VECTOR_INTEGER_ADD, IR_BINARY_VECTOR_FLOAT_ADD, IR_BINARY_VECTOR_INTEGER_EQUAL, IR_BINARY_VECTOR_FLOAT_EQUAL,
+    };
+    u32 control_operands[] = {2, 2, 3, 3, 4, 5, 4, 5};
+    u32 control_results[] = {2, 2, 2, 2, 4, 5, 4, 4};
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(controls) == BUSTER_ARRAY_LENGTH(control_operands));
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(controls) == BUSTER_ARRAY_LENGTH(control_results));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(controls); index += 1)
+    {
+        IrValidationResult validation = ir_test_canonical_binary_fixture(controls[index], control_operands[index], control_results[index]);
+        BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -809,6 +938,10 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, ir_field_access_pieces(IR_FIELD_ACCESS_MAX_SIZE, 0) == 0);
 
+    UnitTestResult binary_families = ir_test_canonical_binary_families(arguments);
+    result.succeeded_test_count += binary_families.succeeded_test_count;
+    result.test_count += binary_families.test_count;
+
     UnitTestResult call_validation = ir_test_canonical_call_validation(arguments);
     result.succeeded_test_count += call_validation.succeeded_test_count;
     result.test_count += call_validation.test_count;
@@ -847,6 +980,61 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                     BUSTER_TEST(arguments, abi.parts[1].value_offset == 8 && abi.parts[1].size == 8);
                 }
             }
+        }
+    }
+
+    // Alignment tail padding is NO_CLASS, and a leading padding eightbyte
+    // must not move the surviving piece down in its object representation.
+    {
+        IrProgram fixture = ir_program_initialize(arguments->arena, 0, 12, 0, 0);
+        IrTypeId scalar_types[] = {
+            ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 64,
+                .layout = {.size = 8, .alignment = 8, .resolved = true}}),
+            ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 64,
+                .layout = {.size = 8, .alignment = 8, .resolved = true}}),
+            ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32,
+                .layout = {.size = 4, .alignment = 4, .resolved = true}}),
+        };
+        for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(scalar_types); shape += 1)
+        {
+            for (u32 upper = 0; upper < 2; upper += 1)
+            {
+                IrField* field = arena_allocate(arguments->arena, IrField, 1);
+                *field = (IrField){.name = S8("value"), .type = scalar_types[shape], .offset = upper * 8};
+                IrTypeId record = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_STRUCT,
+                    .fields = field, .field_count = 1, .layout = {.size = 16, .alignment = 16, .resolved = true}});
+                for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+                {
+                    IrAbiValue abi = ir_type_abi_value(&fixture, record, IR_ABI_CONVENTION_SYSTEMV_X86_64, (IrAbiUse)use);
+                    BUSTER_TEST(arguments, !abi.indirect && !abi.memory && abi.part_count == 1);
+                    BUSTER_TEST(arguments, abi.parts[0].abi_class == (shape == 1 ? IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER));
+                    BUSTER_TEST(arguments, abi.parts[0].value_offset == upper * 8 && abi.parts[0].size == 8);
+                    IrAbiValue windows = ir_type_abi_value(&fixture, record, IR_ABI_CONVENTION_WIN64_X86_64, (IrAbiUse)use);
+                    BUSTER_TEST(arguments, windows.indirect && windows.part_count == 1 &&
+                                           windows.parts[0].abi_class == IR_ABI_CLASS_POINTER);
+                }
+            }
+        }
+    }
+
+    // A GNU empty record is a real value with no SysV transport pieces. It
+    // consumes neither a register nor a stack slot for arguments or results.
+    // Keep this distinct from a nonempty all-NO_CLASS record, whose frontend
+    // support remains deliberately gated.
+    {
+        IrProgram fixture = ir_program_initialize(arguments->arena, 0, 2, 0, 0);
+        IrTypeId empty = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_STRUCT,
+            .layout = {.size = 0, .alignment = 1, .resolved = true}});
+        IrField* field = arena_allocate(arguments->arena, IrField, 1);
+        *field = (IrField){.type = empty};
+        IrTypeId wrapper = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_STRUCT, .fields = field, .field_count = 1,
+            .layout = {.size = 0, .alignment = 1, .resolved = true}});
+        for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+        {
+            IrAbiValue abi = ir_type_abi_value(&fixture, empty, IR_ABI_CONVENTION_SYSTEMV_X86_64, (IrAbiUse)use);
+            IrAbiValue wrapped = ir_type_abi_value(&fixture, wrapper, IR_ABI_CONVENTION_SYSTEMV_X86_64, (IrAbiUse)use);
+            BUSTER_TEST(arguments, !abi.indirect && !abi.memory && abi.part_count == 0);
+            BUSTER_TEST(arguments, !wrapped.indirect && !wrapped.memory && wrapped.part_count == 0);
         }
     }
 
