@@ -2,15 +2,18 @@
 // gpu_tools_main owns strict profile selection; gpu_tools_profile executes real
 // ide pipelines and independent consumers. Reuse d_observe/d_write/d_create_output
 // for bounded processes, lossless argv and diagnostics, and exclusive evidence
-// directories. No shader SDK is needed by the build driver or planner tests.
+// directories. gpu_tools_spirv_mutate_stride supplies a semantic layout-negative
+// control for the direct canonical-C profile. No shader SDK is needed by the
+// build driver or planner tests.
 #include "throughput/hash.h"
 
-#define GPU_TOOLS_PROFILE_COUNT 5
+#define GPU_TOOLS_PROFILE_COUNT 6
 #define GPU_TOOLS_RUN(settings, name, ...) gpu_tools_run(settings, name, (String8[]){__VA_ARGS__}, sizeof((String8[]){__VA_ARGS__}) / sizeof(String8))
 
 BUSTER_GLOBAL_LOCAL String8 const gpu_tools_profiles[] = {
     S8_INITIALIZER("spirv-dxc-2025.07"), S8_INITIALIZER("ptx-llvm18-cuda12.4"),
-    S8_INITIALIZER("amdgcn-llvm18"), S8_INITIALIZER("metal-xcode16.4"), S8_INITIALIZER("dxil-dxc-2025.07")};
+    S8_INITIALIZER("amdgcn-llvm18"), S8_INITIALIZER("metal-xcode16.4"), S8_INITIALIZER("dxil-dxc-2025.07"),
+    S8_INITIALIZER("spirv-direct-vulkan1.2")};
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(gpu_tools_profiles) == GPU_TOOLS_PROFILE_COUNT);
 
 typedef struct GpuToolsFixture GpuToolsFixture;
@@ -20,7 +23,8 @@ BUSTER_GLOBAL_LOCAL GpuToolsFixture const gpu_tools_fixtures[] = {
     {S8_INITIALIZER("tests/gpu/smoke.ll"), S8_INITIALIZER("0c294c24d6de71b8dbcce99ac6b881bb03adc0286c8dc1dc8e40a84c662f5106")},
     {S8_INITIALIZER("tests/gpu/smoke.cl"), S8_INITIALIZER("4af41171a25c6b0a93e405910ac2f2f9035414fb74f91c262c7350d67d8f75ac")},
     {S8_INITIALIZER("tests/gpu/smoke.metal"), S8_INITIALIZER("f519a92229ec74c8841b772f173a79a5481503330660bf6a182f07f1b302b7e7")},
-    {S8_INITIALIZER("tests/gpu/metal_reader.c"), S8_INITIALIZER("a9013aae35ebfed695f4a4cca4dcb3ee6a78e4cee86091efafd5ea6cfe87ef0b")}};
+    {S8_INITIALIZER("tests/gpu/metal_reader.c"), S8_INITIALIZER("a9013aae35ebfed695f4a4cca4dcb3ee6a78e4cee86091efafd5ea6cfe87ef0b")},
+    {S8_INITIALIZER("tests/gpu/direct_transform.c"), S8_INITIALIZER("218047a0faf10c2a68b6b38917c9126f36a7bd1b55274631795ffb4bbf327d50")}};
 
 typedef struct GpuTools GpuTools;
 struct GpuTools
@@ -123,13 +127,48 @@ BUSTER_GLOBAL_LOCAL bool gpu_tools_files_identical(GpuTools* settings, String8 r
     return identical && !settings->evidence.io_failed;
 }
 
+BUSTER_GLOBAL_LOCAL u32 gpu_tools_spirv_word(u8* bytes)
+{
+    return (u32)bytes[0] | ((u32)bytes[1] << 8) | ((u32)bytes[2] << 16) | ((u32)bytes[3] << 24);
+}
+
+BUSTER_GLOBAL_LOCAL bool gpu_tools_spirv_mutate_stride(ByteSlice bytes)
+{
+    bool valid = bytes.pointer && bytes.length >= 20 && bytes.length % 4 == 0;
+    if (valid) { valid = gpu_tools_spirv_word(bytes.pointer) == 0x07230203; }
+    bool changed = false;
+    u64 cursor = 20;
+    while (valid && cursor < bytes.length)
+    {
+        u32 instruction = gpu_tools_spirv_word(bytes.pointer + cursor);
+        u64 instruction_bytes = (u64)(instruction >> 16) * 4;
+        valid = instruction_bytes != 0 && instruction_bytes <= bytes.length - cursor;
+        if (valid)
+        {
+            // OpDecorate 71, ArrayStride 6. The direct fixture's uint32 buffer
+            // elements require a four-byte stride under Vulkan buffer layout.
+            if (!changed && (instruction & 0xffff) == 71 && instruction_bytes == 16 &&
+                gpu_tools_spirv_word(bytes.pointer + cursor + 8) == 6 && gpu_tools_spirv_word(bytes.pointer + cursor + 12) == 4)
+            {
+                bytes.pointer[cursor + 12] = 1;
+                bytes.pointer[cursor + 13] = 0;
+                bytes.pointer[cursor + 14] = 0;
+                bytes.pointer[cursor + 15] = 0;
+                changed = true;
+            }
+            cursor += instruction_bytes;
+        }
+    }
+    return valid && changed;
+}
+
 BUSTER_GLOBAL_LOCAL bool gpu_tools_profile(GpuTools* settings, u32 profile)
 {
     DSettings* evidence = &settings->evidence;
     Arena* arena = evidence->arena;
     settings->directory = path_join(arena, evidence->out, gpu_tools_profiles[profile]);
     bool ok = d_create_output(arena, settings->directory);
-    String8 artifact_name = profile == 0 ? S8("artifact.spv") : S8("artifact");
+    String8 artifact_name = profile == 0 || profile == 5 ? S8("artifact.spv") : S8("artifact");
     String8 artifact = path_join(arena, settings->directory, artifact_name);
     String8 invalid = path_join(arena, settings->directory, S8("invalid"));
     String8 source = gpu_tools_fixtures[profile == 4 ? 0 : profile].path;
@@ -249,6 +288,38 @@ BUSTER_GLOBAL_LOCAL bool gpu_tools_profile(GpuTools* settings, u32 profile)
             rejected = GPU_TOOLS_RUN(settings, S8("reject"), settings->readobj, S8("--file-headers"), S8("--symbols"), S8("--notes"), invalid);
         }
     }
+    else if (profile == 5)
+    {
+        d_write(evidence, path_join(arena, settings->directory, S8("direct-contract.txt")),
+            S8("target=spirv-vulkan1.2-compute\nconsumer_environment=vulkan1.2\nphysical_device_execution=PENDING_NOT_CONFIGURED\n"));
+        ok &= gpu_tools_spirv_version(settings);
+        if (ok)
+        {
+            compiled = GPU_TOOLS_RUN(settings, S8("compile-direct"), evidence->ide, S8("cc"),
+                S8("--target=spirv-vulkan1.2-compute"), S8("-c"), source, S8("-o"), artifact);
+            consumed = GPU_TOOLS_RUN(settings, S8("validate-direct"), settings->spirv_val, S8("--target-env"), S8("vulkan1.2"), artifact);
+            // Valid SPIR-V header, no memory model or entry point.
+            malformed = S8("\x03\x02\x23\x07\x00\x00\x01\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00");
+            d_write(evidence, invalid, malformed);
+            rejected = GPU_TOOLS_RUN(settings, S8("reject-direct-header"), settings->spirv_val, S8("--target-env"), S8("vulkan1.2"), invalid);
+            if (d_success(compiled) && d_success(consumed))
+            {
+                ByteSlice layout_negative = file_read(arena, artifact, (FileReadOptions){0});
+                bool mutated = gpu_tools_spirv_mutate_stride(layout_negative);
+                ok &= mutated;
+                if (mutated)
+                {
+                    String8 bad_layout = path_join(arena, settings->directory, S8("invalid-array-stride.spv"));
+                    d_write(evidence, bad_layout, (String8){.pointer = (char8*)layout_negative.pointer, .length = layout_negative.length});
+                    DObservation layout_reject = GPU_TOOLS_RUN(settings, S8("reject-direct-layout"), settings->spirv_val,
+                        S8("--target-env"), S8("vulkan1.2"), bad_layout);
+                    ok &= gpu_tools_rejected(layout_reject) && (d_contains(layout_reject.output, S8("stride")) ||
+                        d_contains(layout_reject.error, S8("stride"))) && gpu_tools_hash(settings, bad_layout, (String8){0});
+                }
+                else { string_print(S8("GPU_DIRECT_LAYOUT_CONTROL_FAIL: expected ArrayStride 4 decoration\n")); }
+            }
+        }
+    }
     else
     {
         DObservation xcode = GPU_TOOLS_RUN(settings, S8("xcode-version"), settings->xcodebuild, S8("-version"));
@@ -302,6 +373,28 @@ BUSTER_GLOBAL_LOCAL u32 gpu_tools_self_test(Arena* arena)
         S8("not SPIRV-Tools v2026.1\n")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(supported_versions); index += 1) { failures += !gpu_tools_spirv_version_supported(supported_versions[index]); }
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unsupported_versions); index += 1) { failures += gpu_tools_spirv_version_supported(unsupported_versions[index]); }
+    // A structurally bounded synthetic module tests the mutation mechanism;
+    // only the real validator profile establishes semantic rejection.
+    u8 stride_module[] = {3, 2, 35, 7, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0,
+        71, 0, 4, 0, 1, 0, 0, 0, 6, 0, 0, 0, 4, 0, 0, 0};
+    ByteSlice stride_bytes = {.pointer = stride_module, .length = sizeof(stride_module)};
+    failures += !gpu_tools_spirv_mutate_stride(stride_bytes);
+    failures += gpu_tools_spirv_word(stride_module + 32) != 1;
+    failures += gpu_tools_spirv_mutate_stride(stride_bytes);
+    stride_module[32] = 4;
+    stride_bytes.length -= 1;
+    failures += gpu_tools_spirv_mutate_stride(stride_bytes);
+    stride_bytes.length = 20;
+    failures += gpu_tools_spirv_mutate_stride(stride_bytes);
+    stride_bytes.length = sizeof(stride_module);
+    stride_module[22] = 0;
+    failures += gpu_tools_spirv_mutate_stride(stride_bytes);
+    stride_module[22] = 5;
+    failures += gpu_tools_spirv_mutate_stride(stride_bytes);
+    stride_module[22] = 4;
+    stride_module[0] = 0;
+    failures += gpu_tools_spirv_mutate_stride(stride_bytes);
+    failures += gpu_tools_spirv_mutate_stride((ByteSlice){0});
     Sha256 hash;
     char digest[65];
     sha256_init(&hash);

@@ -21,6 +21,8 @@ typedef enum CpuArch
     CPU_ARCH_WASM64,
     // Linux eBPF, emitted as little-endian ELF64 relocatable objects.
     CPU_ARCH_BPFEL,
+    // Vulkan 1.2 logical-address compute; the bounded C interface is ILP32.
+    CPU_ARCH_SPIRV_COMPUTE,
     CPU_ARCH_COUNT,
 } CpuArch;
 

@@ -212,6 +212,14 @@ pipelines reject them because their toolchains do not use Buster's C frontend.
 
 ## C input phase selection
 
+`--target=spirv-vulkan1.2-compute -c` selects the direct Vulkan 1.2 / SPIR-V 1.5
+compute emitter. It accepts one bounded C kernel and no native link inputs,
+external GPU tool flags, LLVM emission, explicit native allocator, debug/PIC,
+or native verification options. The [compute contract](../spirv-compute.md)
+defines the interface, unsigned integer subset, automatic bounds guard and
+pending physical-device evidence. Existing external `spirv` routes are separate.
+Without `-o`, the direct target publishes `<input-path>.spv`.
+
 A `.c` input and any path under `-x c` begin as raw C source and run the full
 preprocessor. In automatic language mode, `.i` begins as preprocessed C;
 `-x cpp-output` selects that same phase for any suffix, including an
