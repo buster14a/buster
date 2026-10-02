@@ -3406,6 +3406,20 @@ BUSTER_C_INTERNAL bool c_ir_query_offsetof(CIntegerIrBuilder* builder, u32 start
     return result.success;
 }
 
+// Runtime expressions enter the same query-frame walk used by static
+// initializer constants; its children resolve type names and array indexes.
+BUSTER_C_INTERNAL bool c_ir_offsetof_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out)
+{
+    CIrQueryFrame result = {0};
+    bool success = c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_OFFSETOF}, &result) &&
+                   result.success;
+    if (success)
+    {
+        *offset_out = result.integer;
+    }
+    return success;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out);
 BUSTER_C_INTERNAL bool c_ir_constant_normalize(CIntegerIrBuilder* builder, CIrConstantValue* value);
 BUSTER_C_INTERNAL bool c_ir_constant_type_is_integer(IrType* type);
@@ -29291,86 +29305,8 @@ c_ir_expression_core_loop:
             c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            u32 comma = close;
-            u32 nested = 0;
-            for (u32 scan = index + 2; scan < close; scan += 1)
-            {
-                CToken item = builder->preprocess.tokens[scan];
-                if (c_token_is_punctuator(&item, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&item, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    nested += 1;
-                }
-                else if (c_token_is_punctuator(&item, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&item, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    if (!nested)
-                    {
-                        break;
-                    }
-                    nested -= 1;
-                }
-                else if (!nested && c_token_is_punctuator(&item, C_PUNCTUATOR_COMMA))
-                {
-                    comma = scan;
-                    break;
-                }
-            }
-            IrTypeId type = comma < close ? c_ir_type_name(builder, index + 2, comma) : IR_TYPE_ID_INVALID;
             u64 offset = 0;
-            u32 designator = comma + 1;
-            bool valid = close < end && designator < close && type.value != IR_ID_UNDERLYING_INVALID;
-            while (valid && designator < close)
-            {
-                CToken member = builder->preprocess.tokens[designator];
-                IrType* aggregate = ir_type_from_id(&builder->program->types, type);
-                if (!aggregate || member.kind != C_TOKEN_IDENTIFIER || (aggregate->kind != IR_TYPE_STRUCT && aggregate->kind != IR_TYPE_UNION))
-                {
-                    valid = false;
-                    break;
-                }
-                IrField* field = 0;
-                for (u32 field_index = 0; field_index < aggregate->field_count; field_index += 1)
-                {
-                    if (string_equal(aggregate->fields[field_index].name, c_token_spelling(builder->preprocess.spelling_base, member)))
-                    {
-                        field = aggregate->fields + field_index;
-                        break;
-                    }
-                }
-                if (!field || field->is_bit_field)
-                {
-                    valid = false;
-                    break;
-                }
-                offset += field->offset;
-                type = field->type;
-                designator += 1;
-                while (valid && designator < close && c_token_is_punctuator(&builder->preprocess.tokens[designator], C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    u32 bracket_close = c_ir_matching_delimiter_cached(builder, designator, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-                    IrType* array = ir_type_from_id(&builder->program->types, type);
-                    u64 element_index = 0;
-                    IrType* element = array && array->kind == IR_TYPE_ARRAY ? ir_type_from_id(&builder->program->types, array->element_type) : 0;
-                    if (bracket_close >= close || !element || !element->layout.resolved ||
-                        !c_ir_integer_constant_evaluate(builder->arena, builder, designator + 1, bracket_close, &element_index))
-                    {
-                        valid = false;
-                        break;
-                    }
-                    offset += element->layout.size * element_index;
-                    type = array->element_type;
-                    designator = bracket_close + 1;
-                }
-                if (designator < close)
-                {
-                    if (!c_token_is_punctuator(&builder->preprocess.tokens[designator], C_PUNCTUATOR_DOT) || designator + 1 >= close)
-                    {
-                        valid = false;
-                        break;
-                    }
-                    designator += 1;
-                }
-            }
-            if (!valid)
+            if (close >= end || !c_ir_offsetof_evaluate(builder, index + 2, close, &offset))
             {
                 builder->failure_message = S8("invalid __builtin_offsetof type or member designator");
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -48304,102 +48240,92 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_bytes(CIntegerIrBuilder
 
 BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out)
 {
-    if (start >= end)
-    {
-        return false;
-    }
+    bool valid = start < end;
     u32 comma = end;
-    u32 parentheses = 0;
+    u32 nested = 0;
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            parentheses += 1;
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-            parentheses -= 1;
-        else if (!parentheses && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            nested += 1;
+        }
+        else if ((c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                  c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                  c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE)) && nested)
+        {
+            nested -= 1;
+        }
+        else if (!nested && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
         {
             comma = index;
             break;
         }
     }
-    if (comma == end)
-    {
-        return false;
-    }
     IrTypeId type_id = IR_TYPE_ID_INVALID;
-    if (!c_ir_query_type_name(builder, start, comma, true, &type_id) && builder->queries->has_request)
+    valid = valid && comma < end && comma + 1 < end;
+    if (valid)
     {
-        return false;
+        valid = c_ir_query_type_name(builder, start, comma, true, &type_id);
     }
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
-    if (!type || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION))
-    {
-        return false;
-    }
+    valid = valid && type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
     u64 offset = 0;
     u32 index = comma + 1;
-    while (index < end)
+    while (valid && index < end)
     {
-        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT))
+        CToken token = builder->preprocess.tokens[index];
+        CIrPromotedMemberPath path = {0};
+        valid = token.kind == C_TOKEN_IDENTIFIER &&
+                c_ir_promoted_member_path(builder, type_id, c_token_spelling(builder->preprocess.spelling_base, token), &path) &&
+                path.field && !path.field->is_bit_field && offset <= UINT64_MAX - path.offset;
+        if (valid)
+        {
+            offset += path.offset;
+            type_id = path.type;
             index += 1;
-        if (index >= end || builder->preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
-        {
-            return false;
         }
-        String8 member = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]);
-        IrField* field = 0;
-        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-        {
-            if (string_equal(type->fields[field_index].name, member)) { field = type->fields + field_index; break; }
-        }
-        if (!field || offset > UINT64_MAX - field->offset)
-        {
-            return false;
-        }
-        offset += field->offset;
-        type = ir_type_from_id(&builder->program->types, field->type);
-        index += 1;
-        // C11 7.19p3 lets the member designator subscript as well as select,
-        // and musl's ioctl.c writes `offsetof(struct v4l2_event, ts[0])` in a
-        // *static* initializer -- so this constant walk, not just the value
-        // path, has to follow one.  It only became reachable when __GNUC__
-        // started being predefined in every dialect: <stddef.h> spells
-        // offsetof as pointer arithmetic without it, and that form never
-        // arrives here.
-        while (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
+        // Subscripts are constant-query children, so nested offsetof and sizeof
+        // index expressions use the same explicit query stack.
+        while (valid && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-            if (close >= end || !type || type->kind != IR_TYPE_ARRAY)
-            {
-                return false;
-            }
+            IrType* array = ir_type_from_id(&builder->program->types, type_id);
+            IrTypeId element_id = array && array->kind == IR_TYPE_ARRAY ? array->element_type : IR_TYPE_ID_INVALID;
             CIrConstantValue subscript = {0};
-            if (!c_ir_query_constant(builder, index + 1, close, &subscript) || subscript.kind != C_IR_CONSTANT_INTEGER)
+            valid = close < end && element_id.value != IR_ID_UNDERLYING_INVALID &&
+                    c_ir_query_constant(builder, index + 1, close, &subscript) && subscript.kind == C_IR_CONSTANT_INTEGER;
+            IrType* element = ir_type_from_id(&builder->program->types, element_id);
+            valid = valid && element && element->layout.resolved;
+            if (valid)
             {
-                return false;
+                valid = !element->layout.size || subscript.integer <= UINT64_MAX / element->layout.size;
+                if (valid)
+                {
+                    u64 element_offset = subscript.integer * element->layout.size;
+                    valid = offset <= UINT64_MAX - element_offset;
+                    if (valid)
+                    {
+                        offset += element_offset;
+                        type_id = element_id;
+                        index = close + 1;
+                    }
+                }
             }
-            IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
-            if (!element || !element->layout.resolved)
-            {
-                return false;
-            }
-            if (element->layout.size && subscript.integer > UINT64_MAX / element->layout.size)
-            {
-                return false;
-            }
-            u64 element_offset = subscript.integer * element->layout.size;
-            if (offset > UINT64_MAX - element_offset)
-            {
-                return false;
-            }
-            offset += element_offset;
-            type = element;
-            index = close + 1;
+        }
+        if (valid && index < end)
+        {
+            valid = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT) && index + 1 < end;
+            index += 1;
         }
     }
-    *offset_out = offset;
-    return true;
+    if (valid)
+    {
+        *offset_out = offset;
+    }
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_constant_is_null_pointer_constant(CIntegerIrBuilder* builder, CIrConstantValue const* value)
