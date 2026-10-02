@@ -191,6 +191,20 @@ BUSTER_GLOBAL_LOCAL bool probe_lifecycle_test(ProbeHost* host, char const* compi
     }
     probe_check(host, probe_shutdown(host, versions) == PROBE_OK && !host->live_maps && !host->live_bytes, "shutdown_releases_both_slots");
     probe_check(host, probe_shutdown(host, versions) == PROBE_OK, "shutdown_is_idempotent");
+    FILE* commands = tmpfile();
+    bool scripted = commands != 0;
+    if (scripted)
+    {
+        scripted = fputs("invalid-command-that-exceeds-buffer\ns\nr\ns\nq\n", commands) >= 0 && fseek(commands, 0, SEEK_SET) == 0;
+        if (scripted)
+        {
+            host->state = (PilotState){0};
+            scripted = probe_interactive(host, compiler, source, output, commands) &&
+                host->state.total == 4 && host->state.calls == 2 && !host->live_maps;
+        }
+        scripted = fclose(commands) == 0 && scripted;
+    }
+    probe_check(host, scripted, "interactive_step_reload_quit_commands_and_bounded_line_parser");
     probe_check(host, unlink(source) == 0, "private_source_removed");
     return !host->failures;
 }

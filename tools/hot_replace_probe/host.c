@@ -411,7 +411,7 @@ BUSTER_GLOBAL_LOCAL ProbeError probe_compile(ProbeHost* host, char const* compil
         }
         else
         {
-            printf("COMPILE_SPAWN_FAILED stage=%u error=%llu\n", (unsigned)spawn.failure, (unsigned long long)spawn.error);
+            printf("COMPILE_SPAWN_FAILED stage=%u error=%llu\n", (unsigned)spawn.failure, (unsigned long long)spawn.error.v);
         }
         scratch_end(scratch);
     }
@@ -486,7 +486,7 @@ BUSTER_GLOBAL_LOCAL ProbeError probe_shutdown(ProbeHost* host, ProbeVersion* ver
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool probe_interactive(ProbeHost* host, char const* compiler, char const* source, char const* output)
+BUSTER_GLOBAL_LOCAL bool probe_interactive(ProbeHost* host, char const* compiler, char const* source, char const* output, FILE* input)
 {
     ProbeVersion versions[2] = {0};
     bool result = probe_rebuild(host, versions, compiler, source, output) == PROBE_OK;
@@ -495,12 +495,12 @@ BUSTER_GLOBAL_LOCAL bool probe_interactive(ProbeHost* host, char const* compiler
         printf("Commands: s = step, r = rebuild and reload saved source, q = quit\n");
         char command[16];
         bool done = false;
-        while (!done && fgets(command, sizeof(command), stdin))
+        while (!done && fgets(command, sizeof(command), input))
         {
-            if (!strchr(command, '\n') && !feof(stdin))
+            if (!strchr(command, '\n') && !feof(input))
             {
                 int byte;
-                do { byte = fgetc(stdin); } while (byte != '\n' && byte != EOF);
+                do { byte = fgetc(input); } while (byte != '\n' && byte != EOF);
                 printf("Expected s, r, or q\n");
             }
             else if (!strcmp(command, "s\n") || !strcmp(command, "s"))
@@ -531,7 +531,7 @@ BUSTER_GLOBAL_LOCAL bool probe_interactive(ProbeHost* host, char const* compiler
 int main(int argc, char** argv)
 {
     int result;
-    if (argc != 3)
+    if (argc != 3 || strlen(argv[1]) >= PROBE_PATH_CAPACITY || strlen(argv[2]) >= PROBE_PATH_CAPACITY)
     {
         fprintf(stderr, "usage: %s --self-test /absolute/path/ide\n       %s /absolute/path/ide source.c\n", argv[0], argv[0]);
         result = 2;
@@ -555,7 +555,7 @@ int main(int argc, char** argv)
             snprintf(output, sizeof(output), "%s/candidate.o", owned);
             bool self_test = !strcmp(argv[1], "--self-test");
             bool success = self_test ? probe_lifecycle_test(&host, argv[2], owned, output) :
-                probe_interactive(&host, argv[1], argv[2], output);
+                probe_interactive(&host, argv[1], argv[2], output, stdin);
             if (!host.compile_blocked)
             {
                 unlink(output);
