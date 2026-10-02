@@ -13165,6 +13165,335 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
     return result;
 }
 
+
+// AArch64 ELF has no PIC reference model. Keep admission, flag order and
+// non-code-generation routes distinct from architectures with another model.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_arguments(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    struct PicTargetCase
+    {
+        String8 triple;
+        bool refuse;
+    } targets[] = {
+        {S8("aarch64-linux"), true}, {S8("aarch64-linux-android"), true},
+        {S8("aarch64-unknown-freestanding"), true},
+        {S8("x86_64-linux"), false}, {S8("x86_64-linux-android"), false},
+        {S8("x86_64-unknown-freestanding"), false},
+        {S8("x86_64-macos"), false}, {S8("aarch64-macos"), false}, {S8("aarch64-ios"), false},
+        {S8("x86_64-windows"), false}, {S8("aarch64-windows"), false},
+        {S8("x86_64-uefi"), false}, {S8("aarch64-uefi"), false},
+        {S8("wasm32-unknown-freestanding"), false}, {S8("wasm32-wasip1"), false},
+        {S8("wasm64-unknown-freestanding"), false}, {S8("bpfel-unknown-linux"), false},
+    };
+    struct PicOrderCase
+    {
+        String8 first;
+        String8 second;
+        String8 surviving;
+    } orders[] = {
+        {S8("-fPIC"), S8("-g0"), S8("-fPIC")}, {S8("-fpic"), S8("-g0"), S8("-fpic")},
+        {S8("-fPIE"), S8("-g0"), S8("-fPIE")}, {S8("-fpie"), S8("-g0"), S8("-fpie")},
+        {S8("-fPIC"), S8("-fno-pic"), {0}}, {S8("-fPIE"), S8("-fno-pie"), {0}},
+        {S8("-fPIC"), S8("-fno-pie"), S8("-fPIC")}, {S8("-fPIE"), S8("-fPIC"), S8("-fPIC")},
+        {S8("-fPIC"), S8("-fpie"), S8("-fpie")}, {S8("-fno-pic"), S8("-fpic"), S8("-fpic")},
+        {S8("-fno-pie"), S8("-fPIE"), S8("-fPIE")}, {S8("-fpic"), S8("-fno-pic"), {0}},
+    };
+    String8 actions[] = {S8("-c"), S8("-S"), S8("-g0")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 order = 0; order < BUSTER_ARRAY_LENGTH(orders); order += 1)
+        {
+            for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+            {
+                TemporalArena scope = arena_begin_temporal(arena);
+                String8 command[] = {S8("-target"), targets[target].triple, actions[action], orders[order].first,
+                                     orders[order].second, S8("pic-model-input.c")};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                    arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                bool refused = targets[target].refuse && orders[order].surviving.length;
+                BUSTER_TEST(arguments, invocation.error == (refused ? COMPILER_DRIVER_ERROR_ARGUMENT : COMPILER_DRIVER_ERROR_NONE));
+                BUSTER_TEST(arguments, invocation.position_independent == (orders[order].surviving.length != 0));
+                BUSTER_TEST(arguments, invocation.image_kind == NATIVE_IMAGE_EXECUTABLE);
+                if (refused)
+                {
+                    String8 diagnostic = string_format(arena, S8("unsupported option: {S8} on AArch64 ELF"), orders[order].surviving);
+                    BUSTER_STRING_TEST(arguments, invocation.diagnostic, diagnostic);
+                }
+                scratch_end(scope);
+            }
+        }
+    }
+    String8 positives[] = {S8("-fPIC"), S8("-fpic"), S8("-fPIE"), S8("-fpie")};
+    String8 no_code[] = {S8("-E"), S8("-fsyntax-only")};
+    for (u32 target = 0; target < 3; target += 1)
+    {
+        for (u32 flag = 0; flag < BUSTER_ARRAY_LENGTH(positives); flag += 1)
+        {
+            for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(no_code); action += 1)
+            {
+                String8 command[] = {S8("-target"), targets[target].triple, positives[flag], no_code[action], S8("pic-model-input.c")};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                    arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST(arguments, invocation.position_independent);
+            }
+            // Bitcode has its own emitter; this partial repair must not
+            // silently claim or change the unresolved bitcode PIC policy.
+            String8 bitcode[] = {S8("-target"), targets[target].triple, positives[flag], S8("-emit-llvm"),
+                                S8("-c"), S8("pic-model-input.c")};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(bitcode));
+            BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, invocation.position_independent);
+        }
+    }
+    for (u32 flag = 0; flag < BUSTER_ARRAY_LENGTH(positives); flag += 1)
+    {
+        String8 command[] = {S8("-target"), S8("spirv-vulkan1.2-compute"), S8("-c"), positives[flag], S8("pic-model-input.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_TEST(arguments, string_first_sequence(invocation.diagnostic, S8("debug/PIC")) != BUSTER_STRING_NO_MATCH);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_pic_output_unchanged(Arena* arena, String8 path, bool existed, String8 sentinel)
+{
+    bool result = false;
+    if (existed)
+    {
+        ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
+        result = bytes.pointer && bytes.length == sentinel.length && memcmp(bytes.pointer, sentinel.pointer, sentinel.length) == 0;
+    }
+    else
+    {
+        FileStats stats = os_file_replacement_target_stats(path);
+        result = stats.valid && stats.kind == OS_FILE_KIND_MISSING;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_outputs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-aarch64-pic-input"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-aarch64-pic-output"), S8(".o"));
+    String8 source = S8("int pic_probe_value = 3;\nint pic_probe_read(void) { return pic_probe_value; }\n");
+    String8 sentinel = S8("existing PIC output must remain byte-identical\n");
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    String8 flags[] = {S8("-fPIC"), S8("-fpic"), S8("-fPIE"), S8("-fpie")};
+    String8 actions[] = {S8("-c"), S8("-S")};
+    for (u32 action = 0; written && action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+    {
+        for (u32 flag = 0; flag < BUSTER_ARRAY_LENGTH(flags); flag += 1)
+        {
+            for (u32 existed = 0; existed < 2; existed += 1)
+            {
+                TemporalArena scope = arena_begin_temporal(arena);
+                bool prepared = os_file_delete(output);
+                if (existed)
+                {
+                    prepared = prepared && file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel));
+                }
+                BUSTER_TEST(arguments, prepared);
+                if (prepared)
+                {
+                    String8 command[] = {S8("-target"), S8("aarch64-linux"), S8("-nostdinc"), S8("-g0"), actions[action],
+                                         flags[flag], input, S8("-o"), output};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    BUSTER_STRING_TEST(arguments, compiled.diagnostic,
+                                       string_format(arena, S8("unsupported option: {S8} on AArch64 ELF"), flags[flag]));
+                    BUSTER_TEST(arguments, !compiled.has_object && !compiled.output.length && !compiled.native_link.executable.length);
+                    BUSTER_TEST(arguments, compiler_driver_test_pic_output_unchanged(arena, output, existed != 0, sentinel));
+                }
+                (void)os_file_delete(output);
+                scratch_end(scope);
+            }
+        }
+    }
+    // Invocation-API clients can request the same code model without argv.
+    // No flag spelling exists there, so the diagnostic names the model.
+    for (u32 existed = 0; written && existed < 2; existed += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(arena);
+        bool prepared = os_file_delete(output);
+        if (existed)
+        {
+            prepared = prepared && file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel));
+        }
+        BUSTER_TEST(arguments, prepared);
+        if (prepared)
+        {
+            String8 command[] = {S8("-target"), S8("aarch64-linux"), S8("-nostdinc"), S8("-g0"), S8("-c"),
+                                 input, S8("-o"), output};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+            invocation.position_independent = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            BUSTER_STRING_TEST(arguments, compiled.diagnostic, S8("position-independent code generation is unsupported on AArch64 ELF"));
+            BUSTER_TEST(arguments, !compiled.has_object && !compiled.output.length && !compiled.native_link.executable.length);
+            BUSTER_TEST(arguments, compiler_driver_test_pic_output_unchanged(arena, output, existed != 0, sentinel));
+        }
+        (void)os_file_delete(output);
+        scratch_end(scope);
+    }
+    // Every cancelled spelling must still emit the default model's bytes.
+    for (u32 action = 0; written && action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(arena);
+        String8 control_path = buster_test_temporary_path(arena, S8("buster-aarch64-pic-default"), S8(".o"));
+        String8 control_command[] = {S8("-target"), S8("aarch64-linux"), S8("-nostdinc"), S8("-g0"), actions[action],
+                                     input, S8("-o"), control_path};
+        CompilerDriverResult control = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(control_command)));
+        BUSTER_TEST_RAW(arguments, control.error == COMPILER_DRIVER_ERROR_NONE && control.has_object, control.diagnostic);
+        ByteSlice reference = control.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, control_path, (FileReadOptions){0}) : (ByteSlice){0};
+        BUSTER_TEST(arguments, reference.pointer && reference.length);
+        for (u32 flag = 0; reference.pointer && flag < BUSTER_ARRAY_LENGTH(flags); flag += 1)
+        {
+            TemporalArena attempt = arena_begin_temporal(arena);
+            String8 cancel = flag >= 2 ? S8("-fno-pie") : S8("-fno-pic");
+            String8 command[] = {S8("-target"), S8("aarch64-linux"), S8("-nostdinc"), S8("-g0"), actions[action],
+                                 flags[flag], cancel, input, S8("-o"), output};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            ByteSlice bytes = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+            BUSTER_TEST(arguments, bytes.pointer && bytes.length == reference.length &&
+                                      memcmp(bytes.pointer, reference.pointer, reference.length) == 0);
+            (void)os_file_delete(output);
+            scratch_end(attempt);
+        }
+        (void)os_file_delete(control_path);
+        scratch_end(scope);
+    }
+    for (u32 flag = 0; written && flag < BUSTER_ARRAY_LENGTH(flags); flag += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(arena);
+        bool prepared = file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel));
+        BUSTER_TEST(arguments, prepared);
+        String8 syntax[] = {S8("-target"), S8("aarch64-linux"), S8("-nostdinc"), flags[flag], S8("-fsyntax-only"),
+                            input, S8("-o"), output};
+        CompilerDriverResult checked = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax)));
+        BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE && !checked.has_object, checked.diagnostic);
+        BUSTER_TEST(arguments, compiler_driver_test_pic_output_unchanged(arena, output, true, sentinel));
+        String8 preprocess[] = {S8("-target"), S8("aarch64-linux"), S8("-nostdinc"), flags[flag], S8("-E"),
+                                input, S8("-o"), output};
+        CompilerDriverResult expanded = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess)));
+        BUSTER_TEST_RAW(arguments, expanded.error == COMPILER_DRIVER_ERROR_NONE && !expanded.has_object, expanded.diagnostic);
+        ByteSlice bytes = expanded.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+        BUSTER_TEST(arguments, bytes.pointer && string_first_sequence(BYTE_SLICE_TO_STRING(8, bytes), S8("pic_probe_read")) != BUSTER_STRING_NO_MATCH);
+        (void)os_file_delete(output);
+        scratch_end(scope);
+    }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 executable = program_state && program_state->input.arguments.pointer && program_state->input.arguments.length
+                             ? program_state->input.arguments.pointer[0] : (String8){0};
+    BUSTER_TEST(arguments, executable.length != 0);
+    for (u32 flag = 0; written && executable.length && flag < BUSTER_ARRAY_LENGTH(flags); flag += 1)
+    {
+        for (u32 existed = 0; existed < 2; existed += 1)
+        {
+            TemporalArena scope = arena_begin_temporal(arena);
+            bool prepared = os_file_delete(output);
+            if (existed)
+            {
+                prepared = prepared && file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel));
+            }
+            BUSTER_TEST(arguments, prepared);
+            if (prepared)
+            {
+                String8 command[] = {executable, S8("cc"), S8("-target"), S8("aarch64-linux"), S8("-nostdinc"), S8("-g0"),
+                                     S8("-c"), flags[flag], input, S8("-o"), output};
+                ProcessWaitResult waited = compiler_driver_test_response_file_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                BUSTER_TEST(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_FAILED);
+                BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0);
+                String8 diagnostic = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+                BUSTER_TEST(arguments, string_first_sequence(diagnostic,
+                    string_format(arena, S8("unsupported option: {S8} on AArch64 ELF"), flags[flag])) != BUSTER_STRING_NO_MATCH);
+                BUSTER_TEST(arguments, compiler_driver_test_pic_output_unchanged(arena, output, existed != 0, sentinel));
+            }
+            (void)os_file_delete(output);
+            scratch_end(scope);
+        }
+    }
+#endif
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID
+    // Independent native objects must be accepted by LLD as shared objects.
+    // This establishes fixture validity, not Buster AArch64 PIC support.
+    for (u32 flag = 0; written && flag < 2; flag += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(arena);
+        String8 host_object = buster_test_temporary_path(arena, S8("buster-aarch64-pic-host"), S8(".o"));
+        String8 shared = buster_test_temporary_path(arena, S8("buster-aarch64-pic-host"), S8(".so"));
+        String8 command[12] = {0};
+        u32 count = 0;
+        command[count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+        {
+            command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+        }
+        command[count++] = flags[flag];
+        command[count++] = S8("-g");
+        command[count++] = S8("-O0");
+        command[count++] = S8("-c");
+        command[count++] = input;
+        command[count++] = S8("-o");
+        command[count++] = host_object;
+        ProcessWaitResult produced = compiler_driver_test_response_file_run(arena, (SliceString8){.pointer = command, .length = count});
+        bool host_ready = !produced.timed_out && produced.result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST_RAW(arguments, host_ready, BYTE_SLICE_TO_STRING(8, produced.streams[STANDARD_STREAM_ERROR]));
+        if (host_ready)
+        {
+            count = 0;
+            command[count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+            {
+                command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            }
+            command[count++] = S8("-fuse-ld=lld");
+            command[count++] = S8("-shared");
+            command[count++] = S8("-Wl,--no-undefined");
+            command[count++] = host_object;
+            command[count++] = S8("-o");
+            command[count++] = shared;
+            ProcessWaitResult linked = compiler_driver_test_response_file_run(arena, (SliceString8){.pointer = command, .length = count});
+            bool accepted = !linked.timed_out && linked.result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST_RAW(arguments, accepted, BYTE_SLICE_TO_STRING(8, linked.streams[STANDARD_STREAM_ERROR]));
+            ByteSlice bytes = accepted ? file_read(arena, shared, (FileReadOptions){0}) : (ByteSlice){0};
+            bool elf = bytes.pointer && bytes.length >= 64 && memcmp(bytes.pointer, "\x7f" "ELF", 4) == 0 &&
+                       bytes.pointer[4] == 2 && bytes.pointer[5] == 1 && bytes.pointer[16] == 3 && bytes.pointer[17] == 0 &&
+                       bytes.pointer[18] == 183 && bytes.pointer[19] == 0;
+            BUSTER_TEST(arguments, elf);
+            if (elf)
+            {
+                arguments->show(arguments, S8("AArch64 PIC host LLD witness flag={S8} type=3 machine=183\n"), flags[flag]);
+            }
+        }
+        (void)os_file_delete(host_object);
+        (void)os_file_delete(shared);
+        scratch_end(scope);
+    }
+#else
+    arguments->show(arguments, S8("AArch64 PIC host LLD controls require the configured native Linux AArch64 compiler\n"));
+#endif
+    (void)os_file_delete(input);
+    (void)os_file_delete(output);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_common_storage_option(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -16560,6 +16889,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unreferenced_declarations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_section_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_pic_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_pic_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_weak_unwind);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
