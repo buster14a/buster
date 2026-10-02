@@ -10942,7 +10942,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_ou
         S8("typedef int (*F)(void); int first(void){return 7;} int probe(void){F volatile p=first;return p==0;} void _start(void){}"),
         S8("typedef int (*F)(void); int first(void){return 7;} F probe(void){return first;} void _start(void){}"),
         S8("typedef int (*F)(void); int first(void){return 7;} int probe(void){F p=first;void *v=(void*)p;__UINTPTR_TYPE__ n=(__UINTPTR_TYPE__)v;p=(F)n;return p!=0;} void _start(void){}"),
-        S8("typedef int (*F)(void); int first(void){return 7;} int probe(void){F p=&*first;return p!=0;} void _start(void){}"),
+        S8("typedef int (*F)(void); int first(void){return 7;} int probe(void){F p=first;F q=p;return q!=0;} void _start(void){}"),
         S8("typedef int (*F)(void); int first(void){return 7;} int later(void){return 11;} int probe(int choose){F volatile p=choose?first:later;return p!=0;} void _start(void){}"),
         S8("typedef int (*F)(void); int probe(F p){return p();} void _start(void){}"),
         S8("typedef int (*F)(void); int first(void){return 7;} F slot=first; int probe(void){return slot!=0;} void _start(void){}"),
