@@ -11701,12 +11701,12 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_sequence_entry(MachineX64Prep
             BusterX86MetadataMachineExactToken* token = entry->sequence_tokens +
                 variant_index * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS + step_index;
             bool condition_step = true;
-            if ((sequence_index == 47 || sequence_index == 48) && step_index == 0)
+            if ((registry_entry->opcode == MACHINE_X64_SETCC || registry_entry->opcode == MACHINE_X64_JCC) && step_index == 0)
             {
-                u32 family = sequence_index == 47 ? BUSTER_X86_CONDITION_FAMILY_SET : BUSTER_X86_CONDITION_FAMILY_JUMP;
+                u32 family = registry_entry->opcode == MACHINE_X64_SETCC ? BUSTER_X86_CONDITION_FAMILY_SET : BUSTER_X86_CONDITION_FAMILY_JUMP;
                 condition_step = machine_x64_exact_check_condition_binding(family, variant_index, step->key);
             }
-            else if (sequence_index == 45 && (step_index == 3 || step_index == 4))
+            else if (registry_entry->opcode == MACHINE_X64_FCMP_SET && (step_index == 3 || step_index == 4))
             {
                 u32 condition = step_index == 3
                                     ? machine_x64_float_comparison_conditions[variant_index % BUSTER_ARRAY_LENGTH(machine_x64_float_comparison_conditions)]

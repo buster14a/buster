@@ -142,7 +142,7 @@ buster_condition_oracle:
 .Lhinted:
     cs je .Lhinted
 
-# External targets require near relocations; the object retains PC32 fields.
+# External targets require near relocations; objects retain signed 32-bit PC-relative fields.
     je buster_condition_oracle_external
     jne buster_condition_oracle_external
 

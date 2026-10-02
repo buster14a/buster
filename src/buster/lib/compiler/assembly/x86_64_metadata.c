@@ -13065,6 +13065,22 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataCandidateRange buster_x86_metadata_lookup_t
     u32 length = 0;
     if (buster_x86_metadata_normalize_lookup(input, kind == BUSTER_X86_METADATA_INDEX_MNEMONIC, buffer, sizeof(buffer), &length))
     {
+        // Lookup accepts padding and complete disassembly text. Resolve only
+        // its normalized first token, while the public spelling helper keeps
+        // its exact-name contract. Iclass/iform identities are not aliases.
+        if (kind == BUSTER_X86_METADATA_INDEX_MNEMONIC)
+        {
+            String8 token = {.pointer = buffer, .length = length};
+            String8 canonical = buster_x86_metadata_condition_canonical_mnemonic(token);
+            if (canonical.pointer != token.pointer)
+            {
+                for (u32 index = 0; index < canonical.length; index += 1)
+                {
+                    buffer[index] = buster_x86_metadata_lowercase_character(canonical.pointer[index]);
+                }
+                length = (u32)canonical.length;
+            }
+        }
         u32 low = 0;
         u32 high = buster_x86_metadata_text_range_count(kind);
         while (low < high)
@@ -13202,7 +13218,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_metadata_mnemonic_alias_target(String8 mn
     }
     else
     {
-        result = buster_x86_metadata_condition_canonical_mnemonic(mnemonic);
+        result = mnemonic;
     }
 
     return result;

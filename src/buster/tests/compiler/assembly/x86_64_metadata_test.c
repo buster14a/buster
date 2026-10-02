@@ -3676,6 +3676,22 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_conditions(UnitTestArguments* argu
                 mnemonic, operands, family == 2 ? 2 : 1, (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
             BusterX86MetadataCandidateRange alias_candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
             BusterX86MetadataCandidateRange canonical_candidates = buster_x86_metadata_lookup_mnemonic(witness.mnemonics[family]);
+            String8 lookup_inputs[] = {
+                string_format(arguments->arena, S8(" \t{S8}\n"), mnemonic),
+                string_format(arguments->arena, S8("{S8} operands"), mnemonic),
+                string_format(arguments->arena, S8(" \t{S8} operands\n"), mnemonic),
+            };
+            for (u32 input_index = 0; input_index < BUSTER_ARRAY_LENGTH(lookup_inputs); input_index += 1)
+            {
+                BusterX86MetadataCandidateRange normalized = buster_x86_metadata_lookup_mnemonic(lookup_inputs[input_index]);
+                bool lookup_valid = normalized.first == canonical_candidates.first && normalized.count == canonical_candidates.count &&
+                                    normalized.index_kind == canonical_candidates.index_kind;
+                if (!lookup_valid)
+                {
+                    arguments->show(arguments, S8("X86_CONDITION_LOOKUP mnemonic={S8} input={S8}\n"), mnemonic, lookup_inputs[input_index]);
+                }
+                valid &= lookup_valid;
+            }
             bool case_valid = parsed &&
                 string_equal(buster_x86_metadata_condition_mnemonic(family, aliases[alias_index].condition), witness.mnemonics[family]) &&
                 string_equal(buster_x86_metadata_condition_canonical_mnemonic(mnemonic), witness.mnemonics[family]) &&
@@ -3755,6 +3771,11 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_conditions(UnitTestArguments* argu
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(outside_family); index += 1)
     {
         valid &= string_equal(buster_x86_metadata_condition_canonical_mnemonic(outside_family[index]), outside_family[index]);
+        BusterX86MetadataCandidateRange plain = buster_x86_metadata_lookup_mnemonic(outside_family[index]);
+        String8 lookup_text = string_format(arguments->arena, S8(" \t{S8} operands\n"), outside_family[index]);
+        BusterX86MetadataCandidateRange with_operands = buster_x86_metadata_lookup_mnemonic(lookup_text);
+        valid &= plain.first == with_operands.first && plain.count == with_operands.count &&
+                 plain.index_kind == with_operands.index_kind;
     }
 
     BusterX86MetadataPhysicalQuery branch_query = x86_64_metadata_test_physical_query(
