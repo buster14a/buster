@@ -11852,7 +11852,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_initializer_inferred_bounds(
             CPreprocessResult preprocess = c_preprocess(temporary.arena, tag_sources[invalid_index],
                 (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
             CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
-            CParseResult parsed = c_analyze_semantics(temporary.arena, preprocess, syntax);
+            CAnalysisResult parsed = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
             BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
             BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
             BUSTER_TEST_RAW(arguments, invalid_index ? parsed.diagnostic_count != 0 : parsed.diagnostic_count == 0,
