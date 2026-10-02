@@ -1,0 +1,168 @@
+name: Serial process-control diagnostic
+
+# Temporary issue-1298 hosted frontdoor evidence; remove before the source PR.
+# Configuration, warnings and test policy remain in build.c/CMake.
+on:
+  push:
+    branches: [codex/1298-serial-process-control-cast]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: serial-process-control-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  serial:
+    name: Serial ${{ matrix.cc }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [clang, gcc]
+    env:
+      SERIAL_CC: ${{ matrix.cc }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 1
+      BUSTER_MATRIX_THREADS: 2
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Checkout frozen baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: cdcfa9b605a3e3f3dbb0b137973b868fc52ae302
+          path: baseline
+          persist-credentials: false
+      - name: Reproduce serial warning and run corrected serial frontdoor
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python3 -B - <<'PY'
+          import hashlib, json, os, pathlib, shlex, signal, subprocess
+
+          root = pathlib.Path.cwd()
+          evidence = root / "evidence"
+          compiler = os.environ["SERIAL_CC"]
+          records = []
+
+          def run(label, argv, cwd=root, timeout=15, baseline_build=False):
+              command = [str(arg) for arg in argv]
+              process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, start_new_session=True)
+              expired = False
+              try:
+                  out, err = process.communicate(timeout=timeout)
+              except subprocess.TimeoutExpired:
+                  expired = True
+                  os.killpg(process.pid, signal.SIGKILL)
+                  out, err = process.communicate()
+              (evidence / (label + ".stdout")).write_bytes(out)
+              (evidence / (label + ".stderr")).write_bytes(err)
+              records.append(dict(label=label, argv=command, cwd=str(cwd), returncode=process.returncode,
+                                  timed_out=expired, timeout_seconds=timeout))
+              (evidence / "commands.json").write_text(json.dumps(records, indent=2) + "\n")
+              text = (out + err).decode("utf-8", errors="replace")
+              print(label + ": exit=" + str(process.returncode) + " timed_out=" + str(expired), flush=True)
+              if expired:
+                  raise RuntimeError("timed out: " + label)
+              if baseline_build:
+                  required = ["os.c:" + str(baseline_line) + ":", "error:", "sign-conversion"]
+                  matching = [line for line in text.splitlines() if all(token in line for token in required)]
+                  if process.returncode == 0 and compiler == "gcc":
+                      outcome = "accepted-without-expected-warning"
+                  elif process.returncode > 0 and len(matching) == 1:
+                      outcome = "specific-signedness-refusal"
+                      print(matching[0], flush=True)
+                  else:
+                      raise RuntimeError("specific serial signed-conversion refusal missing: " + label + "\n" + text)
+                  (evidence / "baseline-result.json").write_text(json.dumps(
+                      dict(compiler=compiler, outcome=outcome, returncode=process.returncode,
+                           source_line=baseline_line, diagnostic=matching,
+                           aliases_observed={alias: alias in text for alias in ["ProcessControlAtomic", "u64"]}),
+                      indent=2) + "\n")
+                  print("baseline serial compiler outcome: " + outcome, flush=True)
+              elif process.returncode != 0:
+                  raise RuntimeError("unexpected frontdoor failure: " + label + "\n" + text)
+              return text
+
+          for tool in ["clang", "gcc", "cmake", "ninja"]:
+              run(tool + "-identity", [tool, "--version"])
+          paths = ["src/buster/lib/os.c", "src/buster/lib/os.h", "src/buster/tests/os_test.c",
+                   "docs/agents/platform.md", "build.c", "CMakeLists.txt", "AGENTS.md"]
+          hashes = {}
+          for stage in ["baseline", "candidate"]:
+              checkout = root / stage
+              run(stage + "-git", ["git", "rev-parse", "HEAD", "HEAD^{tree}"], checkout)
+              run(stage + "-status", ["git", "status", "--porcelain"], checkout)
+              run(stage + "-clean", ["git", "diff", "--exit-code"], checkout)
+              hashes[stage] = {path: hashlib.sha256((checkout / path).read_bytes()).hexdigest() for path in paths}
+              source = (checkout / "src/buster/lib/os.c").read_text()
+              load_body = source.split("u64 process_control_atomic_load(", 1)[1].split("\n}\n", 1)[0]
+              statement = "result = *address;" if stage == "baseline" else "result = (u64)*address;"
+              if statement not in load_body:
+                  raise RuntimeError("unexpected process-control source input: " + stage)
+              if stage == "baseline":
+                  offset = source.index(statement, source.index("u64 process_control_atomic_load("))
+                  baseline_line = source.count("\n", 0, offset) + 1
+          (evidence / "source-sha256.json").write_text(json.dumps(hashes, indent=2) + "\n")
+
+          for stage in ["baseline", "candidate"]:
+              checkout = root / stage
+              tools = checkout / ".ci-tools"
+              tools.mkdir()
+              driver = tools / "build"
+              # Existing hosted Clang bootstrap exception; compiler selection is generate-owned.
+              run(stage + "-bootstrap", ["clang", "-Isrc", "-Wall", "-Werror", "-Wno-unused-function",
+                  "-Wno-unused-variable", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char",
+                  "build.c", "-o", driver], checkout, 120)
+              build = checkout / "build/serial"
+              run(stage + "-generate", [driver, "generate", "--build-directory", build, "--cc", compiler,
+                  "--config", "Release", "--ci", "--no-sanitize", "--no-fuzz", "--no-lto", "--linker", "DEFAULT",
+                  "--", "-DBUSTER_DEBUG_INFO=OFF", "-DBUSTER_SINGLE_THREADED=ON",
+                  "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"], checkout, 120)
+              cache = (build / "CMakeCache.txt").read_text()
+              if "BUSTER_SINGLE_THREADED:BOOL=ON" not in cache:
+                  raise RuntimeError("serial configuration missing: " + stage)
+              (evidence / (stage + "-CMakeCache.txt")).write_text(cache)
+              commands = (build / "compile_commands.json").read_bytes()
+              (evidence / (stage + "-compile_commands.json")).write_bytes(commands)
+              selected = []
+              source_name = "ide.c" if compiler == "clang" else "os.c"
+              for row in json.loads(commands):
+                  argv = row.get("arguments") or shlex.split(row["command"])
+                  if pathlib.Path(row["file"]).name == source_name and "CMakeFiles/ide.dir/Release/" in " ".join(argv):
+                      selected.append(argv)
+              required = ["-DBUSTER_SINGLE_THREADED=1", "-DBUSTER_INCLUDE_TESTS=1", "-Werror", "-Wconversion"]
+              suppressed = ["-Wno-conversion", "-Wno-sign-conversion", "-Wno-error", "-Wno-error=conversion",
+                            "-Wno-error=sign-conversion"]
+              if len(selected) != 1 or not all(flag in selected[0] for flag in required) or any(flag in selected[0] for flag in suppressed):
+                  raise RuntimeError("serial OS-bearing Release ide compile flags missing or suppressed: " + stage)
+              (evidence / (stage + "-selected-compile-argv.json")).write_text(json.dumps(selected[0], indent=2) + "\n")
+              run(stage + "-build-ide", [driver, "build", "--build-directory", build, "--config", "Release", "-t", "ide"],
+                  checkout, 600 if stage == "baseline" else 900, baseline_build=(stage == "baseline"))
+              if stage == "candidate":
+                  ide = build / "Release/ide"
+                  (evidence / "candidate-compiler.sha256").write_text(hashlib.sha256(ide.read_bytes()).hexdigest() + "\n")
+                  run("candidate-os-tests", [ide, "test", "--module=os_tests", "--verbose=1", "--ci=1"], checkout, 600)
+                  run("candidate-test-all", [driver, "build", "--build-directory", build, "--config", "Release", "-t", "test_all"],
+                      checkout, 2400)
+          print("Serial frontdoor passed with " + compiler + ": baseline compiler outcome recorded, "
+                "corrected ide build, focused OS tests and full test_all.", flush=True)
+          PY
+      - name: Retain exact serial diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: issue-1298-${{ matrix.cc }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          if-no-files-found: error
+          retention-days: 14
