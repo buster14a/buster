@@ -4938,7 +4938,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_negative_array_bounds(UnitTestArgument
             for (u32 index = 0; index < case_count; index += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                u32 context = index < BUSTER_ARRAY_LENGTH(accepted) ? 0 : index - BUSTER_ARRAY_LENGTH(accepted);
+                u32 context = index < BUSTER_ARRAY_LENGTH(accepted) ? 0 : index - (u32)BUSTER_ARRAY_LENGTH(accepted);
                 String8 source = index < BUSTER_ARRAY_LENGTH(accepted) ? accepted[index] :
                     string_format(temporary.arena, S8("{S8}0{S8}"), contexts[context].prefix, contexts[context].suffix);
                 CPreprocessOptions options = {.target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect]};
