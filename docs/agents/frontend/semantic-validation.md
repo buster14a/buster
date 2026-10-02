@@ -152,8 +152,8 @@ does not continue into a successful parse is masked by its root's rollback, so
 GNU `__attribute__((fallthrough));` and its `__fallthrough__` alias
 are null statements, including in C99/GNU11/C17. Leading attribute lists
 are skipped by the lowering body walker; `c_parse_validate_gnu_fallthrough`
-therefore checks the empty statement and zero-argument constraint before
-lowering can erase the attribute prefix. Other attributes retain their own
+therefore checks the empty statement and zero-argument constraint (allowing
+an empty parenthesized parameter list) before lowering can erase the attribute prefix. Other attributes retain their own
 handling. Embedded driver regressions cover both spellings, dialects, both
 frontend forms and all four allocators, with syntax/object diagnostic
 equivalence for a missing semicolon or attribute arguments.
