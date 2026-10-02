@@ -25237,12 +25237,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     return result;
 }
 
-// `_Float16`: the type the LLVM 18 FP16 resource headers declare, and the
-// only real floating type narrower than `float` this frontend has. The three
-// groups below are the contract: the layout every supported target gives it,
-// the binary16 encoding of its constants -- Clang 18 goldens below, with the
-// #1226 midpoint regressions derived from the exact binary16 grid -- and the specifier
-// combinations that are not a type at all.
 // Scalar fabs must lower without any math-library import on every native
 // layout; the driver fixture separately observes executed float images.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fabs_builtin_lowering(UnitTestArguments* arguments)
@@ -25303,6 +25297,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fabs_builtin_lowering(UnitTestArgument
     return result;
 }
 
+// `_Float16`: the type the LLVM 18 FP16 resource headers declare, and the
+// only real floating type narrower than `float` this frontend has. The three
+// groups below are the contract: the layout every supported target gives it,
+// the binary16 encoding of its constants -- Clang 18 goldens below, with the
+// #1226 midpoint regressions derived from the exact binary16 grid -- and the specifier
+// combinations that are not a type at all.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float16_type(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};

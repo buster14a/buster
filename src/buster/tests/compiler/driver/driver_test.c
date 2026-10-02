@@ -25423,7 +25423,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     BUSTER_TEST(arguments, fabs_spawn.handle != 0);
                     if (fabs_spawn.handle)
                     {
-                        BUSTER_TEST(arguments, os_process_wait_sync(fabs_temporary.arena, fabs_spawn).result == PROCESS_RESULT_SUCCESS);
+                        BUSTER_TEST(arguments, os_process_wait_deadline(fabs_temporary.arena, fabs_spawn, 30000000).result == PROCESS_RESULT_SUCCESS);
                     }
                 }
                 scratch_end(fabs_temporary);
