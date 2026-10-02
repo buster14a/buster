@@ -17248,7 +17248,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
         "Pair pair(void) { seen = 49u; }\n"
         "Big big(void) { seen = 50u; }\n"
         "void tidy(int *value) { cleanups += 1u; seen += (unsigned)*value; }\n"
-        "int cleanup(void) { int value __attribute__((cleanup(tidy))) = 3; seen = 51u; }\n"
+        "int cleanup_effect(void) { int value __attribute__((cleanup(tidy))) = 3; seen = 51u; }\n"
         "int vla(int count) { int data[count]; data[0] = count; seen = 54u + (unsigned)data[0]; }\n"
         "unsigned long long wide(void) { seen = 59u; }\n"
         "float single(void) { seen = 60u; }\n"
@@ -17265,7 +17265,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
         "extern volatile unsigned cleanups;\n"
         "int effect(void); int by_pointer(void); int conditional(int);\n"
         "double real(void); int *pointer(void); Pair pair(void); Big big(void);\n"
-        "int cleanup(void); int vla(int); unsigned long long wide(void); float single(void);\n"
+        "int cleanup_effect(void); int vla(int); unsigned long long wide(void); float single(void);\n"
         "int explicit_value(void); void ordinary_void(void);\n"
         "int main(int argc, char **argv) {\n"
         "    unsigned expected = 0u;\n"
@@ -17282,7 +17282,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
         "    case 'h': pointer(); expected = 48u; break;\n"
         "    case 'i': pair(); expected = 49u; break;\n"
         "    case 'j': big(); expected = 50u; break;\n"
-        "    case 'k': cleanup(); expected = 54u; expected_cleanups = 1u; break;\n"
+        "    case 'k': cleanup_effect(); expected = 54u; expected_cleanups = 1u; break;\n"
         "    case 'l': for (int repeat = 0; repeat < 64; repeat += 1) vla(4); expected = 58u; break;\n"
         "    case 'm': wide(); expected = 59u; break;\n"
         "    case 'n': single(); expected = 60u; break;\n"
@@ -17311,7 +17311,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
         {S8("pointer"), 1, 0},
         {S8("pair"), 1, 0},
         {S8("big"), 1, 0},
-        {S8("cleanup"), 1, 0},
+        {S8("cleanup_effect"), 1, 0},
         {S8("vla"), 1, 0},
         {S8("wide"), 1, 0},
         {S8("single"), 1, 0},
@@ -17378,7 +17378,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
                             {
                                 BUSTER_TEST_RAW(arguments, stack_save != 0 && stack_restore != 0, context);
                             }
-                            if (string_equal(function->name, S8("cleanup")) || string_equal(function->name, S8("by_pointer")))
+                            if (string_equal(function->name, S8("cleanup_effect")) || string_equal(function->name, S8("by_pointer")))
                             {
                                 BUSTER_TEST_RAW(arguments, calls == 1, context);
                             }
