@@ -1,0 +1,52 @@
+name: Phase accounting 2369 diagnostic
+on:
+  push:
+    branches: [codex/2369-phase-accounting-probe]
+permissions:
+  contents: read
+jobs:
+  phase-accounting:
+    if: github.repository == 'buster14a/buster'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Baseline failure-first and candidate synthetic phase controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check f73f75ed4a59594eb1f43ec505c100457bc35185..f3e01184bb642a6e822d004373dec768b6563dc8
+          python3 - <<'PY'
+          import importlib.util
+          import subprocess
+          import sys
+          import unittest
+          sys.path.insert(0, "tools")
+          import ci_matrix_phases_test as tests
+          candidate = tests.phases
+          parent = "f73f75ed4a59594eb1f43ec505c100457bc35185"
+          candidate_head = "f3e01184bb642a6e822d004373dec768b6563dc8"
+          changed = subprocess.check_output(["git", "diff", "--name-only", candidate_head, "HEAD"], text=True).splitlines()
+          if changed != [".github/workflows/phase-accounting-2369-probe.yml"]:
+              raise SystemExit("probe source differs outside its diagnostic workflow")
+          raw = subprocess.check_output(["git", "show", parent + ":tools/ci_matrix_phases.py"])
+          spec = importlib.util.spec_from_loader("phase_accounting_baseline", loader=None)
+          baseline = importlib.util.module_from_spec(spec)
+          exec(compile(raw, parent + ":tools/ci_matrix_phases.py", "exec"), baseline.__dict__)
+          tests.phases = baseline
+          suite = unittest.TestSuite([tests.PhaseValidationTests("test_nested_setup_conserves_enclosing_child_phase_time")])
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          text = "\n".join(message for _, message in result.failures)
+          if result.testsRun != 1 or len(result.failures) != 2 or result.errors or "132 != 136" not in text or "32 != 36" not in text:
+              raise SystemExit("baseline did not fail for both exact positive-gap controls")
+          print("BASELINE_EXPECTED_ACCOUNTING_FAILURE pooled=132/136 direct=32/36 missing_us=4")
+          tests.phases = candidate
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(tests.PhaseValidationTests)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful():
+              raise SystemExit("candidate controls failed")
+          print("CANDIDATE_ACCOUNTING_PASS tests=" + str(result.testsRun) + " head=" + candidate_head)
+          PY
