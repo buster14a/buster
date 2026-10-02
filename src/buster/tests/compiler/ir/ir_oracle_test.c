@@ -369,12 +369,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_rejection_controls(UnitTestArgument
                 break;
             }
         }
-        IrInstruction* terminator = probe->instructions + probe->blocks[0].last_instruction.value;
+        IrFunction* observe = ir_oracle_named(program->modules, S8("observe"));
+        IrInstruction* terminator = observe->instructions + observe->blocks[0].last_instruction.value;
         IrInstruction saved = *terminator;
         *terminator = (IrInstruction){.opcode = IR_OPCODE_UNREACHABLE, .canonical_type = saved.canonical_type,
             .result = IR_VALUE_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID};
-        run = ir_oracle_evaluate(arguments->arena, program, program->modules, probe, inputs, 2, IR_ORACLE_STEPS);
-        BUSTER_TEST(arguments, run->status == IR_ORACLE_INVALID);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(program, program->modules).error == IR_VALIDATION_NONE);
+        run = ir_oracle_evaluate(arguments->arena, program, program->modules, observe, 0, 0, IR_ORACLE_STEPS);
+        BUSTER_TEST(arguments, run->status == IR_ORACLE_INVALID && run->steps > 0);
         *terminator = saved;
         // Canonically valid undefined return must be refused, never compared.
         IrInstruction* constant = 0;
