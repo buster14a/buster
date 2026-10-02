@@ -6957,29 +6957,6 @@ BUSTER_C_INTERNAL bool c_ir_emit_wide_atomic_runtime_store(CIntegerIrBuilder* bu
     return emitted;
 }
 
-// GNU empty records have a value but no object bytes. Materialize that value
-// as the ordinary zero-operand aggregate constructor so reads do not publish a
-// zero-width LOAD for a backend to invent storage for. The lvalue expression
-// has already been evaluated before this point, including all side effects.
-BUSTER_C_INTERNAL IrValueId c_ir_emit_empty_aggregate_value(CIntegerIrBuilder* builder, IrTypeId type, IrSourceRange source)
-{
-    IrType* aggregate = ir_type_from_id(&builder->program->types, type);
-    IrValueId result = IR_VALUE_ID_INVALID;
-    if (aggregate && !aggregate->is_atomic && aggregate->layout.resolved && !aggregate->layout.size &&
-        (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION))
-    {
-        IrTypeId result_type = aggregate->is_volatile ? aggregate->unqualified_type : type;
-        result = c_ir_add_result(builder, result_type);
-        if (result.value != IR_ID_UNDERLYING_INVALID)
-        {
-            IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_AGGREGATE, result_type);
-            instruction.result = result;
-            c_ir_append_instruction(builder, instruction, source);
-        }
-    }
-    return result;
-}
-
 BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_load(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CToken token)
 {
     IrType* place_type = ir_type_from_id(&builder->program->types, local->type);
@@ -7023,15 +7000,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_load(CIntegerIrBuilder* builder, CI
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CToken token)
 {
-    IrSourceRange source = c_ir_token_source_range(builder, token);
-    IrValueId result = c_ir_emit_empty_aggregate_value(builder, local->type, source);
-    if (result.value == IR_ID_UNDERLYING_INVALID)
-    {
-        CIrSsaLocal* direct = local->direct_ssa ? c_ir_ssa_place_local(builder, local->place) : 0;
-        result = direct ? c_ir_ssa_read(builder, direct, source, true)
-                        : c_ir_emit_memory_load(builder, local, token);
-        c_ir_vla_loaded_shape(builder, result, local->place);
-    }
+    CIrSsaLocal* direct = local->direct_ssa ? c_ir_ssa_place_local(builder, local->place) : 0;
+    IrValueId result = direct ? c_ir_ssa_read(builder, direct, c_ir_token_source_range(builder, token), true)
+                              : c_ir_emit_memory_load(builder, local, token);
+    c_ir_vla_loaded_shape(builder, result, local->place);
     return result;
 }
 
@@ -7285,14 +7257,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_load_place_raw(CIntegerIrBuilder* b
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source)
 {
-    IrValueId result = c_ir_emit_empty_aggregate_value(builder, type, source);
-    if (result.value == IR_ID_UNDERLYING_INVALID)
-    {
-        CIrSsaLocal* local = c_ir_ssa_place_local(builder, place);
-        result = local && local->type.value == type.value ? c_ir_ssa_read(builder, local, source, false)
-                                                         : c_ir_emit_memory_load_place_raw(builder, place, type, source);
-        c_ir_vla_loaded_shape(builder, result, place);
-    }
+    CIrSsaLocal* local = c_ir_ssa_place_local(builder, place);
+    IrValueId result = local && local->type.value == type.value ? c_ir_ssa_read(builder, local, source, false)
+                                                               : c_ir_emit_memory_load_place_raw(builder, place, type, source);
+    c_ir_vla_loaded_shape(builder, result, place);
     return result;
 }
 
@@ -8699,12 +8667,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValue
         value = c_ir_emit_binary_value(builder, current, packed, access_type, IR_BINARY_INTEGER_BITWISE_OR, source);
     }
     CIrSsaLocal* local = c_ir_ssa_place_local(builder, place);
-    if (empty_aggregate)
-    {
-        // The place and converted value have been evaluated; no object bytes
-        // or direct-SSA state remain to update.
-    }
-    else if (local && !atomic && stored_type.value == local->type.value &&
+    if (local && !atomic && stored_type.value == local->type.value &&
         builder->function->values[value.value].canonical_type.value == local->type.value &&
         builder->function->values[value.value].category == IR_VALUE_VALUE)
     {
@@ -8712,7 +8675,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValue
         c_ir_ssa_event(builder, (u32)(local - builder->direct_ssa->locals), IR_OPCODE_STORE, value, source);
         builder->direct_ssa->statistics.writes += 1;
     }
-    else
+    else if (!empty_aggregate)
     {
         IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
         operands[0] = place;
