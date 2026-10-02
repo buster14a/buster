@@ -11,7 +11,6 @@ if (BUSTER_HOT_RELOAD_DEMO)
         # This standalone main owns its lifecycle. Test seams and persistent
         # worker creation do not belong in its object/JIT runtime.
         set(BUSTER_INCLUDE_TESTS OFF)
-        set(BUSTER_SINGLE_THREADED ON)
         # Loader-only sources rely on section GC for unused object converters;
         # static unity declarations require the entire compiler implementation.
         set(BUSTER_UNITY_BUILD_DEFINE 0)
