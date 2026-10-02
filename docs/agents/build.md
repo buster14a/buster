@@ -278,13 +278,21 @@ run. If objdump is also missing, the leg still compiles and links. Each
 `MODE_MATRIX` row names its avenue and verification level: `behavioral` for
 native/emulated execution, `structural` for disassembly, and `link-only` for
 the tool-free fallback. Structural acceptance requires objdump exit zero,
-at least one decoded instruction and no `<unknown>` instruction rows;
-headers, symbol labels and operand annotations are not instruction mnemonics.
+at least one decoded instruction and no unexplained `<unknown>` instruction
+rows. Raw instruction bytes delimit a narrow AArch64 address-literal recipe:
+`LDR Xn, PC+8`, `B PC+12`, eight complete data bytes, and a decoded instruction
+at the branch target. Only those two literal rows are data, even when their
+bytes happen to decode. The classifier consumes the payload before examining
+another recipe; malformed, overlapping or incomplete evidence receives no
+waiver. Headers, symbol labels and operand annotations are not instruction mnemonics.
 It proves decoding, not program behavior, relocation correctness or refusal
 of every architecturally UNPREDICTABLE encoding. No assembler round trip runs.
 
 The command always exercises parser controls, including empty/header-only
-output, data directives and `<unknown>` text outside instruction mnemonics. When both
+output, data directives and `<unknown>` text outside instruction mnemonics,
+plus exact/raw-byte literal forms, corrupt load/branch fields, incomplete or
+discontinuous rows, section boundaries, overflow, nested payload recipes and
+unknown instructions after a valid literal. When both
 `llvm-objdump` and `llvm-objcopy` are available, it also checks real AArch64 PE
 and Mach-O images from the first `none` fixture, even on native macOS. The
 pristine image must pass; a test-owned copy whose entire text section is

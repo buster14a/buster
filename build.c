@@ -16522,63 +16522,440 @@ struct ModeMatrixOracleOutput
 {
     u64 decoded;
     u64 unknown;
+    u64 literal_rows;
 };
 
-// --no-show-raw-insn leaves only an address and mnemonic on each instruction
-// row. Section headers and symbol labels are not instructions, even when
-// their text contains <unknown>. This check establishes decoding, not behavior.
-BUSTER_GLOBAL_LOCAL ModeMatrixOracleOutput mode_matrix_oracle_parse(String8 output)
+typedef struct ModeMatrixOracleRow ModeMatrixOracleRow;
+enum { MODE_MATRIX_ORACLE_LITERAL_ROWS = 5 };
+struct ModeMatrixOracleRow
+{
+    u64 address;
+    u32 word;
+    u32 byte_count;
+    bool raw_valid;
+    bool decoded;
+    bool unknown;
+};
+
+// LLVM prints AArch64 words or individual x86 bytes before the mnemonic.
+// Require complete raw tokens; an address row with missing/malformed bytes
+// is refused rather than silently discarded beside another decoded row.
+BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_row_parse(String8 line, bool aarch64, ModeMatrixOracleRow* row)
+{
+    bool result = false;
+    IntegerParsingU64 address = string8_parse_u64_hexadecimal(line);
+    if (address.status == INTEGER_PARSING_SUCCESS && address.length && address.length < line.length && line.pointer[address.length] == ':')
+    {
+        result = true;
+        row->address = address.value;
+        String8 remainder = build_compiler_output_trim(string_slice(line, address.length + 1, line.length));
+        u64 separator = string_first_code_unit(remainder, '\t');
+        String8 raw_text = {0};
+        String8 instruction = {0};
+        if (separator != BUSTER_STRING_NO_MATCH)
+        {
+            raw_text = build_compiler_output_trim(string_slice(remainder, 0, separator));
+            instruction = build_compiler_output_trim(string_slice(remainder, separator + 1, remainder.length));
+        }
+        bool complete = raw_text.length != 0;
+        while (complete && raw_text.length)
+        {
+            u64 end = 0;
+            while (end < raw_text.length && raw_text.pointer[end] != ' ') { end += 1; }
+            String8 token = string_slice(raw_text, 0, end);
+            IntegerParsingU64 raw = string8_parse_u64_hexadecimal(token);
+            complete = raw.status == INTEGER_PARSING_SUCCESS && raw.length == token.length;
+            if (complete && aarch64 && !row->byte_count && token.length == 8)
+            {
+                row->word = (u32)raw.value;
+                row->byte_count = 4;
+            }
+            else if (complete && token.length == 2 && row->byte_count < (aarch64 ? 4u : 15u))
+            {
+                if (aarch64) { row->word |= (u32)raw.value << (row->byte_count * 8); }
+                row->byte_count += 1;
+            }
+            else { complete = false; }
+            raw_text = build_compiler_output_trim(string_slice(raw_text, end, raw_text.length));
+        }
+        row->raw_valid = complete && row->byte_count && (!aarch64 || row->byte_count == 4) && instruction.length;
+        row->unknown = !row->raw_valid || string_starts_with_sequence(instruction, S8("<unknown>"));
+        row->decoded = row->raw_valid && !row->unknown &&
+                       ((instruction.pointer[0] >= 'a' && instruction.pointer[0] <= 'z') ||
+                        (instruction.pointer[0] >= 'A' && instruction.pointer[0] <= 'Z'));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void mode_matrix_oracle_rows_count(ModeMatrixOracleOutput* result, ModeMatrixOracleRow const* rows, u32 count)
+{
+    for (u32 index = 0; index < count; index += 1)
+    {
+        result->decoded += rows[index].decoded;
+        result->unknown += rows[index].unknown;
+    }
+}
+
+// The non-Darwin producer emits LDR Xn, PC+8; B PC+12; an eight-byte
+// address; then resumes at A+16. Raw bytes certify that exact local recipe,
+// including a decoded follower. They do not establish program behavior.
+BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_literal(ModeMatrixOracleRow const* rows)
+{
+    bool result = rows[0].decoded && rows[1].decoded && rows[MODE_MATRIX_ORACLE_LITERAL_ROWS - 1].decoded && !(rows[0].address & 3) &&
+                  rows[0].address <= UINT64_MAX - 16 && (rows[0].word & UINT32_C(0xffffffe0)) == UINT32_C(0x58000040) &&
+                  rows[1].word == UINT32_C(0x14000003);
+    for (u32 index = 0; result && index < MODE_MATRIX_ORACLE_LITERAL_ROWS; index += 1)
+    {
+        result = rows[index].raw_valid && rows[index].byte_count == 4 && rows[index].address == rows[0].address + (u64)index * 4;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ModeMatrixOracleOutput mode_matrix_oracle_parse(String8 output, bool aarch64)
 {
     ModeMatrixOracleOutput result = {0};
     bool in_section = false;
+    ModeMatrixOracleRow rows[MODE_MATRIX_ORACLE_LITERAL_ROWS] = {{0}};
+    u32 row_count = 0;
     String8 line = {0};
     while (text_next_line(&output, &line))
     {
         line = build_compiler_output_trim(line);
         if (string_starts_with_sequence(line, S8("Disassembly of section ")) && string_ends_with_sequence(line, S8(":")))
         {
+            mode_matrix_oracle_rows_count(&result, rows, row_count);
+            row_count = 0;
             in_section = true;
         }
         else if (in_section)
         {
-            IntegerParsingU64 address = string8_parse_u64_hexadecimal(line);
-            if (address.status == INTEGER_PARSING_SUCCESS && address.length && address.length < line.length && line.pointer[address.length] == ':')
+            ModeMatrixOracleRow row = {0};
+            bool parsed = mode_matrix_oracle_row_parse(line, aarch64, &row);
+            if (parsed && aarch64 && row.byte_count == 4)
             {
-                String8 instruction = build_compiler_output_trim(string_slice(line, address.length + 1, line.length));
-                if (instruction.length)
+                if (row_count && (rows[row_count - 1].address > UINT64_MAX - 4 || rows[row_count - 1].address + 4 != row.address))
                 {
-                    if (string_starts_with_sequence(instruction, S8("<unknown>"))) { result.unknown += 1; }
-                    else if ((instruction.pointer[0] >= 'a' && instruction.pointer[0] <= 'z') ||
-                             (instruction.pointer[0] >= 'A' && instruction.pointer[0] <= 'Z')) { result.decoded += 1; }
+                    mode_matrix_oracle_rows_count(&result, rows, row_count);
+                    row_count = 0;
                 }
+                rows[row_count++] = row;
+                if (row_count == BUSTER_ARRAY_LENGTH(rows))
+                {
+                    u32 consumed = 1;
+                    if (mode_matrix_oracle_literal(rows))
+                    {
+                        mode_matrix_oracle_rows_count(&result, rows, 2);
+                        result.literal_rows += 2;
+                        consumed = 4;
+                    }
+                    else { mode_matrix_oracle_rows_count(&result, rows, 1); }
+                    // Consume the certified payload too: literal bytes that look
+                    // like another LDR/B cannot hide an unknown after this island.
+                    row_count -= consumed;
+                    memmove(rows, rows + consumed, sizeof(*rows) * row_count);
+                }
+            }
+            else
+            {
+                mode_matrix_oracle_rows_count(&result, rows, row_count);
+                row_count = 0;
+                if (parsed) { mode_matrix_oracle_rows_count(&result, &row, 1); }
             }
         }
     }
+    mode_matrix_oracle_rows_count(&result, rows, row_count);
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_parse_self_test(void)
 {
-    String8 outputs[] = {
-        S8(""),
-        S8("dead: file format coff-arm64\nDisassembly of section .text:\n00000000 <unknown>:\n"),
-        S8("Disassembly of section .text:\n  1000: ret\n"),
-        S8("Disassembly of section .text:\n  1000: <unknown>\n"),
-        S8("Disassembly of section .text:\n  1000: ret\n  1004: <unknown>\n"),
-        S8("<unknown>: file format mach-o arm64\r\nDisassembly of section __TEXT,__text:\r\n"
-           "0000000100000ABC <unknown>:\r\n100000ABC: bl 0x100000ac0 <unknown>\r\n100000AC0: ret"),
-        S8("Disassembly of section .text:\n  1000:\n  1004 <unknown>:\n  nothex: <unknown>\n"),
-        S8("Disassembly of section .text:\n  1000: .word 0xffffffff\n  1004: .byte 0xff\n"),
-    };
-    u64 decoded[] = {0, 0, 1, 0, 1, 2, 0, 0};
-    u64 unknown[] = {0, 0, 0, 1, 1, 0, 0, 0};
-    bool result = true;
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(outputs); index += 1)
+    typedef struct ModeMatrixOracleParseCase ModeMatrixOracleParseCase;
+    struct ModeMatrixOracleParseCase
     {
-        ModeMatrixOracleOutput parsed = mode_matrix_oracle_parse(outputs[index]);
-        result = parsed.decoded == decoded[index] && parsed.unknown == unknown[index] && result;
+        String8 output;
+        u64 decoded;
+        u64 unknown;
+        u64 literal_rows;
+        bool aarch64;
+    };
+    ModeMatrixOracleParseCase cases[] = {
+        // empty
+        {.output = S8(""),
+         .decoded = 0, .unknown = 0, .literal_rows = 0, .aarch64 = false},
+        // header-only
+        {.output = S8("dead: file format coff-arm64\n"
+                      "Disassembly of section .text:\n"
+                      "00000000 <unknown>:\n"),
+         .decoded = 0, .unknown = 0, .literal_rows = 0, .aarch64 = false},
+        // decoded-x86
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: c3\tret\n"),
+         .decoded = 1, .unknown = 0, .literal_rows = 0, .aarch64 = false},
+        // unknown-x86
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: ff\t<unknown>\n"),
+         .decoded = 0, .unknown = 1, .literal_rows = 0, .aarch64 = false},
+        // mixed-x86
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: c3\tret\n"
+                      "  1001: ff\t<unknown>\n"),
+         .decoded = 1, .unknown = 1, .literal_rows = 0, .aarch64 = false},
+        // annotations
+        {.output = S8("<unknown>: file format mach-o arm64\r\n"
+                      "Disassembly of section .text:\r\n"
+                      "0000000100000ABC <unknown>:\r\n"
+                      "100000ABC: e8 00 00 00 00\tbl 0x100000ac0 <unknown>\r\n"
+                      "100000AC0: c3\tret"),
+         .decoded = 2, .unknown = 0, .literal_rows = 0, .aarch64 = false},
+        // malformed-address
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000:\n"
+                      "  1004 <unknown>:\n"
+                      "  nothex: <unknown>\n"),
+         .decoded = 0, .unknown = 1, .literal_rows = 0, .aarch64 = false},
+        // data-directives
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: ff ff ff ff\t.word 0xffffffff\n"
+                      "  1004: ff\t.byte 0xff\n"),
+         .decoded = 0, .unknown = 0, .literal_rows = 0, .aarch64 = false},
+        // literal-unknown
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 0, .literal_rows = 2, .aarch64 = true},
+        // literal-byte-tokens
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 40 00 00 58\tldr x0, 0x1008\n"
+                      "  1004: 03 00 00 14\tb 0x1010\n"
+                      "  1008: ff ff ff ff\t<unknown>\n"
+                      "  100c: ff ff ff ff\t<unknown>\n"
+                      "  1010: c0 03 5f d6\tret\n"),
+         .decoded = 3, .unknown = 0, .literal_rows = 2, .aarch64 = true},
+        // literal-decoded
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: d503201f\tnop\n"
+                      "  100c: d65f03c0\tret\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 0, .literal_rows = 2, .aarch64 = true},
+        // foreign-architecture
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 40 00 00 58\tldr x0, 0x1008\n"
+                      "  1004: 03 00 00 14\tb 0x1010\n"
+                      "  1008: ff ff ff ff\t<unknown>\n"
+                      "  100c: ff ff ff ff\t<unknown>\n"
+                      "  1010: c0 03 5f d6\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = false},
+        // load-plus4
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000020\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // load-plus12
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000060\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // load32
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 18000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // load-simd
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 5c000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // prefetch
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: d8000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // branch-plus8
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000002\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // branch-plus16
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000004\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // branch-link
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 94000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // unknown-load
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\t<unknown>\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 2, .unknown = 3, .literal_rows = 0, .aarch64 = true},
+        // unknown-branch
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\t<unknown>\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 2, .unknown = 3, .literal_rows = 0, .aarch64 = true},
+        // unknown-follower
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\t<unknown>\n"),
+         .decoded = 2, .unknown = 3, .literal_rows = 0, .aarch64 = true},
+        // missing-follower
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"),
+         .decoded = 2, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // truncated-payload
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ff ff\t<unknown>\n"),
+         .decoded = 2, .unknown = 1, .literal_rows = 0, .aarch64 = true},
+        // gap
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  1010: ffffffff\t<unknown>\n"
+                      "  1014: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // duplicate
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // reordered
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // unaligned
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1001: 58000040\tldr x0, 0x1008\n"
+                      "  1005: 14000003\tb 0x1010\n"
+                      "  1009: ffffffff\t<unknown>\n"
+                      "  100d: ffffffff\t<unknown>\n"
+                      "  1011: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // overflow
+        {.output = S8("Disassembly of section .text:\n"
+                      "  fffffffffffffff0: 58000040\tldr x0, 0x1008\n"
+                      "  fffffffffffffff4: 14000003\tb 0x1010\n"
+                      "  fffffffffffffff8: ffffffff\t<unknown>\n"
+                      "  fffffffffffffffc: ffffffff\t<unknown>\n"
+                      "  0: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // section-boundary
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "Disassembly of section .text:\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // excess-payload-token
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff 00\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // unknown-after-literal
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"
+                      "  1014: ffffffff\t<unknown>\n"),
+         .decoded = 3, .unknown = 1, .literal_rows = 2, .aarch64 = true},
+        // nested-payload
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: 58000040\tldr x0, 0x1010\n"
+                      "  100c: 14000003\tb 0x1018\n"
+                      "  1010: d503201f\tnop\n"
+                      "  1014: ffffffff\t<unknown>\n"
+                      "  1018: d65f03c0\tret\n"),
+         .decoded = 4, .unknown = 1, .literal_rows = 2, .aarch64 = true},
+        // consecutive-literals
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: 58000040\tldr x0, 0x1008\n"
+                      "  1014: 14000003\tb 0x1010\n"
+                      "  1018: ffffffff\t<unknown>\n"
+                      "  101c: ffffffff\t<unknown>\n"
+                      "  1020: d65f03c0\tret\n"),
+         .decoded = 5, .unknown = 0, .literal_rows = 4, .aarch64 = true},
+        // garbage
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: ffffffff\t<unknown>\n"
+                      "  1004: ffffffff\t<unknown>\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: ffffffff\t<unknown>\n"),
+         .decoded = 0, .unknown = 5, .literal_rows = 0, .aarch64 = true},
+    };
+    bool result = true;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        ModeMatrixOracleParseCase* test = cases + index;
+        ModeMatrixOracleOutput parsed = mode_matrix_oracle_parse(test->output, test->aarch64);
+        result = parsed.decoded == test->decoded && parsed.unknown == test->unknown && parsed.literal_rows == test->literal_rows && result;
     }
-    string_print(S8("MODE_MATRIX_ORACLE_PARSER cases={u64} status={S8}\n"), BUSTER_ARRAY_LENGTH(outputs), result ? S8("pass") : S8("fail"));
+    string_print(S8("MODE_MATRIX_ORACLE_PARSER cases={u64} status={S8}\n"), BUSTER_ARRAY_LENGTH(cases), result ? S8("pass") : S8("fail"));
     return result;
 }
 
@@ -16590,12 +16967,12 @@ struct ModeMatrixOracleResult
     bool valid;
 };
 
-BUSTER_GLOBAL_LOCAL ModeMatrixOracleResult mode_matrix_oracle(Arena* arena, String8 oracle, String8 image)
+BUSTER_GLOBAL_LOCAL ModeMatrixOracleResult mode_matrix_oracle(Arena* arena, String8 oracle, String8 image, bool aarch64)
 {
-    String8 arguments[] = {oracle, S8("-d"), S8("--no-show-raw-insn"), image};
+    String8 arguments[] = {oracle, S8("-d"), image};
     ModeMatrixOracleResult result;
     result.command = mode_matrix_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), true);
-    result.output = mode_matrix_oracle_parse(result.command.output);
+    result.output = mode_matrix_oracle_parse(result.command.output, aarch64);
     result.valid = result.command.result == PROCESS_RESULT_SUCCESS && result.output.decoded && !result.output.unknown;
     return result;
 }
@@ -16605,7 +16982,8 @@ BUSTER_GLOBAL_LOCAL ModeMatrixOracleResult mode_matrix_oracle(Arena* arena, Stri
 // still be refused, so this witnesses the old exit-status-only defect.
 BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_control(Arena* arena, String8 oracle, String8 objcopy, String8 image, String8 target, String8 section)
 {
-    ModeMatrixOracleResult pristine = mode_matrix_oracle(arena, oracle, image);
+    bool aarch64 = string_starts_with_sequence(target, S8("aarch64-"));
+    ModeMatrixOracleResult pristine = mode_matrix_oracle(arena, oracle, image, aarch64);
     bool result = pristine.valid;
     String8 payload = string_format(arena, S8("{S8}-oracle-text"), image);
     String8 copy = string_format(arena, S8("{S8}-oracle-copy"), image);
@@ -16638,7 +17016,7 @@ BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_control(Arena* arena, String8 oracle
     bool corrupt_ran = result;
     if (corrupt_ran)
     {
-        corrupt = mode_matrix_oracle(arena, oracle, garbage);
+        corrupt = mode_matrix_oracle(arena, oracle, garbage, aarch64);
         result = corrupt.command.result == PROCESS_RESULT_SUCCESS && corrupt.output.unknown && !corrupt.valid;
     }
     string_print(S8("MODE_MATRIX_ORACLE_CONTROL target={S8} section={S8} pristine_decoded={u64} garbage_exit_zero={u64} garbage_unknown={u64} status={S8}\n"),
@@ -16823,7 +17201,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
                 }
                 else if (target->avenue == MODE_MATRIX_AVENUE_ORACLE)
                 {
-                    ModeMatrixOracleResult oracle_run = mode_matrix_oracle(leg_temporary.arena, oracle, image);
+                    ModeMatrixOracleResult oracle_run = mode_matrix_oracle(leg_temporary.arena, oracle, image,
+                        string_starts_with_sequence(target->name, S8("aarch64-")));
                     if (!oracle_run.valid)
                     {
                         leg_failure = string_format(arena, S8("stage=oracle fixture={S8} decoded={u64} unknown={u64}"), fixture,
