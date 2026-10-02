@@ -1,0 +1,67 @@
+name: Differential oracle controls 2365
+
+on:
+  push:
+    branches: [codex/2365-differential-oracle-controls]
+
+permissions:
+  contents: read
+
+jobs:
+  controls:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record exact source and runtime
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          python3 --version
+          clang --version
+          gcc --version
+          git ls-tree 69c1b21bd9fa5a9924b298d56b0d267c85055fb9 tools/differential_c_harness.py tools/reduce_differential_case.py tools/differential_ci_policy_test.py docs/differential-testing.md
+          for path in tools/differential_c_harness.py tools/reduce_differential_case.py tools/differential_ci_policy_test.py docs/differential-testing.md; do
+            test "$(git rev-parse "HEAD:$path")" = "$(git rev-parse "69c1b21bd9fa5a9924b298d56b0d267c85055fb9:$path")"
+          done
+      - name: Require baseline negative-control failures
+        run: |
+          set -euo pipefail
+          baseline="$RUNNER_TEMP/differential-baseline"
+          mkdir -p "$baseline/tools"
+          git show f73f75ed4a59594eb1f43ec505c100457bc35185:tools/differential_c_harness.py > "$baseline/tools/differential_c_harness.py"
+          git show f73f75ed4a59594eb1f43ec505c100457bc35185:tools/reduce_differential_case.py > "$baseline/tools/reduce_differential_case.py"
+          cp tools/differential_ci_policy_test.py "$baseline/tools/differential_ci_policy_test.py"
+          set +e
+          python3 "$baseline/tools/differential_ci_policy_test.py" DifferentialOracleTests DifferentialReducerTests DifferentialCampaignTests -v > "$RUNNER_TEMP/differential-baseline.log" 2>&1
+          baseline_status=$?
+          set -e
+          cat "$RUNNER_TEMP/differential-baseline.log"
+          test "$baseline_status" -eq 1
+          ! grep --fixed-strings --quiet 'ERROR:' "$RUNNER_TEMP/differential-baseline.log"
+          grep --fixed-strings --quiet 'FAIL: test_matching_crashes_and_missing_results_never_pass' "$RUNNER_TEMP/differential-baseline.log"
+          grep --fixed-strings --quiet 'FAIL: test_rejection_and_compiler_crash_require_optimized_reference' "$RUNNER_TEMP/differential-baseline.log"
+          grep --fixed-strings --quiet 'FAIL: test_compile_timeout_is_not_a_source_rejection' "$RUNNER_TEMP/differential-baseline.log"
+          grep --fixed-strings --quiet 'FAIL: test_empty_family_selection_is_rejected_before_work' "$RUNNER_TEMP/differential-baseline.log"
+          grep --fixed-strings --quiet 'FAIL: test_isolate_whole_case_failure_propagates_status' "$RUNNER_TEMP/differential-baseline.log"
+          printf 'BASELINE_SENSITIVITY expected_failure=1 errors=0\n'
+      - name: Require candidate controls and deterministic generators
+        run: |
+          set -euo pipefail
+          python3 tools/differential_ci_policy_test.py -v
+          python3 tools/differential_c_harness.py --self-test
+          git diff --check f73f75ed4a59594eb1f43ec505c100457bc35185 69c1b21bd9fa5a9924b298d56b0d267c85055fb9
+      - name: Check unsigned-char reference semantics with hosted compilers
+        run: |
+          set -euo pipefail
+          printf 'int main(void) { char value = -1; return value < 0; }\n' > "$RUNNER_TEMP/char-profile.c"
+          for cc in clang gcc; do
+            for mode in O0 O2; do
+              "$cc" "-$mode" -fwrapv -fno-strict-aliasing -funsigned-char "$RUNNER_TEMP/char-profile.c" -o "$RUNNER_TEMP/char-profile"
+              "$RUNNER_TEMP/char-profile"
+            done
+          done
+          printf 'REFERENCE_PROFILE unsigned_char=1 oracle_runs=4 normal_exit=0\n'
