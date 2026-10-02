@@ -15895,6 +15895,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
            "_Static_assert(__alignof__(pick(1, 2)->x) == 16, \"extra argument\");"),
         S8("struct S { int x __attribute__((aligned(16))); }; struct S *pick(int);"
            "enum { E = __alignof__(pick(1, 2)->x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "_Static_assert(__alignof__((++s).x) == 16, \"aggregate update is invalid\");"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "enum { E = __alignof__((++s).x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "_Static_assert(__alignof__((s++).x) == 16, \"aggregate update is invalid\");"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "enum { E = __alignof__((s++).x) };"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
     {
