@@ -345,7 +345,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_prepr
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries_file(UnitTestArguments* arguments, String8 source_path, bool expanded)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_preprocess_boundaries_file(UnitTestArguments* arguments, String8 source_path, bool expanded)
 {
     UnitTestResult result = {0};
 #if !BUSTER_ANDROID && !BUSTER_IOS
