@@ -5038,6 +5038,245 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 c_test_braced_string_runtime_source =
+    S8("struct BracedName { char name[8]; int number; };\n"
+       "struct BracedConst { const unsigned char msg[4]; int number; };\n"
+       "struct BracedName braced_name = { { \"a\" \"bc\", }, 7 };\n"
+       "static const struct BracedConst braced_const[] = { { { \"ab\" }, 2 } };\n"
+       "static unsigned char braced_rows[][8] = { { \"\" }, { \"a\" }, { \"b\" \"c\", } };\n"
+       "static char braced_exact[3] = { \"abc\" };\n"
+       "static unsigned short braced_wide[2][3] = { { u\"ab\" }, { u\"xy\", } };\n"
+       "int main(void) {\n"
+       " struct BracedName local = { { \"hello\" }, 5 };\n"
+       " unsigned char rows[2][4] = { { \"ab\", }, { \"cd\" } };\n"
+       " unsigned short wide[2][3] = { { u\"uv\" }, { u\"wx\", } };\n"
+       " char exact[3] = { \"xyz\" };\n"
+       " char *pointers[1] = { \"p\" };\n"
+       " if (braced_name.name[0]!='a' || braced_name.name[2]!='c' || braced_name.name[3]!=0 || braced_name.name[7]!=0 || braced_name.number!=7) return 1;\n"
+       " if (braced_const[0].msg[0]!='a' || braced_const[0].msg[1]!='b' || braced_const[0].msg[2]!=0 || braced_const[0].number!=2) return 2;\n"
+       " if (braced_rows[0][0]!=0 || braced_rows[0][7]!=0 || braced_rows[1][0]!='a' || braced_rows[1][1]!=0 || braced_rows[2][0]!='b' || braced_rows[2][1]!='c' || braced_rows[2][2]!=0) return 3;\n"
+       " if (braced_exact[0]!='a' || braced_exact[2]!='c' || local.name[4]!='o' || local.name[5]!=0 || local.name[7]!=0 || local.number!=5) return 4;\n"
+       " if (rows[0][1]!='b' || rows[0][2]!=0 || rows[1][0]!='c' || rows[1][1]!='d' || rows[1][3]!=0 || exact[0]!='x' || exact[2]!='z' || pointers[0][0]!='p') return 5;\n"
+       " if (braced_wide[0][0]!='a' || braced_wide[0][1]!='b' || braced_wide[0][2]!=0 || braced_wide[1][0]!='x' || braced_wide[1][1]!='y' || braced_wide[1][2]!=0) return 6;\n"
+       " if (wide[0][0]!='u' || wide[0][1]!='v' || wide[0][2]!=0 || wide[1][0]!='w' || wide[1][1]!='x' || wide[1][2]!=0) return 7;\n"
+       " return 0; }\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_initializers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 name;
+        String8 source;
+        bool valid;
+    } cases[] = {
+        {S8("struct-static"), S8("struct S { char name[8]; int x; }; struct S s = { { \"abc\" }, 1 };"), true},
+        {S8("struct-const-array"), S8("struct T { const unsigned char msg[4]; int n; }; static const struct T t[] = { { { \"ab\" }, 2 } };"), true},
+        {S8("struct-local"), S8("int f(void) { struct { unsigned char msg[8]; int n; } local = { { \"hello\" }, 5 }; return local.msg[4]; }"), true},
+        {S8("table-inferred"), S8("static const unsigned char vectors[][81] = { { \"\" }, { \"a\" }, { \"abc\" } };"), true},
+        {S8("table-local"), S8("int f(void) { signed char rows[2][4] = { { \"ab\" }, { \"cd\" } }; return rows[1][1]; }"), true},
+        {S8("concatenated-trailing-comma"), S8("char rows[2][4] = { { \"a\" \"b\", }, { \"c\", } };"), true},
+        {S8("exact-without-terminator"), S8("struct S { char name[3]; int x; }; struct S s = { { \"abc\" }, 1 };"), true},
+        {S8("designated-member"), S8("struct S { char name[4]; int x; }; struct S s = { .name = { \"ab\" }, .x = 3 };"), true},
+        {S8("member-positional-continuation"), S8("struct S { char name[4]; int x; }; struct S s = { .name = { \"ab\" }, 3 };"), true},
+        {S8("indexed-positional-continuation"), S8("static char rows[][4] = { [2] = { \"ab\" }, { \"cd\" } }; _Static_assert(sizeof rows == 16, \"outer count\");"), true},
+        {S8("utf16-rows"), S8("unsigned short rows[2][3] = { { u\"ab\" }, { u\"xy\", } };"), true},
+        {S8("wchar-rows"), S8("__WCHAR_TYPE__ rows[1][3] = { { L\"ab\" } };"), true},
+        {S8("pointer-array-control"), S8("struct S { char *names[1]; int x; }; struct S s = { { \"abc\" }, 1 };"), true},
+        {S8("unbraced-control"), S8("struct S { char name[8]; int x; }; struct S s = { \"abc\", 1 };"), true},
+        {S8("multiple-strings-static"), S8("char rows[1][4] = { { \"ab\", \"cd\" } };"), false},
+        {S8("multiple-strings-local"), S8("int f(void) { char rows[1][4] = { { \"ab\", \"cd\" } }; return rows[0][0]; }"), false},
+        {S8("overlong-static"), S8("struct S { char name[2]; int x; }; struct S s = { { \"abc\" }, 1 };"), false},
+        {S8("overlong-local"), S8("int f(void) { char rows[1][2] = { { \"abc\" } }; return rows[0][0]; }"), false},
+        {S8("duplicate-trailing-comma"), S8("char rows[1][4] = { { \"ab\",, } };"), false},
+        {S8("wide-mismatch"), S8("char rows[1][4] = { { u\"ab\" } };"), false},
+        {S8("extra-brace-depth"), S8("char rows[1][4] = { { { \"ab\" } } };"), false},
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU23};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(0, 0);
+                    Target target = targets[target_index];
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect]});
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].name);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    BUSTER_TEST_RAW(arguments, semantic.analysis_complete && (semantic.diagnostic_count == 0) == cases[case_index].valid,
+                                    cases[case_index].name);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("braced-strings.c"), tokens, syntax,
+                        target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, (lowered.diagnostic_count == 0 && lowered.program != 0) == cases[case_index].valid,
+                                    cases[case_index].name);
+                    BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                    for (u32 index = 0; index < semantic.diagnostic_count && index < lowered.diagnostic_count; index += 1)
+                    {
+                        BUSTER_TEST(arguments, semantic.diagnostics[index].kind == lowered.diagnostics[index].kind);
+                        BUSTER_TEST(arguments, semantic.diagnostics[index].location.line == lowered.diagnostics[index].location.line);
+                        BUSTER_TEST(arguments, semantic.diagnostics[index].location.column == lowered.diagnostics[index].location.column);
+                        BUSTER_STRING_TEST(arguments, semantic.diagnostics[index].message, lowered.diagnostics[index].message);
+                    }
+                    if (cases[case_index].valid && BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    if (!cases[case_index].valid) BUSTER_TEST(arguments, lowered.program == 0);
+                    scratch_end(temporary);
+                }
+            }
+        }
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_braced_string_runtime_source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_C17});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("braced-string-bytes.c"), tokens, parse,
+                target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+            {
+                u8 expected_name[] = {'a', 'b', 'c', 0, 0, 0, 0, 0, 7, 0, 0, 0};
+                u8 expected_const[] = {'a', 'b', 0, 0, 2, 0, 0, 0};
+                u8 expected_rows[] = {0, 0, 0, 0, 0, 0, 0, 0, 'a', 0, 0, 0, 0, 0, 0, 0, 'b', 'c', 0, 0, 0, 0, 0, 0};
+                u8 expected_exact[] = {'a', 'b', 'c'};
+                u8 expected_wide[] = {'a', 0, 'b', 0, 0, 0, 'x', 0, 'y', 0, 0, 0};
+                struct { String8 name; u8* bytes; u64 count; } globals[] = {
+                    {S8("braced_name"), expected_name, sizeof(expected_name)},
+                    {S8("braced_const"), expected_const, sizeof(expected_const)},
+                    {S8("braced_rows"), expected_rows, sizeof(expected_rows)},
+                    {S8("braced_exact"), expected_exact, sizeof(expected_exact)},
+                    {S8("braced_wide"), expected_wide, sizeof(expected_wide)},
+                };
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                for (u32 expected = 0; expected < BUSTER_ARRAY_LENGTH(globals); expected += 1)
+                {
+                    u32 matches = 0;
+                    for (u32 index = 0; index < module->global_count; index += 1)
+                    {
+                        IrGlobal* global = module->globals + index;
+                        IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+                        if (symbol && string_equal(symbol->name, globals[expected].name))
+                        {
+                            matches += 1;
+                            BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
+                            BUSTER_TEST(arguments, global->relocation_count == 0);
+                            if (BUSTER_REQUIRE(arguments, global->bytes.length == globals[expected].count))
+                                BUSTER_TEST_RAW(arguments, memcmp(global->bytes.pointer, globals[expected].bytes, globals[expected].count) == 0,
+                                                globals[expected].name);
+                        }
+                    }
+                    BUSTER_TEST_RAW(arguments, matches == 1, globals[expected].name);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+        CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("braced-string-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_braced_string_runtime_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("braced-string-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], frontends[form],
+                    S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                BUSTER_TEST(arguments, invocation.register_allocator == expected_modes[mode]);
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("braced string runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        String8 references[] = {S8("gcc"), S8("clang")};
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("braced-string-reference"), S8(".exe"));
+            if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+            {
+                String8 command[] = {compiler, S8("-std=c17"), S8("-pedantic-errors"), S8("-nostdinc"), S8("-o"), output, source};
+                ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                          .use_process_environment = true, .search_path = true});
+                if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                {
+                    ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, 30000000);
+                    String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
+                    BUSTER_TEST_RAW(arguments, !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS,
+                        string_format(temporary.arena, S8("braced string oracle {S8}: status={u32} timed_out={u32}\n{S8}"),
+                            compiler, compilation.platform_status, (u32)compilation.timed_out,
+                            string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                    if (BUSTER_REQUIRE(arguments, !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS))
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("braced string oracle run {S8}: status={u32} timed_out={u32}"),
+                                    compiler, execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+#endif
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_corrections(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -32043,6 +32282,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_promoted_member_search);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_corrections);
+    BUSTER_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
+    BUSTER_TEST_FIXTURE(arguments, c_test_braced_string_runtime);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_brace_designators);
 
