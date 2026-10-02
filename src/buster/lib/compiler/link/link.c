@@ -8653,13 +8653,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
                 result.symbol = symbol->name;
                 return result;
             }
-            u64 initialized_size =
-                align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
-            u64 symbol_offset = symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
-            u64 thread_pointer_offset = 16 + symbol_offset + (u64)relocation->addend;
-            if (thread_pointer_offset > 0xffffff)
+            // Variant I places the executable's block after the 16-byte TCB,
+            // rounded to PT_TLS alignment before adding module-relative offsets.
+            u64 thread_local_alignment =
+                BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
+            u64 thread_local_start = align_forward(16, thread_local_alignment);
+            u64 symbol_offset = link_elf_thread_local_offset(object, symbol);
+            u64 thread_pointer_offset = 0;
+            if (!link_u64_add(thread_local_start, symbol_offset, &thread_pointer_offset) ||
+                !link_address_addend(thread_pointer_offset, relocation->addend, &thread_pointer_offset) || thread_pointer_offset > 0xffffff)
             {
                 result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
                 return result;
             }
             u32 instruction = link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset);

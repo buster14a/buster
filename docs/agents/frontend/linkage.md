@@ -30,7 +30,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   and the packed loaded-section map shared with the section table. The TLS
   block starts at the maximum `.tdata`/`.tbss` alignment so that each section's
   address agrees with its block-relative symbol offsets. Local-exec relocations
-  round the whole block to that same alignment before computing TP offsets.
+  round the whole block to that same alignment before computing x86-64 TP
+  offsets. AArch64 places its block after the 16-byte TCB rounded to this
+  alignment before adding the module offset and relocation addend.
   The PIE emitter uses the same map, including copy-created `.bss` and omitted
   empty sections. Hidden definitions remain private, undefined hidden references
   fail, and TLS/non-TLS object identities retain their mismatch diagnostic.
