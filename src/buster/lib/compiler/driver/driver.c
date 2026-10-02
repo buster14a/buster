@@ -2118,7 +2118,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         else
         {
-            invocation.investigation_configuration = (String8){.pointer = configuration.bytes, .length = configuration.count};
+            invocation.investigation_configuration = (String8){.pointer = (char8*)configuration.bytes, .length = configuration.count};
         }
     }
     return invocation;
