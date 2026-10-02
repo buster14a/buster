@@ -2673,6 +2673,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("float g(float _Complex x) { return __builtin_fabsf(x); }\n"), true},
         {S8("double g(void) { return __builtin_fabs(); }\n"), false, false, S8("takes exactly one argument")},
         {S8("float g(void) { return __builtin_fabsf(1,2); }\n"), false, false, S8("takes exactly one argument")},
+        {S8("float g(void) { return __builtin_fabsf(); }\n"), false, false, S8("takes exactly one argument")},
+        {S8("double g(void) { return __builtin_fabs(1,2); }\n"), false, false, S8("takes exactly one argument")},
         {S8("double g(int *x) { return __builtin_fabs(x); }\n"), false, false, S8("requires one arithmetic scalar argument")},
         {S8("struct S { int x; }; float g(struct S x) { return __builtin_fabsf(x); }\n"), false, false, S8("requires one arithmetic scalar argument")},
         {S8("typedef float V __attribute__((vector_size(16))); float g(V x) { return __builtin_fabsf(x); }\n"), false, true, S8("requires one arithmetic scalar argument")},

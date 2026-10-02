@@ -17,6 +17,7 @@ executes explicit images, integer conversion and exactly-once calls in both
 frontend forms, all four allocators and O0/O2 without `-lm`. Arity and
 non-arithmetic/vector operands are diagnosed before lowering. `fabsl` remains
 separately tracked.
+
 AArch64 binary128 widening and scalar transport use ordinary MIR frame
 images; see the machine guide for their exact conversion and ABI-boundary
 checks. Binary128 arithmetic, comparison, truth conversion and rounding
