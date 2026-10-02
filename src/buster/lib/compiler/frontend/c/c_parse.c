@@ -23897,21 +23897,13 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
                 {
                     CTypeId a = from.element_type;
                     CTypeId b = result->types[field.value].element_type;
-                    if (a.value < result->type_count && b.value < result->type_count)
-                    {
-                        CType source_pointee = result->types[a.value];
-                        CType member_pointee = result->types[b.value];
-                        bool void_compatible = source_pointee.kind == C_TYPE_VOID || member_pointee.kind == C_TYPE_VOID;
-                        bool drops_qualifier = (source_pointee.is_const && !member_pointee.is_const) ||
-                                               (source_pointee.is_volatile && !member_pointee.is_volatile) ||
-                                               (source_pointee.is_restrict && !member_pointee.is_restrict);
-                        // Pointer parameters may add qualifiers to a matching
-                        // pointee. Keep atomic identity and qualifier losses
-                        // checked before the existing unqualified conversion.
-                        bool atomic_compatible = void_compatible || source_pointee.is_atomic == member_pointee.is_atomic;
-                        compatible |= !drops_qualifier && atomic_compatible &&
-                                      (void_compatible || c_parse_cleanup_pointer_conversion(machine->scratch_arena, result, preprocess, a, b));
-                    }
+                    // A transparent member accepts the same pointer assignment
+                    // as an ordinary parameter, including qualifier addition.
+                    // Keep pointee identity and every qualifier-loss check at
+                    // the shared assignment-conversion owner.
+                    compatible |= a.value < result->type_count && b.value < result->type_count &&
+                                  !c_parse_assignment_conversion_message(machine, result, preprocess, scope, field, source,
+                                                                         start, end).length;
                 }
                 else if (!source_pointer && field_pointer)
                     compatible |= c_parse_range_is_null_pointer_constant(machine->scratch_arena, preprocess, result, scope, source, start, end);

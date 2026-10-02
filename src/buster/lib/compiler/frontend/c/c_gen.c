@@ -10934,8 +10934,9 @@ BUSTER_C_INTERNAL bool c_ir_float16_literal_bits(String8 spelling, u64* bits_out
 // leaves its small exact window, and flushes subnormals to zero, which is
 // what made a global disagree with a local.
 //
-// Typed halves use the exact path for zero, subnormal, and special results
-// too. Other widths retain their existing accumulation fallback.
+// Every supported IEEE width uses the exact path for zero, subnormal, and
+// special results. Only a failed rational conversion retains the existing
+// accumulation fallback; overflow and rounded-to-zero underflow are values.
 //
 // An f suffix rounds to float first and widens the result: the literal's own
 // type is float, so `double d = 1.1f;` must hold that float, and the
@@ -10962,20 +10963,33 @@ BUSTER_C_INTERNAL bool c_ir_float_literal_value(String8 spelling, f64* value_out
         CIrExt80Big denominator;
         s32 binary_exponent = 0;
         u64 bits = 0;
-        if (result && c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent) &&
-            c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false, single ? 23 : 52, single ? -126 : -1022,
-                                    single ? 127 : 1023, single ? 8 : 11, &bits) == C_IR_ROUND_OK)
+        if (result && c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
         {
-            if (single)
+            u8 status = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false,
+                                               single ? 23 : 52, single ? -126 : -1022, single ? 127 : 1023, single ? 8 : 11, &bits);
+            if (status == C_IR_ROUND_OVERFLOW)
             {
-                u32 narrowed_bits = (u32)bits;
-                f32 narrowed = 0.0f;
-                memcpy(&narrowed, &narrowed_bits, sizeof(narrowed));
-                *value_out = (f64)narrowed;
+                bits = single ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
             }
-            else
+            else if (status == C_IR_ROUND_UNDERFLOW)
             {
-                memcpy(value_out, &bits, sizeof(*value_out));
+                // This status means a nonzero source rounded to zero. A
+                // representable subnormal instead has C_IR_ROUND_OK bits.
+                bits = 0;
+            }
+            if (status != C_IR_ROUND_FAILED)
+            {
+                if (single)
+                {
+                    u32 narrowed_bits = (u32)bits;
+                    f32 narrowed = 0.0f;
+                    memcpy(&narrowed, &narrowed_bits, sizeof(narrowed));
+                    *value_out = (f64)narrowed;
+                }
+                else
+                {
+                    memcpy(value_out, &bits, sizeof(*value_out));
+                }
             }
         }
     }
@@ -12163,11 +12177,20 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     }
     else if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
     {
-        converted = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false,
+        u8 status = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false,
                                              type_value->bit_width == 32 ? 23 : 52,
                                              type_value->bit_width == 32 ? -126 : -1022,
                                              type_value->bit_width == 32 ? 127 : 1023,
-                                             type_value->bit_width == 32 ? 8 : 11, &bits) == C_IR_ROUND_OK;
+                                             type_value->bit_width == 32 ? 8 : 11, &bits);
+        if (status == C_IR_ROUND_OVERFLOW)
+        {
+            bits = type_value->bit_width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+        }
+        else if (status == C_IR_ROUND_UNDERFLOW)
+        {
+            bits = 0;
+        }
+        converted = status != C_IR_ROUND_FAILED;
     }
     if (!converted && type_value->bit_width == 16)
     {
@@ -12175,9 +12198,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     }
     if (!converted)
     {
-        // Preserve the existing behavior for underflow/overflow spellings
-        // that are outside the finite IEEE range; the host conversion yields
-        // the required zero or infinity representation in those cases.
+        // Only a failed exact conversion uses the accumulation fallback.
+        // Range statuses already carry the literal's infinity or zero image.
         f64 value = 0.0;
         if (!c_ir_float_parse(spelling, &value, &suffix))
         {
