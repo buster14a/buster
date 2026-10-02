@@ -817,10 +817,16 @@ fixture as well as compiling both architectures.
   with the function's own offset, because an FDE naming a preemptible function
   is the same PC-relative reference to an interposable symbol that `ld`
   refuses in the body.
-- On x86-64 ELF, `-fPIE`/`-fpie` are rejected because PIE-specific reference
-  selection is not implemented. Mach-O, COFF, UEFI, eBPF and Wasm keep their
-  existing accepted no-op behavior. `-fno-pic` clears the PIC model;
-  `-fno-pie` remains an accepted no-op.
+- On x86-64 ELF, `-fPIE`/`-fpie` request the same implemented PIC model
+  as `-fPIC`/`-fpic`; the last positive spelling wins. `-fno-pic` clears
+  that request, and `-fno-pie` cancels only a PIE spelling. Native AArch64
+  ELF C generation has no PIC reference model and the driver rejects an
+  effective positive request before mapping sources or publishing artifacts.
+  Default/cancelled generation and non-code actions remain supported.
+  Assembly and prebuilt inputs spell their own references. Mach-O/COFF models
+  and Wasm/eBPF compatibility behavior are unchanged; this partial #1289
+  boundary does not certify their PIC policy or the residual LLVM/direct
+  backend model paths.
 - The built-in linker binds every name in its image: `PLT32` patches the same
   rel32 `PC32` does. The ELF reader preserves `GOTPCREL`, `GOTPCRELX`,
   `REX_GOTPCRELX` and `CODE_4_GOTPCRELX` as distinct relocation kinds.

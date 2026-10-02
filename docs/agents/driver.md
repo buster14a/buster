@@ -520,11 +520,20 @@ On x86-64 Linux, `-shared` links a shared object and `-pie` a
 position-independent executable (`NativeImageKind`, carried to the linker in
 `NativeExecutableLinkOptions.image_kind`). `-shared` outranks `-pie` in either
 order and `-no-pie` undoes only `-pie`. Linking either kind compiles the C
-inputs of that invocation with the position-independent code model, and
-`-fPIE`/`-fpie` select that same model on every target (the last of the four
-positive spellings wins; `-fno-pie` cancels only a PIE spelling). On any other
-target a link that asks for either image is refused as an unsupported option,
-while a compile-only invocation ignores the link option, as GCC does.
+inputs of that invocation with the position-independent code model.
+The last of `-fPIC`, `-fpic`, `-fPIE` and `-fpie` selects the requested
+model; `-fno-pic` clears it, while `-fno-pie` cancels only a PIE spelling.
+On x86-64 ELF the positive spellings select the implemented PIC reference
+model. Native AArch64 ELF C generation rejects a surviving positive request
+by its spelling before source mapping or output publication; direct invocation
+API requests name the unavailable model. Cancellation, preprocessing,
+syntax-only and assembly/prebuilt-only input routes retain their behavior.
+Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
+behavior is unchanged. LLVM-bitcode and direct backend model requests remain
+an audit residual, so this bounded refusal is only partial issue #1289 support.
+On any other target a link that asks for either image is refused as an
+unsupported option, while a compile-only invocation ignores the link option,
+as GCC does.
 
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
