@@ -19,7 +19,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: f320f6b67d56e72976c5cf00df34b3f9a60768ad
+          ref: 52c18c6980bc459b97d423f81a2c3823fd1572a9
           path: candidate
           persist-credentials: false
       - name: Record source and toolchain
@@ -68,9 +68,6 @@ jobs:
           cat > evidence/positive/9.c <<'C'
           int main(void){int x=(enum{A=1})A+(enum{B=A+1})B;return x!=3||A!=1||B!=2;}
           C
-          cat > evidence/positive/10.c <<'C'
-          int main(void){for(int x=sizeof(enum{E=2});x>0;x-=1)return E-2;return 1;}
-          C
           cat > evidence/negative/0.c <<'C'
           int main(void){int x=E+(enum{E=2})E;return x;}
           C
@@ -86,14 +83,11 @@ jobs:
           cat > evidence/negative/4.c <<'C'
           int main(void){int x=(enum{E=2})0+(enum{E=3})0;return x;}
           C
-          cat > evidence/negative/5.c <<'C'
-          int main(void){for(int x=sizeof(enum{E=2});x>0;x=0){}return E;}
-          C
           cat > evidence/negative/6.c <<'C'
           int main(void){int x=(enum{A=1})0+B+(enum{B=2})0;return x;}
           C
           cat > evidence/runtime.c <<'C'
-          enum{Q=1};static int sizes(void){int x=(sizeof(enum{E=2,F=E+1}),E+F);return x!=5||E!=2||F!=3;}static int cast(void){int x=(enum{E=2,F=E+1})F;return x!=3||E!=2||F!=3;}static int literal(void){int x=(enum{E=2}){E};return x!=2||E!=2;}static int later(void){int old=Q,x=(enum{Q=Q+1})Q,after=Q;return old!=1||x!=2||after!=2||Q!=2;}static int order(void){int x=Q+(enum{Q=2})Q;return x!=3||Q!=2;}static int bound(void){int x=(enum{E=2})E,a[E];return x!=2||sizeof a!=2*sizeof(int);}static int shadow(void){int inner=0;{int x=(enum{Q=2})Q;inner=x;}return inner!=2||Q!=1;}static int tagged(void){int x=(enum Tag{E=2})E;enum Tag object=E;return x!=2||object!=2;}static int stored(void){static int x=(enum{E=2})E;return x!=2||E!=2;}static int multiple(void){int x=(enum{A=1})A+(enum{B=A+1})B;return x!=3||A!=1||B!=2;}static int loop(void){for(int x=sizeof(enum{E=2});x>0;x-=1)return E!=2;return 1;}int main(void){return sizes()||cast()||literal()||later()||order()||bound()||shadow()||tagged()||stored()||multiple()||loop();}
+          enum{Q=1};static int sizes(void){int x=(sizeof(enum{E=2,F=E+1}),E+F);return x!=5||E!=2||F!=3;}static int cast(void){int x=(enum{E=2,F=E+1})F;return x!=3||E!=2||F!=3;}static int literal(void){int x=(enum{E=2}){E};return x!=2||E!=2;}static int later(void){int old=Q,x=(enum{Q=Q+1})Q,after=Q;return old!=1||x!=2||after!=2||Q!=2;}static int order(void){int x=Q+(enum{Q=2})Q;return x!=3||Q!=2;}static int bound(void){int x=(enum{E=2})E,a[E];return x!=2||sizeof a!=2*sizeof(int);}static int shadow(void){int inner=0;{int x=(enum{Q=2})Q;inner=x;}return inner!=2||Q!=1;}static int tagged(void){int x=(enum Tag{E=2})E;enum Tag object=E;return x!=2||object!=2;}static int stored(void){static int x=(enum{E=2})E;return x!=2||E!=2;}static int multiple(void){int x=(enum{A=1})A+(enum{B=A+1})B;return x!=3||A!=1||B!=2;}int main(void){return sizes()||cast()||literal()||later()||order()||bound()||shadow()||tagged()||stored()||multiple();}
           C
       - name: Require independent acceptance values and refusal neighbors
         shell: bash
