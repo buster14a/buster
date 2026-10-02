@@ -117,6 +117,7 @@ BUSTER_F_DECL bool os_process_group_escaped_capture_self_test(Arena* arena);
 #endif
 #if BUSTER_LINUX
 BUSTER_F_DECL bool os_linux_process_stat_parse_self_test(void);
+BUSTER_F_DECL bool os_linux_proc_read_self_test(void);
 BUSTER_F_DECL bool os_linux_process_group_churn_self_test(Arena* arena);
 #endif
 
