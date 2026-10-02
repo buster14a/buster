@@ -457,6 +457,154 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_switch_case(UnitTestArguments* arguments, u32 bit_width, bool is_signed,
+                                                                u64* keys, u32 case_count, bool shared_target, IrValidationError expected)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    IrTypeId parameter_type = {.value = 1};
+    IrType types[] = {
+        {.id = {.value = 0}, .kind = IR_TYPE_VOID},
+        {.id = {.value = 1}, .kind = IR_TYPE_INTEGER, .bit_width = (u16)bit_width, .is_signed = is_signed,
+         .layout = {.size = bit_width / 8, .alignment = bit_width / 8, .resolved = true}},
+        {.id = {.value = 2}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0},
+         .parameter_types = &parameter_type, .parameter_count = 1},
+    };
+    u64 argument_index = 0;
+    IrValueId selector = {.value = 0};
+    IrValue value = {.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_VALUE};
+    IrBlockId* targets = arena_allocate(temporary.arena, IrBlockId, case_count + 1);
+    u64* original_keys = arena_allocate(temporary.arena, u64, case_count);
+    IrBlockId* original_targets = arena_allocate(temporary.arena, IrBlockId, case_count + 1);
+    for (u32 index = 0; index < case_count; index += 1)
+    {
+        targets[index].value = shared_target ? 1 : 1 + index % 2;
+        original_keys[index] = keys[index];
+        original_targets[index] = targets[index];
+    }
+    targets[case_count].value = 3;
+    original_targets[case_count] = targets[case_count];
+    // Raw original rows: default is last; distinct keys may share a target.
+    IrInstruction instructions[] = {
+        {.opcode = IR_OPCODE_ARGUMENT, .canonical_type = {.value = 1}, .result = {.value = 0},
+         .immediates = &argument_index, .immediate_count = 1, .next = {.value = 1}},
+        {.opcode = IR_OPCODE_SWITCH, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .operands = &selector, .operand_count = 1, .immediates = keys, .immediate_count = (u16)case_count,
+         .targets = targets, .target_count = (u16)(case_count + 1), .next = IR_INSTRUCTION_ID_INVALID},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID},
+    };
+    IrBlock blocks[] = {
+        {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 1}, .sealed = true, .terminated = true},
+        {.id = {.value = 1}, .first_instruction = {.value = 2}, .last_instruction = {.value = 2}, .sealed = true, .terminated = true},
+        {.id = {.value = 2}, .first_instruction = {.value = 3}, .last_instruction = {.value = 3}, .sealed = true, .terminated = true},
+        {.id = {.value = 3}, .first_instruction = {.value = 4}, .last_instruction = {.value = 4}, .sealed = true, .terminated = true},
+    };
+    IrFunction function = {.canonical_type = {.value = 2}, .state = IR_FUNCTION_LOWERED, .entry = {.value = 0},
+                           .blocks = blocks, .block_count = BUSTER_ARRAY_LENGTH(blocks), .instructions = instructions,
+                           .instruction_count = BUSTER_ARRAY_LENGTH(instructions), .values = &value, .value_count = 1};
+    IrModule module = {.functions = &function, .function_count = 1};
+    IrProgram program = {.arena = temporary.arena, .modules = &module, .module_count = 1,
+                         .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    IrValidationResult validation = ir_validate_canonical_module(&program, &module);
+    BUSTER_TEST(arguments, validation.error == expected);
+    if (expected != IR_VALIDATION_NONE && validation.error == IR_VALIDATION_BRANCH_TARGET)
+    {
+        BUSTER_TEST(arguments, validation.function.value == 0 && validation.block.value == 0 && validation.instruction.value == 1);
+        IrValidationResult prepared = ir_prepare_canonical_module(&program, &module, false);
+        BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_BRANCH_TARGET);
+        BUSTER_TEST(arguments, prepared.function.value == 0 && prepared.block.value == 0 && prepared.instruction.value == 1);
+        BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+        BUSTER_TEST(arguments, !function.published_cfg && !module.local_promotion_complete && !module.fast_complete);
+    }
+    bool keys_unchanged = true;
+    bool targets_unchanged = true;
+    for (u32 index = 0; index < case_count; index += 1)
+    {
+        keys_unchanged &= keys[index] == original_keys[index];
+    }
+    for (u32 index = 0; index <= case_count; index += 1)
+    {
+        targets_unchanged &= targets[index].value == original_targets[index].value;
+    }
+    BUSTER_TEST(arguments, keys_unchanged && targets_unchanged);
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_switch_keys(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct IrTestSwitchKeysCase IrTestSwitchKeysCase;
+    struct IrTestSwitchKeysCase
+    {
+        u64 keys[5];
+        u32 count;
+        u32 bit_width;
+        bool is_signed;
+        bool shared_target;
+        bool duplicate;
+    };
+    IrTestSwitchKeysCase cases[] = {
+        {{0}, 0, 32, false, false, false},
+        {{7}, 1, 32, false, false, false},
+        {{263}, 1, 8, false, false, false},
+        {{1, 7, 9}, 3, 32, false, false, false},
+        {{9, 7, 1}, 3, 32, false, false, false},
+        {{7, 1, 9}, 3, 32, false, false, false},
+        {{7, 1, 9}, 3, 32, false, true, false},
+        {{7, 7}, 2, 32, false, false, true},
+        {{7, 7}, 2, 32, false, true, true},
+        {{7, 9, 7}, 3, 32, false, false, true},
+        {{7, 9, 7}, 3, 32, false, true, true},
+        {{7, 263}, 2, 8, false, false, true},
+        {{263, 7}, 2, 8, false, false, true},
+        {{UINT64_C(0xff), UINT64_MAX}, 2, 8, true, false, true},
+        {{UINT64_MAX, 0, 1}, 3, 8, true, false, false},
+        {{7, UINT64_C(65543)}, 2, 16, false, false, true},
+        {{UINT64_C(65535), UINT64_MAX}, 2, 16, true, false, true},
+        {{7, UINT64_C(0x10000000007)}, 2, 64, false, false, false},
+        {{7, UINT64_C(0x10000000007)}, 2, 32, false, false, true},
+        {{UINT64_C(0xffffffff), UINT64_MAX}, 2, 32, true, false, true},
+        {{0, UINT64_MAX, UINT64_C(0x8000000000000000), UINT64_C(0x7fffffffffffffff)}, 4, 64, true, false, false},
+        {{0, UINT64_MAX, UINT64_C(0x8000000000000000), UINT64_C(0x7fffffffffffffff)}, 4, 64, false, false, false},
+        {{0, UINT64_MAX, UINT64_C(0x8000000000000000), UINT64_MAX}, 4, 64, true, false, true},
+        {{0, UINT64_MAX, UINT64_C(0x8000000000000000), UINT64_MAX}, 4, 64, false, true, true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        IrTestSwitchKeysCase* test = cases + index;
+        UnitTestResult keys = ir_test_canonical_switch_case(arguments, test->bit_width, test->is_signed, test->keys, test->count,
+                                                          test->shared_target, test->duplicate ? IR_VALIDATION_BRANCH_TARGET : IR_VALIDATION_NONE);
+        result.test_count += keys.test_count;
+        result.succeeded_test_count += keys.succeeded_test_count;
+    }
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    enum { IR_TEST_SWITCH_KEY_COUNT = 4096 };
+    u64* large_keys = arena_allocate(temporary.arena, u64, IR_TEST_SWITCH_KEY_COUNT);
+    for (u32 order = 0; order < 4; order += 1)
+    {
+        for (u32 index = 0; index < IR_TEST_SWITCH_KEY_COUNT; index += 1)
+        {
+            // Multiplication by an odd number permutes residues modulo 4096.
+            u64 key = order == 0 ? index : (order == 1 ? IR_TEST_SWITCH_KEY_COUNT - 1 - index : (UINT64_C(2053) * index) & (IR_TEST_SWITCH_KEY_COUNT - 1));
+            large_keys[index] = order == 3 ? (key << 48) | (key << 16) | 7 : key;
+        }
+        UnitTestResult valid = ir_test_canonical_switch_case(arguments, 64, false, large_keys, IR_TEST_SWITCH_KEY_COUNT,
+                                                           order == 3, IR_VALIDATION_NONE);
+        result.test_count += valid.test_count;
+        result.succeeded_test_count += valid.succeeded_test_count;
+        large_keys[IR_TEST_SWITCH_KEY_COUNT - 1] = large_keys[0];
+        UnitTestResult duplicate = ir_test_canonical_switch_case(arguments, 64, false, large_keys, IR_TEST_SWITCH_KEY_COUNT,
+                                                               order == 3, IR_VALIDATION_BRANCH_TARGET);
+        result.test_count += duplicate.test_count;
+        result.succeeded_test_count += duplicate.succeeded_test_count;
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_validation_census(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -870,6 +1018,10 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult validation_census = ir_test_validation_census(arguments);
     result.test_count += validation_census.test_count;
     result.succeeded_test_count += validation_census.succeeded_test_count;
+
+    UnitTestResult switch_keys = ir_test_canonical_switch_keys(arguments);
+    result.test_count += switch_keys.test_count;
+    result.succeeded_test_count += switch_keys.succeeded_test_count;
     UnitTestResult integer_semantics = ir_integer_tests(arguments);
     result.test_count += integer_semantics.test_count;
     result.succeeded_test_count += integer_semantics.succeeded_test_count;
