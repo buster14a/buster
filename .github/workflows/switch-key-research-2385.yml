@@ -1,0 +1,52 @@
+name: SWITCH key research 2385
+on:
+  push:
+    branches: [codex/2385-switch-key-evidence]
+permissions:
+  contents: read
+concurrency:
+  group: switch-key-research-2385
+  cancel-in-progress: false
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Produce independently consumable objects from validated canonical IR
+        shell: bash
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: 2
+          BUSTER_TEST_JOBS: 1
+        run: |
+          set -euo pipefail
+          mkdir -p switch-evidence
+          git rev-parse HEAD HEAD^{tree} > switch-evidence/revisions.txt
+          git diff --stat 7afde682de1beb595c779192c9519b7524afb412 > switch-evidence/source-diff.txt
+          clang --version > switch-evidence/clang.txt
+          uname -a > switch-evidence/platform.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o /tmp/switch-probe-build
+          /tmp/switch-probe-build generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_DEBUG_INFO=OFF 2>&1 | tee switch-evidence/generate.log
+          /tmp/switch-probe-build build --config Release -t ide 2>&1 | tee switch-evidence/build.log
+          sha256sum build/Release/ide /tmp/switch-probe-build > switch-evidence/binaries.sha256
+          timeout 180 build/Release/ide test --module=codegen_tests --verbose=1 --ci=1 2>&1 | tee switch-evidence/probe.log
+      - name: Independent Clang callers execute native and LLVM artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/investigations/switch-2385/observe.py | tee switch-evidence/observations.jsonl
+      - name: Preserve all outcomes
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: switch-2385-${{ matrix.runner }}
+          path: switch-evidence/
+          if-no-files-found: error
+          retention-days: 30
