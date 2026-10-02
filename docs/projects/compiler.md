@@ -21,6 +21,7 @@ contract; this page does not maintain a second copy of command-line flags.
 | `compiler.hot-reload-demo` | Opt-in trusted-module Linux x86-64 counter consumer: edit/rebuild/reload at explicit safe points with host-owned state. | [Runnable workflow and support contract](../../tools/hot_replace_probe/README.md). Application dispatch stays outside compiler internals. |
 | `compiler.wasm64` | Direct core Wasm64 output. | [Wasm64 contract](../../WASM64.md). |
 | `compiler.llvm-bitcode` | Direct binary LLVM bitcode output. | [Bitcode contract](../../LLVM_BITCODE.md). |
+| `compiler.ir-oracle` | Test-only bounded canonical IR interpreter and isolated native comparison. | [Executable-semantics boundary](../canonical-ir-oracle.md). |
 
 These are navigation entries, not an exhaustive language or target-support matrix.
 The target/ABI/mode and limitations in each detailed contract remain decisive.
