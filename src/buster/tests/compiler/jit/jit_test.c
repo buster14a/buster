@@ -28,7 +28,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_imported_function_data_pc32(UnitTest
     void* host_address = 0;
     BUSTER_CT_CHECK(sizeof(host_function) == sizeof(host_address));
     memcpy(&host_address, &host_function, sizeof(host_address));
-    ObjectSectionKind kinds[] = {OBJECT_SECTION_DATA, OBJECT_SECTION_READ_ONLY};
+    ObjectSectionKind kinds[] = {OBJECT_SECTION_DATA, OBJECT_SECTION_READ_ONLY_DATA};
     s64 addends[] = {-1, 0, 1};
     for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
     {
