@@ -328,7 +328,8 @@ dropped state. No inline optimizer, dependency walk or GNU policy is added.
 
 The registered `c_test_windows_inline_bodies` requires callable needed Windows
 `__inline`/`__forceinline` definitions and transitive header helpers, unchanged
-static/extern storage and function address identity. Unused header bodies must
+static/extern storage and function address identity. Later raw-inline prototypes
+must share the retained definition's symbol state. Unused header bodies must
 stay omitted; plain `inline`, GNU `__inline__`, explicit GNU-inline attributes
 and Linux `__inline` retain their existing rules. Original inline sources and
 real Windows `<stdio.h>` formatting run in both frontend forms and all four
