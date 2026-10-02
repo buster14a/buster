@@ -25262,7 +25262,15 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_extension_constant_source = S8_INITIALI
     "if (__real__ z != 1.0 || __imag__ z != 2.0 || __real__ sign != 0.0 || __imag__ sign != -1.0) return 2;\n"
     "if (__real__ nested != 0.0 || __imag__ nested != 1.0 || __imag__ table[0] != 1.0 || __real__ table[1] != 2.0 || __imag__ table[1] != 3.0) return 3;\n"
     "if (local_integer != 5 || automatic != 5 || __real__ local_z != 1.0 || __imag__ local_z != 2.0 || __imag__ automatic_z != 2.0) return 4;\n"
+    "#if __LDBL_MANT_DIG__ == 113\n"
+    "const unsigned char *l = (const unsigned char *)&local_wide, *w = (const unsigned char *)&wide, *u = (const unsigned char *)&wide_unsigned;\n"
+    "const unsigned char expected_l[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0x80,0xff,0x3f};\n"
+    "const unsigned char expected_w[16] = {0,0,0,0,0,0,2,0,0,0,0,0,0,0,0xff,0x3f};\n"
+    "const unsigned char expected_u[16] = {0,0,0,0,0,0,0,0,0,0,0xfe,0xff,0xff,0xff,0x1e,0x40};\n"
+    "for (unsigned int k = 0; k < 16; ++k) if (l[k] != expected_l[k] || w[k] != expected_w[k] || u[k] != expected_u[k]) return 5;\n"
+    "#else\n"
     "if ((double)local_wide != 1.5 || (double)wide_unsigned != 4294967295.0 || (double)wide != 1.0) return 5;\n"
+    "#endif\n"
     "return 0; }\n");
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_extension_constants(UnitTestArguments* arguments)
@@ -25324,6 +25332,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_extension_constants(UnitTestArguments*
                         u8 const expected_unsigned[] = {0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0x1e, 0x40, 0, 0, 0, 0, 0, 0};
                         BUSTER_TEST(arguments, c_test_ext80_global_bytes(checked.program, wide, expected_wide, sizeof(expected_wide)));
                         BUSTER_TEST(arguments, c_test_ext80_global_bytes(checked.program, wide_unsigned, expected_unsigned, sizeof(expected_unsigned)));
+                    }
+                    else if (target_data_layout(target).long_double_type.bit_width == 128)
+                    {
+                        IrGlobal* wide = c_test_find_ir_global(module, checked.program, S8("wide"));
+                        IrGlobal* wide_unsigned = c_test_find_ir_global(module, checked.program, S8("wide_unsigned"));
+                        u8 const expected_wide[] = {0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0xff, 0x3f};
+                        u8 const expected_unsigned[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0x1e, 0x40};
+                        BUSTER_TEST(arguments, c_test_ext80_aggregate_bytes(wide, expected_wide, sizeof(expected_wide)));
+                        BUSTER_TEST(arguments, c_test_ext80_aggregate_bytes(wide_unsigned, expected_unsigned, sizeof(expected_unsigned)));
                     }
                     BUSTER_TEST(arguments, checked.canonical_ir_certified);
                     BUSTER_TEST(arguments, ir_validate_canonical_module(checked.program, module).error == IR_VALIDATION_NONE);
