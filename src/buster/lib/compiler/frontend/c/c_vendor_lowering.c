@@ -28,6 +28,8 @@ typedef enum CIrVendorOperation
     C_IR_VENDOR_PERMUTE_BYTE_512,
     C_IR_VENDOR_ZERO_HIGH_32,
     C_IR_VENDOR_ZERO_HIGH_64,
+    C_IR_VENDOR_COUNT_TRAILING_32,
+    C_IR_VENDOR_COUNT_TRAILING_64,
     C_IR_VENDOR_MASK_COPY,
     C_IR_VENDOR_MASK_TEST_ZERO,
     C_IR_VENDOR_SHUFFLE_DWORD,
@@ -67,6 +69,8 @@ BUSTER_GLOBAL_LOCAL CIrVendorRule const c_ir_vendor_rules[] = {
     {S8_INITIALIZER("__builtin_ia32_vpermi2varqi512"), {2048, 2048, 0}, C_IR_VENDOR_PERMUTE_BYTE_512, 3, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_bzhi_si"), {48, 48, 0}, C_IR_VENDOR_ZERO_HIGH_32, 2, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_bzhi_di"), {48, 48, 0}, C_IR_VENDOR_ZERO_HIGH_64, 2, 0, 0},
+    {S8_INITIALIZER("__builtin_ia32_tzcnt_u32"), {32, 32, 0}, C_IR_VENDOR_COUNT_TRAILING_32, 1, 0, 0},
+    {S8_INITIALIZER("__builtin_ia32_tzcnt_u64"), {32, 32, 0}, C_IR_VENDOR_COUNT_TRAILING_64, 1, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_kmovq"), {2, 2, 0}, C_IR_VENDOR_MASK_COPY, 1, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_kortestzdi"), {8, 8, 0}, C_IR_VENDOR_MASK_TEST_ZERO, 2, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_pshufd"), {32, 32, 0}, C_IR_VENDOR_SHUFFLE_DWORD, 2, 2, 256},
@@ -555,6 +559,25 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_zero_high(CIntegerIrBuilder* builder, Ir
     return result;
 }
 
+// The canonical count operation is given a nonzero operand. Intel TZCNT
+// returns the operand width for zero, unlike the C __builtin_ctz contract.
+BUSTER_C_INTERNAL IrValueId c_ir_vendor_count_trailing(CIntegerIrBuilder* builder, IrValueId input, u32 width, IrSourceRange source)
+{
+    IrTypeId type = c_ir_vendor_unsigned_type(builder, width);
+    IrValueId operand = c_ir_vendor_cast(builder, input, type, source);
+    IrValueId zero = c_ir_vendor_constant(builder, 0, type, source);
+    IrValueId is_zero = c_ir_vendor_binary(builder, operand, zero, builder->bool_type, IR_BINARY_INTEGER_EQUAL, source);
+    IrValueId zero_bit = c_ir_vendor_cast(builder, is_zero, type, source);
+    IrValueId safe_operand = c_ir_vendor_binary(builder, operand, zero_bit, type, IR_BINARY_INTEGER_BITWISE_OR, source);
+    IrValueId trailing = safe_operand.value < builder->function->value_count
+                             ? c_ir_emit_unary_value(builder, safe_operand, type, IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS, source)
+                             : IR_VALUE_ID_INVALID;
+    IrValueId bits = c_ir_vendor_constant(builder, width, type, source);
+    IrValueId empty_count = c_ir_vendor_binary(builder, zero_bit, bits, type, IR_BINARY_INTEGER_MULTIPLY, source);
+    IrValueId result = c_ir_vendor_binary(builder, trailing, empty_count, type, IR_BINARY_INTEGER_ADD, source);
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_vendor_shuffle_bytes(CIntegerIrBuilder* builder, IrValueId const* arguments, IrSourceRange source)
 {
     IrTypeId u8_type = c_ir_vendor_unsigned_type(builder, 8);
@@ -707,6 +730,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder,
         case C_IR_VENDOR_ZERO_HIGH_32:
         case C_IR_VENDOR_ZERO_HIGH_64:
             result = c_ir_vendor_zero_high(builder, arguments, rule->operation == C_IR_VENDOR_ZERO_HIGH_32 ? 32 : 64, source);
+            break;
+        case C_IR_VENDOR_COUNT_TRAILING_32:
+        case C_IR_VENDOR_COUNT_TRAILING_64:
+            result = c_ir_vendor_count_trailing(builder, arguments[0], rule->operation == C_IR_VENDOR_COUNT_TRAILING_32 ? 32 : 64, source);
             break;
         case C_IR_VENDOR_MASK_COPY:
             result = c_ir_vendor_cast(builder, arguments[0], c_ir_vendor_unsigned_type(builder, 64), source);

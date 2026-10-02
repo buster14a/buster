@@ -296,3 +296,13 @@ through the existing bounded member-path query and retain the selected type
 across array subscripts. A bound builtin name is accepted in a static initializer
 only when the typed evaluator proves the complete type/member expression to be
 an integer constant; ordinary function calls retain their diagnostic.
+
+Aggregate-expression brace elision also descends through array destinations
+until the expression matches an element. Whole-array admission is retained for
+array expressions. Runtime initialization and inferred array bounds share this
+rule, including a union value initializing a one-element array member.
+
+The exact `__builtin_ia32_tzcnt_u32` and `__builtin_ia32_tzcnt_u64` spellings
+return their unsigned operand width for zero. The canonical count receives a
+nonzero guarded value; each source operand is evaluated once and requires no
+BMI instruction support.

@@ -26413,7 +26413,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             type = ir_type_from_id(&builder->program->types, task.type);
             child = ir_type_from_id(&builder->program->types, child_type);
             bool whole_value = value_is_aggregate && child &&
-                               (child->kind == IR_TYPE_ARRAY || c_ir_initializer_aggregate_types_compatible(builder, value_type, child_type));
+                               c_ir_initializer_aggregate_types_compatible(builder, value_type, child_type);
             while (child && c_ir_initializer_type_is_aggregate(child) && !whole_value && !string_initializer &&
                    !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
             {
@@ -26460,7 +26460,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 }
                 child = ir_type_from_id(&builder->program->types, child_type);
                 whole_value = value_is_aggregate && child &&
-                              (child->kind == IR_TYPE_ARRAY || c_ir_initializer_aggregate_types_compatible(builder, value_type, child_type));
+                              c_ir_initializer_aggregate_types_compatible(builder, value_type, child_type);
             }
             if (child_place.value == IR_ID_UNDERLYING_INVALID)
             {
@@ -43780,14 +43780,15 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
     return result;
 }
 
-// Whole-record capture uses type identity, including the existing qualified
-// views. Equal layout alone does not make two distinct records compatible.
-// Vectors keep the same conversion rule as c_ir_emit_cast.
+// Whole-array capture requires an array expression. Record capture uses
+// type identity, including the existing qualified views; equal layout does
+// not make distinct records compatible. Vectors retain their conversion rule.
 BUSTER_C_INTERNAL bool c_ir_initializer_aggregate_types_compatible(CIntegerIrBuilder* builder, IrTypeId value_type, IrTypeId object_type)
 {
     IrType* value = ir_type_from_id(&builder->program->types, value_type);
     IrType* object = ir_type_from_id(&builder->program->types, object_type);
-    bool result = value && object && (value_type.value == object_type.value ||
+    bool result = value && object && ((value->kind == IR_TYPE_ARRAY && object->kind == IR_TYPE_ARRAY) ||
+                  value_type.value == object_type.value ||
                   ir_types_differ_only_in_volatile(&builder->program->types, value_type, object_type) ||
                   c_ir_atomic_aggregate_pair(builder, value_type, object_type).value != IR_ID_UNDERLYING_INVALID);
     if (!result && value && object && value->kind == IR_TYPE_VECTOR && object->kind == IR_TYPE_VECTOR &&
@@ -44317,10 +44318,9 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
             continue;
         }
         IrTypeId expression_type = IR_TYPE_ID_INVALID;
-        bool array_initializer = value_type->kind == IR_TYPE_ARRAY;
         if (aggregate && !c_ir_tokens_are_string_literals(builder->preprocess, designator.value_start, value_end) &&
             !(c_ir_initializer_value_is_aggregate_expression(builder, scope, designator.value_start, value_end, &expression_type) &&
-              (array_initializer || c_ir_initializer_aggregate_types_compatible(builder, expression_type, designator.value_type))))
+              c_ir_initializer_aggregate_types_compatible(builder, expression_type, designator.value_type)))
         {
             if (frame_count + designator.continuation_count >= capacity)
             {

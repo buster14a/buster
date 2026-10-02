@@ -5289,6 +5289,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
     u64 exact_clobbers = 0;
     u8 effects = 0;
     u16 preserved_vector_mask = 0;
+    // The balanced 64-bit swaps preserve RBX only when the generic
+    // output receives another physical register.
+    if (selected && codegen_inline_assembly_protected_cpuid(selector->program, function, instruction, extra))
+    {
+        reserved[MACHINE_X64_RBX] = true;
+    }
     for (u32 index = 0; selected && index < extra.clobber_count; index += 1)
     {
         X64Register clobber = X64_REGISTER_RAX;

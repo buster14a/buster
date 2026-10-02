@@ -8518,7 +8518,7 @@ BUSTER_C_SHARED bool c_initializer_has_top_level_comma(CToken* tokens, u32 start
 
 // An aggregate expression initializes the current subobject whole only when
 // its type is compatible. Otherwise brace elision must descend through the
-// enclosing record. Preserve the existing whole-array admission separately.
+// enclosing record or array. Whole-array admission requires an array expression.
 BUSTER_C_INTERNAL bool c_parse_initializer_value_is_aggregate_expression(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                                            CParseResult* result, CScopeId scope, u32 start, u32 end,
                                                                            CTypeId object_type)
@@ -8533,7 +8533,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_value_is_aggregate_expression(CTypePa
         CTypeKind object_kind = result->types[object_type.value].kind;
         bool aggregate = expression_kind == C_TYPE_ARRAY || expression_kind == C_TYPE_VECTOR ||
                          expression_kind == C_TYPE_STRUCT || expression_kind == C_TYPE_UNION;
-        consumes_whole = aggregate && (object_kind == C_TYPE_ARRAY ||
+        consumes_whole = aggregate && ((object_kind == C_TYPE_ARRAY && expression_kind == C_TYPE_ARRAY) ||
             c_parse_types_compatible(machine->scratch_arena, result, preprocess,
                                      c_parse_unqualified_type(result, object_type),
                                      c_parse_unqualified_type(result, expression_type)));
