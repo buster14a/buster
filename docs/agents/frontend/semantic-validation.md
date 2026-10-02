@@ -45,7 +45,7 @@ separate array-only duration check still permits a static pointer to a VLA while
 rejecting a VLA object with static duration. Function prototype parameter types
 retain their existing rules; the VM walk stops at function types.
 
-Structure and union member validation walks every array/pointer derivation,
+Structure and union member validation walks array, pointer and function-return derivations,
 including those inherited through typedefs, and rejects variably modified
 types at the member's original source site. Each bound is queried in its
 declaring scope using the existing typed constant predicate. The check runs

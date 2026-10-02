@@ -25759,14 +25759,26 @@ BUSTER_C_INTERNAL void c_parse_validate_member_types(CTypeParseMachine* machine,
         while (!variable && remaining && type.value < result->type_count)
         {
             CType value = result->types[type.value];
-            if (value.kind != C_TYPE_ARRAY && value.kind != C_TYPE_POINTER) break;
-            if (value.kind == C_TYPE_ARRAY && value.array_bound < result->array_bound_count)
+            if (value.kind == C_TYPE_FUNCTION)
             {
-                CArrayBound bound = result->array_bounds[value.array_bound];
-                CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, bound.token_start);
-                variable = c_parse_array_bound_is_variable(machine, result, preprocess, scope, bound);
+                // Return-type derivation carries VM status; prototype
+                // parameter bounds do not make the member itself VM.
+                type = value.return_type;
             }
-            type = value.element_type;
+            else if (value.kind == C_TYPE_ARRAY || value.kind == C_TYPE_POINTER)
+            {
+                if (value.kind == C_TYPE_ARRAY && value.array_bound < result->array_bound_count)
+                {
+                    CArrayBound bound = result->array_bounds[value.array_bound];
+                    CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, bound.token_start);
+                    variable = c_parse_array_bound_is_variable(machine, result, preprocess, scope, bound);
+                }
+                type = value.element_type;
+            }
+            else
+            {
+                break;
+            }
             remaining -= 1;
         }
         if (variable)

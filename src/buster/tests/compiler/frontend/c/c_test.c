@@ -4879,6 +4879,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArgument
         {S8("int f(int n) {\nstruct S {\n    int (*a)[n];\n};\nreturn 0;\n}\n"), 3, 11},
         {S8("int f(int n) {\ntypedef int A[n];\nstruct S {\n    A a;\n};\nreturn 0;\n}\n"), 4, 7},
         {S8("int f(int n) {\ntypedef int A[n];\nstruct S {\n    A *a;\n};\nreturn 0;\n}\n"), 4, 8},
+        {S8("int f(int n) {\ntypedef int A[n];\nstruct S {\n    A *(*a)(void);\n};\nreturn 0;\n}\n"), 4, 10},
         {S8("int f(int n) {\nstruct S { struct {\n    int a[n];\n} inner; };\nreturn 0;\n}\n"), 3, 9},
         {S8("int f(int n) {\nif (sizeof(struct {\n    int a[n];\n})) return 1;\nreturn 0;\n}\n"), 3, 9},
         {S8("int f(int n) {\n(void)sizeof(struct {\n    int a[n];\n});\nreturn 0;\n}\n"), 3, 9},
