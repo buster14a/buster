@@ -127,33 +127,39 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_aarch64_printer_text(ByteSlice ima
     return text;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_process(UnitTestArguments* arguments, Arena* arena, SliceString8 command)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_process(UnitTestArguments* arguments, Arena* arena, bool* admission, SliceString8 command)
 {
     bool success = false;
-    u64 limit = BUSTER_KB(64);
-    ProcessSpawnResult child = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                              .use_process_environment = true, .new_process_group = true, .search_path = true,
-                              .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = limit, [STANDARD_STREAM_ERROR] = limit},
-                                                 .total = limit * 2},
-                              .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
-    if (child.handle)
+    if (*admission)
     {
-        ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
-        success = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS && !waited.capture_failed &&
-                  !waited.output_truncated && !waited.capture_limit_exceeded && !waited.process_tree_cleanup_failed &&
-                  !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
-        if (!success)
+        u64 limit = BUSTER_KB(64);
+        ProcessSpawnResult child = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                  .use_process_environment = true, .new_process_group = true, .search_path = true,
+                                  .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = limit, [STANDARD_STREAM_ERROR] = limit},
+                                                     .total = limit * 2},
+                                  .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+        if (child.handle)
         {
-            String8 diagnostic = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
-            arguments->show(arguments, S8("AARCH64_PRINTER_ASSEMBLER status={u32} timeout={u32}\n{S8}\n"),
-                waited.platform_status, (u32)waited.timed_out, string_slice(diagnostic, 0, BUSTER_MIN(diagnostic.length, 4096)));
+            ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
+            bool group_valid = !waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained &&
+                               !waited.process_group_ownership_lost;
+            *admission &= group_valid;
+            success = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS && !waited.capture_failed &&
+                      !waited.output_truncated && !waited.capture_limit_exceeded && group_valid;
+            if (!success)
+            {
+                String8 diagnostic = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+                arguments->show(arguments, S8("AARCH64_PRINTER_ASSEMBLER status={u32} timeout={u32} admission={u32}\n{S8}\n"),
+                    waited.platform_status, (u32)waited.timed_out, (u32)*admission,
+                    string_slice(diagnostic, 0, BUSTER_MIN(diagnostic.length, 4096)));
+            }
         }
     }
     return success;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_assemble(UnitTestArguments* arguments, Arena* arena, String8 compiler,
+BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_assemble(UnitTestArguments* arguments, Arena* arena, bool* admission, String8 compiler,
                                                                   String8 compiler_argument, bool clang, String8 source, String8 output)
 {
     String8 command[10];
@@ -174,7 +180,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_assemble(UnitTestArgume
     command[count++] = source;
     command[count++] = S8("-o");
     command[count++] = output;
-    return compiler_driver_aarch64_printer_process(arguments, arena, (SliceString8){.pointer = command, .length = count});
+    return compiler_driver_aarch64_printer_process(arguments, arena, admission, (SliceString8){.pointer = command, .length = count});
 }
 #endif
 
@@ -218,10 +224,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
 #endif
     if (compiler.length)
     {
+        bool admission = true;
         String8 original_path = buster_test_temporary_path(arena, S8("a64-printer-original"), S8(".s"));
         String8 printed_path = buster_test_temporary_path(arena, S8("a64-printer-printed"), S8(".s"));
         String8 reference_path = buster_test_temporary_path(arena, S8("a64-printer-reference"), S8(".o"));
         String8 reassembled_path = buster_test_temporary_path(arena, S8("a64-printer-reassembled"), S8(".o"));
+        // Each literal case retains its original word after a fixed B +4 label seed.
         u32 words[] = {
             UINT32_C(0xd503201f), UINT32_C(0xd65f03c0), UINT32_C(0xd65f00a0), UINT32_C(0xd61f00a0), UINT32_C(0xd63f00a0),
             UINT32_C(0xd53bd043), UINT32_C(0x93407c43), UINT32_C(0x8a040043), UINT32_C(0xaa040043), UINT32_C(0xca040043),
@@ -232,16 +240,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
             UINT32_C(0xa9401043), UINT32_C(0x9adf23e3), UINT32_C(0x9b1f7fe3), UINT32_C(0x8b1f03ff), UINT32_C(0xd280003f),
             UINT32_C(0xa9407fe3), UINT32_C(0x93407c5f), UINT32_C(0x93407fe3), UINT32_C(0xd53bd05f), UINT32_C(0x390003ff),
             UINT32_C(0x14000000), UINT32_C(0x94000000), UINT32_C(0x54000000), UINT32_C(0xb4000003), UINT32_C(0xb5000003),
-            UINT32_C(0x36000003), UINT32_C(0xb7000003), UINT32_C(0x58000003), UINT32_C(0xd5033bbf), UINT32_C(0xd5033fbf),
-            UINT32_C(0xd5033b9f), UINT32_C(0xd5033fdf), UINT32_C(0xd5033f5f), UINT32_C(0xd503305f), UINT32_C(0xd51bd040),
-            UINT32_C(0xd5300000), UINT32_C(0x93401c43), UINT32_C(0x93403c43), UINT32_C(0x13001c43), UINT32_C(0x9347fc43),
-            UINT32_C(0x93c21c43), UINT32_C(0x3d802780), UINT32_C(0xfd001380), UINT32_C(0xfd400380), UINT32_C(0x3dc02783),
-            UINT32_C(0x39800843), UINT32_C(0x39c00843), UINT32_C(0xb9800843), UINT32_C(0xf9800843), UINT32_C(0x6d010440),
-            UINT32_C(0xad010440), UINT32_C(0x69411043), UINT32_C(0xa8011043), UINT32_C(0xaa441c43), UINT32_C(0x8a041c43),
-            UINT32_C(0xaa0407e3), UINT32_C(0x8b441c43), UINT32_C(0xeb041c5f), UINT32_C(0x91400043), UINT32_C(0x52c00023),
-            UINT32_C(0x9a9fe7e3), UINT32_C(0x9a9ff7e3), UINT32_C(0x91800043), UINT32_C(0x0b048043), UINT32_C(0x72c00023),
-            UINT32_C(0x12c00023), UINT32_C(0x18000003), UINT32_C(0x1c000003), UINT32_C(0x5c000003), UINT32_C(0x9c000003),
-            UINT32_C(0x98000003), UINT32_C(0xd8000003),
+            UINT32_C(0x36000003), UINT32_C(0xb7000003), UINT32_C(0x14000001), UINT32_C(0x58000003), UINT32_C(0xd5033bbf),
+            UINT32_C(0xd5033fbf), UINT32_C(0xd5033b9f), UINT32_C(0xd5033fdf), UINT32_C(0xd5033f5f), UINT32_C(0xd503305f),
+            UINT32_C(0xd51bd040), UINT32_C(0xd5300000), UINT32_C(0x93401c43), UINT32_C(0x93403c43), UINT32_C(0x13001c43),
+            UINT32_C(0x9347fc43), UINT32_C(0x93c21c43), UINT32_C(0x3d802780), UINT32_C(0xfd001380), UINT32_C(0xfd400380),
+            UINT32_C(0x3dc02783), UINT32_C(0x39800843), UINT32_C(0x39c00843), UINT32_C(0xb9800843), UINT32_C(0xf9800843),
+            UINT32_C(0x6d010440), UINT32_C(0xad010440), UINT32_C(0x69411043), UINT32_C(0xa8011043), UINT32_C(0xaa441c43),
+            UINT32_C(0x8a041c43), UINT32_C(0xaa0407e3), UINT32_C(0x8b441c43), UINT32_C(0xeb041c5f), UINT32_C(0x91400043),
+            UINT32_C(0x52c00023), UINT32_C(0x9a9fe7e3), UINT32_C(0x9a9ff7e3), UINT32_C(0x91800043), UINT32_C(0x0b048043),
+            UINT32_C(0x72c00023), UINT32_C(0x12c00023), UINT32_C(0x14000001), UINT32_C(0x18000003), UINT32_C(0x14000001),
+            UINT32_C(0x1c000003), UINT32_C(0x14000001), UINT32_C(0x5c000003), UINT32_C(0x14000001), UINT32_C(0x9c000003),
+            UINT32_C(0x14000001), UINT32_C(0x98000003), UINT32_C(0x14000001), UINT32_C(0xd8000003),
         };
         u8 original_bytes[sizeof(words)];
         String8 original_source = S8(".text\n.p2align 2\n.global printer_original\nprinter_original:\n");
@@ -260,7 +269,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
         BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, original_readback.bytes), original_source);
         original_ready &= original_readback.status == OS_FILE_READ_OK && original_readback.error.v == 0 &&
                           string_equal(BYTE_SLICE_TO_STRING(8, original_readback.bytes), original_source);
-        bool reference_ready = original_ready && compiler_driver_aarch64_printer_assemble(arguments, arena, compiler, compiler_argument, clang,
+        bool reference_ready = original_ready && compiler_driver_aarch64_printer_assemble(arguments, arena, &admission, compiler, compiler_argument, clang,
                                                                                           original_path, reference_path);
         BUSTER_TEST(arguments, reference_ready);
         if (reference_ready)
@@ -280,7 +289,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
                 String8 printed = object_print_assembly(arena, &object);
                 bool printed_ready = printed.length != 0 && file_write(printed_path, BUSTER_SLICE_TO_BYTE_SLICE(printed));
                 BUSTER_TEST(arguments, printed_ready);
-                bool reassembled = printed_ready && compiler_driver_aarch64_printer_assemble(arguments, arena, compiler, compiler_argument, clang,
+                bool reassembled = printed_ready && compiler_driver_aarch64_printer_assemble(arguments, arena, &admission, compiler, compiler_argument, clang,
                                                                                              printed_path, reassembled_path);
                 BUSTER_TEST(arguments, reassembled);
                 if (reassembled)
@@ -327,9 +336,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
         String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                            S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
-        for (u32 mode = 0; source_ready && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        for (u32 mode = 0; admission && source_ready && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
-            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            for (u32 form = 0; admission && form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
             {
                 TemporalArena row = arena_begin_temporal(arena);
                 String8 object_path = buster_test_temporary_path(arena, S8("a64-printer-c-object"), S8(".o"));
@@ -354,7 +363,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
                 {
                     ByteSlice encoded = compiler_driver_aarch64_printer_text(file_read(arena, object_path, (FileReadOptions){0}));
                     BUSTER_TEST(arguments, encoded.pointer && encoded.length != 0);
-                    bool assembled = compiler_driver_aarch64_printer_assemble(arguments, arena, compiler, compiler_argument, clang,
+                    bool assembled = compiler_driver_aarch64_printer_assemble(arguments, arena, &admission, compiler, compiler_argument, clang,
                                                                               assembly_path, observer_path);
                     BUSTER_TEST(arguments, assembled);
                     if (assembled)

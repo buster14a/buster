@@ -162,12 +162,14 @@ instruction words and their expected mnemonic or raw-word lines across Linux,
 Android, Windows and macOS AArch64 targets. The neighboring encodings cover
 system operations, literal and unsigned loads, FP/vector memory, pairs, shifts,
 register 31, reserved widths and immediate-shift bits without consulting the
-production decoder.
+production decoder. Seven literal-load cases retain their original self-targeting
+word after an independent fixed `B +4` prefix; that branch establishes the target
+label without a production decoder or relocation oracle.
 
 The registered `compiler_driver_aarch64_printer_roundtrip` independently
 assembles the original literal words and the printed assembly, extracts
 `.text` directly from their ELF bytes and compares both with the fixed original
-bytes. It also compiles a C corpus through both `-c` and `-S` for all four
+bytes (99 words including the seven label seeds). It also compiles a C corpus through both `-c` and `-S` for all four
 allocators and both frontend forms, then assembles the original `-S` output
 and compares its `.text` with the original `-c` output. The corpus exercises
 fences, compare-exchange failure, signed extensions, HFA calls, scalar and vector
@@ -178,4 +180,5 @@ fixture.
 
 These are regression oracles. Their presence alone does not establish that the
 current printer satisfies the contract; qualification is tied to an actual
-reviewed source head and hosted results.
+reviewed source head and hosted results. Observer admission stops after a failed
+group cleanup, retained reservation or lost ownership.
