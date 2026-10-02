@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: fast-empty-slot-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   diagnostic:
