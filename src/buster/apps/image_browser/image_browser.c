@@ -90,7 +90,7 @@ BUSTER_GLOBAL_LOCAL void image_browser_usage(void)
 {
     fprintf(stderr, "usage: image_browser <image-or-directory>\n");
 #if BUSTER_INCLUDE_TESTS
-    fprintf(stderr, "       image_browser tests/image-browser --smoke\n");
+    fprintf(stderr, "       image_browser src/buster/tests/image_browser/fixtures --smoke\n");
 #endif
     fprintf(stderr, "Linux x86-64 / XCB CPU raster. PNG, sequential JPEG, GIF first image, BMP, TGA, QOI, PNM/PAM.\n"
                     "Left/Right or PgUp/PgDn navigate; wheel or +/- zoom; left drag pans; F fits; 1 sets actual size; R reloads; Esc closes.\n"

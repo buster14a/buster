@@ -20,7 +20,7 @@ if (BUSTER_BUILD_IMAGE_BROWSER)
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             VERBATIM)
         add_custom_target(test_image_browser_native
-            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:image_browser>" tests/image-browser --smoke
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:image_browser>" src/buster/tests/image_browser/fixtures --smoke
             DEPENDS image_browser
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             VERBATIM)

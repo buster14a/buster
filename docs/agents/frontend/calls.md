@@ -231,3 +231,37 @@ allows a list containing only ellipsis. Array `static` needs an expression;
 parameter derivations. A nested function-pointer parameter still introduces
 its own prototype scope. The syntax/object diagnostic-equivalence corpus
 checks rejection, legal neighbors and both frontend SSA forms.
+
+## GNU callback storage through void pointers
+
+In GNU dialects, native x86-64 and AArch64 Linux/macOS admit assignment,
+initialization, return and argument conversions between a function pointer
+and `void *`. This is an explicit Buster extension for callback storage,
+including QuickJS's `(void *)dbuf_printf` initializer. It changes only the
+immediate function/void pointee pair; `void **` is not a generic callback-slot
+type. ISO C99/C11/C17/C23 modes still diagnose the implicit conversion, as do
+other target families. Android/iOS are outside this initial policy.
+
+N1570 6.5.16.1p1 restricts the ISO assignment exemption to object pointers,
+and 6.7.9p11 applies that constraint to initialization. Annex J.5.7 records
+explicit function-pointer casts as a common extension. POSIX `dlsym`
+describes a callable conversion through `void *`; it does not require
+implicit assignment acceptance. GCC/Clang acceptance is implementation
+evidence, not the definition of this extension.
+
+A genuine function address may round-trip through `void *` and be called
+through its original compatible signature. Arbitrary data addresses and
+calls through incompatible signatures have no supported execution contract.
+Direct mismatched function signatures, non-void object/function-pointer
+assignments and discarded pointee qualifiers remain errors. Explicit casts
+retain their pre-existing policy.
+
+`c_parse_assignment_conversion_message` owns admission; lowering uses the
+existing canonical pointer conversion. `c_test_void_function_pointer_policy`
+checks the independent dialect/target acceptance table, and
+`compiler_driver_test_void_function_pointer_roundtrip` compiles, links and
+runs both source and separately emitted object routes across the four native
+allocators and both frontend SSA forms on eligible hosts. Semantic checks
+for a target are distinct from executing that target.
+See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
+for exercised configurations and remaining external-harness blockers.

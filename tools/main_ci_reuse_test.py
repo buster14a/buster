@@ -611,14 +611,15 @@ class MainCIReuseFinishTests(unittest.TestCase):
             self.assert_refused(self.invoke("finish", handoff), "final-source-recheck")
 
     def test_decision_without_proof_falls_back_and_retains_diagnostics(self):
-        with self.list_sequence([[]]):
+        with self.list_sequence([[], [], []]):
             code, report, outputs, _ = self.invoke("decide")
         self.assertEqual(code, 0)
         self.assertEqual(outputs, {"reuse": "false"})
         self.assertEqual(report["status"], "unavailable")
         self.assertNotIn("receipt", report)
         self.assertEqual(report["error"]["code"], "missing-source")
-        self.sleeps.assert_not_called()
+        self.assertEqual(len(report["diagnostics"]["discovery"]), 3)
+        self.assertEqual(self.sleeps.call_args_list, [mock.call(1), mock.call(2)])
 
     def test_exception_token_is_redacted_from_diagnostic_and_log(self):
         handoff = self.decide()
@@ -667,6 +668,145 @@ class MainCIReuseFinishTests(unittest.TestCase):
             self.api.main_jobs[-2][field] = value
             with self.subTest(field=field):
                 self.assert_refused(self.invoke("finish", handoff), "main-jobs")
+
+
+    def assert_fallback(self, result):
+        code, report, outputs, text = result
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(outputs, {"reuse": "false"})
+        self.assertNotIn("receipt", report)
+        self.assertNotIn("Main CI reuse verified", text)
+
+    def test_decision_recollection_preserves_the_full_proof(self):
+        # Replay the previous one-read policy and the new policy on the same
+        # absent-then-complete observation. This is not a hosted timing claim.
+        with mock.patch.object(reuse, "DISCOVERY_DELAYS", ()), self.list_sequence([[]]):
+            self.assert_fallback(self.invoke("decide"))
+        self.sleeps.assert_not_called()
+        with self.list_sequence([[], [self.api.source]]):
+            code, report, outputs, _ = self.invoke("decide")
+        self.assertEqual(code, 0)
+        self.assertEqual(outputs["reuse"], "true")
+        self.assertEqual(report["status"], "verified")
+        self.assertEqual(len(report["receipt"]["source_jobs"]), 19)
+        self.assertEqual(len(report["receipt"]["source_artifacts"]), 19)
+        self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
+        self.sleeps.assert_called_once_with(1)
+
+    def test_decision_recovers_only_inconclusive_discovery_reads(self):
+        errors = (AdmissionError("API response is truncated or changed during pagination"),
+                  reuse.APIReadError(reuse.DISCOVERY_PATH, 429, 4),
+                  reuse.APIReadError(reuse.DISCOVERY_PATH, 503, 4),
+                  reuse.APIReadError(reuse.DISCOVERY_PATH, None, 4))
+        for error in errors:
+            self.sleeps.reset_mock()
+            with self.subTest(error=str(error)), self.list_sequence([error, [self.api.source]]):
+                code, report, outputs, _ = self.invoke("decide")
+            self.assertEqual(code, 0)
+            self.assertEqual(outputs["reuse"], "true")
+            self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
+            self.sleeps.assert_called_once_with(1)
+
+    def test_decision_definite_rejections_do_not_retry(self):
+        cases = ([self.api.source, self.api.source], [None], {},
+                 [dict(self.api.source, head_sha="d" * 40)],
+                 [dict(self.api.source, conclusion="failure")],
+                 [dict(self.api.source, conclusion="cancelled")],
+                 [dict(self.api.source, status="in_progress")],
+                 [dict(self.api.source, run_attempt=2)],
+                 AdmissionError("API pagination limit reached; refusing partial evidence"),
+                 reuse.APIReadError(reuse.DISCOVERY_PATH, 403, 1),
+                 reuse.APIReadError(reuse.DISCOVERY_PATH, 404, 1))
+        for rows in cases:
+            with self.subTest(rows=rows), self.list_sequence([rows]):
+                self.assert_fallback(self.invoke("decide"))
+        self.sleeps.assert_not_called()
+
+    def test_decision_recollection_cannot_admit_late_stale_or_changed_source(self):
+        for field, value in (("updated_at", NOW.isoformat()),
+                             ("updated_at", (NOW - timedelta(hours=3)).isoformat()),
+                             ("head_sha", "d" * 40), ("workflow_id", 99),
+                             ("conclusion", "cancelled"), ("run_attempt", 2)):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            self.api.source[field] = value
+            with self.subTest(field=field, value=value), self.list_sequence([[], [self.api.source]]):
+                self.assert_fallback(self.invoke("decide"))
+            self.sleeps.assert_called_once_with(1)
+
+    def test_decision_run_movement_during_backoff_refuses_positive_outputs(self):
+        for field, value in (("head_sha", "d" * 40), ("run_attempt", 2),
+                             ("event", "workflow_dispatch")):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            self.sleeps.side_effect = lambda delay: self.api.current.update({field: value})
+            with self.subTest(field=field), self.list_sequence([[], [self.api.source]]):
+                self.assert_fallback(self.invoke("decide"))
+            self.sleeps.assert_called_once_with(1)
+        self.sleeps.side_effect = None
+
+    def test_decision_recovered_listing_does_not_retry_missing_coverage(self):
+        for missing in ("job", "step", "artifact", "workflow"):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            if missing == "job":
+                self.api.jobs.pop()
+            elif missing == "step":
+                native = next(row for row in self.api.jobs if row["name"] == "Linux x86-64 native")
+                native["steps"] = [row for row in native["steps"] if
+                                   row["name"] != "Native configuration differential matrix"]
+            elif missing == "artifact":
+                self.api.artifacts.pop()
+            else:
+                original = self.api.get
+                def get(path, **query):
+                    value = original(path, **query)
+                    if path == "contents/" + reuse.WORKFLOW_PATH:
+                        value["sha"] = "d" * 40
+                    return value
+                self.api.get = get
+            with self.subTest(missing=missing), self.list_sequence([[], [self.api.source]]):
+                self.assert_fallback(self.invoke("decide"))
+            self.sleeps.assert_called_once_with(1)
+
+    def test_decision_exhausted_wrapped_reads_fall_back_with_http_diagnostic(self):
+        errors = [reuse.APIReadError(reuse.DISCOVERY_PATH, 503, 4) for _ in range(3)]
+        with self.list_sequence(errors):
+            result = self.invoke("decide")
+        self.assert_fallback(result)
+        self.assertEqual(result[1]["error"]["http_status"], 503)
+        self.assertEqual(len(result[1]["diagnostics"]["discovery"]), 3)
+        self.assertEqual(self.sleeps.call_args_list, [mock.call(1), mock.call(2)])
+
+    def test_production_reader_wrapping_is_recollected_in_both_phases(self):
+        # Exercise GitHub.pages -> get -> github_read_json -> APIReadError,
+        # rather than substituting a raw HTTP error that production wraps.
+        for phase in ("decide", "finish"):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            handoff = self.decide() if phase == "finish" else None
+            real = GitHub(reuse.REPOSITORY, "fixture-secret")
+            original = self.api.pages
+            def pages(path, field, **query):
+                if path == reuse.DISCOVERY_PATH:
+                    return real.pages(path, field, **query)
+                return original(path, field, **query)
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps(
+                {"total_count": 1, "workflow_runs": [self.api.source]}).encode()
+            errors = [urllib.error.HTTPError("https://api.github.com/fixture", 503,
+                                             "Unavailable", {}, None) for _ in range(4)]
+            with self.subTest(phase=phase), mock.patch.object(self.api, "pages", side_effect=pages), \
+                    mock.patch("urllib.request.urlopen", side_effect=errors + [response]) as transport:
+                code, report, outputs, text = self.invoke(phase, handoff)
+            self.assertEqual(code, 0, text)
+            self.assertEqual(report["status"], "verified")
+            self.assertEqual(transport.call_count, 5)
+            self.assertEqual(report["diagnostics"]["discovery"][0]["error"]["http_status"], 503)
+            self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
+            self.assertEqual(self.sleeps.call_args_list,
+                             [mock.call(1), mock.call(2), mock.call(4), mock.call(1)])
 
 
 if __name__ == "__main__":
