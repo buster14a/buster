@@ -208,26 +208,328 @@ BUSTER_GLOBAL_LOCAL void raster_native_bounded_poll(Arena* arena, WmHandle* wind
 
 BUSTER_GLOBAL_LOCAL void raster_native_window_arena_failure(void)
 {
-    // Park exactly one arena: native XDND initialization consumes it, so the
-    // existing next-reserve fault seam reaches the required window arena.
+    // XDND staging is lazy; the first native arena is now the required window
+    // arena. Empty the reuse pool so the reservation fault reaches that owner.
     BUSTER_UNUSED(arena_pool_release_thread());
-    Arena* pooled = arena_create((ArenaCreation){0});
-    raster_native_check(pooled != 0, "window arena failure fixture reservation");
-    if (pooled)
+    arena_test_fail_next_reserve();
+    WmHandle* windowing = wm_initialize();
+    raster_native_check(windowing == 0, "required window arena failure rejects native initialization");
+    if (windowing)
     {
-        u64 reservation = pooled->reserved_size;
-        arena_destroy(pooled, 1);
-        raster_native_check(arena_test_pool_count(reservation) == 1, "one parked arena isolates window reservation failure");
-        arena_test_fail_next_reserve();
-        WmHandle* windowing = wm_initialize();
-        raster_native_check(windowing == 0, "required window arena failure rejects native initialization");
-        if (windowing)
-        {
-            wm_deinitialize(windowing);
-        }
-        wm_deinitialize(0);
-        BUSTER_UNUSED(arena_pool_release_thread());
+        wm_deinitialize(windowing);
     }
+    wm_deinitialize(0);
+    BUSTER_UNUSED(arena_pool_release_thread());
+}
+
+BUSTER_GLOBAL_LOCAL void raster_native_xim_scope(Arena* arena, WmHandle* windowing, WmWindowHandle* window)
+{
+    // This drives the callback reducer with project-authored UTF-8, separately
+    // from a live provider. Native polling below checks scope teardown.
+    char8 text[16385];
+    memset(text, 'a', sizeof(text));
+    u64 start = arena->position;
+    raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 1, S8("a")) && arena->position == start,
+                        "XIM callback outside poll cannot retain the caller arena");
+    windowing->event_arena = arena;
+    windowing->event_list = (WmEventList){0};
+    windowing->poll_arena = arena;
+    windowing->poll_event_list = &windowing->event_list;
+    windowing->poll_commit_bytes = 0;
+    windowing->poll_commit_count = 0;
+    raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 4097, S8("a")) && arena->position == start,
+                        "XIM oversized raw input rejected before conversion or allocation");
+    raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 0, S8("a")) && arena->position == start,
+                        "XIM empty raw input cannot publish output");
+    raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 1, (String8){.length = 1}) && arena->position == start,
+                        "XIM null conversion output rejected without arena mutation");
+    raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 2, S8("\xc0\xaf")) && arena->position == start,
+                        "XIM malformed UTF-8 rejected before event publication");
+    raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 4096, (String8){text, sizeof(text)}) && arena->position == start,
+                        "XIM oversized converted output rejected without arena mutation");
+    raster_native_check(wm_x11_xim_commit_for_test(windowing, window, 4096, (String8){text, 16384}),
+                        "XIM exact input and converted-output boundaries admitted");
+    WmEvent* committed = windowing->event_list.first;
+    raster_native_check(committed && committed->kind == WM_EVENT_TEXT_INPUT && committed->window == window &&
+                        committed->text.length == 16384 && committed->text.pointer != text &&
+                        memcmp(committed->text.pointer, text, 16384) == 0, "XIM accepted text is copied into event ownership");
+    text[0] = 'b';
+    raster_native_check(committed && committed->text.pointer[0] == 'a', "XIM copied bytes survive source mutation");
+    for (u32 index = 0; index < 3; index += 1)
+    {
+        raster_native_check(wm_x11_xim_commit_for_test(windowing, window, 4096, (String8){text, 16384}),
+                            "XIM bounded cumulative converted text admitted");
+    }
+    u64 accepted_end = arena->position;
+    raster_native_check(windowing->poll_commit_bytes == 65536 &&
+                        !wm_x11_xim_commit_for_test(windowing, window, 1, S8("a")) && arena->position == accepted_end && windowing->event_list.count == 4,
+                        "XIM cumulative bytes reject the next commit atomically");
+    arena_reset_to_start(arena);
+    windowing->event_list = (WmEventList){0};
+    windowing->poll_commit_bytes = 0;
+    windowing->poll_commit_count = 0;
+    for (u32 index = 0; index < 32; index += 1)
+    {
+        raster_native_check(wm_x11_xim_commit_for_test(windowing, window, 1, S8("a")), "XIM bounded commit count admitted");
+    }
+    accepted_end = arena->position;
+    raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 1, S8("a")) && arena->position == accepted_end && windowing->event_list.count == 32,
+                        "XIM 33rd commit is refused without publishing partial output");
+    arena_reset_to_start(arena);
+    windowing->event_list = (WmEventList){0};
+    windowing->poll_commit_bytes = 0;
+    windowing->poll_commit_count = 0;
+    for (u32 index = 0; index < 32; index += 1)
+    {
+        raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 1, (String8){text, sizeof(text)}),
+                            "XIM rejected conversion still charges callback work");
+    }
+    raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 1, S8("a")) && windowing->poll_commit_count == 32 &&
+                        windowing->event_list.count == 0, "XIM work exhaustion blocks later conversion attempts");
+    Arena* limited = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = true}});
+    raster_native_check(limited != 0, "XIM limited committed arena created");
+    if (limited)
+    {
+        // Leave space for one byte, but no aligned event; reserved capacity is
+        // deliberately larger than committed capacity.
+        BUSTER_UNUSED(arena_allocate(limited, u8, limited->os_position - limited->position - 1));
+        windowing->event_arena = limited;
+        windowing->poll_arena = limited;
+        windowing->poll_commit_count = 0;
+        start = limited->position;
+        raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 1, S8("a")) && limited->position == start,
+                            "XIM checks committed text plus aligned event capacity before copying");
+        arena_destroy(limited, 1);
+    }
+    windowing->event_arena = arena;
+    windowing->poll_arena = arena;
+    windowing->event_list = (WmEventList){0};
+    windowing->poll_commit_bytes = 0;
+    windowing->poll_commit_count = 0;
+    raster_native_check(wm_x11_xim_commit_for_test(windowing, window, 4, S8("\xf0\x9f\x98\x80")) && windowing->event_list.count == 1 &&
+                        windowing->event_list.first->text.length == 4, "XIM valid Unicode scalar reaches owned text event");
+    arena_reset_to_start(arena);
+    BUSTER_UNUSED(wm_poll_events(arena, windowing));
+    raster_native_check(!windowing->poll_arena && !windowing->poll_event_list && !windowing->poll_commit_bytes && !windowing->poll_commit_count,
+                        "actual native poll clears XIM callback destination and budget scope");
+    start = arena->position;
+    raster_native_check(!wm_x11_xim_commit_for_test(windowing, window, 1, S8("a")) && arena->position == start,
+                        "XIM late callback after native poll cannot use stale storage");
+    arena_reset_to_start(arena);
+}
+
+BUSTER_GLOBAL_LOCAL void raster_native_xdnd_message(Arena* arena, WmHandle* windowing, xcb_window_t target, xcb_window_t source,
+                                                  char const* type, u32 data1, u32 data2)
+{
+    xcb_client_message_event_t message = {0};
+    message.response_type = XCB_CLIENT_MESSAGE;
+    message.format = 32;
+    message.window = target;
+    message.type = raster_native_atom(windowing->connection, type);
+    message.data.data32[0] = source;
+    message.data.data32[1] = data1;
+    message.data.data32[2] = data2;
+    xcb_generic_error_t* error = xcb_request_check(windowing->connection,
+        xcb_send_event_checked(windowing->connection, 0, target, XCB_EVENT_MASK_NO_EVENT, (char const*)&message));
+    raster_native_check(message.type != XCB_ATOM_NONE && !error, "checked native XDND message queued");
+    free(error);
+    BUSTER_UNUSED(wm_poll_events(arena, windowing));
+    arena_reset_to_start(arena);
+}
+
+BUSTER_GLOBAL_LOCAL void raster_native_xdnd_budgets(Arena* arena, WmHandle* windowing, WmWindowHandle* window, WmNativeSurface surface)
+{
+    xcb_connection_t* connection = windowing->connection;
+    xcb_window_t target = (xcb_window_t)(uintptr_t)surface.window;
+    xcb_window_t source = xcb_generate_id(connection);
+    xcb_screen_t* screen = xcb_setup_roots_iterator(xcb_get_setup(connection)).data;
+    u32 source_mask = XCB_EVENT_MASK_PROPERTY_CHANGE;
+    xcb_generic_error_t* error = xcb_request_check(connection, xcb_create_window_checked(connection, XCB_COPY_FROM_PARENT,
+        source, screen->root, 0, 0, 8, 8, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT, screen->root_visual, XCB_CW_EVENT_MASK, &source_mask));
+    raster_native_check(!error, "native XDND source window created");
+    free(error);
+    xcb_atom_t type_list = raster_native_atom(connection, "XdndTypeList");
+    xcb_atom_t uri_list = raster_native_atom(connection, "text/uri-list");
+    xcb_atom_t atoms[1025];
+    u32 accepted_positions[] = {0, 255, 256, 1023};
+    u32 expected_replies[] = {1, 1, 2, 4};
+    for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(accepted_positions); test += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(atoms); index += 1)
+        {
+            atoms[index] = XCB_ATOM_STRING;
+        }
+        atoms[accepted_positions[test]] = uri_list;
+        error = xcb_request_check(connection, xcb_change_property_checked(connection, XCB_PROP_MODE_REPLACE, source,
+            type_list, XCB_ATOM_ATOM, 32, 1024, atoms));
+        raster_native_check(!error, "bounded native atom list installed");
+        free(error);
+        raster_native_xdnd_message(arena, windowing, target, source, "XdndEnter", (5u << 24) | 1u, 0);
+        raster_native_check(windowing->xdnd_active && windowing->xdnd_uri_list_supported && !windowing->xdnd_transfer_arena,
+                            "native type negotiation admits URI at reply/work boundary without staging allocation");
+        raster_native_check(windowing->xdnd_type_test_reply_count == expected_replies[test] &&
+                            windowing->xdnd_type_test_max_reply_atoms == 256 &&
+                            windowing->xdnd_type_test_scanned_atoms == accepted_positions[test] + 1,
+                            "actual native property reply and work observations respect independent limits");
+        raster_native_xdnd_message(arena, windowing, target, source, "XdndLeave", 0, 0);
+        xcb_get_window_attributes_reply_t* attributes = xcb_get_window_attributes_reply(connection, xcb_get_window_attributes(connection, source), 0);
+        raster_native_check(attributes && attributes->your_event_mask == source_mask && !windowing->xdnd_active &&
+                            !windowing->xdnd_transfer_arena, "cancelled native negotiation restores source ownership");
+        free(attributes);
+    }
+    atoms[0] = uri_list;
+    error = xcb_request_check(connection, xcb_change_property_checked(connection, XCB_PROP_MODE_REPLACE, source,
+        type_list, XCB_ATOM_ATOM, 32, 1025, atoms));
+    raster_native_check(!error, "oversized native atom list installed");
+    free(error);
+    raster_native_xdnd_message(arena, windowing, target, source, "XdndEnter", (5u << 24) | 1u, 0);
+    raster_native_check(windowing->xdnd_active && !windowing->xdnd_uri_list_supported && !windowing->xdnd_transfer_arena,
+                        "oversized list rejects even an early URI before scanning or staging");
+    raster_native_check(windowing->xdnd_type_test_reply_count == 1 && windowing->xdnd_type_test_max_reply_atoms == 256 &&
+                        windowing->xdnd_type_test_scanned_atoms == 0, "oversized native list receives one bounded reply and performs no atom scan");
+    raster_native_xdnd_message(arena, windowing, target, source, "XdndLeave", 0, 0);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(atoms); index += 1)
+    {
+        atoms[index] = XCB_ATOM_STRING;
+    }
+    for (u32 mode = 0; mode < 2; mode += 1)
+    {
+        error = xcb_request_check(connection, xcb_change_property_checked(connection, XCB_PROP_MODE_REPLACE, source,
+            type_list, XCB_ATOM_ATOM, mode == 0 ? 32 : 8, mode == 0 ? 1024 : 4, atoms));
+        raster_native_check(!error, "native absent-URI or wrong-format atom property installed");
+        free(error);
+        raster_native_xdnd_message(arena, windowing, target, source, "XdndEnter", (5u << 24) | 1u, 0);
+        raster_native_check(!windowing->xdnd_uri_list_supported && !windowing->xdnd_transfer_arena &&
+                            windowing->xdnd_type_test_scanned_atoms == (mode == 0 ? 1024u : 0u),
+                            "native absent URI exhausts bounded work and malformed format rejects before scan");
+        raster_native_xdnd_message(arena, windowing, target, source, "XdndLeave", 0, 0);
+    }
+
+    // Begin an ordinary inline negotiation, then exercise the same append owner
+    // used by direct and INCR property reads without allocating X-server peaks.
+    raster_native_xdnd_message(arena, windowing, target, source, "XdndEnter", 5u << 24, uri_list);
+    raster_native_check(windowing->xdnd_active && windowing->xdnd_uri_list_supported, "inline native URI negotiation remains admitted");
+    arena_test_fail_next_reserve();
+    raster_native_check(!wm_x11_xdnd_append_for_test(windowing, S8("file:///tmp/bounded\r\n")) && !windowing->xdnd_transfer_arena &&
+                        windowing->xdnd_transfer_data.length == 0, "XDND staging reservation refusal is recoverable");
+    arena_test_fail_next_commit();
+    raster_native_check(!wm_x11_xdnd_append_for_test(windowing, S8("file:///tmp/bounded\r\n")) && !windowing->xdnd_transfer_arena &&
+                        windowing->xdnd_transfer_data.length == 0, "XDND staging commitment refusal releases its reservation");
+    char8 chunk[32768];
+    memset(chunk, 'x', sizeof(chunk));
+    bool appended = true;
+    char8* original = 0;
+    for (u32 index = 0; appended && index < 512; index += 1)
+    {
+        appended = wm_x11_xdnd_append_for_test(windowing, (String8){chunk, sizeof(chunk)});
+        if (!index)
+        {
+            original = windowing->xdnd_transfer_data.pointer;
+        }
+    }
+    raster_native_check(appended && windowing->xdnd_transfer_data.length == 16777216 && windowing->xdnd_transfer_data.pointer == original &&
+                        windowing->xdnd_transfer_arena && windowing->xdnd_transfer_arena->reserved_size == 16842752 &&
+                        windowing->xdnd_transfer_arena->position == arena_minimum_position + 16777216,
+                        "repeated append reaches payload boundary with one independently bounded retained mapping");
+    raster_native_check(appended && original[0] == 'x' && original[16777215] == 'x', "XDND staged boundary bytes are preserved");
+    raster_native_check(!wm_x11_xdnd_append_for_test(windowing, S8("x")) && windowing->xdnd_transfer_data.length == 16777216,
+                        "XDND next byte is refused without changing retained data");
+    raster_native_xdnd_message(arena, windowing, target, source, "XdndLeave", 0, 0);
+    raster_native_check(!windowing->xdnd_transfer_arena && !windowing->xdnd_transfer_capacity &&
+                        !windowing->xdnd_transfer_data.pointer && !windowing->xdnd_active, "native cancellation releases staging owner and payload");
+    raster_native_xdnd_message(arena, windowing, target, source, "XdndEnter", 5u << 24, uri_list);
+    raster_native_check(!wm_x11_xdnd_append_for_test(windowing, (String8){chunk, UINT64_MAX}) && !windowing->xdnd_transfer_arena,
+                        "XDND oversized arithmetic rejects before allocating or reading supplied bytes");
+    raster_native_check(wm_x11_xdnd_append_for_test(windowing, S8("file:///tmp/bounded\r\n")), "new transaction recovers after budget refusal");
+    raster_native_xdnd_message(arena, windowing, target, source, "XdndEnter", 5u << 24, uri_list);
+    raster_native_check(windowing->xdnd_active && !windowing->xdnd_transfer_arena && !windowing->xdnd_transfer_data.pointer,
+                        "superseding native enter releases previous staging owner");
+    raster_native_xdnd_message(arena, windowing, target, source, "XdndLeave", 0, 0);
+
+    xcb_atom_t selection = raster_native_atom(connection, "XdndSelection");
+    error = xcb_request_check(connection, xcb_set_selection_owner_checked(connection, source, selection, XCB_CURRENT_TIME));
+    raster_native_check(!error, "native test source owns XDND selection");
+    free(error);
+    for (u32 mode = 0; mode < 3; mode += 1)
+    {
+        raster_native_xdnd_message(arena, windowing, target, source, "XdndEnter", 5u << 24, uri_list);
+        raster_native_xdnd_message(arena, windowing, target, source, "XdndPosition", 0, (12u << 16) | 12u);
+        raster_native_check(windowing->xdnd_accept, "native position admits bounded URI drop");
+        raster_native_xdnd_message(arena, windowing, target, source, "XdndDrop", 0, XCB_CURRENT_TIME);
+        raster_native_check(windowing->xdnd_drop_pending && windowing->xdnd_window == window,
+                            "native drop requests owned selection without a premature completion");
+        xcb_atom_t property = windowing->xdnd_property;
+        u32 hint = UINT32_MAX;
+        String8 payload = S8("file:///tmp/bounded%20drop\r\n");
+        xcb_atom_t initial_type = mode == 1 ? raster_native_atom(connection, "INCR") : mode == 2 ? XCB_ATOM_STRING : uri_list;
+        error = xcb_request_check(connection, xcb_change_property_checked(connection, XCB_PROP_MODE_REPLACE, target, property,
+            initial_type, mode == 1 ? 32 : 8, mode == 1 ? 1 : (u32)payload.length, mode == 1 ? (void const*)&hint : (void const*)payload.pointer));
+        raster_native_check(!error, "native source supplies direct or incremental selection property");
+        free(error);
+        xcb_selection_notify_event_t notify = {0};
+        notify.response_type = XCB_SELECTION_NOTIFY;
+        notify.requestor = target;
+        notify.selection = selection;
+        notify.target = uri_list;
+        notify.property = property;
+        error = xcb_request_check(connection, xcb_send_event_checked(connection, 0, target, XCB_EVENT_MASK_NO_EVENT, (char const*)&notify));
+        raster_native_check(!error, "native selection notification queued");
+        free(error);
+        WmEventList completed = wm_poll_events(arena, windowing);
+        if (mode == 1)
+        {
+            raster_native_check(windowing->xdnd_incremental && windowing->xdnd_transfer_expected == UINT32_MAX &&
+                                !windowing->xdnd_transfer_arena, "INCR hint cannot preallocate unbounded staging");
+            arena_reset_to_start(arena);
+            char8* retained = 0;
+            u32 offset = 0;
+            for (u32 chunk_index = 0; chunk_index < 2; chunk_index += 1)
+            {
+                u32 length = chunk_index == 0 ? 8 : (u32)payload.length - offset;
+                error = xcb_request_check(connection, xcb_change_property_checked(connection, XCB_PROP_MODE_REPLACE, target, property,
+                    uri_list, 8, length, payload.pointer + offset));
+                raster_native_check(!error, "native INCR chunk property installed");
+                free(error);
+                BUSTER_UNUSED(wm_poll_events(arena, windowing));
+                offset += length;
+                if (!chunk_index)
+                {
+                    retained = windowing->xdnd_transfer_data.pointer;
+                }
+                raster_native_check(windowing->xdnd_drop_pending && windowing->xdnd_transfer_data.length == offset &&
+                                    windowing->xdnd_transfer_data.pointer == retained, "native INCR chunks retain one stable bounded buffer");
+                arena_reset_to_start(arena);
+            }
+            error = xcb_request_check(connection, xcb_change_property_checked(connection, XCB_PROP_MODE_REPLACE, target, property, uri_list, 8, 0, 0));
+            raster_native_check(!error, "native INCR terminator installed");
+            free(error);
+            completed = wm_poll_events(arena, windowing);
+        }
+        WmEvent* drop_event = 0;
+        for (WmEvent* event = completed.first; event; event = event->next)
+        {
+            if (event->kind == WM_EVENT_FILE_DROP)
+            {
+                drop_event = event;
+            }
+        }
+        if (mode == 2)
+        {
+            raster_native_check(!drop_event, "wrong native selection type rejects without publishing paths");
+        }
+        else
+        {
+            raster_native_check(drop_event && drop_event->window == window && drop_event->paths.length == 1 &&
+                                drop_event->paths.pointer[0].length == 17 && memcmp(drop_event->paths.pointer[0].pointer, "/tmp/bounded drop", 17) == 0,
+                                "native direct and INCR drops publish independently expected decoded path");
+        }
+        raster_native_check(!windowing->xdnd_active && !windowing->xdnd_transfer_arena && !windowing->xdnd_transfer_data.pointer,
+                            "native selection completion releases transfer storage before caller consumes paths");
+        arena_reset_to_start(arena);
+    }
+    error = xcb_request_check(connection, xcb_destroy_window_checked(connection, source));
+    raster_native_check(!error, "native XDND source window destroyed");
+    free(error);
 }
 
 BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
@@ -280,6 +582,11 @@ BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
 
                 raster_native_bounded_poll(arena, windowing, window, surface);
                 raster_native_file_drop_opt_out(arena, windowing, window, surface, cycle != 0);
+                raster_native_xim_scope(arena, windowing, window);
+                if (cycle == 0)
+                {
+                    raster_native_xdnd_budgets(arena, windowing, window, surface);
+                }
                 xcb_connection_t* connection = (xcb_connection_t*)surface.display;
                 u32 values[] = {48, 40};
                 xcb_generic_error_t* error = xcb_request_check(connection,
@@ -318,8 +625,11 @@ BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
                 raster_native_check(rendering_raster_deinitialize(&presenter), "repeated presenter shutdown");
             }
         }
+        raster_native_check(wm_x11_xdnd_append_for_test(windowing, S8("shutdown-owned-staging")), "shutdown fixture owns bounded staging");
         wm_deinitialize(windowing);
         wm_deinitialize(windowing);
+        raster_native_check(!windowing->xdnd_transfer_arena && !windowing->connection && !windowing->xdnd_transfer_data.pointer,
+                            "repeated native shutdown releases active staging and connection");
         raster_native_check(true, "repeated wm shutdown returned");
     }
 }
