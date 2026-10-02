@@ -1398,6 +1398,20 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_weak_symbol(String8 table, String8 na
 }
 #endif
 
+BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_weak_prepare(UnitTestArguments* arguments, IrProgram* program, IrModule* module,
+                                                      String8 target, bool repeated)
+{
+    IrValidationResult validation = ir_prepare_canonical_module(program, module, false);
+    bool success = validation.error == IR_VALIDATION_NONE;
+    if (!success)
+    {
+        arguments->show(arguments, S8("LLVM weak records {S8}: repeated={u32} IR error={u32} boundary={u32} function={u32} block={u32} instruction={u32}\n"),
+                        target, (u32)repeated, (u32)validation.error, (u32)validation.boundary,
+                        validation.function.value, validation.block.value, validation.instruction.value);
+    }
+    return success;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1421,7 +1435,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
     };
     u64 constant = 11;
     IrValueId returned = {.value = 0};
-    IrInstruction instructions[] = {
+    IrInstruction body[] = {
         {.opcode = IR_OPCODE_CONSTANT_INTEGER, .canonical_type = {.value = 1}, .result = {.value = 0}, .next = {.value = 1},
          .immediates = &constant, .immediate_count = 1, .conversion_operation = IR_CONVERSION_COUNT,
          .unary_operation = IR_UNARY_COUNT, .binary_operation = IR_BINARY_COUNT},
@@ -1429,8 +1443,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
          .result = IR_VALUE_ID_INVALID, .conversion_operation = IR_CONVERSION_COUNT,
          .unary_operation = IR_UNARY_COUNT, .binary_operation = IR_BINARY_COUNT},
     };
-    IrValue value = {.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_VALUE};
-    IrBlock block = {.first_instruction = {.value = 0}, .last_instruction = {.value = 1}, .terminated = true, .sealed = true};
+    // CFG publication consumes each mutable builder chain. Every definition
+    // therefore owns its rows, value and block, even when the bodies match.
+    IrInstruction instructions[definition_count][BUSTER_ARRAY_LENGTH(body)];
+    IrValue values[definition_count] = {0};
+    IrBlock blocks[definition_count] = {0};
     IrSymbol symbols[binding_count * 2] = {0};
     IrGlobal globals[definition_count] = {0};
     IrFunction functions[binding_count] = {0};
@@ -1453,15 +1470,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
         symbol.type.value = 2;
         symbol.kind = IR_SYMBOL_FUNCTION;
         symbols[binding_count + index] = symbol;
-        functions[index] = (IrFunction){.name = symbol.name, .symbol = symbol.id, .canonical_type = {.value = 2},
+        functions[index] = (IrFunction){.name = symbol.name, .symbol = symbol.id, .canonical_type = {.value = 2}, .id = {.value = index},
                                        .state = expected[index].declaration ? IR_FUNCTION_DECLARATION : IR_FUNCTION_LOWERED};
         if (!expected[index].declaration)
         {
-            functions[index].blocks = &block;
+            memcpy(instructions[index], body, sizeof(body));
+            values[index] = (IrValue){.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_VALUE};
+            blocks[index] = (IrBlock){.first_instruction = {.value = 0}, .last_instruction = {.value = 1}, .terminated = true, .sealed = true};
+            functions[index].blocks = blocks + index;
             functions[index].block_count = 1;
-            functions[index].instructions = instructions;
-            functions[index].instruction_count = 2;
-            functions[index].values = &value;
+            functions[index].instructions = instructions[index];
+            functions[index].instruction_count = BUSTER_ARRAY_LENGTH(body);
+            functions[index].values = values + index;
             functions[index].value_count = 1;
         }
     }
@@ -1475,13 +1495,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
     program.data_layout.pointer.size = 8;
     LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
     // Deliberately contradictory weak/hidden local flags pin internal
-    // precedence at the serializer boundary without asserting frontend admission.
-    options.validate_ir = false;
+    // precedence at the serializer boundary. Strict canonical validation
+    // remains enabled; it does not assert frontend admission of these flags.
     String8 targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
         options.target_triple = targets[target];
+        bool prepared = llvm_bitcode_test_weak_prepare(arguments, &program, &module, targets[target], false);
+        BUSTER_TEST(arguments, prepared);
+        if (!prepared)
+        {
+            continue;
+        }
         LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arguments->arena, &program, &module, 1, options);
+        prepared = llvm_bitcode_test_weak_prepare(arguments, &program, &module, targets[target], true);
+        BUSTER_TEST(arguments, prepared);
+        if (!prepared)
+        {
+            continue;
+        }
         LlvmBitcodeArtifact repeated = llvm_bitcode_emit_with_options(arguments->arena, &program, &module, 1, options);
         if (!llvm_bitcode_artifact_is_valid(first) || !llvm_bitcode_artifact_is_valid(repeated))
         {
