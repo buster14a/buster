@@ -509,10 +509,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries_fi
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(UnitTestArguments* arguments)
 {
-    UnitTestResult result = compiler_driver_test_preprocess_boundaries_file(arguments, S8("tests/basic_c_preprocess_boundaries.txt"), false);
-    UnitTestResult expanded = compiler_driver_test_preprocess_boundaries_file(arguments, S8("tests/basic_c_preprocess_expansion_boundaries.txt"), true);
-    result.test_count += expanded.test_count;
-    result.succeeded_test_count += expanded.succeeded_test_count;
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    result = compiler_driver_test_preprocess_boundaries_file(arguments, S8("tests/basic_c_preprocess_boundaries.txt"), false);
+    // Generated controls keep the retirement suite's tracked support frozen.
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-preprocess-expansion-boundaries"), S8(".c"));
+    String8 source = S8("#define TAIL() \"tail\"\n"
+                        "#define EMPTY\n"
+                        "#define FORWARD(x) x\n"
+                        "#define COMPACT a+b\n"
+                        "#define SPACED a + b\n"
+                        "#define EMPTY_LEADING(x) x+\n"
+                        "#define EMPTY_MIDDLE(x) left x+B\n"
+                        "#define EMPTY_TRAILING(x) left x\n"
+                        "#define SPELL(...) #__VA_ARGS__\n"
+                        "#define STRINGIFY(...) SPELL(__VA_ARGS__)\n"
+                        "#define INNER_EMPTY() left EMPTY\n"
+                        "#define OUTER_EMPTY(x) x;\n"
+                        "#define VARIADIC(x,...) x , ## __VA_ARGS__+D\n"
+                        "#define VARIADIC_PAIR(x,y,...) x y , ## __VA_ARGS__+D\n"
+                        "adjacent_tail: TAIL();\n"
+                        "spaced_tail: TAIL() ;\n"
+                        "comment_tail: TAIL()/**/;\n"
+                        "nested_tail: FORWARD(TAIL());\n"
+                        "empty_adjacent: TAIL()EMPTY;\n"
+                        "empty_spaced: TAIL() EMPTY;\n"
+                        "empty_chain: TAIL() EMPTY EMPTY;\n"
+                        "compact_tokens: COMPACT;\n"
+                        "spaced_tokens: SPACED;\n"
+                        "empty_leading: before EMPTY_LEADING(EMPTY);\n"
+                        "empty_middle: EMPTY_MIDDLE(EMPTY);\n"
+                        "empty_trailing: EMPTY_TRAILING(EMPTY);\n"
+                        "nested_empty_tail: OUTER_EMPTY(INNER_EMPTY())\n"
+                        "stringified_empty: STRINGIFY(a EMPTY+b);\n"
+                        "stringified_parameter: STRINGIFY(EMPTY_MIDDLE(EMPTY));\n"
+                        "\n"
+                        "stringified_omitted_comma: STRINGIFY(VARIADIC(A));\n"
+                        "stringified_empty_comma: STRINGIFY(VARIADIC(A,));\n"
+                        "stringified_empty_pair: STRINGIFY(VARIADIC_PAIR(A,));\n");
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, (ByteSlice){.pointer = (u8*)source.pointer, .length = source.length})))
+    {
+        UnitTestResult expanded = compiler_driver_test_preprocess_boundaries_file(arguments, source_path, true);
+        result.test_count += expanded.test_count;
+        result.succeeded_test_count += expanded.succeeded_test_count;
+        BUSTER_TEST(arguments, os_file_delete(source_path));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
     return result;
 }
 

@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
     paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_*boundaries*', '.github/workflows/clang-suite.yml']
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 permissions:

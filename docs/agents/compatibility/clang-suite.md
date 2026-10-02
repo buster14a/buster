@@ -91,7 +91,9 @@ dirty/ignored inputs, occupied/aliased outputs and malformed CLI invocations.
 After building Release `ide`, it runs the two real preprocessing tests and
 controls for hidden fixture mutation and compiler launch failure.
 It also compares eighteen first-party macro boundary/stringification controls
-against both compilers. These regression controls are separate from the two
+against both compilers, using generated temporary sources preserved in the
+hosted evidence. Tracked retirement support remains frozen. These regression
+controls are separate from the two
 upstream test identities and never increase the reported upstream coverage.
 
 The existing Python regression-test convention supplies an independent reader
@@ -103,7 +105,8 @@ BUSTER_CLANG_SUITE_IDE=/absolute/ide BUSTER_CLANG_SUITE_CLANG=/absolute/clang \
 python3 tools/clang_suite_test.py -v
 ```
 
-The workflow retains exact source/tool identity and complete result artifacts.
+The workflow runs on affected pull requests, exact merge groups and affected
+main pushes. It retains exact source/tool identity and complete result artifacts.
 Its results are correctness evidence only; no performance acceptance or
 hardware run is implied. Whole-suite completion remains on #2280 and its
 remaining children; it cannot be inferred from a green inventory/smoke lane.

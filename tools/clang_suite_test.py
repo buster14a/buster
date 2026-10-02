@@ -275,7 +275,41 @@ class ClangSuiteTests(unittest.TestCase):
 
     def test_macro_output_boundaries_against_clang(self):
         self.require_smoke()
-        source = Path(__file__).resolve().parents[1] / "tests/basic_c_preprocess_expansion_boundaries.txt"
+        source = self.evidence / "macro-boundaries.c"
+        source.write_bytes(b"""#define TAIL() "tail"
+#define EMPTY
+#define FORWARD(x) x
+#define COMPACT a+b
+#define SPACED a + b
+#define EMPTY_LEADING(x) x+
+#define EMPTY_MIDDLE(x) left x+B
+#define EMPTY_TRAILING(x) left x
+#define SPELL(...) #__VA_ARGS__
+#define STRINGIFY(...) SPELL(__VA_ARGS__)
+#define INNER_EMPTY() left EMPTY
+#define OUTER_EMPTY(x) x;
+#define VARIADIC(x,...) x , ## __VA_ARGS__+D
+#define VARIADIC_PAIR(x,y,...) x y , ## __VA_ARGS__+D
+adjacent_tail: TAIL();
+spaced_tail: TAIL() ;
+comment_tail: TAIL()/**/;
+nested_tail: FORWARD(TAIL());
+empty_adjacent: TAIL()EMPTY;
+empty_spaced: TAIL() EMPTY;
+empty_chain: TAIL() EMPTY EMPTY;
+compact_tokens: COMPACT;
+spaced_tokens: SPACED;
+empty_leading: before EMPTY_LEADING(EMPTY);
+empty_middle: EMPTY_MIDDLE(EMPTY);
+empty_trailing: EMPTY_TRAILING(EMPTY);
+nested_empty_tail: OUTER_EMPTY(INNER_EMPTY())
+stringified_empty: STRINGIFY(a EMPTY+b);
+stringified_parameter: STRINGIFY(EMPTY_MIDDLE(EMPTY));
+
+stringified_omitted_comma: STRINGIFY(VARIADIC(A));
+stringified_empty_comma: STRINGIFY(VARIADIC(A,));
+stringified_empty_pair: STRINGIFY(VARIADIC_PAIR(A,));
+""")
         expected = (
             b'adjacent_tail: "tail";',
             b'spaced_tail: "tail" ;',
