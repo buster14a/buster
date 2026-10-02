@@ -73,12 +73,20 @@ empty-section removal), replacing byte comparison with a read-back comparison.
 ## ELF64 import semantics
 
 `object_read_elf64` accepts allocated PROGBITS/NOBITS payloads, supported
-unwind records and init/fini/preinit arrays. Preinit entries run before all
-normal initializers. It refuses allocated sections whose type or name carries
-runtime semantics the object model cannot preserve: unsupported section types,
-legacy `.ctors`/`.dtors` and their priority families, `.init`/`.fini` fragments,
-and exception tables the reader previously discarded. An unsupported allocated
-note is refused too; its contract must be understood before it can be dropped.
+unwind records and init/fini arrays. Existing preinit records are admitted into
+the initializer model; `.preinit_array` names receive priority zero. The current
+runtime control checks a preinit entry before a constructor in the same image.
+It does not establish a distinct loader-facing preinit phase. The
+[ELF initialization contract](https://gabi.xinuos.com/v42/elf/08-dynamic.html#initialization-and-termination-functions)
+requires executable preinit entries to run before dependency constructors and
+prohibits them in shared objects. That phase, section-type-independent ordering
+and the shared-object prohibition remain open under
+[#1243](https://github.com/buster14a/buster/issues/1243).
+
+The bounded refusal repair for #1243 rejects unsupported allocated section
+types, legacy `.ctors`/`.dtors` and their priority families, `.init`/`.fini`
+fragments, and exception tables the reader previously discarded. An unsupported
+allocated note is refused too; its contract must be understood before it can be dropped.
 One canonical GNU property note is understood: the optional x86 IBT/SHSTK or
 AArch64 BTI/PAC/GCS `FEATURE_1_AND` record. Its output feature intersection is
 zero because Buster's generated code does not assert those features, so this
@@ -100,9 +108,11 @@ path, or archive/member path, in the import error and publishes no output image.
 `object_test_elf_semantic_refusals` uses independent raw ELF records on both
 architectures. `compiler_driver_elf_semantic_tests` imports host-compiled inputs
 on Linux x86-64/AArch64, checks attributable refusal and no artifact, and requires
-the host linker/runtime to preserve each input's meaning. A preinit control
-continues to link and run through both linkers, as does a canonical optional
-GNU property control. Raw note controls cover every known feature combination,
+the host linker/runtime to preserve each input's meaning. A same-image
+preinit/constructor control continues to link and run through both linkers, as
+does a canonical optional GNU property control. It does not cover dependency
+constructor ordering, preinit section types with other names, or preinit in a
+shared output. Raw note controls cover every known feature combination,
 unknown/required properties, malformed shape, and payload bounds.
 
 ## The work ledger: `ObjectWriteStatistics`
