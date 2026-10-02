@@ -16209,7 +16209,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                     String8 output = buster_test_temporary_path(temporary.arena, S8("function-parameters-reference-run"), S8(".exe"));
                     if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                     {
-                        String8 command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"),
+                        String8 command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"), S8("-Wno-strict-prototypes"),
                                              S8("-nostdinc"), S8("-o"), output, source};
                         ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
                             (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
@@ -16289,7 +16289,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                         process_admission &= exact_source;
                         if (process_admission && BUSTER_REQUIRE(arguments, compiler.length != 0))
                         {
-                            String8 command[] = {compiler, refusal_dialects[dialect], S8("-pedantic-errors"),
+                            String8 command[] = {compiler, refusal_dialects[dialect], S8("-pedantic-errors"), S8("-Wno-strict-prototypes"),
                                                  S8("-nostdinc"), S8("-fsyntax-only"), negative_source};
                             ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
                                 (SliceString8){0}, (SliceString8){0},

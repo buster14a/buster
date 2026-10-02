@@ -283,7 +283,11 @@ parameters. Desktop native execution uses GNU17/GNU23 × four allocators ×
 two frontend forms (16 profiles). Linux additionally requires GCC and Clang
 at both dialects and O0/O2 (eight build/run controls), and separately compiles
 each original float/char/short/Bool conflict in C17/GNU17 (16 required
-refusals). Original source bytes are read back before launch. Every child
+refusals). Both reference commands disable only `-Wstrict-prototypes`: the
+legal pre-C23 empty declarations are deprecated, and Clang otherwise upgrades
+that warning under `-pedantic-errors`. Actual conflicting-type errors remain
+required, including a captured `conflicting` diagnostic for every refusal.
+Original source bytes are read back before launch. Every child
 owns its process group and has a thirty-second deadline; bounded captured
 diagnostics fail on truncation/overflow. Cleanup/retained-reservation/lost-
 ownership failures stop later child admission. Temporary executables and
