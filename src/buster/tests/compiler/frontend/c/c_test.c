@@ -6514,12 +6514,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTe
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_diagnostic_messages(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    struct
+    typedef struct CTestStaticAssertDiagnosticCase
     {
         String8 source;
         String8 message;
         CDiagnosticKind kind;
-    } const cases[] = {
+    } CTestStaticAssertDiagnosticCase;
+    CTestStaticAssertDiagnosticCase const cases[] = {
         {S8("_Static_assert(0, \"plain message\");\n"),
          S8("static assertion failed: \"plain message\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
         {S8("enum { E = 0 };\n_Static_assert(E, \"enum message\");\n"),

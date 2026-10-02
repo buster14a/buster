@@ -7375,64 +7375,64 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     {
         c_parse_defer_static_assert(preprocess, result, declaration, scope);
     }
-    if (syntax_error.length || deferred)
+    if (!syntax_error.length && !deferred)
     {
-        return;
-    }
-    CToken first = preprocess.tokens[declaration.token_start];
-    bool expression_is_integer = true;
-    u32 expression_start = 0;
-    u32 expression_end = 0;
-    bool has_expression = c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end);
-    if (machine && has_expression)
-    {
-        CTypeId expression_type = C_TYPE_ID_INVALID;
-        if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, expression_start, expression_end, &expression_type) &&
-            expression_type.value < result->type_count)
+        CToken first = preprocess.tokens[declaration.token_start];
+        bool expression_is_integer = true;
+        u32 expression_start = 0;
+        u32 expression_end = 0;
+        bool has_expression = c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end);
+        if (machine && has_expression)
         {
-            expression_is_integer = c_parse_expression_integer_kind(result->types[expression_type.value].kind);
+            CTypeId expression_type = C_TYPE_ID_INVALID;
+            if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, expression_start, expression_end, &expression_type) &&
+                expression_type.value < result->type_count)
+            {
+                expression_is_integer = c_parse_expression_integer_kind(result->types[expression_type.value].kind);
+            }
+        }
+        u64 value = 0;
+        bool requires_typed_evaluation = false;
+        // An integer constant expression has one value: the one C's types,
+        // promotions and conversions give it (C17 6.6), which the typed
+        // evaluator computes through the shared integer semantics. The legacy
+        // retokenizer's preprocessing arithmetic (intmax_t, casts erased) is a
+        // different rule (6.10.1p4): it still decides which assertions wait for
+        // the deferred typed check, and answers only shapes the typed evaluator
+        // does not model. A typed fault (division by zero, a shift count outside
+        // the promoted width) is final, as it is in lowering.
+        bool legacy = expression_is_integer && c_parse_static_assert_evaluate(machine, arena, preprocess, result, declaration, scope, &value,
+                                                                              &requires_typed_evaluation);
+        CParseConstant typed = {.type = C_TYPE_ID_INVALID};
+        if (!requires_typed_evaluation && machine && expression_is_integer && expression_end > expression_start)
+        {
+            // The caller's arena, as the legacy route uses: nested type parses may
+            // grow machine state in the scratch arena mid-declaration, so it is not
+            // rewound here.
+            typed = c_parse_typed_constant(machine, arena, preprocess, result, scope, expression_start, expression_end);
+        }
+        bool typed_answer = typed.valid && !typed.is_float;
+        bool evaluated = typed_answer || (!typed.faulted && legacy);
+        if (typed_answer)
+        {
+            value = c_parse_constant_truth(typed);
+        }
+        if (requires_typed_evaluation)
+        {
+            c_parse_defer_static_assert(preprocess, result, declaration, scope);
+        }
+        else if (!evaluated)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
+        }
+        else if (!value)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
+                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
         }
     }
-    u64 value = 0;
-    bool requires_typed_evaluation = false;
-    // An integer constant expression has one value: the one C's types,
-    // promotions and conversions give it (C17 6.6), which the typed
-    // evaluator computes through the shared integer semantics. The legacy
-    // retokenizer's preprocessing arithmetic (intmax_t, casts erased) is a
-    // different rule (6.10.1p4): it still decides which assertions wait for
-    // the deferred typed check, and answers only shapes the typed evaluator
-    // does not model. A typed fault (division by zero, a shift count outside
-    // the promoted width) is final, as it is in lowering.
-    bool legacy = expression_is_integer && c_parse_static_assert_evaluate(machine, arena, preprocess, result, declaration, scope, &value,
-                                                                          &requires_typed_evaluation);
-    CParseConstant typed = {.type = C_TYPE_ID_INVALID};
-    if (!requires_typed_evaluation && machine && expression_is_integer && expression_end > expression_start)
-    {
-        // The caller's arena, as the legacy route uses: nested type parses may
-        // grow machine state in the scratch arena mid-declaration, so it is not
-        // rewound here.
-        typed = c_parse_typed_constant(machine, arena, preprocess, result, scope, expression_start, expression_end);
-    }
-    bool typed_answer = typed.valid && !typed.is_float;
-    bool evaluated = typed_answer || (!typed.faulted && legacy);
-    if (typed_answer)
-    {
-        value = c_parse_constant_truth(typed);
-    }
-    if (requires_typed_evaluation)
-    {
-        c_parse_defer_static_assert(preprocess, result, declaration, scope);
-    }
-    else if (!evaluated)
-    {
-        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
-                           c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
-    }
-    else if (!value)
-    {
-        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
-                           c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
-    }
+    return;
 }
 
 BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
