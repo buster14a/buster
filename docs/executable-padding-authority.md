@@ -1,7 +1,12 @@
 # Executable padding authority (#267)
 
 `assembly_fill_executable_padding` is the shared target-aware policy for both
-`assembly_unit_directive_align` and `codegen_generate_canonical_module_attempt`.
+`assembly_unit_directive_align` and `codegen_generate_canonical_module_attempt`,
+and the x86-64 PE/Mach-O writers' final object-text alignment before their
+import-thunk/stub tables. Those image-layout gaps are bounded to 0..15 bytes
+and filled without moving addresses, section sizes or relocations. Object-owned
+text bytes and PE raw-file alignment zeros retain their existing bytes;
+AArch64 linker gaps retain their zero fill.
 Explicit `.p2align` / `.balign` fill bytes remain user data. Non-executable
 sections retain zero fill. No target policy is inferred from byte literals.
 
@@ -23,6 +28,11 @@ unaligned caller buffers, guards, zero lengths, unsupported targets, null
 storage, and overflowing section offsets. Existing assembly-unit regressions
 continue covering directives and explicit fill, including AArch64 fall-through
 code that preserves x16 when native execution is available.
+
+The registered linker suite separately checks range placement in in-memory
+PE and Mach-O images: every x86-64 gap length with zero/one import, immutable
+source bytes (including zero data), relocated address markers, import-stub
+boundaries, PE raw-file zeros, and word-aligned AArch64 zero-gap controls.
 
 Source bytes and returned recipes are not proof of execution on every target;
 validation records distinguish native runs from disassembly-only checks.

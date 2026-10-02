@@ -269,24 +269,48 @@ toolchain cross-links from any host — x86-64 and AArch64, each as ELF, PE and
 Mach-O, 24 legs. Where `test_self_host` is deep on one mode and one target,
 this matrix is wide: each leg links a small self-checking fixture corpus
 (`basic_c_call_abi`, `basic_c_x86_64_i128_stack_abi`, `basic_c_float_abi`,
-`basic_c_vector_register_pressure`) at the default CPU model and then takes
+`basic_c_vector_register_pressure`, `basic_c_machine_alias`,
+`basic_c_fast_ra_cfg`) at the default CPU model and then takes
 the strongest verification avenue the host offers — native execution when
 host and target agree, `qemu-aarch64` for AArch64 ELF, `wine` for x86-64 PE,
 and an `llvm-objdump` disassembly oracle for images nothing on the host can
-run. A leg whose avenue tool is missing still compiles, links and
-oracle-checks, and reports the downgraded avenue in its `MODE_MATRIX` row
-rather than vanishing. A leg that must fail belongs in
+run. If objdump is also missing, the leg still compiles and links. Each
+`MODE_MATRIX` row names its avenue and verification level: `behavioral` for
+native/emulated execution, `structural` for disassembly, and `link-only` for
+the tool-free fallback. Structural acceptance requires objdump exit zero,
+at least one decoded instruction and no unexplained `<unknown>` instruction
+rows. Raw instruction bytes delimit a narrow AArch64 address-literal recipe:
+`LDR Xn, PC+8`, `B PC+12`, eight complete data bytes, and a decoded instruction
+at the branch target. Only those two literal rows are data, even when their
+bytes happen to decode. The classifier consumes the payload before examining
+another recipe; malformed, overlapping or incomplete evidence receives no
+waiver. Headers, symbol labels and operand annotations are not instruction mnemonics.
+It proves decoding, not program behavior, relocation correctness or refusal
+of every architecturally UNPREDICTABLE encoding. No assembler round trip runs.
+
+The command always exercises parser controls, including empty/header-only
+output, data directives and `<unknown>` text outside instruction mnemonics,
+plus exact/raw-byte literal forms, corrupt load/branch fields, incomplete or
+discontinuous rows, section boundaries, overflow, nested payload recipes and
+unknown instructions after a valid literal. When both
+`llvm-objdump` and `llvm-objcopy` are available, it also checks real AArch64 PE
+and Mach-O images from the first `none` fixture, even on native macOS. The
+pristine image must pass; a test-owned copy whose entire text section is
+replaced with same-length `0xFF` bytes must fail the same structural helper
+despite objdump exit zero. The original fixture remains intact. Each attempted
+control is fatal on failure; the result reports two passed controls, or
+`controls=unavailable` when either tool is absent. Unavailable controls are
+unrun, not passing tests. Ordinary GitHub CI provisions both tools and runs
+`test_mode_matrix` in its Unix and Windows desktop lanes.
+
+A leg that must fail belongs in
 `mode_matrix_expected_failures` in `build.c` with its issue number; the leg
 is then required to fail, so a regression and a silently landed fix are both
 caught. Fixture runs are deliberately uncaptured — wine's background services
 inherit captured pipe ends and stretch a 10 ms run to seconds — and every
-child is bounded by `MODE_MATRIX_TIMEOUT_SECONDS`. The whole matrix costs
-about four seconds on a warm tree; CI runs it on the dedicated Linux runner
-and on macOS (where the Mach-O rows execute natively), and skips the Windows
-runner because that box is the CI wall-time gate and its PE rows already run
-under wine on Linux. GitHub CI runs it on all four of its Unix runners, which
-is what makes the ELF and Mach-O rows execute natively at both x86-64 and
-AArch64; those images carry no wine, so their PE rows stay on the oracle.
+child is bounded by `MODE_MATRIX_TIMEOUT_SECONDS`. Execution depends on the
+actual host/tool availability; an oracle pass supplies structural evidence
+even when another CI host executes that same target behaviorally.
 The combination matrix shares one multi-config build tree across configurations
 when their configure-time policy matches. Clang omits unsanitized Debug because
 sanitized Debug provides the stronger coverage; it builds and runs unsanitized

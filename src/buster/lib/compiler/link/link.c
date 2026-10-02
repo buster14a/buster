@@ -104,6 +104,7 @@
 #include <buster/lib/compiler/link/link_internal.h>
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/pdb/pdb.h>
 
@@ -112,6 +113,9 @@
 #include <buster/lib/integer.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
+
+// PE import thunks and Mach-O import stubs follow this image-layout boundary.
+#define BUSTER_LINK_IMAGE_STUB_ALIGNMENT 16
 
 BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_debug_kinds[] = {
     OBJECT_SECTION_DEBUG_INFO,
@@ -9334,7 +9338,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     u64 thunk_offset = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        thunk_offset = align_forward(object_section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
+        thunk_offset = align_forward(object_section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length,
+                                     BUSTER_LINK_IMAGE_STUB_ALIGNMENT);
     }
     u32 thunk_entry_size = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -9730,6 +9735,28 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 {
                     memcpy(bytes + section_raw_offsets[output_section] + object_section_offsets[section], data.pointer, data.length);
                 }
+            }
+        }
+    }
+    // This gap belongs to image layout, after the complete object text and
+    // before the aligned import-thunk table. Object bytes and raw-file padding
+    // retain their own policy; no size, address or relocation moves.
+    if (result.error == LINK_ERROR_NONE && !aarch64)
+    {
+        u64 text_start = object_section_offsets[OBJECT_SECTION_TEXT];
+        u64 text_size = object->sections[OBJECT_SECTION_TEXT].data.length;
+        u64 text_raw = section_raw_offsets[PE_SECTION_TEXT];
+        if (text_start > thunk_offset || text_size > thunk_offset - text_start || text_raw > file_size || thunk_offset > file_size - text_raw)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+        }
+        if (result.error == LINK_ERROR_NONE)
+        {
+            u64 text_end = text_start + text_size;
+            if (thunk_offset - text_end >= BUSTER_LINK_IMAGE_STUB_ALIGNMENT ||
+                !assembly_fill_executable_padding(object->target, bytes + text_raw + text_end, text_end, thunk_offset - text_end))
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
             }
         }
     }
@@ -12609,7 +12636,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     u64 stub_offset = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        stub_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
+        stub_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length,
+                                    BUSTER_LINK_IMAGE_STUB_ALIGNMENT);
     }
     u64 stub_end = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -13007,7 +13035,27 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 memcpy(bytes + section_offsets[section], data.pointer, data.length);
             }
         }
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(dwarf_kinds); index += 1)
+        // Fill only the linker-owned final text alignment, before the stubs.
+        // The source text and non-executable segment/file gaps stay untouched.
+        if (object->target.cpu_arch == CPU_ARCH_X86_64)
+        {
+            u64 text_start = section_offsets[OBJECT_SECTION_TEXT];
+            u64 object_text_size = object->sections[OBJECT_SECTION_TEXT].data.length;
+            if (text_start > stub_offset || object_text_size > stub_offset - text_start || stub_offset > file_size)
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+            }
+            if (result.error == LINK_ERROR_NONE)
+            {
+                u64 object_text_end = text_start + object_text_size;
+                if (stub_offset - object_text_end >= BUSTER_LINK_IMAGE_STUB_ALIGNMENT ||
+                    !assembly_fill_executable_padding(object->target, bytes + object_text_end, object_text_end - text_start, stub_offset - object_text_end))
+                {
+                    result.error = LINK_ERROR_INVALID_INPUT;
+                }
+            }
+        }
+        for (u32 index = 0; result.error == LINK_ERROR_NONE && index < BUSTER_ARRAY_LENGTH(dwarf_kinds); index += 1)
         {
             ByteSlice data = object->sections[dwarf_kinds[index]].data;
             if (data.length)
