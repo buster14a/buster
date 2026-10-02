@@ -1225,16 +1225,18 @@ BUSTER_GLOBAL_LOCAL bool test_module_group_union_valid(TestDescriptor* original,
 BUSTER_GLOBAL_LOCAL void test_native_host_profile(UnitTestArguments* arguments)
 {
     BUSTER_CT_CHECK(TARGET_CPU_FEATURE_WORD_COUNT == 4);
-    TargetCpuFeatures features = target_native.cpu_features;
-    String8 feature_source = target_native.cpu_features_explicit ? S8("target-native") : S8("unavailable");
 #if BUSTER_CPU_ARCH_X86_64
     String8 architecture = S8("x86_64");
-    features = cpu_detect_features_x86_64();
-    feature_source = S8("cpuid-xcr0");
-#elif BUSTER_CPU_ARCH_AARCH64
+    TargetCpuFeatures features = cpu_detect_features_x86_64();
+    String8 feature_source = S8("cpuid-xcr0");
+#else
+    TargetCpuFeatures features = target_native.cpu_features;
+    String8 feature_source = target_native.cpu_features_explicit ? S8("target-native") : S8("unavailable");
+#if BUSTER_CPU_ARCH_AARCH64
     String8 architecture = S8("aarch64");
 #else
     String8 architecture = cpu_arch_to_string_os(target_native.cpu_arch);
+#endif
 #endif
     // Storage bit n represents TargetCpuFeature ordinal n+1 (NONE has no bit).
     // Word n contains storage bits 64*n through 64*n+63. x86 probing includes
