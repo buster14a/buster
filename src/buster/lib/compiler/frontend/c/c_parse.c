@@ -25749,8 +25749,9 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
 // written; a later shadowing declaration cannot change its type.
 BUSTER_C_INTERNAL void c_parse_validate_member_types(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
 {
-    u32 member_count = result->member_count;
-    for (u32 index = 0; index < member_count; index += 1)
+    // Bound queries may materialize nested aggregate type names. Completed
+    // definitions reuse their source identity, so visit every appended member.
+    for (u32 index = 0; index < result->member_count; index += 1)
     {
         CMember member = result->members[index];
         CTypeId type = member.type;

@@ -4884,6 +4884,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArgument
         {S8("int f(int n) {\nif (sizeof(struct {\n    int a[n];\n})) return 1;\nreturn 0;\n}\n"), 3, 9},
         {S8("int f(int n) {\n(void)sizeof(struct {\n    int a[n];\n});\nreturn 0;\n}\n"), 3, 9},
         {S8("int f(int n) {\nstruct S {\n    int a[n], b;\n} x, y;\nreturn 0;\n}\n"), 3, 9},
+        {S8("int n;\nstruct S {\n    char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct {\n        int (*p)[n];\n    })]; })]; })];\n};\nint f(void) { return 0; }\n"), 4, 15},
     };
     String8 accepted[] = {
         S8("enum { N = 3 }; struct S { int a[N]; char b[sizeof(int) * 2]; }; int f(void) { return sizeof(struct S); }"),
@@ -4894,6 +4895,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArgument
         S8("struct S { void (*f)(int n, int a[n]); }; int g(void) { return sizeof(struct S); }"),
         S8("int n; int f(void) { enum { n = 3 }; struct S { int a[n]; }; return sizeof(struct S); }"),
         S8("enum { N = 3 }; typedef int A[N]; int f(int N) { struct S { A a; }; return sizeof(struct S); }"),
+        S8("enum { n = 3 }; struct S { char a[sizeof(struct { char b[sizeof(struct { char c[sizeof(struct { int (*p)[n]; })]; })]; })]; }; int f(void) { return sizeof(struct S); }"),
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
     for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)

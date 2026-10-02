@@ -49,8 +49,9 @@ Structure and union member validation walks array, pointer and function-return d
 including those inherited through typedefs, and rejects variably modified
 types at the member's original source site. Each bound is queried in its
 declaring scope using the existing typed constant predicate. The check runs
-after expression/type-name validation has finished appending members, so an
-aggregate written inside `sizeof` is covered without declaring an object.
+after expression/type-name validation and also visits members appended by its
+own bound queries. Completed aggregate definitions retain their source identity,
+so deeply nested `sizeof` type names are covered without declaring an object.
 Flexible arrays, constant expression bounds and function-pointer prototype
 parameters keep their existing rules. `c_test_variable_member_types` checks
 rejected file/block/type-name/nested/typedef forms, exact member locations and
