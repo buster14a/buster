@@ -30172,6 +30172,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("zero + 1"), 1}, {S8("nonzero != 0"), 1},
         {S8("exact_object"), 29}, {S8("*(const int *)&exact_object"), 29},
         {S8("((const int *)&exact_object)[0]"), 29}, {S8("*(ConstInt *)&exact_object"), 29},
+        {S8("aligned_object"), 31}, {S8("*(const int *)&aligned_object"), 31},
         {S8("null_object == 0"), 1}, {S8("address_object == &object"), 1},
         {S8("array && 1"), 1}, {S8("array || 0"), 1},
         {S8("(1 ? -1 : wide_input > 0) > 0"), 0},
@@ -30202,6 +30203,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("((const int *)&wide_object)[0]"), 0}, {S8("((const int *)&wide_object)[1]"), 0},
         {S8("*(const short *)&wide_object"), 0}, {S8("*(const unsigned long long *)&wide_object"), 0},
         {S8("*(const int *)&record_object.bits"), 0}, {S8("((const int *)&exact_object)[1]"), 0},
+        {S8("*(const int *)&float_object"), 0},
+        {S8("*(const long *)&wide_object"), 0},
     };
     enum { CONSTANT_COUNT = BUSTER_ARRAY_LENGTH(constants), PREDICATE_COUNT = BUSTER_ARRAY_LENGTH(predicates) };
     TemporalArena sources = scratch_begin(&arguments->arena, 1);
@@ -30209,6 +30212,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
     definitions[0] = S8("static const int zero = 0, nonzero = -7;\n"
         "static const int exact_object = 29; typedef const int ConstInt;\n"
         "static const long long wide_object = 0x1122334455667788LL;\n"
+        "typedef int AlignedInt __attribute__((aligned(16))); static const AlignedInt aligned_object = 31;\n"
+        "static const float float_object = 1.25f;\n"
         "struct ReadOnlyRecord { long long bits; int tail; };\n"
         "static const struct ReadOnlyRecord record_object = {0x1122334455667788LL, 19};\n"
         "static const double fzero = -0.0, fraction = 0.25;\n"
@@ -30414,6 +30419,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         S8("static const long long k = 0x1122334455667788LL; static unsigned long long bad = *(const unsigned long long *)&k;"),
         S8("struct S { long long bits; int tail; }; static const struct S k = {0x1122334455667788LL, 19}; static int bad = *(const int *)&k.bits;"),
         S8("static const int k = 29; static int bad = ((const int *)&k)[1];"),
+        S8("static const float k = 1.25f; static int bad = *(const int *)&k;"),
+        S8("static const long long k = 29; static long bad = *(const long *)&k;"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {

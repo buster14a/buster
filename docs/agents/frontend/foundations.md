@@ -432,9 +432,11 @@ without facts for identical bitcode and diagnostics.
   Its static const initializer cases use the existing GNU folding extension;
   ISO integer-constant-expression admission keeps its separate checks.
   Read-only lvalue materialization requires the whole declared object at byte
-  offset zero with its exact canonical access type. Reinterpreted or displaced
-  accesses remain unknown rather than borrowing the whole initializer's value.
-  The same fixture preserves direct, same-type and typedef reads, rejects the
+  offset zero with a matching canonical scalar access representation. Scalar
+  alignment aliases preserve their value and the access type; changed width,
+  signedness, integer rank, kind or pointer pointee identity stays unknown. Displaced accesses
+  also stay unknown rather than borrowing the whole initializer's value.
+  The same fixture preserves direct, same-type, typedef and aligned reads, rejects the
   static cast/offset neighbors, and pins conservative unevaluated predicate
   answers with no loads or effects (#1566).
 - A folded conditional expression converts its selected value to the common
