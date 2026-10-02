@@ -14636,8 +14636,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
 #endif
         };
         ProcessSpawnOptions capture = {.use_process_environment = true, .new_process_group = true, .search_path = true,
-            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = 65536, [STANDARD_STREAM_ERROR] = 65536}, .total = 131072},
+            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL};
         bool process_admission = true;
+#if BUSTER_LINUX
+        process_admission = BUSTER_REQUIRE(arguments, compilers[2].length != 0);
+#endif
         for (u32 producer = 0; process_admission && producer < BUSTER_ARRAY_LENGTH(compilers); producer += 1)
         {
             if (producer && !BUSTER_REQUIRE(arguments, compilers[producer].length != 0))
@@ -14664,13 +14669,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
                         bool compiled = false;
                         if (!producer)
                         {
+#if BUSTER_LINUX
+                            // As in float16_codegen, link Buster's original object
+                            // with Clang's real binary16 runtime support.
+                            String8 object = buster_test_temporary_path(arena, S8("buster-function-literal-identity"), S8(".o"));
+#endif
                             String8 command[] = {S8("-g0"), S8("-std=c17"), forms[form], modes[mode], optimizations[optimization],
                                 S8("-fverify-codegen"), mode ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
-                                S8("-o"), output, input};
-                            CompilerDriverResult linked = compiler_driver_execute_invocation(arena,
+#if BUSTER_LINUX
+                                S8("-c"), S8("-o"), object, input
+#else
+                                S8("-o"), output, input
+#endif
+                            };
+                            CompilerDriverResult produced = compiler_driver_execute_invocation(arena,
                                 compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-                            compiled = linked.error == COMPILER_DRIVER_ERROR_NONE;
-                            BUSTER_TEST_RAW(arguments, compiled, string_format(arena, S8("{S8}: {S8}"), context, linked.diagnostic));
+                            compiled = produced.error == COMPILER_DRIVER_ERROR_NONE;
+#if BUSTER_LINUX
+                            compiled = compiled && produced.has_object;
+#endif
+                            BUSTER_TEST_RAW(arguments, compiled, string_format(arena, S8("{S8}: {S8}"), context, produced.diagnostic));
+#if BUSTER_LINUX
+                            if (compiled && process_admission)
+                            {
+                                String8 link[] = {compilers[2], S8("-no-pie"), object, S8("-o"), output};
+                                compiled = false;
+                                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
+                                    (SliceString8){0}, (SliceString8){0}, capture);
+                                if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
+                                {
+                                    ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
+                                    process_admission = process_admission && !waited.process_tree_cleanup_failed &&
+                                        !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
+                                    compiled = waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
+                                        !waited.capture_limit_exceeded &&
+                                        !waited.output_truncated && !waited.process_tree_cleanup_failed &&
+                                        !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
+                                    BUSTER_TEST_RAW(arguments, compiled, string_format(arena, S8("{S8}: binary16 runtime link: {S8}"), context,
+                                        BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR])));
+                                }
+                            }
+                            BUSTER_TEST(arguments, os_file_delete(object));
+#endif
                         }
                         else
                         {
@@ -14683,6 +14723,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
                                 process_admission = process_admission && !waited.process_tree_cleanup_failed &&
                                     !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
                                 compiled = waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
+                                    !waited.capture_limit_exceeded &&
                                     !waited.output_truncated && !waited.process_tree_cleanup_failed &&
                                     !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
                                 BUSTER_TEST_RAW(arguments, compiled, string_format(arena, S8("{S8}: {S8}"), context,
@@ -14700,6 +14741,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
                                 process_admission = process_admission && !waited.process_tree_cleanup_failed &&
                                     !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
                                 bool correct = waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
+                                    !waited.capture_limit_exceeded &&
                                     !waited.output_truncated && !waited.process_tree_cleanup_failed &&
                                     !waited.process_group_reservation_retained && !waited.process_group_ownership_lost &&
                                     !waited.streams[STANDARD_STREAM_OUTPUT].length && !waited.streams[STANDARD_STREAM_ERROR].length;
