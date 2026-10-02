@@ -10912,6 +10912,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_transform_builtins(UnitTestArg
 
 // Typed vendor declarations must not create a lowering capability or skip
 // validation in unused bodies and unevaluated expressions.
+BUSTER_GLOBAL_LOCAL IrGlobal* c_test_find_ir_global(IrModule* module, IrProgram* program, String8 name);
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_builtin_admission(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
