@@ -127,10 +127,10 @@ BUSTER_GLOBAL_LOCAL IrProgram* ir_oracle_fixture(Arena* arena, u32 fixture, u32 
         IrValueId a = ir_oracle_argument(arena, helper, integer, 0);
         IrValueId b = ir_oracle_argument(arena, helper, integer, 1);
         IrValueId x = ir_oracle_emit(arena, helper, 0, (IrInstruction){.opcode = IR_OPCODE_CAST, .canonical_type = narrow,
-            .conversion_operation = width == 64 ? IR_CONVERSION_IDENTITY : IR_CONVERSION_INTEGER_TRUNCATE,
+            .conversion_operation = width == 64 ? IR_CONVERSION_INTEGER_REINTERPRET : IR_CONVERSION_INTEGER_TRUNCATE,
             .operands = ir_oracle_operands(arena, a, a, a, 1), .operand_count = 1}, IR_VALUE_VALUE);
         IrValueId y = ir_oracle_emit(arena, helper, 0, (IrInstruction){.opcode = IR_OPCODE_CAST, .canonical_type = narrow,
-            .conversion_operation = width == 64 ? IR_CONVERSION_IDENTITY : IR_CONVERSION_INTEGER_TRUNCATE,
+            .conversion_operation = width == 64 ? IR_CONVERSION_INTEGER_REINTERPRET : IR_CONVERSION_INTEGER_TRUNCATE,
             .operands = ir_oracle_operands(arena, b, b, b, 1), .operand_count = 1}, IR_VALUE_VALUE);
         IrValueId local = ir_oracle_emit(arena, helper, 0, (IrInstruction){.opcode = IR_OPCODE_LOCAL, .canonical_type = narrow,
             .canonical_local = {.value = 0}}, IR_VALUE_PLACE);
@@ -150,7 +150,7 @@ BUSTER_GLOBAL_LOCAL IrProgram* ir_oracle_fixture(Arena* arena, u32 fixture, u32 
         IrValueId sum = ir_oracle_emit(arena, helper, 0, (IrInstruction){.opcode = IR_OPCODE_BINARY, .canonical_type = narrow,
             .binary_operation = IR_BINARY_INTEGER_ADD, .operands = ir_oracle_operands(arena, loaded, y, y, 2), .operand_count = 2}, IR_VALUE_VALUE);
         IrValueId wide = ir_oracle_emit(arena, helper, 0, (IrInstruction){.opcode = IR_OPCODE_CAST, .canonical_type = integer,
-            .conversion_operation = width == 64 ? IR_CONVERSION_IDENTITY : IR_CONVERSION_INTEGER_ZERO_EXTEND,
+            .conversion_operation = width == 64 ? IR_CONVERSION_INTEGER_REINTERPRET : IR_CONVERSION_INTEGER_ZERO_EXTEND,
             .operands = ir_oracle_operands(arena, sum, sum, sum, 1), .operand_count = 1}, IR_VALUE_VALUE);
         IrValueId global = ir_oracle_emit(arena, helper, 0, (IrInstruction){.opcode = IR_OPCODE_GLOBAL, .canonical_type = integer, .symbol = sink}, IR_VALUE_PLACE);
         (void)ir_oracle_emit(arena, helper, 0, (IrInstruction){.opcode = IR_OPCODE_STORE, .canonical_type = void_type,

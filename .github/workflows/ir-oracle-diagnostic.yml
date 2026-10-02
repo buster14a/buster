@@ -14,12 +14,11 @@ jobs:
           persist-credentials: false
       - name: Hosted bootstrap
         run: |
-          mkdir -p build
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o /tmp/ir-oracle-build
       - name: Configure through native driver
-        run: build/build generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+        run: /tmp/ir-oracle-build generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
       - name: Build through native driver
-        run: build/build build --config Release -t ide
+        run: /tmp/ir-oracle-build build --config Release -t ide
       - name: Independent IR/native boundary and fault controls
         env:
           BUSTER_TEST_JOBS: '1'
