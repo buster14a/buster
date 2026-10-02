@@ -3020,7 +3020,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
     // Function-typed values are inert direct-call markers on Wasm32. Every
     // other operand use would expose the raw function index as an address.
     bool runtime_function_operand = false;
-    if (!wasm64_is_memory64(context))
+    if (type && !wasm64_is_memory64(context))
     {
         for (u32 operand_index = 0; operand_index < instruction->operand_count && !runtime_function_operand; operand_index += 1)
         {
