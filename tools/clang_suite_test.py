@@ -229,10 +229,15 @@ class ClangSuiteTests(unittest.TestCase):
         self.assertFalse(forbidden.exists())
         alias = self.evidence / "source-alias"
         alias.symlink_to(self.checkout, target_is_directory=True)
-        for output in (forbidden, alias / forbidden.name):
-            with self.subTest(output=output):
-                self.rejected(self.invoke("--inventory", self.checkout, output), "fresh output outside the checkout")
-                self.assertFalse(forbidden.exists())
+        try:
+            for output in (forbidden, alias / forbidden.name):
+                with self.subTest(output=output):
+                    self.rejected(self.invoke("--inventory", self.checkout, output), "fresh output outside the checkout")
+                    self.assertFalse(forbidden.exists())
+        finally:
+            # Artifact upload follows directory links. Keep the alias control
+            # from redistributing the entire upstream checkout as evidence.
+            alias.unlink()
         self.assert_clean_source()
 
     def require_smoke(self):
@@ -243,7 +248,14 @@ class ClangSuiteTests(unittest.TestCase):
         self.require_smoke()
         output = self.evidence / "smoke-success"
         result = self.invoke("--smoke", self.checkout, output, self.ide, self.clang)
-        self.assertEqual(result.returncode, 0, result.stdout.decode(errors="replace"))
+        diagnostic = result.stdout.decode(errors="replace")
+        if result.returncode != 0:
+            for case in CASE_CHECKS:
+                for compiler in ("clang", "buster"):
+                    path = output / f"{case}.{compiler}.stdout"
+                    if path.exists():
+                        diagnostic += f"\n{case}/{compiler} stdout:\n{path.read_text(errors='replace')}\n"
+        self.assertEqual(result.returncode, 0, diagnostic)
         self.assertIn(b"selected=2 attempted=2 passed=2 status=pass", (output / "smoke-summary.txt").read_bytes())
         for case, patterns in CASE_CHECKS.items():
             for compiler in ("clang", "buster"):
