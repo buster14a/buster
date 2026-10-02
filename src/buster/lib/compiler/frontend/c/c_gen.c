@@ -48241,6 +48241,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_bytes(CIntegerIrBuilder
 BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out)
 {
     bool valid = start < end;
+    u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(builder->preprocess.target).pointer.bit_width).low;
     u32 comma = end;
     u32 nested = 0;
     for (u32 index = start; index < end; index += 1)
@@ -48280,7 +48281,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
         CIrPromotedMemberPath path = {0};
         valid = token.kind == C_TOKEN_IDENTIFIER &&
                 c_ir_promoted_member_path(builder, type_id, c_token_spelling(builder->preprocess.spelling_base, token), &path) &&
-                path.field && !path.field->is_bit_field && offset <= UINT64_MAX - path.offset;
+                path.field && !path.field->is_bit_field && path.offset <= maximum && offset <= maximum - path.offset;
         if (valid)
         {
             offset += path.offset;
@@ -48297,15 +48298,21 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
             CIrConstantValue subscript = {0};
             valid = close < end && element_id.value != IR_ID_UNDERLYING_INVALID &&
                     c_ir_query_constant(builder, index + 1, close, &subscript) && subscript.kind == C_IR_CONSTANT_INTEGER;
+            IrType* subscript_type = ir_type_from_id(&builder->program->types, subscript.type);
+            IrInteger bits = subscript_type
+                ? ir_integer_mask((IrInteger){.low = subscript.integer, .high = subscript.integer_high}, subscript_type->bit_width)
+                : (IrInteger){0};
             IrType* element = ir_type_from_id(&builder->program->types, element_id);
-            valid = valid && element && element->layout.resolved;
+            valid = valid && subscript_type && (subscript_type->kind == IR_TYPE_INTEGER || subscript_type->kind == IR_TYPE_BOOLEAN) &&
+                    subscript_type->bit_width && subscript_type->bit_width <= 128 && !bits.high &&
+                    !(subscript_type->is_signed && ir_integer_sign_bit(bits, subscript_type->bit_width)) && element && element->layout.resolved;
             if (valid)
             {
-                valid = !element->layout.size || subscript.integer <= UINT64_MAX / element->layout.size;
+                valid = !element->layout.size || bits.low <= maximum / element->layout.size;
                 if (valid)
                 {
-                    u64 element_offset = subscript.integer * element->layout.size;
-                    valid = offset <= UINT64_MAX - element_offset;
+                    u64 element_offset = bits.low * element->layout.size;
+                    valid = offset <= maximum - element_offset;
                     if (valid)
                     {
                         offset += element_offset;
