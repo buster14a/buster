@@ -4,6 +4,7 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/object/object.h>
+#include <buster/lib/string.h>
 #include <buster/tests/compiler/ir/ir_oracle_internal.h>
 
 // ir_oracle_fixture builds canonical rows without the C frontend. The C
@@ -387,6 +388,59 @@ BUSTER_GLOBAL_LOCAL bool ir_oracle_clean(ProcessWaitResult wait)
         !wait.process_group_reservation_retained && !wait.process_group_ownership_lost && !wait.streams[STANDARD_STREAM_ERROR].length;
 }
 
+BUSTER_GLOBAL_LOCAL bool ir_oracle_record_token(String8 block, u64* cursor, String8 token)
+{
+    bool valid = *cursor <= block.length && token.length <= block.length - *cursor &&
+                 !memcmp(block.pointer + *cursor, token.pointer, token.length);
+    if (valid) *cursor += token.length;
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_oracle_record_number(String8 block, u64* cursor)
+{
+    u64 start = *cursor;
+    u64 value = 0;
+    bool valid = true;
+    while (*cursor < block.length && block.pointer[*cursor] >= '0' && block.pointer[*cursor] <= '9')
+    {
+        u64 digit = (u64)(block.pointer[*cursor] - '0');
+        if (value > (UINT64_MAX - digit) / 10) valid = false;
+        else value = value * 10 + digit;
+        *cursor += 1;
+    }
+    return valid && *cursor > start;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_oracle_record(Arena* arena, String8 output, u32 fixture, String8* block_out)
+{
+    String8 begin = S8("IR_ORACLE_BEGIN_V1\n"), end_marker = S8("IR_ORACLE_END_V1\n");
+    u64 start = string_first_sequence(output, begin);
+    u64 end = string_first_sequence(output, end_marker);
+    bool valid = start != BUSTER_STRING_NO_MATCH && end != BUSTER_STRING_NO_MATCH && end > start;
+    *block_out = S8("");
+    if (valid)
+    {
+        *block_out = (String8){.pointer = output.pointer + start, .length = end + end_marker.length - start};
+        String8 tail = {.pointer = output.pointer + end + end_marker.length, .length = output.length - end - end_marker.length};
+        String8 after_begin = {.pointer = output.pointer + start + begin.length, .length = output.length - start - begin.length};
+        valid = string_first_sequence(after_begin, begin) == BUSTER_STRING_NO_MATCH &&
+                string_first_sequence(tail, end_marker) == BUSTER_STRING_NO_MATCH;
+        u64 cursor = 0;
+        valid = valid && ir_oracle_record_token(*block_out, &cursor, begin);
+        for (u32 input = 0; valid && input < IR_ORACLE_INPUTS; input += 1)
+        {
+            String8 prefix = string_format(arena, S8("IR_ORACLE_V1 fixture={u32} input={u32} return="), fixture, input);
+            valid = ir_oracle_record_token(*block_out, &cursor, prefix) &&
+                    ir_oracle_record_number(*block_out, &cursor) &&
+                    ir_oracle_record_token(*block_out, &cursor, S8(" memory=")) &&
+                    ir_oracle_record_number(*block_out, &cursor) &&
+                    ir_oracle_record_token(*block_out, &cursor, S8("\n"));
+        }
+        valid = valid && ir_oracle_record_token(*block_out, &cursor, end_marker) && cursor == block_out->length;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -477,16 +531,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
                     {
                         ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
                         bool clean = ir_oracle_clean(wait);
-                        String8 output = {.pointer = wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length};
-                        u64 start = string_first_sequence(output, S8("IR_ORACLE_BEGIN_V1\n"));
-                        u64 end = string_first_sequence(output, S8("IR_ORACLE_END_V1\n"));
-                        bool record = start != BUSTER_STRING_NO_MATCH && end != BUSTER_STRING_NO_MATCH && end > start;
-                        String8 block = record ? (String8){.pointer = output.pointer + start, .length = end + S8("IR_ORACLE_END_V1\n").length - start} : S8("");
+                        String8 output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length};
+                        String8 block;
+                        bool record = ir_oracle_record(arguments->arena, output, fixture, &block);
                         bool agreement = clean && record && string_equal(block, expected);
                         BUSTER_TEST(arguments, clean && record);
                         BUSTER_TEST(arguments, mutation ? clean && record && !agreement : agreement);
                         arguments->show(arguments, S8("IR_ORACLE_REPORT_V1 fixture={u32} mutation={u32} allocator={u32} status={S8} timed_out={u32}\n{S8}"),
-                            fixture, mutation, mode, !clean || !record ? S8("inconclusive") : mutation ? S8("detected-discrepancy") :
+                            fixture, mutation, mode, !clean || !record ? S8("inconclusive") : mutation ? agreement ? S8("negative-control-missed") : S8("detected-discrepancy") :
                             agreement ? S8("agreement") : S8("discrepancy"), (u32)wait.timed_out, block);
                         if (!clean) arguments->show(arguments, S8("{S8}\n"), output);
                     }
@@ -498,7 +550,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
             arguments->show(arguments, S8("IR_ORACLE_REPORT_V1 fixture={u32} status=native-unavailable\n"), fixture);
 #endif
         }
-        arena_end_temporal(temporary);
+        scratch_end(temporary);
     }
     return result;
 }
