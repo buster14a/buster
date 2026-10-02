@@ -14047,14 +14047,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
         ProcessSpawnOptions capture = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
             .use_process_environment = true, .new_process_group = true, .search_path = true,
+            .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64), [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
+                               .total = BUSTER_KB(128)},
+            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL,
         };
-        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        bool admission = true;
+        for (u32 dialect = 0; admission && dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
         {
-            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            for (u32 form = 0; admission && form < BUSTER_ARRAY_LENGTH(forms); form += 1)
             {
-                for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                for (u32 mode = 0; admission && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
                 {
-                    for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                    for (u32 optimization = 0; admission && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
                     {
                         String8 context = string_format(arena, S8("address-integer native dialect={S8} form={S8} mode={S8} optimization={S8}"),
                                                         dialects[dialect], forms[form], modes[mode], optimizations[optimization]);
@@ -14082,12 +14086,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                             if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
+                                admission = !waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained &&
+                                            !waited.process_group_ownership_lost;
                                 String8 diagnostic = string_format(arena, S8("{S8}: result={u32} status={u32} timeout={u32} stderr={S8}"),
                                     context, (u32)waited.result, waited.platform_status, (u32)waited.timed_out,
                                     BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
                                 BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out &&
                                                 !waited.capture_failed && !waited.output_truncated &&
-                                                !waited.process_tree_cleanup_failed && waited.platform_status == 0, diagnostic);
+                                                admission && waited.platform_status == 0, diagnostic);
                                 BUSTER_TEST_RAW(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
                                 arguments->show(arguments, S8("ADDRESS-INTEGER native {S8} status={u32}\n"), context, waited.platform_status);
@@ -14106,7 +14112,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
         {
             bool available = compilers[compiler].length != 0;
             BUSTER_TEST_RAW(arguments, available, compiler ? S8("Clang address-integer reference is required") : S8("GCC address-integer reference is required"));
-            if (available)
+            if (available && admission)
             {
                 String8 version_command[] = { compilers[compiler], S8("--version") };
                 ProcessSpawnResult version_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(version_command),
@@ -14114,10 +14120,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                 if (BUSTER_REQUIRE(arguments, version_spawn.handle != 0))
                 {
                     ProcessWaitResult version = os_process_wait_deadline(arena, version_spawn, 30000000);
+                    admission = !version.process_tree_cleanup_failed && !version.process_group_reservation_retained &&
+                                !version.process_group_ownership_lost;
                     String8 text = BYTE_SLICE_TO_STRING(8, version.streams[STANDARD_STREAM_OUTPUT]);
                     bool is_clang = string_first_sequence(text, S8("clang")) != BUSTER_STRING_NO_MATCH;
                     available = version.result == PROCESS_RESULT_SUCCESS && !version.timed_out &&
-                                !version.capture_failed && !version.output_truncated && !version.process_tree_cleanup_failed &&
+                                !version.capture_failed && !version.output_truncated && admission &&
                                 version.platform_status == 0 && is_clang == (compiler != 0);
                     BUSTER_TEST_RAW(arguments, available, text);
                     arguments->show(arguments, S8("ADDRESS-INTEGER reference compiler={S8} version={S8}\n"), compilers[compiler], text);
@@ -14127,9 +14135,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                     available = false;
                 }
             }
-            for (u32 dialect = 0; available && dialect < BUSTER_ARRAY_LENGTH(reference_dialects); dialect += 1)
+            for (u32 dialect = 0; available && admission && dialect < BUSTER_ARRAY_LENGTH(reference_dialects); dialect += 1)
             {
-                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                for (u32 optimization = 0; admission && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
                 {
                     String8 context = string_format(arena, S8("address-integer reference compiler={S8} dialect={S8} optimization={S8}"),
                                                     compilers[compiler], reference_dialects[dialect], optimizations[optimization]);
@@ -14141,9 +14149,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                     if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
                     {
                         ProcessWaitResult compiled = os_process_wait_deadline(arena, spawn, 30000000);
+                        admission = !compiled.process_tree_cleanup_failed && !compiled.process_group_reservation_retained &&
+                                    !compiled.process_group_ownership_lost;
                         bool success = compiled.result == PROCESS_RESULT_SUCCESS && !compiled.timed_out &&
                                        !compiled.capture_failed && !compiled.output_truncated &&
-                                       !compiled.process_tree_cleanup_failed && compiled.platform_status == 0;
+                                       admission && compiled.platform_status == 0;
                         BUSTER_TEST_RAW(arguments, success, string_format(arena, S8("{S8}: {S8}"), context,
                                         BYTE_SLICE_TO_STRING(8, compiled.streams[STANDARD_STREAM_ERROR])));
                         if (success)
@@ -14154,12 +14164,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                             if (BUSTER_REQUIRE(arguments, run_spawn.handle != 0))
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, run_spawn, 30000000);
+                                admission = !waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained &&
+                                            !waited.process_group_ownership_lost;
                                 String8 diagnostic = string_format(arena, S8("{S8}: result={u32} status={u32} timeout={u32} stderr={S8}"),
                                     context, (u32)waited.result, waited.platform_status, (u32)waited.timed_out,
                                     BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
                                 BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out &&
                                                 !waited.capture_failed && !waited.output_truncated &&
-                                                !waited.process_tree_cleanup_failed && waited.platform_status == 0, diagnostic);
+                                                admission && waited.platform_status == 0, diagnostic);
                                 BUSTER_TEST_RAW(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
                                 arguments->show(arguments, S8("ADDRESS-INTEGER reference {S8} status={u32}\n"), context, waited.platform_status);
