@@ -29398,41 +29398,41 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(gnu_specifier_temporary);
         }
         // Both GNU spellings retain their control-flow effect under every
-        // allocator/frontend and each dialect from the original report.
+        // fallthrough_allocator/fallthrough_frontend and each fallthrough_dialect from the original report.
         String8 fallthrough_dialects[] = {S8("-std=c99"), S8("-std=gnu11"), S8("-std=c17")};
-        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(fallthrough_dialects); dialect += 1)
+        for (u32 fallthrough_dialect = 0; fallthrough_dialect < BUSTER_ARRAY_LENGTH(fallthrough_dialects); fallthrough_dialect += 1)
         {
-            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); frontend += 1)
+            for (u32 fallthrough_frontend = 0; fallthrough_frontend < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); fallthrough_frontend += 1)
             {
-                for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator += 1)
+                for (u32 fallthrough_allocator = 0; fallthrough_allocator < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); fallthrough_allocator += 1)
                 {
                     TemporalArena fallthrough_temporary = scratch_begin(&arguments->arena, 1);
                     String8 fallthrough_path = buster_test_temporary_path(fallthrough_temporary.arena,
-                        S8("buster-c-gnu-fallthrough"), string_format(fallthrough_temporary.arena, S8("-{u32}-{u32}-{u32}"), dialect, frontend, allocator));
-                    String8 syntax_command[] = {
-                        fallthrough_dialects[dialect], c_flat_initializer_frontends[frontend], c_lz4_regression_allocators[allocator],
+                        S8("buster-c-gnu-fallthrough"), string_format(fallthrough_temporary.arena, S8("-{u32}-{u32}-{u32}"), fallthrough_dialect, fallthrough_frontend, fallthrough_allocator));
+                    String8 fallthrough_syntax_command[] = {
+                        fallthrough_dialects[fallthrough_dialect], c_flat_initializer_frontends[fallthrough_frontend], c_lz4_regression_allocators[fallthrough_allocator],
                         S8("-fsyntax-only"), leading_gnu_attribute_path,
                     };
-                    CompilerDriverResult syntax = compiler_driver_execute_invocation(fallthrough_temporary.arena,
-                        compiler_driver_parse_arguments(fallthrough_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
-                    BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE, syntax.diagnostic);
-                    bool native = !string_equal(c_lz4_regression_allocators[allocator], S8("-fregister-allocator=none"));
-                    String8 command[] = {
-                        fallthrough_dialects[dialect], S8("-O0"), c_flat_initializer_frontends[frontend], c_lz4_regression_allocators[allocator],
-                        S8("-fverify-codegen"), native ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                    CompilerDriverResult fallthrough_syntax = compiler_driver_execute_invocation(fallthrough_temporary.arena,
+                        compiler_driver_parse_arguments(fallthrough_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_syntax_command)));
+                    BUSTER_TEST_RAW(arguments, fallthrough_syntax.error == COMPILER_DRIVER_ERROR_NONE, fallthrough_syntax.diagnostic);
+                    bool fallthrough_native = !string_equal(c_lz4_regression_allocators[fallthrough_allocator], S8("-fregister-fallthrough_allocator=none"));
+                    String8 fallthrough_command[] = {
+                        fallthrough_dialects[fallthrough_dialect], S8("-O0"), c_flat_initializer_frontends[fallthrough_frontend], c_lz4_regression_allocators[fallthrough_allocator],
+                        S8("-fverify-codegen"), fallthrough_native ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
                         S8("-o"), fallthrough_path, leading_gnu_attribute_path,
                     };
-                    CompilerDriverResult compiled = compiler_driver_execute_invocation(fallthrough_temporary.arena,
-                        compiler_driver_parse_arguments(fallthrough_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
-                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    CompilerDriverResult fallthrough_compiled = compiler_driver_execute_invocation(fallthrough_temporary.arena,
+                        compiler_driver_parse_arguments(fallthrough_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_command)));
+                    BUSTER_TEST_RAW(arguments, fallthrough_compiled.error == COMPILER_DRIVER_ERROR_NONE, fallthrough_compiled.diagnostic);
+                    if (fallthrough_compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
-                        String8 run_command[] = {fallthrough_path};
-                        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0}, (SliceString8){0},
+                        String8 fallthrough_run_command[] = {fallthrough_path};
+                        ProcessSpawnResult fallthrough_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_run_command), (SliceString8){0}, (SliceString8){0},
                             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
-                        BUSTER_TEST(arguments, spawn.handle != 0);
-                        if (spawn.handle)
-                            BUSTER_TEST(arguments, os_process_wait_sync(fallthrough_temporary.arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                        BUSTER_TEST(arguments, fallthrough_spawn.handle != 0);
+                        if (fallthrough_spawn.handle)
+                            BUSTER_TEST(arguments, os_process_wait_sync(fallthrough_temporary.arena, fallthrough_spawn).result == PROCESS_RESULT_SUCCESS);
                     }
                     scratch_end(fallthrough_temporary);
                 }
@@ -29440,29 +29440,29 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
 #if BUSTER_LINUX && !BUSTER_ANDROID
         String8 fallthrough_hosts[] = {executable_resolve_in_path(arguments->arena, S8("gcc")), executable_resolve_in_path(arguments->arena, S8("clang"))};
-        for (u32 host = 0; host < BUSTER_ARRAY_LENGTH(fallthrough_hosts); host += 1)
+        for (u32 fallthrough_host = 0; fallthrough_host < BUSTER_ARRAY_LENGTH(fallthrough_hosts); fallthrough_host += 1)
         {
-            if (BUSTER_REQUIRE(arguments, fallthrough_hosts[host].length != 0))
+            if (BUSTER_REQUIRE(arguments, fallthrough_hosts[fallthrough_host].length != 0))
             {
-                for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(fallthrough_dialects); dialect += 1)
+                for (u32 fallthrough_dialect = 0; fallthrough_dialect < BUSTER_ARRAY_LENGTH(fallthrough_dialects); fallthrough_dialect += 1)
                 {
-                    TemporalArena reference_temporary = scratch_begin(&arguments->arena, 1);
-                    String8 reference_path = buster_test_temporary_path(reference_temporary.arena, S8("buster-c-gnu-fallthrough-reference"), S8(""));
-                    String8 reference_command[] = {fallthrough_hosts[host], fallthrough_dialects[dialect], S8("-O0"), S8("-o"), reference_path, leading_gnu_attribute_path};
-                    ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(reference_command), (SliceString8){0}, (SliceString8){0},
+                    TemporalArena fallthrough_reference_temporary = scratch_begin(&arguments->arena, 1);
+                    String8 fallthrough_reference_path = buster_test_temporary_path(fallthrough_reference_temporary.arena, S8("buster-c-gnu-fallthrough-reference"), S8(""));
+                    String8 fallthrough_reference_command[] = {fallthrough_hosts[fallthrough_host], fallthrough_dialects[fallthrough_dialect], S8("-O0"), S8("-o"), fallthrough_reference_path, leading_gnu_attribute_path};
+                    ProcessSpawnResult fallthrough_build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_reference_command), (SliceString8){0}, (SliceString8){0},
                         (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
-                    bool built = build.handle && os_process_wait_sync(reference_temporary.arena, build).result == PROCESS_RESULT_SUCCESS;
-                    BUSTER_TEST(arguments, built);
-                    if (built)
+                    bool fallthrough_built = fallthrough_build.handle && os_process_wait_sync(fallthrough_reference_temporary.arena, fallthrough_build).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, fallthrough_built);
+                    if (fallthrough_built)
                     {
-                        String8 run_command[] = {reference_path};
-                        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0}, (SliceString8){0},
+                        String8 fallthrough_run_command[] = {fallthrough_reference_path};
+                        ProcessSpawnResult fallthrough_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_run_command), (SliceString8){0}, (SliceString8){0},
                             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
-                        BUSTER_TEST(arguments, spawn.handle != 0);
-                        if (spawn.handle)
-                            BUSTER_TEST(arguments, os_process_wait_sync(reference_temporary.arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                        BUSTER_TEST(arguments, fallthrough_spawn.handle != 0);
+                        if (fallthrough_spawn.handle)
+                            BUSTER_TEST(arguments, os_process_wait_sync(fallthrough_reference_temporary.arena, fallthrough_spawn).result == PROCESS_RESULT_SUCCESS);
                     }
-                    scratch_end(reference_temporary);
+                    scratch_end(fallthrough_reference_temporary);
                 }
             }
         }
