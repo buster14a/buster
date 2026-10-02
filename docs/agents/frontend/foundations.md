@@ -472,6 +472,24 @@ without facts for identical bitcode and diagnostics.
   cannot initialize static pointers. This boundary follows WG14 N1570
   6.4.5, 6.5.2.5 and 6.6; it does not admit non-null integer-pointer
   arithmetic or unrepresentable signed relocation addends.
+  Literal operands now export typed static array/aggregate lvalues to the
+  existing constant folder, preserving its cast and subscript scaling. String
+  object emission is shared by runtime and static paths; all uses of the
+  implicit static `__func__` object in one function share its symbol.
+  Incomplete compatible character-array compound literals with one string
+  initializer include its terminator when determining their element count.
+  The general compound-address operand route materializes through the existing
+  initializer machinery with one guarded entry. Nested compound objects on
+  that new route remain unsupported and produce a diagnostic; existing whole
+  compound-address shortcuts retain their prior behavior. No general nested
+  initializer evaluator or pointer-to-integer capability is added.
+  `compiler_driver_test_static_literal_guard` checks refusal followed by valid
+  array, scalar-child, string-child, UTF and trailing-comma globals in the same
+  lowering builder, plus a one-element pointer array carrying a real string
+  relocation. `compiler_driver_test_function_literal_identity` compares static
+  and runtime `__func__` pointers twice under both forms/four allocators/O0/O2
+  and independent Linux GCC/Clang runs. The original 22 payload/addend sources
+  and shared 4554-byte native/reference program remain unchanged.
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
