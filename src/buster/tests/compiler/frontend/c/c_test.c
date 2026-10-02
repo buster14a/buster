@@ -11874,65 +11874,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_offsetof_static_tables(UnitTe
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
         {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
     };
-    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    String8 sources[] = {
+        source,
+        string_format(arguments->arena, S8("unsigned long __builtin_offsetof(int,int);\n{S8}"), source),
+    };
+    for (u32 binding = 0; binding < BUSTER_ARRAY_LENGTH(sources); binding += 1)
     {
-        for (u32 form = 0; form < 2; form += 1)
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
         {
-            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-            Target target = targets[target_index];
-            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
-                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
-            CParseResult parsed = c_parse(temporary.arena, preprocess);
-            bool parsed_ok = preprocess.diagnostic_count == 0 && parsed.diagnostic_count == 0;
-            BUSTER_TEST_RAW(arguments, parsed_ok, string_format(temporary.arena,
-                S8("promoted offsetof parser target={u32} form={u32}: {S8}"), target_index, form,
-                parsed.diagnostic_count ? parsed.diagnostics[0].message : S8("none")));
-            if (parsed_ok)
+            for (u32 form = 0; form < 2; form += 1)
             {
-                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("promoted-offsetof.c"), preprocess, parsed, target,
-                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
-                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, string_format(temporary.arena,
-                    S8("promoted offsetof IR target={u32} form={u32}: {S8}"), target_index, form,
-                    lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
-                if (lowered.diagnostic_count == 0 && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Target target = targets[target_index];
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, sources[binding],
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParseResult parsed = c_parse(temporary.arena, preprocess);
+                bool parsed_ok = preprocess.diagnostic_count == 0 && parsed.diagnostic_count == 0;
+                BUSTER_TEST_RAW(arguments, parsed_ok, string_format(temporary.arena,
+                    S8("promoted offsetof parser binding={u32} target={u32} form={u32}: {S8}"), binding, target_index, form,
+                    parsed.diagnostic_count ? parsed.diagnostics[0].message : S8("none")));
+                if (parsed_ok)
                 {
-                    IrProgram* program = lowered.program;
-                    IrModule* module = program->modules;
-                    BUSTER_TEST(arguments, lowered.canonical_ir_certified);
-                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
-                    IrGlobal* metadata = 0;
-                    u32 matches = 0;
-                    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+                    u32 bound_entities = 0;
+                    for (u32 entity_index = 0; entity_index < parsed.entity_count; entity_index += 1)
                     {
-                        IrGlobal* global = module->globals + global_index;
-                        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
-                        if (symbol && string_equal(symbol->name, S8("metadata")))
-                        {
-                            metadata = global;
-                            matches += 1;
-                        }
+                        CEntity* entity = parsed.entities + entity_index;
+                        if (entity->kind == C_ENTITY_FUNCTION && string_equal(entity->name, S8("__builtin_offsetof")))
+                            bound_entities += 1;
                     }
-                    BUSTER_TEST(arguments, matches == 1);
-                    // These byte positions are the independently asserted
-                    // target layout, not offsets obtained from the lowerer.
-                    if (BUSTER_REQUIRE(arguments, metadata && metadata->bytes.pointer && metadata->bytes.length == 112))
+                    BUSTER_TEST(arguments, bound_entities == binding);
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("promoted-offsetof.c"), preprocess, parsed, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, string_format(temporary.arena,
+                        S8("promoted offsetof IR binding={u32} target={u32} form={u32}: {S8}"), binding, target_index, form,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+                    if (lowered.diagnostic_count == 0 && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
                     {
-                        for (u32 item = 0; item < BUSTER_ARRAY_LENGTH(expected); item += 1)
+                        IrProgram* program = lowered.program;
+                        IrModule* module = program->modules;
+                        BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                        IrGlobal* metadata = 0;
+                        u32 matches = 0;
+                        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
                         {
-                            u64 value = 0;
-                            for (u32 byte = 0; byte < 8; byte += 1)
+                            IrGlobal* global = module->globals + global_index;
+                            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+                            if (symbol && string_equal(symbol->name, S8("metadata")))
                             {
-                                u32 shift_byte = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte : 7 - byte;
-                                value |= (u64)metadata->bytes.pointer[(u64)item * 16 + 8 + byte] << (shift_byte * 8);
+                                metadata = global;
+                                matches += 1;
                             }
-                            BUSTER_TEST_RAW(arguments, value == expected[item], string_format(temporary.arena,
-                                S8("promoted offsetof target={u32} form={u32} item={u32}: expected={u64} actual={u64}"),
-                                target_index, form, item, expected[item], value));
+                        }
+                        BUSTER_TEST(arguments, matches == 1);
+                        // These byte positions are the independently asserted
+                        // target layout, not offsets obtained from the lowerer.
+                        if (BUSTER_REQUIRE(arguments, metadata && metadata->bytes.pointer && metadata->bytes.length == 112))
+                        {
+                            for (u32 item = 0; item < BUSTER_ARRAY_LENGTH(expected); item += 1)
+                            {
+                                u64 value = 0;
+                                for (u32 byte = 0; byte < 8; byte += 1)
+                                {
+                                    u32 shift_byte = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte : 7 - byte;
+                                    value |= (u64)metadata->bytes.pointer[(u64)item * 16 + 8 + byte] << (shift_byte * 8);
+                                }
+                                BUSTER_TEST_RAW(arguments, value == expected[item], string_format(temporary.arena,
+                                    S8("promoted offsetof binding={u32} target={u32} form={u32} item={u32}: expected={u64} actual={u64}"),
+                                    binding, target_index, form, item, expected[item], value));
+                            }
                         }
                     }
                 }
+                scratch_end(temporary);
             }
-            scratch_end(temporary);
         }
     }
     String8 rejected[] = {
@@ -11949,9 +11964,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_offsetof_static_tables(UnitTe
             CPreprocessResult preprocess = c_preprocess(temporary.arena, rejected[case_index],
                 (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
             CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
-            CAnalysisResult analyzed = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            CIRLowerResult analyzed = c_analyze_with_options(temporary.arena, S8("invalid-promoted-offsetof.c"), preprocess, syntax, target,
+                (CIRLowerOptions){0});
             BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0);
-            BUSTER_TEST_RAW(arguments, analyzed.diagnostic_count != 0, string_format(temporary.arena,
+            BUSTER_TEST_RAW(arguments, analyzed.diagnostic_count != 0 && !analyzed.canonical_ir_certified, string_format(temporary.arena,
                 S8("promoted offsetof rejects invalid member/bitfield or ordinary bound call: case={u32} target={u32}"),
                 case_index, target_index));
             scratch_end(temporary);
