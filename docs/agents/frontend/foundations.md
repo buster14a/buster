@@ -1252,3 +1252,27 @@ constants, not inferred from Buster. The fixed-range fixture additionally checks
 the aligned-base case against Clang. `c_test_enum_runtime` runs these two sources
 and the bit-field source in all four native allocator modes with strict codegen
 verification, rejecting machine fallback outside NONE.
+
+## Static address-to-integer initializer regressions (#1273)
+
+`compiler_driver_test_static_address_integers` is a regression-first driver
+fixture for the address-constant extension: pointer-width signed and unsigned
+integer casts followed by byte addends. Its 17 isolated sources cover scalar,
+member, function, aggregate, local-static and const storage; pointer scaling
+and negative subscripts retain the #1230 controls. Both frontend forms and
+C17/GNU17 emit serialized x86-64/AArch64 ELF objects. The independent oracle
+checks absolute 64-bit relocation width, owner-relative offsets, exact record
+counts and signed section coordinates S+A, allowing ELF section anchors.
+A plain pointer and fixed numeric byte image are positive controls.
+
+Nine narrower, truncating and nonlinear cases require a diagnostic and
+preservation of absent or sentinel output files. The narrow cases include the
+Windows LLP64 long model and require an explicit width diagnostic.
+
+`compiler_driver_test_static_address_integer_native` compares relocated
+storage through volatile reads with runtime addresses plus literal byte
+addends, then separately reads the const integer normally. The identical
+source runs with both frontend forms, all four allocators and O0/O2 in
+C17/GNU17 on desktop hosts. Linux requires configured GCC and Clang GNU17/
+GNU2x O0/O2 compile-and-run references. These tests establish the intended
+contract; a regression-only commit does not claim production support.
