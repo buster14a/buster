@@ -4862,12 +4862,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_member_search(UnitTestArgumen
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variable_member_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    struct
+    typedef struct CVariableMemberRejectedCase CVariableMemberRejectedCase;
+    struct CVariableMemberRejectedCase
     {
         String8 source;
         u32 member_line;
         u32 member_column;
-    } rejected[] = {
+    };
+    CVariableMemberRejectedCase rejected[] = {
         {S8("int n = 3;\nstruct S {\n    int a[n];\n};\n"), 3, 9},
         {S8("int f(int n) {\nstruct S {\n    int a[n];\n};\nreturn sizeof(struct S);\n}\n"), 3, 9},
         {S8("int f(int n) {\nreturn sizeof(struct {\n    int a[n];\n});\n}\n"), 3, 9},
