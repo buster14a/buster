@@ -152,7 +152,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   and in the object. An unresolved width holds the layout unresolved instead
   of reading as zero; lowering still evaluates such a width itself as a
   temporary bridge, and `c_parse_validate_bit_field_widths` re-evaluates only
-  unresolved widths to diagnose non-integer or negative values. Semantic
+  unresolved widths in the producer's declaration-point ENUM mode to
+  diagnose non-integer or negative values, restoring the previous mode
+  immediately after the query. Semantic
   validation also refuses a width exceeding the target's declared integer
   type, including an enum's resolved underlying type and qualified,
   typedef, or `typeof` spellings. `_Bool` has a one-bit value limit even

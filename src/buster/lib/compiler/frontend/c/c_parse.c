@@ -25765,8 +25765,11 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
             if (!member.bit_width_resolved && member.bit_width_token_count)
             {
                 CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, member.bit_width_token_start);
+                CConstantEvaluationMode previous_mode = machine->constant_evaluation_mode;
+                machine->constant_evaluation_mode = C_CONSTANT_EVALUATION_ENUM;
                 width = c_parse_typed_integer_constant(machine, machine->scratch_arena, preprocess, result, scope,
                                                        member.bit_width_token_start, member.bit_width_token_start + member.bit_width_token_count);
+                machine->constant_evaluation_mode = previous_mode;
             }
             String8 width_message = {0};
             if (!width.valid)
