@@ -39,6 +39,7 @@ jobs:
           sha256sum build/Release/ide /tmp/switch-probe-build > switch-evidence/binaries.sha256
           timeout 180 build/Release/ide test --module=codegen_tests --verbose=1 --ci=1 2>&1 | tee switch-evidence/probe.log
       - name: Independent Clang callers execute native and LLVM artifacts
+        if: always()
         shell: bash
         run: |
           set -euo pipefail

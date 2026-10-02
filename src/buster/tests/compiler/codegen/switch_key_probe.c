@@ -27,7 +27,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult switch_key_probe(UnitTestArguments* arguments
                     char source_buffer[256];
                     int source_length = snprintf(source_buffer, sizeof(source_buffer),
                         "int choose(%s x) { switch (x) { case 7: return 11; default: return 22; } }", names[width_index][signed_index]);
-                    String8 source = {.pointer = (u8*)source_buffer, .length = (u64)source_length};
+                    String8 source = {.pointer = source_buffer, .length = (u64)source_length};
                     Target target = target_native;
                     CPreprocessResult preprocessed = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
                     CParseResult parsed = c_parse(temporary.arena, preprocessed);
@@ -78,7 +78,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult switch_key_probe(UnitTestArguments* arguments
                                 char path_buffer[192];
                                 int path_length = snprintf(path_buffer, sizeof(path_buffer), "switch-evidence/w%u-s%u-v%u-c%u.%s",
                                                            width, signed_index, variant, consumer, consumer == 4 ? "bc" : "o");
-                                String8 path = {.pointer = (u8*)path_buffer, .length = (u64)path_length};
+                                String8 path = {.pointer = path_buffer, .length = (u64)path_length};
                                 if (consumer == 4)
                                 {
                                     LlvmBitcodeArtifact artifact = llvm_bitcode_emit_program(temporary.arena, program);
