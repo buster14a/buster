@@ -3,13 +3,13 @@ name: FAST empty slot diagnostic
 # Bounded #1912 research continuation on cloud hardware only.
 on:
   push:
-    branches: [codex/1912-skip-empty-slot-coloring]
+    branches:
+      - codex/1912-skip-empty-slot-coloring
     paths:
       - src/buster/lib/compiler/codegen/register_allocator_fast.c
       - src/buster/tests/compiler/codegen/machine_test.c
       - tools/fast_empty_slot_diagnostic.py
       - tools/inject_slot_census.py
-      - .github/workflows/fast-empty-slot-diagnostic.yml
 
 permissions:
   contents: read
