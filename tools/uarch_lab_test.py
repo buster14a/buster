@@ -103,6 +103,84 @@ FAULT_SCRIPT = """ 1919.424591: PERF_RECORD_MMAP2 11663/11663: [0x5581eae12000(0
 """
 
 
+TOPDOWN_JSON = "\n".join(json.dumps(record) for record in [
+    {"counter-value": "1100000000.000000", "unit": "", "event": "ls_not_halted_cyc", "variance": 0.12, "event-runtime": 1700000000, "pcnt-running": 83.33},
+    {"counter-value": "2000000000.000000", "unit": "", "event": "ex_ret_ops", "variance": 0.10, "event-runtime": 1700000000, "pcnt-running": 83.33},
+    {"metric-value": "24.500000", "metric-unit": "%  frontend_bound"},
+    {"metric-value": "7.100000", "metric-unit": "%  bad_speculation"},
+    {"metric-value": "38.200000", "metric-unit": "%  backend_bound"},
+    {"metric-value": "30.200000", "metric-unit": "%  retiring"}]) + "\n"
+
+# Finding 1 (Zen 5, perf 7.2.4): duration_time reads 0 beside any other event.
+DURATION_ZERO_CSV = """0,,duration_time,1,100.00,,
+1519.19,msec,task-clock:u,1519190989,100.00,,
+8019305103,,cycles:u,1519190989,100.00,,
+22287659913,,instructions:u,1519190989,100.00,,
+"""
+
+# Finding 5: an uncore group on a host without the amd_umc PMU.
+UMC_ERROR = """event syntax error: '{umc_mem_clk/metric-id=umc_mem_clk/,umc_cas_cmd.rd/metric-id=umc_cas_cmd.rd/}:W'
+                        \\___ Bad event or PMU
+
+Unable to find PMU or event on a PMU of 'umc_mem_clk'
+"""
+
+# Finding 6: perf's -x, metric column keeps one decimal.
+BRANCH_CSV = """4120569627,,ex_ret_brn:u,0.00%,1509882571,100.00,0.0,per_branch  branch_misprediction_rate
+73900351,,ex_ret_brn_misp:u,0.23%,1509882571,100.00,,
+562200,,ls_l1_d_tlb_miss.all:u,1.01%,758573160,50.00,0.0,per_1k_instr  l1_dtlb_misses_pti
+8847212,,bp_l1_tlb_miss_l2_tlb_hit:u,2.29%,756066504,49.00,0.4,per_1k_instr  l1_itlb_misses_pti
+"""
+
+# perf 6.8.12 `perf stat -j` lines (this container).
+STAT_JSON = """{"counter-value" : "1.324303", "unit" : "msec", "event" : "task-clock", "event-runtime" : 1324303, "pcnt-running" : 100.00, "metric-value" : "0.012795", "metric-unit" : "CPUs utilized"}
+{"counter-value" : "<not counted>", "unit" : "", "event" : "cycles:u", "event-runtime" : 0, "pcnt-running" : 100.00, "metric-value" : "0.000000", "metric-unit" : ""}
+{"counter-value" : "1810008.000000", "unit" : "", "event" : "msr/tsc/", "event-runtime" : 934212, "pcnt-running" : 100.00, "metric-value" : "0.000000", "metric-unit" : "(null)"}
+{"counter-value" : "73900351.000000", "unit" : "", "event" : "ex_ret_brn_misp:u", "variance" : 0.23, "event-runtime" : 1509882571, "pcnt-running" : 100.00, "metric-value" : "0.017934", "metric-unit" : "per_branch  branch_misprediction_rate"}
+"""
+
+# Finding 4: `perf report --sort pid,dso` of the system-wide IBS capture; the
+# shares are the review's, the tids illustrate perf's `tid:comm` column.
+TASKS_REPORT = """# Samples: 1M of event 'ibs_op//'
+#
+# Overhead      Pid:Command      Shared Object
+# ........  ...................  .................
+#
+    92.34%     4242:main_thread      ide
+     5.57%     4242:main_thread      [kernel.kallsyms]
+     1.48%     4242:main_thread      libc.so.6
+     0.36%      311:kworker/u64:18-  [kernel.kallsyms]
+     0.08%     4243:ide              [kernel.kallsyms]
+"""
+
+IBS_OP_WORKLOAD = """# Samples: 1M of event 'ibs_op//'
+#
+# Overhead  Symbol
+#
+     4.58%  [.] ir_validate_canonical_function
+     3.24%  [.] machine_fast_placement_build_prepassed
+     2.82%  [.] c_type_parse_machine_run
+"""
+
+IBS_OP_OLD_COMM = """# Samples: 1M of event 'ibs_op//'
+#
+# Overhead  Symbol
+#
+"""
+
+MEM_LEVELS = """# Samples: 13K of event 'ibs_op//'
+#
+# Overhead       Samples  Memory access
+# ........  ............  ........................
+#
+    45.97%            13  RAM hit
+    24.33%          3249  N/A
+    16.15%          2157  L1 hit
+     9.17%            63  L2 hit
+     2.73%             5  L3 hit
+"""
+
+
 class ParserTests(unittest.TestCase):
     def test_stat_csv_values_and_na(self):
         rows = lab.parse_stat_csv(STAT_CSV)
@@ -260,25 +338,38 @@ def child():
     return subprocess.call(args[args.index("--") + 1:]) if "--" in args else 0
 def option(name):
     return args[args.index(name) + 1] if name in args else None
+def sort():
+    for index, arg in enumerate(args):
+        if arg.startswith("--sort="):
+            return arg.split("=", 1)[1]
+        if arg == "--sort":
+            return args[index + 1]
+    return None
+SPLIT = {"frontend_bound": 22.25, "bad_speculation": 7.5, "backend_bound": 40.125, "retiring": 30.125}
 command = args[0]
 if command == "--version":
     print("perf version 6.99.fake")
 elif command == "list":
-    print("\nMetric Groups:\n\nPipelineL1\nPipelineL2\ntlb\ndata_fabric\n")
+    print("\nMetric Groups:\n\nPipelineL1\nPipelineL2\ntlb\ndata_fabric\nmemory_controller\n")
 elif command == "stat":
     status = child()
+    text = STAT
     if "-M" in args:
-        text = TOPDOWN if option("-M") != "tlb" else ""
-        if "-I" in args:
+        selector = option("-M")
+        if selector == "memory_controller":
+            sys.stderr.write(UMC_ERROR)
+            sys.exit(129)
+        if selector in SPLIT:
+            text = ('{"counter-value" : "1100000000.000000", "unit" : "", "event" : "ls_not_halted_cyc", "pcnt-running" : 100.00}\n'
+                    '{"metric-value" : "%f", "metric-unit" : "%%  %s"}\n' % (SPLIT[selector], selector))
+        elif "-I" in args:
             text = ""
-        if option("-M") == "tlb":
-            sys.stderr.write("Cannot find PMU `ls_l1_d_tlb_miss.all'\n")
-            sys.exit(1)
+        else:
+            text = TOPDOWN_JSON if "-j" in args else TOPDOWN
     elif "-I" in args:
         text = INTERVAL
-    else:
-        text = STAT
-    open(option("-o"), "w").write(text)
+    if option("-o"):
+        open(option("-o"), "w").write(text)
     sys.exit(status)
 elif command == "record":
     event = option("-e")
@@ -290,7 +381,11 @@ elif command == "record":
     sys.exit(status)
 elif command == "report":
     event = open(option("-i")).read()
-    if "--children" in args:
+    if sort() == "pid,dso":
+        print(TASKS)
+    elif "--tid" in args:
+        print(IBS_WORKLOAD)
+    elif "--children" in args:
         print(CHILDREN.replace("task-clock:uH", event))
     else:
         print(SELF.replace("cycles:u", event))
@@ -299,7 +394,10 @@ elif command == "mem":
         status = child()
         open(option("-o"), "w").write("ibs_op//")
         sys.exit(status)
-    print("# Samples: 1K of event 'ibs_op//'\n    40.00%  L1 hit  [.] c_lex_dispatch")
+    if sort() == "mem":
+        print(MEM_LEVELS)
+    else:
+        print("# Samples: 1K of event 'ibs_op//'\n    40.00%  2157  L1 hit  [.] c_lex_dispatch")
 elif command == "annotate":
     print(ANNOTATE)
 elif command == "script":
@@ -328,25 +426,25 @@ def write_script(path, body, constants):
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
 
 
-@unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
-class FlowTests(unittest.TestCase):
-    def fakes(self, mode):
+class Fakes:
+    def fakes(self, mode, stat=STAT_CSV):
         root = tempfile.mkdtemp(prefix="uarch-lab-test-")
         self.addCleanup(shutil.rmtree, root, True)
         ide, perf = os.path.join(root, "ide"), os.path.join(root, "perf")
         write_script(ide, FAKE_IDE, {"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": mode})
-        write_script(perf, FAKE_PERF, {"TOPDOWN": TOPDOWN_CSV, "INTERVAL": INTERVAL_CSV, "STAT": STAT_CSV, "SELF": REPORT_SELF,
-                                       "CHILDREN": REPORT_CHILDREN, "ANNOTATE": ANNOTATE, "FAULTS": FAULT_SCRIPT})
+        write_script(perf, FAKE_PERF, {"TOPDOWN": TOPDOWN_CSV, "TOPDOWN_JSON": TOPDOWN_JSON, "INTERVAL": INTERVAL_CSV, "STAT": stat,
+                                       "SELF": REPORT_SELF, "CHILDREN": REPORT_CHILDREN, "ANNOTATE": ANNOTATE, "FAULTS": FAULT_SCRIPT,
+                                       "UMC_ERROR": UMC_ERROR, "TASKS": TASKS_REPORT, "IBS_WORKLOAD": IBS_OP_WORKLOAD, "MEM_LEVELS": MEM_LEVELS})
         write_script(os.path.join(root, "sudo"), FAKE_SUDO, {})
         return root, ide, perf
 
-    def run_lab(self, mode):
-        root, ide, perf = self.fakes(mode)
+    def run_lab(self, mode, stat=STAT_CSV, runs=("--runs", "3")):
+        root, ide, perf = self.fakes(mode, stat)
         output = os.path.join(root, "out")
         stdout = sys.stdout
         try:
             sys.stdout = open(os.devnull, "w")
-            lab.main(["run", "--ide", ide, "--repo-root", root, "--cpu", "-1", "--output", output, "--runs", "3", "--perf", perf])
+            lab.main(["run", "--ide", ide, "--repo-root", root, "--cpu", "-1", "--output", output, "--perf", perf] + list(runs))
         finally:
             sys.stdout.close()
             sys.stdout = stdout
@@ -355,6 +453,10 @@ class FlowTests(unittest.TestCase):
         with open(os.path.join(output, "report.md")) as handle:
             return meta, handle.read(), output
 
+
+
+@unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
+class FlowTests(Fakes, unittest.TestCase):
     def test_full_flow_with_phase_metrics(self):
         meta, report, output = self.run_lab("new")
         for step in ("env", "timed", "topdown", "timeline", "sampling", "micro"):
@@ -363,13 +465,19 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(meta["capabilities"]["metrics_out_measured"])
         self.assertIn("3 runs (0 failed), 3 byte-identical", report)
         self.assertIn("Slowest phase (timed median): **analysis**", report)
-        self.assertIn("Dominant top-down level-1 category: **backend_bound**", report)
         self.assertIn("Hot by cycles: `ir_validate_canonical_function` 4.3%", report)
         self.assertIn("**dTLB misses**: NA (The dTLB-load-misses event is not supported.)", report)
         self.assertIn("IPC 1.948", report)
         self.assertIn("| analysis |", report)
         self.assertIn("`7fe9e8`".strip("`"), report)
-        self.assertIn("Cannot find PMU", report)
+        self.assertIn("**memory_controller**: unavailable -- uncore PMU absent", report)
+        self.assertIn("3 measured, 1 unavailable", report)
+        with open(os.path.join(output, "topdown", "groups.json")) as handle:
+            groups = {entry["group"]: entry for entry in json.load(handle)}
+        self.assertEqual(len(groups["PipelineL1"]["split"]), 4)
+        self.assertIn("Dominant top-down level-1 category: **backend_bound** 40.1%", report)
+        self.assertIn("alone, running 100.0%; group value 38.2", report)
+        self.assertIn("harness span", report)
         self.assertTrue(os.path.exists(os.path.join(output, "timeline", "timeline.html")))
         self.assertIn("BENCH_C_FRONTEND", report)
         rerendered = lab.render_report(output)
@@ -386,10 +494,15 @@ class FlowTests(unittest.TestCase):
                 note = lab.step_ibs(instance)
         finally:
             os.environ["PATH"] = saved_path
-        self.assertEqual(note, "ibs_op exit=0; ibs_fetch exit=0; perf mem exit=0")
-        text = "\n".join(lab.render_ibs(os.path.join(root, "out"), []))
-        self.assertIn("| 4.32% | `ir_validate_canonical_function` |", text)
-        self.assertIn("L1 hit", text)
+        self.assertTrue(note.startswith("ibs_op exit=0; ibs_fetch exit=0; perf mem exit=0; ibs_op: tid 4242"), note)
+        problems = []
+        text = "\n".join(lab.render_ibs(os.path.join(root, "out"), [], problems))
+        self.assertEqual(problems, [])
+        self.assertIn("| 4.58% | `ir_validate_canonical_function` |", text)
+        self.assertIn("threads 4242 (ide,main_thread)", text)
+        self.assertIn("| RAM hit | 45.97% | 13 |", text)
+        with open(os.path.join(root, "out", "ibs", "ibs_op.filter.json")) as handle:
+            self.assertEqual(json.load(handle)["options"], ["--tid", "4242", "--comms", "ide,main_thread"])
 
     def test_binary_without_metrics_out_degrades(self):
         meta, report, _ = self.run_lab("old")
@@ -397,6 +510,211 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(meta["steps"]["timed"]["status"], "ok")
         self.assertIn("Phase breakdown: NA -- the binary does not accept -fmetrics-out=", report)
         self.assertIn("Phase attribution: NA", report)
+
+
+def write_files(root, files):
+    for name, text in files.items():
+        path = os.path.join(root, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as handle:
+            handle.write(text)
+
+
+TIMED_COMMAND = ("taskset -c 2 perf stat -x, -o /home/u/lab-20261002T222008/timed/run-%04d.csv -e duration_time,task-clock,cycles:u -- "
+                 "/b/ide cc -g src/buster/apps/ide/ide.c -fmetrics-out=/home/u/lab-20261002T222008/timed/run-%04d.ccmetrics -o /x/out.exe exit=0 %s\n")
+
+
+class FindingTests(Fakes, unittest.TestCase):
+    """The six findings of the first Zen 5 run (PR #2422 review) plus the
+    multiplexing, run-count and dso items, on the excerpts it quoted."""
+
+    def directory(self, files):
+        root = tempfile.mkdtemp(prefix="uarch-lab-finding-")
+        self.addCleanup(shutil.rmtree, root, True)
+        write_files(root, files)
+        return root
+
+    def timed_dir(self, csv=DURATION_ZERO_CSV, spans=("1.602s",), metrics=True, source=None):
+        files = {"timed/runs.json": json.dumps([{"run": index + 1, "exit": 0, "identical": True} for index in range(len(spans) or 1)]),
+                 "commands.log": "".join(TIMED_COMMAND % (index + 1, index + 1, span) for index, span in enumerate(spans))}
+        for index in range(len(spans) or 1):
+            files["timed/run-%04d.csv" % (index + 1)] = csv
+            if metrics:
+                files["timed/run-%04d.ccmetrics" % (index + 1)] = CC_METRICS.replace("wall_ns=100000000", "wall_ns=1537100000")
+        if source is not None:
+            files["timed/source.metrics"] = source
+        return self.directory(files)
+
+    # 1. duration_time is not a wall time; spans come from commands.log.
+    def test_duration_time_zero_is_not_wall_time(self):
+        self.assertNotIn("duration_time", lab.TIMED_EVENTS)
+        self.assertEqual(lab.stat_values(lab.parse_stat_csv(DURATION_ZERO_CSV))["duration_time"], 0)
+        self.assertEqual(lab.command_spans(TIMED_COMMAND % (7, 7, "1.602s")), {7: 1.602})
+        directory = self.timed_dir(spans=("1.602s", "1.551s", "1.549s"))
+        problems = []
+        text = "\n".join(lab.render_timed(directory, [], problems))
+        self.assertEqual(problems, [])
+        self.assertIn("primary: **harness span** (spans from commands.log)", text)
+        self.assertIn("| harness span (taskset + perf + compile, monotonic, runs.json/commands.log) | 3 | 1.5490 | ", text)
+        self.assertIn("| 1.5510 |", text)
+        self.assertIn("| compiler wall_ns (-fmetrics-out, the compiler's own clock) | 3 | 1.5371 |", text)
+        self.assertIn("| task-clock (CPU time of the process, perf) | 3 | 1.5192 |", text)
+        self.assertIn("duration_time: 3 of 3 runs read 0 or NA", text)
+        self.assertIn("`0,,duration_time,1,100.00,,`", text)
+        self.assertIn("instructions:u median 22,287,659,913, spread (max-min)/median 0.0%", text)
+
+    def test_metric_dividing_by_zero_duration_is_na(self):
+        csv = ("0,,duration_time,1,100.00,,\n"
+               "1200000,,bp_l1_tlb_miss_l2_tlb_hit:u,1519190989,100.00,0.0,per_sec  lpm_itlb_l2_reqs\n"
+               "22287659913,,instructions:u,1519190989,100.00,,\n")
+        directory = self.directory({"topdown/groups.json": json.dumps([{"group": "tlb", "exit": 0}]), "topdown/tlb.csv": csv})
+        problems = []
+        text = "\n".join(lab.render_topdown(directory, [], problems))
+        self.assertIn("| lpm_itlb_l2_reqs | NA (unreliable: divides by duration_time, which perf read as 0) |", text)
+        self.assertNotIn("0.000", text)
+
+    # 2. Fail closed: no positive wall time degrades the step, quoting the CSV.
+    def test_missing_wall_time_degrades_with_raw_line(self):
+        directory = self.timed_dir(spans=(), metrics=False)
+        write_files(directory, {"commands.log": "", "lab.json": json.dumps({"config": {}, "steps": {"timed": {"status": "ok", "note": "1 runs"}}})})
+        problems = []
+        lab.render_timed(directory, [], problems)
+        self.assertTrue(any("no positive wall time" in problem and "`0,,duration_time,1,100.00,,`" in problem for problem in problems), problems)
+        report = lab.render_report(directory)
+        self.assertIn("| timed | degraded |", report)
+        self.assertIn("Step status: **degraded**", report)
+
+    @unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
+    def test_zero_task_clock_degrades_the_run(self):
+        meta, report, _ = self.run_lab("new", stat=STAT_CSV.replace("1795.31,msec,task-clock", "0,msec,task-clock"))
+        self.assertEqual(meta["steps"]["timed"]["status"], "degraded")
+        self.assertIn("`0,msec,task-clock,1795310712,100.00,0.992,CPUs utilized`", meta["steps"]["timed"]["problems"][0])
+        self.assertIn("| timed | degraded |", report)
+
+    # 3. Division in rendering never drops the section.
+    def test_zero_span_and_bad_value_keep_the_section(self):
+        directory = self.timed_dir(spans=("0.000s",), metrics=False, source=SOURCE_METRICS)
+        problems = []
+        text = "\n".join(lab.render_timed(directory, [], problems))
+        self.assertIn("no positive wall time", problems[0])
+        self.assertIn("at the wall minimum NA ns/byte, NA MB/s", text)
+        self.assertIn("instructions:u median 22,287,659,913", text)
+        directory = self.timed_dir(source="lexed.translated_bytes=abc\n")
+        problems = []
+        text = "\n".join(lab.render_timed(directory, [], problems))
+        self.assertIn("- NA (line failed: TypeError", text)
+        self.assertIn("instructions:u median 22,287,659,913", text)
+
+    # 4. IBS keeps the workload's threads, not the exec name.
+    def test_workload_filter_from_tasks(self):
+        rows = lab.parse_task_report(TASKS_REPORT)
+        self.assertEqual(rows[0], (92.34, 4242, "main_thread", "ide"))
+        self.assertEqual(rows[3], (0.36, 311, "kworker/u64:18-", "[kernel.kallsyms]"))
+        selection = lab.workload_filter(rows, "ide")
+        self.assertEqual(selection["options"], ["--tid", "4242", "--comms", "ide,main_thread"])
+        fallback = lab.workload_filter(rows, "cc1")
+        self.assertEqual(fallback["options"], ["--comms", "cc1,main_thread"])
+        self.assertEqual(lab.parse_mem_levels(MEM_LEVELS)[0], (45.97, 13, "RAM hit"))
+        self.assertEqual(lab.parse_mem_levels(MEM_LEVELS)[1], (24.33, 3249, "N/A"))
+
+    def old_ibs_dir(self):
+        return self.directory({"lab.json": json.dumps({"config": {"command": "/b/ide cc x.c"}, "steps": {"ibs": {"status": "ok", "note": ""}}}),
+                               "ibs/ibs_op.data": "ibs_op//", "ibs/ibs_op.self.txt": IBS_OP_OLD_COMM,
+                               "ibs/ibs_op.report.log": "$ perf report --comm ide\nexit=0\n",
+                               "ibs/mem.data": "ibs_op//", "ibs/mem.report.txt": "# Samples: 13K\n"})
+
+    def test_old_ibs_dir_without_perf_is_degraded(self):
+        report = lab.render_report(self.old_ibs_dir())
+        self.assertIn("| ibs | degraded |", report)
+        self.assertIn("pre-fix exec-name report", report)
+        self.assertIn("0 report rows while the capture has samples", report)
+
+    @unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
+    def test_old_ibs_dir_is_rederived_by_pid(self):
+        _, _, perf = self.fakes("new")
+        directory = self.old_ibs_dir()
+        report = lab.render_report(directory, perf)
+        self.assertIn("| ibs | ok |", report)
+        self.assertIn("| 4.58% | `ir_validate_canonical_function` |", report)
+        self.assertIn("| 3.24% | `machine_fast_placement_build_prepassed` |", report)
+        self.assertIn("| 2.82% | `c_type_parse_machine_run` |", report)
+        self.assertIn("| RAM hit | 45.97% | 13 | 0.2% |", report)
+        self.assertIn("| N/A | 24.33% | 3,249 |", report)
+        self.assertIn("threads 4242 (ide,main_thread)", report)
+        self.assertEqual(lab.render_report(directory), report)
+
+    # 5. Uncore groups without their PMU are unavailable, not failed.
+    def test_unavailable_uncore_group(self):
+        directory = self.directory({
+            "topdown/groups.json": json.dumps([{"group": "PipelineL1", "exit": 0}, {"group": "memory_controller", "exit": 129}]),
+            "topdown/PipelineL1.csv": TOPDOWN_CSV.replace("83.33", "100.00"),
+            "topdown/memory_controller.log": "$ perf stat -M memory_controller\nexit=129\n--- stdout\n\n--- stderr\n" + UMC_ERROR})
+        problems = []
+        text = "\n".join(lab.render_topdown(directory, [], problems))
+        self.assertEqual(problems, [])
+        self.assertIn("1 measured, 1 unavailable (uncore PMU absent; not failures), 0 failed", text)
+        self.assertIn("Unable to find PMU or event on a PMU of 'umc_mem_clk'", text)
+        self.assertIn("not a per-process number", text)
+
+    # 6. Rounded metric columns are flagged and recomputed from raw counts.
+    def test_rounded_metrics_recomputed(self):
+        rows = lab.parse_stat_csv(BRANCH_CSV)
+        self.assertEqual(rows[0]["metric_name"], "branch_misprediction_rate")
+        self.assertEqual(rows[0]["metric_unit"], "per_branch")
+        self.assertEqual(lab.metric_text(rows[0]["metric_value"], rows[0]["metric_decimals"]), "< 0.05 (perf printed 0.0; rounded to 0.1)")
+        self.assertEqual(lab.metric_text(0.4, 1), "0.4 (rounded to 0.1)")
+        value, formula = lab.recompute_metric(rows[0], lab.stat_values(rows), None)
+        self.assertAlmostEqual(value, 73900351 / 4120569627)
+        value, formula = lab.recompute_metric(rows[2], lab.stat_values(rows), (22287659913, "instructions:u (timed median)"))
+        self.assertAlmostEqual(value, 0.025224, places=5)
+        directory = self.timed_dir()
+        write_files(directory, {"topdown/groups.json": json.dumps([{"group": "branch_prediction", "exit": 0}]),
+                                "topdown/branch_prediction.csv": BRANCH_CSV})
+        problems = []
+        text = "\n".join(lab.render_topdown(directory, [], problems))
+        self.assertIn("| branch_misprediction_rate | < 0.05 (perf printed 0.0; rounded to 0.1) per_branch | 0.01793 (1.79%) = ex_ret_brn_misp / ex_ret_brn |", text)
+        self.assertIn("| l1_dtlb_misses_pti | < 0.05 (perf printed 0.0; rounded to 0.1) per_1k_instr | 0.02522 = ls_l1_d_tlb_miss.all:u / instructions:u (timed median) x 1000 |", text)
+        self.assertIn("branch misprediction rate 1.79% (ex_ret_brn_misp / ex_ret_brn), branch MPKI 3.316", text)
+        self.assertNotIn("0.000 ", text)
+
+    def test_stat_json(self):
+        rows = lab.parse_stat(STAT_JSON)
+        values = lab.stat_values(rows)
+        self.assertAlmostEqual(values["task-clock"], 1.324303)
+        self.assertIsNone(values["cycles"])
+        self.assertEqual([row["metric_name"] for row in lab.metric_rows(rows)], ["CPUs utilized", "branch_misprediction_rate"])
+        self.assertEqual(lab.metric_text(rows[3]["metric_value"], rows[3]["metric_decimals"]), "0.01793")
+        self.assertEqual(lab.parse_stat(TOPDOWN_JSON)[2]["metric_name"], "frontend_bound")
+        self.assertAlmostEqual(lab.multiplex_percent(lab.parse_stat(TOPDOWN_JSON)), 83.33)
+
+    # 7. A multiplexed group without per-metric values is flagged.
+    def test_multiplexed_group_flagged(self):
+        directory = self.directory({"topdown/groups.json": json.dumps([{"group": "PipelineL1", "exit": 0}]), "topdown/PipelineL1.csv": TOPDOWN_CSV})
+        findings, problems = [], []
+        text = "\n".join(lab.render_topdown(directory, findings, problems))
+        self.assertIn("multiplexed: 0 of 4 metrics re-measured alone", text)
+        self.assertIn("**multiplexed group value** (counters 83.3%), fallback", text)
+        self.assertIn("multiplexed group, see the per-metric values", findings[0])
+
+    # 8. The run count is planned once from the pilot runs' wall time.
+    def test_choose_run_count(self):
+        count, reason = lab.choose_run_count(1.55, 30.0, 15.0, 100)
+        self.assertEqual(count, 3 + int((900 - 30 - 155) / 1.55))
+        self.assertIn("1.550 s per run", reason)
+        self.assertEqual(lab.choose_run_count(1.55, 30.0, 1.0, 100)[0], lab.MIN_TIMED_RUNS)
+        self.assertEqual(lab.estimate_other_compiles(["a", "b"], ["sampling"], False), 12 + 3 + 3)
+
+    @unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
+    def test_target_minutes_flow(self):
+        meta, report, output = self.run_lab("new", runs=("--target-minutes", "0.001", "--skip", "topdown", "sampling", "timeline", "micro"))
+        self.assertEqual(meta["config"]["runs"], lab.MIN_TIMED_RUNS)
+        with open(os.path.join(output, "timed", "runs.json")) as handle:
+            self.assertEqual(len(json.load(handle)), lab.MIN_TIMED_RUNS)
+        self.assertIn("Run count: --target-minutes 0.001:", report)
+
+    def test_unresolved_address_named_by_dso(self):
+        text = "# Samples: 9 of event 'page-faults:u'\n    12.00%  ide  [.] 0x000000000018f5ce\n     3.00%  libc.so.6  [.] memset\n"
+        self.assertEqual([entry[2] for entry in lab.report_entries(text)], ["ide 0x18f5ce", "memset"])
 
 
 if __name__ == "__main__":

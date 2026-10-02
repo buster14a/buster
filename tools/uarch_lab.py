@@ -11,40 +11,69 @@ renders `report.md` from those raw files alone, so `report DIR` reproduces the
 report without re-running anything.
 
     python3 tools/uarch_lab.py run --ide build/Release/ide --repo-root . \\
-        --cpu 2 --output /tmp/lab [--runs 30] [--sudo] [--skip STEP ...] \\
-        [--perf PATH] [-- extra compile args]
-    python3 tools/uarch_lab.py report /tmp/lab
+        --cpu 2 --output /tmp/lab [--target-minutes 15 | --runs N] [--sudo] \\
+        [--skip STEP ...] [--perf PATH] [-- extra compile args]
+    python3 tools/uarch_lab.py report /tmp/lab [--perf PATH]
 
 Steps (each writes DIR/<step>/ and one report section; any can be skipped):
 
     env       versions, CPU model/microcode, governor/EPP, SMT, paranoid,
               `perf list metricgroups`, binary sha256, git revision
-    timed     warm-up, then N pinned runs under `perf stat -x,` (time, cycles,
-              instructions, branch misses, faults), byte-compared outputs,
-              `-fsource-metrics` once and `-fmetrics-out` per run if supported
-    topdown   `perf stat -r 3 -M GROUP` per discovered metric group
+    timed     warm-up, then N pinned runs under `perf stat -x,` (task-clock,
+              cycles, instructions, branch misses, faults), byte-compared
+              outputs, `-fsource-metrics` once and `-fmetrics-out` per run if
+              supported.  Wall time is the harness's own monotonic span around
+              each child (runs.json `span_s`; commands.log for older output
+              directories), beside the compiler's `wall_ns` and task-clock:
+              perf 7.2.4 reads `duration_time` as 0 whenever it shares the
+              event list, so it is not used.  Without --runs, the count is
+              fixed once after PILOT_RUNS runs from their wall time so the
+              whole lab lands near --target-minutes (choose_run_count)
+    topdown   per discovered metric group a cheap `perf stat -M G -- true`
+              dry run (groups whose uncore PMU is absent are "unavailable",
+              not failures), then `perf stat -r 3 -j -M G` (JSON keeps six
+              metric decimals; `-x,` is the fallback and rounds to 0.1).  A
+              multiplexed group (counters running < 100%) is re-measured one
+              `-M <metric>` per run; the group value stays a flagged fallback.
+              Well-known ratios are recomputed from the raw counts
     timeline  one `perf stat -I 20` run plus `-fmetrics-out`: intervals
               attributed to compiler phases (WHEN), CSV and SVG/HTML chart
     sampling  `perf record --call-graph fp` per event (WHERE), every page
-              fault with its data address, annotate and srcline listings
-    ibs       (--sudo only) AMD IBS op/fetch samples and `perf mem`
+              fault with its data address, annotate and srcline listings;
+              per-process captures, so no thread filter is needed; self
+              reports sort by dso,symbol to name unresolved addresses
+    ibs       (--sudo only) AMD IBS op/fetch samples and `perf mem`, recorded
+              on the pinned CPU and filtered to the workload's thread ids (the
+              compiler renames its main thread `main_thread`, so its exec name
+              alone misses nearly every sample); `report DIR` derives these
+              filtered reports from the raw *.data when they are missing
     micro     `ide bench` if the binary supports it
 
-Failures of a step are recorded in DIR/lab.json and the report, never fatal;
-unsupported counters (`<not supported>`, `<not counted>`) are NA, never zero.
+A step is `ok` only when its section has real data: the report re-assesses
+every section from the raw files and marks it `degraded` with the reasons
+(a missing or non-positive time, a report with no rows from a capture that has
+samples, a failed group).  Failures are recorded in DIR/lab.json and the
+report, never fatal; unsupported counters (`<not supported>`, `<not counted>`)
+are NA, never zero, and a rounded perf metric never prints as an exact 0.
 The phase breakdown needs a binary that accepts `-fmetrics-out=` and writes a
 measured `CC_METRICS_INPUT` record; without it those sections say so.
 
 Map (searchable symbols):
     STEPS, TIMED_EVENTS, INTERVAL_EVENTS, SAMPLE_EVENTS   step and event tables
-    parse_stat_csv, stat_values, normalize_event          perf stat -x output
+    parse_stat, parse_stat_csv, parse_stat_json, stat_values  perf stat output
+    metric_text, recompute_metric, branch_pair             metric precision
     parse_key_values, parse_cc_metrics                    compiler metric files
     parse_report, parse_annotate, parse_fault_script      perf report/annotate/script
+    parse_task_report, workload_filter, parse_mem_levels  IBS workload filter
+    command_spans, load_timed, timed_problems             wall time and fail-closed checks
+    choose_run_count, estimate_other_compiles             --target-minutes run count
+    measure_stat, last_reason, topdown_group_lines        top-down dry run, split, render
     summarize, percentile, runs_since_minimum, tenth_medians   statistics
     phase_spans, interval_table, attribute_intervals      timeline alignment
     Lab, Lab.workload, Lab.run_command                    process execution
-    step_env ... step_micro                               the steps (raw files)
-    render_env ... render_micro, render_report            report from raw files
+    step_env ... step_micro, derive_ibs_reports           the steps (raw files)
+    render_env ... render_micro, guarded                  report sections from raw files
+    render_section, effective_status, render_report       content-based step status
     timeline_svg                                          self-contained chart
     main                                                  CLI
 Tests: tools/uarch_lab_test.py (`python3 -B tools/uarch_lab_test.py`).
@@ -55,6 +84,7 @@ import filecmp
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import shutil
@@ -66,7 +96,9 @@ import time
 STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "micro")
 DEFAULT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
                    "-DBUSTER_INCLUDE_TESTS=0", "-g", "src/buster/apps/ide/ide.c", "-lm"]
-TIMED_EVENTS = ["duration_time", "task-clock", "cycles:u", "instructions:u", "branch-misses:u",
+# No duration_time: perf 7.2.4 reads it as 0 whenever it shares the event
+# list with another event; wall time is the harness span (see step_timed).
+TIMED_EVENTS = ["task-clock", "cycles:u", "instructions:u", "branch-misses:u",
                 "page-faults", "minor-faults", "major-faults"]
 # At most six hardware events so a Zen 5 core (six PMCs) need not multiplex.
 INTERVAL_EVENTS = ["cycles:u", "instructions:u", "branch-misses:u", "L1-icache-load-misses:u",
@@ -81,8 +113,31 @@ PHASES = ("read", "preprocess", "parse", "analysis", "ir", "codegen", "object", 
 GROUP_PATTERNS = [r"^pipelinel1$", r"^pipelinel2$", r"^(topdownl1|tmal1)$", r"branch|brmispredict",
                   r"decod|op_?cache|dsb|fetch|frontend|icmiss|icache", r"cache|^l[123]", r"tlb", r"mem"]
 GROUP_EXCLUDE = r"uncore|data_fabric|power|smt|server|soc|^io"
+# perf's text when a group needs a PMU this host lacks (Zen 5 desktops expose no
+# amd_umc/amd_l3 uncore PMU to perf); such groups are unavailable, not failed.
+UNAVAILABLE_PMU = re.compile(r"Unable to find PMU or event|Bad event or PMU")
+UNCORE_GROUP = re.compile(r"(?i)l3|memory_controller|umc|data_fabric|^df")
+# Metrics that divide by duration_time (rates per second): NA when perf read
+# duration_time as 0, never a computed 0.
+TIME_DIVIDED_METRICS = ("lpm_itlb_l2_reqs",)
+RATE_UNIT = re.compile(r"(?i)(per_?sec(ond)?|/s(ec)?)$")
+BRANCH_PAIRS = (("ex_ret_brn_misp", "ex_ret_brn"), ("branch-misses", "branches"),
+                ("branch-misses", "branch-instructions"))
+INSTRUCTION_EVENTS = ("instructions", "ex_ret_instr")
+IBS_CAPTURES = ("ibs_op", "ibs_fetch", "mem")
 TOPDOWN_CATEGORIES = ("frontend_bound", "bad_speculation", "backend_bound", "retiring")
 INTERVAL_MS = 20
+# Run-count planning (choose_run_count): pilot runs, clamps, and the later
+# steps' cost in compile-equivalents.
+PILOT_RUNS = 3
+MIN_TIMED_RUNS = 10
+MAX_TIMED_RUNS = 2000
+TOPDOWN_COMPILES_PER_GROUP = 6
+SAMPLING_COMPILES = 14
+IBS_COMPILES = 6
+# A group whose counters ran less of the time than this is multiplexed and is
+# re-measured one metric at a time (step_topdown).
+FULL_RUNNING = 99.9
 COMMAND_TIMEOUT = 900
 SRCLINE_TIMEOUT = 300
 
@@ -108,12 +163,48 @@ def normalize_event(name):
     return re.sub(r":[a-zA-Z]+$", "", name)
 
 
+def _metric_decimals(text):
+    text = text.strip()
+    return len(text.split(".", 1)[1]) if "." in text else 0
+
+
+def split_metric_label(label):
+    """`per_1k_instr  l1_dtlb_misses_pti` -> ('per_1k_instr', 'l1_dtlb_misses_pti').
+
+    perf joins a metric's ScaleUnit and name with two spaces; `%  retiring`
+    gives ('%', 'retiring'), `insn per cycle` gives ('', 'insn per cycle')."""
+    label = label.strip()
+    match = re.match(r"^(\S+)\s{2,}(\S.*)$", label)
+    if match:
+        return match.group(1), match.group(2).strip()
+    if label.startswith("%"):
+        return "%", label[1:].strip()
+    return "", label
+
+
+def _set_metric(row, text, label):
+    value = parse_number(text)
+    label = label.strip()
+    if value is not None and label != "(null)" and re.search(r"[A-Za-z]", label):
+        unit, name = split_metric_label(label)
+        row.update(metric_value=value, metric_name=name, metric_unit=unit, metric_raw=text.strip(),
+                   metric_decimals=_metric_decimals(text))
+
+
+def _stat_row(moment, value_text, unit, event, line):
+    return {"time": moment, "value": parse_number(value_text), "raw": value_text.strip(), "unit": unit.strip(),
+            "event": event.strip(), "variance": None, "runtime": None, "pct_running": None, "metric_value": None,
+            "metric_name": "", "metric_unit": "", "metric_raw": "", "metric_decimals": None, "line": line}
+
+
 def parse_stat_csv(text, interval=False):
     """Rows of `perf stat -x,` output; values that perf did not count are None.
 
     Field order: [time,] value, unit, event, [variance%,] run time, percent
     running, metric value, metric label.  Metric-only lines (top-down) carry
-    empty counter fields and the metric in the last two fields."""
+    empty counter fields and the metric in the last two fields.  The metric
+    column is printed with perf's display precision (often one decimal), so
+    each row keeps `metric_decimals` for metric_text."""
     rows = []
     for line in text.splitlines():
         if not line.strip() or line.startswith("#"):
@@ -128,27 +219,57 @@ def parse_stat_csv(text, interval=False):
         if len(fields) < 3:
             continue
         rest = fields[3:]
-        variance = None
+        row = _stat_row(moment, fields[0], fields[1], fields[2], line.strip())
         if rest and rest[0].strip().endswith("%"):
-            variance = parse_number(rest[0].strip()[:-1])
+            row["variance"] = parse_number(rest[0].strip()[:-1])
             rest = rest[1:]
-        row = {"time": moment, "value": parse_number(fields[0]), "raw": fields[0].strip(),
-               "unit": fields[1].strip(), "event": fields[2].strip(), "variance": variance,
-               "runtime": parse_number(rest[0]) if rest else None,
-               "pct_running": parse_number(rest[1]) if len(rest) > 1 else None,
-               "metric_value": None, "metric_name": "", "metric_unit": ""}
+        row["runtime"] = parse_number(rest[0]) if rest else None
+        row["pct_running"] = parse_number(rest[1]) if len(rest) > 1 else None
         if len(fields) >= 5:
-            value = parse_number(fields[-2])
-            label = fields[-1].strip()
-            if value is not None and re.search(r"[A-Za-z]", label):
-                unit = ""
-                if label.startswith("%"):
-                    unit, label = "%", label[1:].strip()
-                row["metric_value"], row["metric_name"], row["metric_unit"] = value, label, unit
+            _set_metric(row, fields[-2], fields[-1])
         if not row["event"] and not row["metric_name"]:
             continue
         rows.append(row)
     return rows
+
+
+def parse_stat_json(text, interval=False):
+    """Rows of `perf stat -j` output (one JSON object per line), shaped like
+    parse_stat_csv's.  perf prints `metric-value` with "%f" (six decimals)."""
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        moment = record.get("interval") if interval else None
+        if interval and not isinstance(moment, (int, float)):
+            continue
+        row = _stat_row(moment, str(record.get("counter-value", "")), str(record.get("unit", "")),
+                        str(record.get("event", "")), line)
+        for key, field in (("variance", "variance"), ("runtime", "event-runtime"), ("pct_running", "pcnt-running")):
+            value = record.get(field)
+            row[key] = parse_number(str(value)) if value is not None else None
+        _set_metric(row, str(record.get("metric-value", "")), str(record.get("metric-unit", "")))
+        if not row["event"] and not row["metric_name"]:
+            continue
+        rows.append(row)
+    return rows
+
+
+def parse_stat(text, interval=False):
+    """parse_stat_json or parse_stat_csv, whichever format `text` is in."""
+    for line in (text or "").splitlines():
+        if line.strip() and not line.startswith("#"):
+            if line.lstrip().startswith("{"):
+                return parse_stat_json(text, interval)
+            break
+    return parse_stat_csv(text or "", interval)
 
 
 def stat_values(rows):
@@ -160,15 +281,87 @@ def stat_values(rows):
     return values
 
 
-def stat_metrics(rows):
-    metrics = []
-    seen = set()
+def stat_lines(rows):
+    """Normalized event name -> the raw output line (quoted in problem notes)."""
+    return {normalize_event(row["event"]): row["line"] for row in rows if row["event"]}
+
+
+def metric_rows(rows):
+    """The first row of each distinct metric, in output order."""
+    chosen, seen = [], set()
     for row in rows:
         name = row["metric_name"]
         if name and name not in seen:
             seen.add(name)
-            metrics.append((name, row["metric_value"], row["metric_unit"]))
-    return metrics
+            chosen.append(row)
+    return chosen
+
+
+def stat_metrics(rows):
+    return [(row["metric_name"], row["metric_value"], row["metric_unit"]) for row in metric_rows(rows)]
+
+
+def significant(value, digits=4):
+    if value is None or not math.isfinite(value):
+        return "NA"
+    if value == 0:
+        return "0"
+    if abs(value) >= 10 ** digits:
+        return format(value, ",.0f")
+    return "%.*g" % (digits, value)
+
+
+def metric_text(value, decimals):
+    """A perf metric value at the precision perf printed it with.
+
+    `-x,` metric columns carry one to three decimals, so a CSV value is shown
+    with "rounded to 0.1" and a printed 0.0 becomes "< 0.05", never an exact
+    zero; JSON values (six decimals) print with four significant digits."""
+    if value is None or not math.isfinite(value):
+        return "NA"
+    if decimals is None:
+        return significant(value)
+    step = 10.0 ** -decimals
+    if value == 0:
+        return "< %g (perf printed %.*f; rounded to %g)" % (step / 2, decimals, 0.0, step)
+    if decimals >= 6:
+        return significant(value)
+    return "%.*f (rounded to %g)" % (decimals, value, step)
+
+
+def branch_pair(values):
+    """(mispredicted, branches, names) from raw counts in one output, or None."""
+    for misses, branches in BRANCH_PAIRS:
+        if values.get(misses) is not None and values.get(branches):
+            return values[misses], values[branches], misses, branches
+    return None
+
+
+def instruction_count(values, fallback=None):
+    """(count, label): instructions from the same output, else the fallback."""
+    for event in INSTRUCTION_EVENTS:
+        if values.get(event):
+            return values[event], event
+    return fallback
+
+
+def recompute_metric(row, values, instructions):
+    """(value, formula) for a metric the raw counts of the same output
+    determine, else None.  instructions is instruction_count's result."""
+    name, unit = row["metric_name"].lower(), row["metric_unit"]
+    if unit == "per_branch" or "mispredict" in name:
+        pair = branch_pair(values)
+        if pair:
+            return pair[0] / pair[1], "%s / %s" % (pair[2], pair[3])
+    if unit == "per_1k_instr" and row["event"] and row["value"] is not None and instructions and instructions[0]:
+        return row["value"] * 1000.0 / instructions[0], "%s / %s x 1000" % (row["event"], instructions[1])
+    return None
+
+
+def time_divided(row):
+    """True for a metric that divides by duration_time (a per-second rate)."""
+    return (row["metric_name"] in TIME_DIVIDED_METRICS or bool(RATE_UNIT.search(row["metric_unit"] or ""))
+            or normalize_event(row["event"]) == "duration_time")
 
 
 def multiplex_percent(rows):
@@ -239,7 +432,15 @@ def parse_report(text):
             continue
         match = entry.match(line)
         if match:
-            name = re.sub(r"^\[[.kgu]\]\s+", "", match.group(3))
+            name = match.group(3)
+            # `--sort dso,symbol`: keep the dso only to name an unresolved
+            # address ("ide 0x18f5ce" rather than an anonymous hex value).
+            with_dso = re.match(r"^(\S+)\s+\[[.kgu]\]\s+(.*)$", name)
+            if with_dso:
+                name = with_dso.group(2)
+                if re.match(r"^0x[0-9a-f]+\b", name):
+                    name = "%s %s" % (with_dso.group(1), re.sub(r"^0x0*(?=[0-9a-f])", "0x", name))
+            name = re.sub(r"^\[[.kgu]\]\s+", "", name)
             # perf >= 6.x may append "IPC [IPC Coverage]" columns ("-  -" without LBR).
             name = re.sub(r"\s{2,}(?:-|\d+\.\d+)\s+(?:-|\[\s*\d+\.\d+%\])$", "", name)
             self_percent = float(match.group(2)) if match.group(2) else None
@@ -255,6 +456,69 @@ def report_entries(text):
     for values in parse_report(text).values():
         rows.extend(values)
     return rows
+
+
+TASK_LINE = re.compile(r"^\s*(\d+(?:\.\d+)?)%\s+(\d+):(\S(?:.*?\S)?)\s{2,}(\S.*?)\s*$")
+
+
+def parse_task_report(text):
+    """`perf report --sort pid,dso` -> [(percent, tid, comm, dso)].
+
+    perf's "pid" sort key prints `tid:comm` (the thread's last command name)."""
+    rows = []
+    for line in (text or "").splitlines():
+        if line.startswith("#"):
+            continue
+        match = TASK_LINE.match(line)
+        if match:
+            rows.append((float(match.group(1)), int(match.group(2)), match.group(3), match.group(4)))
+    return rows
+
+
+def workload_filter(task_rows, basename):
+    """perf report options that keep the workload's samples of a system-wide capture.
+
+    The workload's threads are the tids with samples in its own binary; their
+    command names (plus the exec name, before the compiler renames its main
+    thread `main_thread`) exclude pre-exec sudo/taskset samples of the same
+    tid.  Without such a tid, fall back to the command names alone."""
+    chosen = [row for row in task_rows if os.path.basename(row[3]) == basename]
+    if chosen:
+        tids = sorted({row[1] for row in chosen})
+        comms = sorted({row[2] for row in chosen} | {basename[:15]})
+        return {"method": "tid", "tids": tids, "comms": comms,
+                "options": ["--tid", ",".join(str(tid) for tid in tids), "--comms", ",".join(comms)]}
+    comms = [basename[:15], "main_thread"]
+    return {"method": "comm-fallback", "tids": [], "comms": comms, "options": ["--comms", ",".join(comms)]}
+
+
+def parse_mem_levels(text):
+    """`perf mem report -n --sort=mem` -> [(weighted percent, samples, level)]."""
+    rows = []
+    for line in (text or "").splitlines():
+        if line.startswith("#"):
+            continue
+        match = re.match(r"^\s*(\d+\.\d+)%\s+(\d+)\s+(\S.*?)\s*$", line)
+        if match:
+            rows.append((float(match.group(1)), int(match.group(2)), match.group(3)))
+    return rows
+
+
+COMMAND_LINE = re.compile(r"^(?P<argv>.*) exit=(?P<exit>-?\d+) (?P<seconds>\d+(?:\.\d+)?)s$")
+
+
+def command_spans(text):
+    """{timed run number: seconds} from commands.log, whose lines end with the
+    harness's monotonic span (`... exit=0 1.602s`); the last line per run wins."""
+    spans = {}
+    for line in (text or "").splitlines():
+        match = COMMAND_LINE.match(line.rstrip())
+        if not match or " stat " not in match.group("argv"):
+            continue
+        run = re.search(r"timed/run-(\d+)\.csv", match.group("argv"))
+        if run:
+            spans[int(run.group(1))] = float(match.group("seconds"))
+    return spans
 
 
 def parse_annotate(text, limit=10):
@@ -438,6 +702,7 @@ class Lab:
         self.sudo = sudo
         self.environment = dict(os.environ, LC_ALL="C", LANG="C")
         self.meta = load_meta(self.output)
+        self.last_elapsed = None
 
     def path(self, *parts):
         full = os.path.join(self.output, *parts)
@@ -466,13 +731,14 @@ class Lab:
             status, out, err = 127, b"", str(error).encode()
         except subprocess.TimeoutExpired as error:
             status, out, err = 124, error.stdout or b"", (error.stderr or b"") + b"\ntimeout\n"
+        self.last_elapsed = time.monotonic() - started
         out_text = out.decode("utf-8", "replace")
         err_text = err.decode("utf-8", "replace")
         if stdout_path:
             with open(stdout_path, "w") as handle:
                 handle.write(out_text)
         with open(self.path("commands.log"), "a") as handle:
-            handle.write("%s exit=%d %.3fs\n" % (shell_join(argv), status, time.monotonic() - started))
+            handle.write("%s exit=%d %.3fs\n" % (shell_join(argv), status, self.last_elapsed))
         if log:
             with open(log, "w") as handle:
                 handle.write("$ %s\nexit=%d\n--- stdout\n%s\n--- stderr\n%s" % (
@@ -585,7 +851,37 @@ def compile_flags(lab, metrics_path):
     return ["-fmetrics-out=" + metrics_path] if metrics_path and lab.meta["capabilities"].get("metrics_out") else []
 
 
-def step_timed(lab, runs, warmups):
+def estimate_other_compiles(groups, skip, sudo):
+    """Rough cost of the steps after `timed`, in compile-equivalents (one
+    compile's wall time), for choose_run_count."""
+    cost = {"topdown": TOPDOWN_COMPILES_PER_GROUP * (len(groups) if groups is not None else 8),
+            "timeline": 3, "sampling": SAMPLING_COMPILES, "ibs": IBS_COMPILES if sudo else 0, "micro": 3}
+    return sum(value for step, value in cost.items() if step not in skip)
+
+
+def choose_run_count(per_run, elapsed, target_minutes, other_compiles, pilot=PILOT_RUNS):
+    """(timed-run count, reason) so the whole lab lands near target_minutes.
+
+    Fixed once after the pilot runs from their wall time alone, never
+    adapted to the measured results."""
+    remaining = target_minutes * 60.0 - elapsed - other_compiles * per_run
+    count = min(MAX_TIMED_RUNS, max(MIN_TIMED_RUNS, pilot + int(max(0.0, remaining) / per_run)))
+    reason = ("--target-minutes %g: %.3f s per run (median of %d pilot runs), %.1f min elapsed, later steps about %d "
+              "compile-equivalents (%.1f min) -> %d timed runs (clamped to %d..%d)") % (
+        target_minutes, per_run, pilot, elapsed / 60, other_compiles, other_compiles * per_run / 60, count,
+        MIN_TIMED_RUNS, MAX_TIMED_RUNS)
+    return count, reason
+
+
+def task_seconds(rows):
+    """task-clock in seconds (perf prints msec), or None."""
+    for row in rows:
+        if normalize_event(row["event"]) == "task-clock" and row["value"] is not None:
+            return row["value"] / (1e9 if row["unit"] == "ns" else 1e3)
+    return None
+
+
+def step_timed(lab, runs, warmups, target_minutes=15.0, lab_started=None, other_compiles=0):
     directory = lab.directory("timed")
     out = os.path.join(directory, "out.exe")
     capabilities = lab.meta["capabilities"]
@@ -603,49 +899,117 @@ def step_timed(lab, runs, warmups):
     capabilities["metrics_out_measured"] = bool(capabilities["metrics_out"] and measured_input(parse_cc_metrics(read_text(probe) or "")))
     lab.save_meta()
     for index in range(warmups):
-        started = time.monotonic()
         status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(directory, "warmup.ccmetrics"))),
                                          log=os.path.join(directory, "warmup-%d.log" % index))
         if status != 0:
             raise RuntimeError("warm-up failed: " + err.strip()[-400:])
-        print("[timed] warm-up %.2f s; %d timed runs take about %.1f min" % (
-            time.monotonic() - started, runs, (time.monotonic() - started) * runs / 60), flush=True)
+        print("[timed] warm-up %.2f s" % lab.last_elapsed, flush=True)
     reference = os.path.join(directory, "reference.exe")
     shutil.copyfile(out, reference)
-    records, best = [], None
-    for index in range(1, runs + 1):
+    started = lab_started if lab_started is not None else time.monotonic()
+    count = runs
+    plan = {"runs": runs, "reason": "--runs %d" % runs} if runs is not None else None
+    records, best, index = [], None, 0
+    while count is None or index < count:
+        index += 1
         csv_path = os.path.join(directory, "run-%04d.csv" % index)
-        flags = compile_flags(lab, os.path.join(directory, "run-%04d.ccmetrics" % index))
+        metrics_path = os.path.join(directory, "run-%04d.ccmetrics" % index)
         status, out_text, err = lab.run_command(lab.pin() + [lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--"]
-                                                + lab.workload(out, flags))
+                                                + lab.workload(out, compile_flags(lab, metrics_path)))
+        span = lab.last_elapsed
         identical = status == 0 and filecmp.cmp(reference, out, shallow=False)
         if status != 0:
             with open(os.path.join(directory, "run-%04d.err" % index), "w") as handle:
                 handle.write(out_text[-20000:] + err[-20000:])
-        seconds = ratio(stat_values(parse_stat_csv(read_text(csv_path) or "")).get("duration_time"), 1e9)
-        if seconds is not None and status == 0:
-            best = seconds if best is None else min(best, seconds)
-        records.append({"run": index, "exit": status, "identical": identical})
-        print("[timed] %d/%d %s s (min %s)%s" % (index, runs, fmt(seconds, ".4f"), fmt(best, ".4f"),
-                                                 "" if identical else " OUTPUT DIFFERS" if status == 0 else " FAILED"), flush=True)
+        rows = parse_stat(read_text(csv_path) or "")
+        task = task_seconds(rows)
+        wall_ns = parse_cc_metrics(read_text(metrics_path) or "")["header"].get("wall_ns")
+        if status == 0:
+            best = span if best is None else min(best, span)
+        records.append({"run": index, "exit": status, "identical": identical, "span_s": round(span, 6)})
+        warning = "" if task is not None and task > 0 else " TASK-CLOCK %s: %s" % (
+            "MISSING" if task is None else "NON-POSITIVE", stat_lines(rows).get("task-clock", "no task-clock line in " + csv_path))
+        print("[timed] %d/%s span %.4f s, task-clock %s s, compiler wall %s s (min span %s)%s%s" % (
+            index, count if count is not None else "?", span, fmt(task, ".4f"), fmt(ratio(wall_ns, 1e9) if isinstance(wall_ns, (int, float)) else None, ".4f"),
+            fmt(best, ".4f"), "" if identical else " OUTPUT DIFFERS" if status == 0 else " FAILED", warning), flush=True)
+        if count is None and index == PILOT_RUNS:
+            spans = [record["span_s"] for record in records if record["exit"] == 0]
+            per_run = statistics.median(spans) if spans else 2.2
+            count, reason = choose_run_count(per_run, time.monotonic() - started, target_minutes, other_compiles)
+            plan = {"runs": count, "reason": reason}
+            print("[timed] %s" % reason, flush=True)
+    lab.meta["config"]["runs"] = count
+    lab.save_meta()
+    with open(os.path.join(directory, "plan.json"), "w") as handle:
+        json.dump(plan, handle, indent=1)
     with open(os.path.join(directory, "runs.json"), "w") as handle:
         json.dump(records, handle, indent=1)
-    return "%d runs, %d identical outputs" % (runs, sum(record["identical"] for record in records))
+    return "%d runs (%s), %d identical outputs" % (count, plan["reason"] if runs is not None else "--target-minutes %g" % target_minutes,
+                                                   sum(record["identical"] for record in records))
+
+
+def last_reason(text):
+    """The most telling line of a perf log: an unavailable-PMU line, else the last one."""
+    lines = [line.strip() for line in (text or "").splitlines()
+             if line.strip() and not line.startswith(("$", "---", "exit="))]
+    for line in lines:
+        if UNAVAILABLE_PMU.search(line) and not line.startswith("\\"):
+            return line[:240]
+    return lines[-1][:240] if lines else "no output"
+
+
+def measure_stat(lab, base, selector, repeats):
+    """`perf stat -r N -j -M selector` into base.json (base.csv via `-x,` when
+    the JSON is unreadable); returns (exit, format, rows)."""
+    status, _, _ = lab.run_command(lab.pin() + [lab.perf, "stat", "-r", str(repeats), "-j", "-o", base + ".json", "-M", selector, "--"]
+                                   + lab.workload(lab.path("topdown", "out.exe")), log=base + ".log")
+    rows = parse_stat_json(read_text(base + ".json") or "")
+    if status == 0 and rows:
+        return status, "json", rows
+    if status != 0:
+        return status, "json", rows
+    status, _, _ = lab.run_command(lab.pin() + [lab.perf, "stat", "-r", str(repeats), "-x,", "-o", base + ".csv", "-M", selector, "--"]
+                                   + lab.workload(lab.path("topdown", "out.exe")), log=base + ".log")
+    return status, "csv", parse_stat_csv(read_text(base + ".csv") or "")
 
 
 def step_topdown(lab, groups):
+    """One group per invocation after a dry run; a multiplexed group is then
+    re-measured one metric per invocation (`-M <metric>`, one run each) so
+    its values are not scaled estimates."""
     if not groups:
         return "no metric groups discovered (see env/metricgroups.txt)"
     done = []
     for group in groups:
         base = lab.path("topdown", safe_name(group))
-        status, _, _ = lab.run_command(lab.pin() + [lab.perf, "stat", "-r", "3", "-x,", "-o", base + ".csv", "-M", group, "--"]
-                                       + lab.workload(lab.path("topdown", "out.exe")), log=base + ".log")
-        done.append({"group": group, "exit": status})
-        print("[topdown] %s exit=%d" % (group, status), flush=True)
+        entry = {"group": group}
+        status, out, err = lab.run_command([lab.perf, "stat", "-M", group, "--", "true"], log=base + ".dryrun.log", timeout=120)
+        entry["dryrun_exit"] = status
+        if status != 0:
+            entry.update({"exit": status, "reason": last_reason(out + "\n" + err)})
+            if UNAVAILABLE_PMU.search(out + err):
+                entry["unavailable"] = "uncore PMU absent"
+        else:
+            status, form, rows = measure_stat(lab, base, group, 3)
+            entry.update({"exit": status, "format": form, "pct_running": multiplex_percent(rows)})
+            if status == 0 and entry["pct_running"] is not None and entry["pct_running"] < FULL_RUNNING:
+                entry["split"] = []
+                for metric in [row["metric_name"] for row in metric_rows(rows)]:
+                    if not re.fullmatch(r"[A-Za-z0-9_.]+", metric):
+                        continue
+                    split_base = lab.path("topdown", safe_name(group) + ".split", safe_name(metric))
+                    split_status, split_form, split_rows = measure_stat(lab, split_base, metric, 1)
+                    entry["split"].append({"metric": metric, "exit": split_status, "format": split_form,
+                                           "pct_running": multiplex_percent(split_rows)})
+        done.append(entry)
+        print("[topdown] %s exit=%s%s%s" % (group, entry["exit"], " (%s)" % entry["unavailable"] if "unavailable" in entry else "",
+                                            " multiplexed %.1f%%: %d metrics re-measured alone" % (entry["pct_running"], len(entry["split"]))
+                                            if "split" in entry else ""), flush=True)
     with open(lab.path("topdown", "groups.json"), "w") as handle:
         json.dump(done, handle, indent=1)
-    return "%d/%d groups measured" % (sum(entry["exit"] == 0 for entry in done), len(done))
+    unavailable = sum("unavailable" in entry for entry in done)
+    measured = sum(entry["exit"] == 0 for entry in done)
+    return "%d measured, %d unavailable (uncore PMU absent), %d failed" % (measured, unavailable, len(done) - measured - unavailable)
 
 
 def step_timeline(lab):
@@ -680,7 +1044,8 @@ def step_sampling(lab):
             continue
         recorded.append(name)
         report = [lab.perf, "report", "-i", data, "--stdio", "--no-inline"]
-        lab.run_command(report + ["--no-children", "--sort", "symbol", "-g", "none", "--percent-limit", "0.2"],
+        # dso,symbol names an unresolved address by its binary (parse_report).
+        lab.run_command(report + ["--no-children", "--sort", "dso,symbol", "-g", "none", "--percent-limit", "0.2"],
                         stdout_path=os.path.join(directory, name + ".self.txt"), log=os.path.join(directory, name + ".self.log"))
         if name in ("cycles", "cpu-clock"):
             lab.run_command(report + ["--children", "--sort", "symbol", "-g", "caller", "--percent-limit", "2"],
@@ -699,14 +1064,57 @@ def step_sampling(lab):
     print("[sampling] page-faults exit=%d" % status, flush=True)
     if status == 0:
         recorded.append("faults")
-        report = [lab.perf, "report", "-i", data, "--stdio", "--no-inline", "--no-children", "--sort", "symbol"]
-        lab.run_command(report + ["-g", "none", "--percent-limit", "0.2"], stdout_path=os.path.join(directory, "faults.self.txt"))
-        lab.run_command(report + ["-g", "caller", "--percent-limit", "1"], stdout_path=os.path.join(directory, "faults.callers.txt"))
+        report = [lab.perf, "report", "-i", data, "--stdio", "--no-inline", "--no-children"]
+        lab.run_command(report + ["--sort", "dso,symbol", "-g", "none", "--percent-limit", "0.2"], stdout_path=os.path.join(directory, "faults.self.txt"))
+        lab.run_command(report + ["--sort", "symbol", "-g", "caller", "--percent-limit", "1"], stdout_path=os.path.join(directory, "faults.callers.txt"))
         lab.run_command([lab.perf, "script", "-i", data, "-F", "time,addr,ip,sym", "--hide-call-graph", "--no-inline", "--show-mmap-events"],
                         stdout_path=os.path.join(directory, "faults.script.txt"), log=os.path.join(directory, "faults.script.log"))
     if not recorded:
         raise RuntimeError("no event could be recorded")
     return "recorded: " + ", ".join(recorded)
+
+
+def write_text(path, text):
+    with open(path, "w") as handle:
+        handle.write(text)
+
+
+def derive_ibs_reports(lab, directory, basename):
+    """Workload-filtered reports from the raw ibs/*.data captures.
+
+    Each capture is a separate workload run (its own pid), recorded on the
+    pinned CPU: `perf report --sort pid,dso` finds the threads with samples in
+    the workload binary (workload_filter), and the symbol / load-source
+    reports keep only those threads.  `<capture>.filter.json` is written last,
+    so `report DIR` re-derives whatever an older or interrupted run lacks."""
+    notes = []
+    for name in IBS_CAPTURES:
+        data = os.path.join(directory, name + ".data")
+        if not os.path.isfile(data) or os.path.exists(os.path.join(directory, name + ".filter.json")):
+            continue
+        status, out, _ = lab.run_command([lab.perf, "report", "-i", data, "--stdio", "--sort", "pid,dso", "-g", "none"],
+                                         log=os.path.join(directory, name + ".tasks.log"))
+        if status != 0:
+            notes.append("%s: perf report --sort pid,dso exit=%d" % (name, status))
+            continue
+        write_text(os.path.join(directory, name + ".tasks.txt"), out)
+        selection = workload_filter(parse_task_report(out), basename)
+        if name == "mem":
+            mem = [lab.perf, "mem", "report", "-i", data, "--stdio", "-n"]
+            commands = {"mem.levels.txt": mem + ["--sort=mem"] + selection["options"],
+                        "mem.workload.txt": mem + ["--sort=mem,sym", "--percent-limit", "0.3"] + selection["options"]}
+        else:
+            commands = {name + ".workload.txt": [lab.perf, "report", "-i", data, "--stdio", "--no-inline", "--no-children", "--sort",
+                                                 "symbol", "-g", "none", "--percent-limit", "0.3"] + selection["options"]}
+        selection["exits"] = {}
+        for file, argv in commands.items():
+            status, out, _ = lab.run_command(argv, log=os.path.join(directory, file[:-4] + ".log"))
+            selection["exits"][file] = status
+            if status == 0:
+                write_text(os.path.join(directory, file), out)
+        write_text(os.path.join(directory, name + ".filter.json"), json.dumps(selection, indent=1, sort_keys=True))
+        notes.append("%s: %s %s" % (name, selection["method"], ",".join(str(tid) for tid in selection["tids"]) or ",".join(selection["comms"])))
+    return notes
 
 
 def step_ibs(lab):
@@ -721,7 +1129,6 @@ def step_ibs(lab):
     drop = ["sudo", "-u", "#%d" % os.getuid(), "-g", "#%d" % os.getgid(), "--"]
     cpu = ["-C", str(lab.cpu)] if lab.cpu is not None else ["-a"]
     command = drop + lab.pin() + lab.workload(os.path.join(directory, "out.exe"))
-    comm = os.path.basename(lab.ide)[:15]
     notes = []
     for pmu in present:
         data = os.path.join(directory, pmu + ".data")
@@ -733,12 +1140,7 @@ def step_ibs(lab):
                                    log=os.path.join(directory, "mem.record.log"))
     notes.append("perf mem exit=%d" % status)
     lab.run_command(["sudo", "chown", "-R", "%d:%d" % (os.getuid(), os.getgid()), directory])
-    for pmu in present:
-        lab.run_command([lab.perf, "report", "-i", os.path.join(directory, pmu + ".data"), "--stdio", "--no-inline", "--comm", comm,
-                         "--no-children", "--sort", "symbol", "-g", "none", "--percent-limit", "0.3"],
-                        stdout_path=os.path.join(directory, pmu + ".self.txt"), log=os.path.join(directory, pmu + ".report.log"))
-    lab.run_command([lab.perf, "mem", "report", "-i", data, "--stdio", "--comm", comm, "--sort=mem,sym", "--percent-limit", "0.3"],
-                    stdout_path=os.path.join(directory, "mem.report.txt"), log=os.path.join(directory, "mem.report.log"))
+    notes += derive_ibs_reports(lab, directory, os.path.basename(lab.ide))
     return "; ".join(notes)
 
 
@@ -780,9 +1182,26 @@ def top_entries(text, limit):
     return [entry for entry in report_entries(text or "")][:limit]
 
 
-def render_env(directory, findings):
+def guarded(lines, problems, build):
+    """Append build()'s line or lines; an exception becomes one NA line and a
+    problem, so one bad value never drops the rest of a section."""
+    try:
+        result = build()
+    except Exception as error:  # a malformed raw value must not hide the other lines
+        text = "line failed: %s: %s" % (type(error).__name__, error)
+        lines.append("- NA (%s)" % text)
+        problems.append(text)
+        return
+    if isinstance(result, str):
+        lines.append(result)
+    elif result:
+        lines.extend(result)
+
+
+def render_env(directory, findings, problems):
     facts = json.loads(read_text(os.path.join(directory, "env", "env.json")) or "{}")
     if not facts:
+        problems.append("no env/env.json")
         return ["No environment record."]
     keys = ["date", "command", "cpu", "cpu_model", "microcode", "kernel", "perf_version", "clang", "governor", "epp",
             "scaling_driver", "cur_khz", "max_khz", "boost", "smt_active", "smt_siblings", "perf_event_paranoid",
@@ -796,94 +1215,176 @@ def render_env(directory, findings):
     return lines
 
 
+def positive(value):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else None
+
+
 def load_timed(directory):
+    """Timed runs with their counters and wall times.  span_s is the harness
+    span from runs.json, or from commands.log for directories written before
+    runs.json carried it."""
     base = os.path.join(directory, "timed")
     records = json.loads(read_text(os.path.join(base, "runs.json")) or "[]")
+    spans = command_spans(read_text(os.path.join(directory, "commands.log")))
     runs = []
     for record in records:
-        values = stat_values(parse_stat_csv(read_text(os.path.join(base, "run-%04d.csv" % record["run"])) or ""))
+        rows = parse_stat(read_text(os.path.join(base, "run-%04d.csv" % record["run"])) or "")
         metrics = parse_cc_metrics(read_text(os.path.join(base, "run-%04d.ccmetrics" % record["run"])) or "")
-        runs.append({**record, "values": values, "metrics": metrics})
+        span, source = record.get("span_s"), "runs.json"
+        if span is None and record["run"] in spans:
+            span, source = spans[record["run"]], "commands.log"
+        wall_ns = metrics["header"].get("wall_ns")
+        runs.append({**record, "values": stat_values(rows), "lines": stat_lines(rows), "metrics": metrics,
+                     "span_s": span, "span_source": source if span is not None else None,
+                     "cc_wall_s": ratio(wall_ns, 1e9) if isinstance(wall_ns, (int, float)) else None,
+                     "task_s": task_seconds(rows)})
     return runs
 
 
-def render_timed(directory, findings):
+def timed_problems(good):
+    """Fail-closed checks: every successful run needs a positive wall time
+    and task-clock; a counted zero is a perf defect, not a measurement."""
+    problems = []
+    for run in good:
+        if positive(run["span_s"]) is None and positive(run["cc_wall_s"]) is None:
+            problems.append("run %d: no positive wall time (harness span %s, compiler wall_ns %s; perf CSV `%s`)" % (
+                run["run"], fmt(run["span_s"], ".3f"), fmt(run["cc_wall_s"], ".4f"),
+                run["lines"].get("duration_time") or run["lines"].get("task-clock") or "no CSV"))
+        task = run["values"].get("task-clock")
+        if task is None or task <= 0:
+            problems.append("run %d: task-clock %s: `%s`" % (run["run"], "missing" if task is None else "non-positive",
+                                                             run["lines"].get("task-clock", "no task-clock line")))
+        for event in ("cycles", "instructions"):
+            value = run["values"].get(event)
+            if value is not None and value <= 0:
+                problems.append("run %d: %s counted %s: `%s`" % (run["run"], event, fmt(value), run["lines"].get(event)))
+    return problems
+
+
+WALL_SOURCES = (("span_s", "harness span", "taskset + perf + compile, monotonic, runs.json/commands.log"),
+                ("cc_wall_s", "compiler wall_ns", "-fmetrics-out, the compiler's own clock"),
+                ("task_s", "task-clock", "CPU time of the process, perf"))
+
+
+def render_timed(directory, findings, problems):
     runs = load_timed(directory)
     good = [run for run in runs if run["exit"] == 0]
     if not good:
+        problems.append("no successful timed run")
         return ["No successful timed run."]
     source = parse_key_values(read_text(os.path.join(directory, "timed", "source.metrics")) or "")
     work_bytes = source.get("lexed.translated_bytes")
     tokens = source.get("preprocessed.tokens")
+    problems += timed_problems(good)
 
     def column(name):
         return [run["values"].get(name) for run in good]
-    wall = [ratio(value, 1e9) for value in column("duration_time")]
+    walls = {key: [positive(run[key]) for run in good] for key, _, _ in WALL_SOURCES}
+    covered = [(sum(value is not None for value in walls[key]), key, label) for key, label, _ in WALL_SOURCES[:2]]
+    count, primary_key, primary = max(covered, key=lambda item: item[0])
+    if count == 0:
+        primary_key, primary = None, None
+    elif count < len(good):
+        problems.append("%s covers %d of %d successful runs" % (primary, count, len(good)))
+    wall = walls[primary_key] if primary_key else []
     summary = summarize(wall)
     instructions, cycles = summarize(column("instructions")), summarize(column("cycles"))
     task = summarize(column("task-clock"))
-    lines = ["%d runs (%d failed), %d byte-identical to the warm-up output%s." % (
+    lines = []
+    plan = json.loads(read_text(os.path.join(directory, "timed", "plan.json")) or "null")
+    guarded(lines, problems, lambda: "%d runs (%d failed), %d byte-identical to the warm-up output%s.%s" % (
         len(runs), len(runs) - len(good), sum(run["identical"] for run in runs),
-        "" if all(run["identical"] for run in good) else " **(nondeterministic output: see timed/runs.json)**")]
+        "" if all(run["identical"] for run in good) else " **(nondeterministic output: see timed/runs.json)**",
+        " Run count: %s." % plan["reason"] if plan else ""))
+
+    def wall_table():
+        rows = []
+        for key, label, origin in WALL_SOURCES:
+            stats = summarize(walls[key])
+            if stats is None:
+                rows.append(["%s (%s)" % (label, origin), "0"] + ["NA"] * 8)
+                continue
+            rows.append(["%s (%s)" % (label, origin), str(stats["n"]), *(fmt(stats[name], ".4f") for name in ("min", "p10", "median", "p90", "max", "mad")),
+                         percent(ratio(stats["mad"], stats["median"])), fmt(stats["mean"], ".4f")])
+        sources = sorted({run["span_source"] for run in good if run["span_source"]})
+        return ["", "Wall time (s); primary: **%s**%s." % (primary or "none", " (spans from %s)" % ", ".join(sources) if sources else ""), ""] + table(
+            ["source", "n", "min", "p10", "median", "p90", "max", "MAD", "MAD/median", "mean"], rows) + [""]
+    guarded(lines, problems, wall_table)
+
+    def duration_line():
+        present = [run for run in good if "duration_time" in run["values"]]
+        zero = [run for run in present if positive(run["values"]["duration_time"]) is None]
+        if not present:
+            return None
+        return "- duration_time: %d of %d runs read 0 or NA (perf 7.2.4 reads it as 0 whenever it shares the event list: `%s`); not used." % (
+            len(zero), len(present), (zero[0] if zero else present[0])["lines"].get("duration_time")) if zero else \
+            "- duration_time present in %d runs (not used; the harness span is the wall time)." % len(present)
+    guarded(lines, problems, duration_line)
     if summary:
-        lines += [""] + table(["wall (s)", "min", "p10", "median", "p90", "max", "MAD", "mean"],
-                              [["", *(fmt(summary[key], ".4f") for key in ("min", "p10", "median", "p90", "max", "mad", "mean"))]])
-        tenths = tenth_medians(wall)
-        lines += ["", "- min-vs-median gap: %s; MAD/median: %s; runs since last new minimum: %s" % (
-            percent(ratio(summary["median"] - summary["min"], summary["min"])), percent(ratio(summary["mad"], summary["median"])),
-            runs_since_minimum(wall)),
-                  "- median per tenth of the series (drift): " + " ".join(fmt(value, ".4f") for value in tenths)]
+        guarded(lines, problems, lambda: "- %s: min-vs-median gap %s; MAD/median %s; runs since last new minimum: %s" % (
+            primary, percent(ratio(summary["median"] - summary["min"], summary["min"])), percent(ratio(summary["mad"], summary["median"])),
+            runs_since_minimum(wall)))
+        guarded(lines, problems, lambda: "- median per tenth of the series (drift): " + " ".join(fmt(value, ".4f") for value in tenth_medians(wall)))
     median_ipc = ratio(instructions and instructions["median"], cycles and cycles["median"])
-    per_run_ipc = summarize([ratio(run["values"].get("instructions"), run["values"].get("cycles")) for run in good])
-    ghz = summarize([ratio(run["values"].get("cycles"), run["values"].get("task-clock"), 1e-6) for run in good])
-    lines += ["- instructions:u median %s, spread (max-min)/median %s" % (
+    guarded(lines, problems, lambda: "- instructions:u median %s, spread (max-min)/median %s" % (
         fmt(instructions and instructions["median"]),
-        percent(ratio(instructions and instructions["max"] - instructions["min"], instructions and instructions["median"]))),
-        "- cycles:u median %s; IPC %s (per-run median %s); effective clock %s GHz (cycles / task-clock); task-clock median %s ms" % (
-        fmt(cycles and cycles["median"]), fmt(median_ipc, ".3f"), fmt(per_run_ipc and per_run_ipc["median"], ".3f"),
-        fmt(ghz and ghz["median"], ".3f"), fmt(task and task["median"], ".1f"))]
-    misses = column("branch-misses")
-    lines.append("- branch-misses:u median %s (MPKI %s); first 3 %s, last 3 %s (a falling trend means the predictor is learning across runs)" % (
-        fmt(summarize(misses) and summarize(misses)["median"]),
-        fmt(ratio(summarize(misses) and summarize(misses)["median"], instructions and instructions["median"], 1000), ".2f"),
-        [fmt(value) for value in misses[:3]], [fmt(value) for value in misses[-3:]]))
+        percent(ratio(instructions and instructions["max"] - instructions["min"], instructions and instructions["median"]))))
+
+    def cycles_line():
+        per_run_ipc = summarize([ratio(run["values"].get("instructions"), run["values"].get("cycles")) for run in good])
+        ghz = summarize([ratio(run["values"].get("cycles"), run["values"].get("task-clock"), 1e-6) for run in good])
+        return "- cycles:u median %s; IPC %s (per-run median %s); effective clock %s GHz (cycles / task-clock); task-clock median %s ms" % (
+            fmt(cycles and cycles["median"]), fmt(median_ipc, ".3f"), fmt(per_run_ipc and per_run_ipc["median"], ".3f"),
+            fmt(ghz and ghz["median"], ".3f"), fmt(task and task["median"], ".1f"))
+    guarded(lines, problems, cycles_line)
+
+    def branch_line():
+        misses = column("branch-misses")
+        stats = summarize(misses)
+        return "- branch-misses:u median %s (MPKI %s); first 3 %s, last 3 %s (a falling trend means the predictor is learning across runs)" % (
+            fmt(stats and stats["median"]), fmt(ratio(stats and stats["median"], instructions and instructions["median"], 1000), ".2f"),
+            [fmt(value) for value in misses[:3]], [fmt(value) for value in misses[-3:]])
+    guarded(lines, problems, branch_line)
     for name in ("page-faults", "minor-faults", "major-faults"):
-        stats = summarize(column(name))
-        lines.append("- %s per run: median %s, min %s, max %s" % (name, fmt(stats and stats["median"]), fmt(stats and stats["min"]), fmt(stats and stats["max"])))
-    if work_bytes and summary:
-        lines.append("- work (-fsource-metrics): %s translated bytes, %s code lines, %s tokens; min %s ns/byte, %s MB/s; median %s ns/byte, %s MB/s" % (
-            fmt(work_bytes), fmt(source.get("lexed.code_lines")), fmt(tokens), fmt(summary["min"] * 1e9 / work_bytes, ".3f"),
-            fmt(work_bytes / summary["min"] / 1e6, ".2f"), fmt(summary["median"] * 1e9 / work_bytes, ".3f"), fmt(work_bytes / summary["median"] / 1e6, ".2f")))
-        lines.append("- instructions per byte %s, per token %s" % (fmt(ratio(instructions and instructions["median"], work_bytes), ".3f"),
-                                                                  fmt(ratio(instructions and instructions["median"], tokens), ".3f")))
+        def fault_line(name=name):
+            stats = summarize(column(name))
+            return "- %s per run: median %s, min %s, max %s" % (name, fmt(stats and stats["median"]), fmt(stats and stats["min"]), fmt(stats and stats["max"]))
+        guarded(lines, problems, fault_line)
+    low, mid = summary and summary["min"], summary and summary["median"]
+    if work_bytes:
+        guarded(lines, problems, lambda: "- work (-fsource-metrics): %s translated bytes, %s code lines, %s tokens; at the %s minimum %s ns/byte, %s MB/s; median %s ns/byte, %s MB/s" % (
+            fmt(work_bytes), fmt(source.get("lexed.code_lines")), fmt(tokens), primary or "wall", fmt(ratio(low, work_bytes, 1e9), ".3f"),
+            fmt(ratio(work_bytes, low, 1e-6), ".2f"), fmt(ratio(mid, work_bytes, 1e9), ".3f"), fmt(ratio(work_bytes, mid, 1e-6), ".2f")))
+        guarded(lines, problems, lambda: "- instructions per byte %s, per token %s" % (fmt(ratio(instructions and instructions["median"], work_bytes), ".3f"),
+                                                                                     fmt(ratio(instructions and instructions["median"], tokens), ".3f")))
     else:
         lines.append("- work denominators: NA (binary without -fsource-metrics)")
-    records = [measured_input(run["metrics"]) for run in good]
-    records = [record for record in records if record]
-    if records:
-        total = statistics.median(record["total_ns"] for record in records)
-        rows = []
-        medians = {}
-        for phase in PHASES:
-            medians[phase] = statistics.median(record.get(phase + "_ns", 0) for record in records)
-            rows.append([phase, fmt(medians[phase] / 1e6, ",.2f"), percent(ratio(medians[phase], total))])
-        rows.append(["input total", fmt(total / 1e6, ",.2f"), "100.0%"])
-        headers = [run["metrics"]["header"] for run in good if run["metrics"]["header"]]
-        lines += ["", "Per-phase median over %d `-fmetrics-out` records:" % len(records), ""] + table(["phase", "median ms", "share of input"], rows)
-        lines.append("")
-        lines.append("- arena peak median %s bytes; arena retained median %s; peak RSS median %s bytes; driver wall_ns median %s ms" % (
-            fmt(statistics.median(record.get("arena_peak_bytes", 0) for record in records)),
-            fmt(statistics.median(record.get("arena_retained_bytes", 0) for record in records)),
-            fmt(statistics.median(header.get("peak_rss_bytes", 0) for header in headers) if headers else None),
-            fmt(statistics.median(header.get("wall_ns", 0) for header in headers) / 1e6 if headers else None, ",.1f")))
-        slowest = max(PHASES, key=lambda phase: medians[phase])
-        findings.append("Slowest phase (timed median): **%s** %.1f ms = %s of the input (timed/run-*.ccmetrics)" % (
-            slowest, medians[slowest] / 1e6, percent(ratio(medians[slowest], total))))
-    else:
-        lines += ["", "Phase breakdown: NA -- the binary %s." % _metrics_reason(directory)]
+    guarded(lines, problems, lambda: timed_phase_lines(directory, good, findings))
     if summary:
-        findings.append("Wall min %.4f s / median %.4f s, IPC %s, %s MB/s at the minimum (timed/)" % (
-            summary["min"], summary["median"], fmt(median_ipc, ".3f"), fmt(work_bytes / summary["min"] / 1e6, ".2f") if work_bytes else "NA"))
+        guarded(lines, problems, lambda: findings.append("Wall (%s) min %s s / median %s s, IPC %s, %s MB/s at the minimum (timed/)" % (
+            primary, fmt(low, ".4f"), fmt(mid, ".4f"), fmt(median_ipc, ".3f"), fmt(ratio(work_bytes, low, 1e-6), ".2f"))))
+    return lines
+
+
+def timed_phase_lines(directory, good, findings):
+    records = [record for record in (measured_input(run["metrics"]) for run in good) if record]
+    if not records:
+        return ["", "Phase breakdown: NA -- the binary %s." % _metrics_reason(directory)]
+    total = statistics.median(record["total_ns"] for record in records)
+    rows, medians = [], {}
+    for phase in PHASES:
+        medians[phase] = statistics.median(record.get(phase + "_ns", 0) for record in records)
+        rows.append([phase, fmt(ratio(medians[phase], 1e6), ",.2f"), percent(ratio(medians[phase], total))])
+    rows.append(["input total", fmt(ratio(total, 1e6), ",.2f"), "100.0%"])
+    headers = [run["metrics"]["header"] for run in good if run["metrics"]["header"]]
+    lines = ["", "Per-phase median over %d `-fmetrics-out` records:" % len(records), ""] + table(["phase", "median ms", "share of input"], rows)
+    lines += ["", "- arena peak median %s bytes; arena retained median %s; peak RSS median %s bytes" % (
+        fmt(statistics.median(record.get("arena_peak_bytes", 0) for record in records)),
+        fmt(statistics.median(record.get("arena_retained_bytes", 0) for record in records)),
+        fmt(statistics.median(header.get("peak_rss_bytes", 0) for header in headers) if headers else None))]
+    slowest = max(PHASES, key=lambda phase: medians[phase])
+    findings.append("Slowest phase (timed median): **%s** %s ms = %s of the input (timed/run-*.ccmetrics)" % (
+        slowest, fmt(ratio(medians[slowest], 1e6), ".1f"), percent(ratio(medians[slowest], total))))
     return lines
 
 
@@ -896,29 +1397,107 @@ def _metrics_reason(directory):
     return "wrote no measured record in this step"
 
 
-def render_topdown(directory, findings):
+def load_stat_file(base):
+    """(rows, file) from base.json (perf stat -j) or else base.csv."""
+    for suffix in (".json", ".csv"):
+        rows = parse_stat(read_text(base + suffix) or "")
+        if rows:
+            return rows, os.path.basename(base) + suffix
+    return [], None
+
+
+def render_topdown(directory, findings, problems):
     groups = json.loads(read_text(os.path.join(directory, "topdown", "groups.json")) or "[]")
     if not groups:
+        problems.append("no metric group measured")
         return ["No metric group measured."]
-    lines = []
+    counts = {"measured": 0, "unavailable": 0, "failed": 0}
+    cache = {}
+
+    def timed_instructions():
+        if "value" not in cache:
+            stats = summarize([run["values"].get("instructions") for run in load_timed(directory) if run["exit"] == 0])
+            cache["value"] = (stats["median"], "instructions:u (timed median)") if stats else None
+        return cache["value"]
+    body = []
     for entry in groups:
-        base = os.path.join(directory, "topdown", safe_name(entry["group"]))
-        rows = parse_stat_csv(read_text(base + ".csv") or "")
-        metrics = stat_metrics(rows)
-        multiplex = multiplex_percent(rows)
-        lines += ["", "**%s** (exit %d, counters running %s of the time%s)" % (
-            entry["group"], entry["exit"], "NA" if multiplex is None else "%.1f%%" % multiplex,
-            "" if multiplex is None or multiplex >= 99.9 else ", multiplexed"), ""]
-        if metrics:
-            lines += table(["metric", "value"], [(name, "%s %s" % (fmt(value, ",.3f"), unit)) for name, value, unit in metrics])
+        guarded(body, problems, lambda entry=entry: topdown_group_lines(directory, entry, counts, findings, problems, timed_instructions))
+    if counts["measured"] == 0:
+        problems.append("no metric group produced values")
+    head = ["%d measured, %d unavailable (uncore PMU absent; not failures), %d failed. Percentages and ratios come from perf's "
+            "metric expressions; JSON (`-j`) values keep six decimals, `-x,` values are rounded as marked. A group whose counters "
+            "ran less than all of the time is multiplexed (scaled estimates) and is re-measured one metric per run; those "
+            "non-multiplexed values are shown first and the group's value is kept only as a flagged fallback." % (
+                counts["measured"], counts["unavailable"], counts["failed"])]
+    return head + body
+
+
+def topdown_group_lines(directory, entry, counts, findings, problems, timed_instructions):
+    group = entry["group"]
+    base = os.path.join(directory, "topdown", safe_name(group))
+    log = (read_text(base + ".log") or "") + "\n" + (read_text(base + ".dryrun.log") or "")
+    uncore = " Uncore/system-wide counters: not a per-process number." if UNCORE_GROUP.search(group) else ""
+    if entry.get("unavailable") or (entry.get("exit") not in (0, None) and UNAVAILABLE_PMU.search(log)):
+        counts["unavailable"] += 1
+        return ["", "**%s**: unavailable -- uncore PMU absent on this host (`%s`).%s" % (group, entry.get("reason") or last_reason(log), uncore)]
+    rows, file = load_stat_file(base)
+    metrics = metric_rows(rows)
+    if entry.get("exit") != 0 or not metrics:
+        counts["failed"] += 1
+        reason = entry.get("reason") or last_reason(log) if entry.get("exit") != 0 else "no metric values"
+        problems.append("topdown %s: %s" % (group, reason))
+        return ["", "**%s** (exit %s)" % (group, entry.get("exit")), "", "NA (%s)" % reason]
+    counts["measured"] += 1
+    values = stat_values(rows)
+    multiplex = multiplex_percent(rows)
+    split = {}
+    for item in entry.get("split", []):
+        split_rows, _ = load_stat_file(os.path.join(directory, "topdown", safe_name(group) + ".split", safe_name(item["metric"])))
+        chosen = [row for row in metric_rows(split_rows) if row["metric_name"] == item["metric"]]
+        if item.get("exit") == 0 and chosen:
+            split[item["metric"]] = (chosen[0], stat_values(split_rows), multiplex_percent(split_rows))
+    multiplexed = multiplex is not None and multiplex < FULL_RUNNING
+    lines = ["", "**%s** (topdown/%s, exit %d, counters running %s of the time%s)%s" % (
+        group, file, entry["exit"], "NA" if multiplex is None else "%.1f%%" % multiplex,
+        (", multiplexed: %d of %d metrics re-measured alone" % (len(split), len(metrics))) if multiplexed else "", uncore), ""]
+    duration = values.get("duration_time")
+    duration_bad = "duration_time" in values and positive(duration) is None
+    rows_out, chosen_metrics = [], []
+    for row in metrics:
+        own, own_values, own_multiplex = split.get(row["metric_name"], (row, values, multiplex))
+        instructions = instruction_count(own_values, timed_instructions())
+        if time_divided(own) and (duration_bad or ("duration_time" in own_values and positive(own_values["duration_time"]) is None)):
+            value_text = "NA (unreliable: divides by duration_time, which perf read as %s)" % fmt(duration if duration_bad else own_values["duration_time"])
+            chosen_metrics.append((own["metric_name"], None, own["metric_unit"]))
         else:
-            log = read_text(base + ".log") or ""
-            reason = [line for line in log.splitlines() if line.strip() and not line.startswith(("$", "---", "exit="))]
-            lines.append("NA (%s)" % (reason[-1].strip() if reason else "no metric values"))
-        if re.fullmatch(r"(?i)pipelinel1|topdownl1|tmal1", entry["group"]) and metrics:
-            category = dominant_category(metrics)
-            if category:
-                findings.append("Dominant top-down level-1 category: **%s** %s%% (topdown/%s.csv)" % (category[0], fmt(category[1], ".1f"), safe_name(entry["group"])))
+            value_text = "%s %s" % (metric_text(own["metric_value"], own["metric_decimals"]), own["metric_unit"])
+            chosen_metrics.append((own["metric_name"], own["metric_value"], own["metric_unit"]))
+        recomputed = recompute_metric(own, own_values, instructions)
+        recomputed_text = "-"
+        if recomputed:
+            recomputed_text = "%s%s = %s" % (significant(recomputed[0]), " (%.2f%%)" % (recomputed[0] * 100) if own["metric_unit"] == "per_branch" else "", recomputed[1])
+        if row["metric_name"] in split:
+            source = "alone, running %s" % ("NA" if own_multiplex is None else "%.1f%%" % own_multiplex)
+            if own_multiplex is not None and own_multiplex < FULL_RUNNING:
+                source += " (still multiplexed)"
+            source += "; group value %s" % metric_text(row["metric_value"], row["metric_decimals"])
+        elif multiplexed:
+            source = "**multiplexed group value** (counters %.1f%%), fallback" % multiplex
+        else:
+            source = "group"
+        rows_out.append((row["metric_name"], value_text, recomputed_text, source))
+    lines += table(["metric", "value", "recomputed from raw counts", "source"], rows_out)
+    pair = branch_pair(values)
+    if pair:
+        instructions = instruction_count(values, timed_instructions())
+        lines += ["", "- branch misprediction rate %.2f%% (%s / %s), branch MPKI %s (per 1000 %s)" % (
+            pair[0] * 100.0 / pair[1], pair[2], pair[3], fmt(ratio(pair[0], instructions and instructions[0], 1000), ".3f"),
+            instructions[1] if instructions else "instructions: NA")]
+    if re.fullmatch(r"(?i)pipelinel1|topdownl1|tmal1", group):
+        category = dominant_category(chosen_metrics)
+        if category:
+            findings.append("Dominant top-down level-1 category: **%s** %s%% (topdown/%s%s)" % (
+                category[0], fmt(category[1], ".1f"), file, "; multiplexed group, see the per-metric values" if multiplexed and not split else ""))
     return lines
 
 
@@ -939,9 +1518,10 @@ def timeline_data(directory):
     return intervals, metrics, phase_spans(metrics, total), total
 
 
-def render_timeline(directory, findings):
+def render_timeline(directory, findings, problems):
     intervals, metrics, spans, total = timeline_data(directory)
     if not intervals:
+        problems.append("no interval data in timeline/interval.csv")
         return ["No interval data."]
     events = [normalize_event(event) for event in INTERVAL_EVENTS]
     with open(os.path.join(directory, "timeline", "intervals.csv"), "w") as handle:
@@ -967,8 +1547,14 @@ def render_timeline(directory, findings):
                  "the workload exec, the compiler's clock starts after argument parsing; %s ms of the run lie outside the compiler's "
                  "clock (start-up + teardown), which bounds how early the phase boundaries can be drawn. Interval granularity adds up "
                  "to %d ms of smearing at each boundary." % (fmt(error and error * 1e3, ".2f"), INTERVAL_MS))
+    guarded(lines, problems, lambda: timeline_phase_lines(intervals, spans, findings))
+    lines += ["", "The `-M PipelineL1` interval run is kept raw: timeline/pipeline-l1.csv."]
+    return lines
+
+
+def timeline_phase_lines(intervals, spans, findings):
     attributed = attribute_intervals(intervals, spans)
-    rows = []
+    lines, rows = [], []
     for name, start, end in spans:
         values = attributed[name]
         instructions = values.get("instructions")
@@ -986,7 +1572,6 @@ def render_timeline(directory, findings):
     if any(count for count, _ in faulting):
         count, name = max(faulting)
         findings.append("Most minor faults by phase: **%s** (%s faults, timeline phase table)" % (name, fmt(count)))
-    lines += ["", "The `-M PipelineL1` interval run is kept raw: timeline/pipeline-l1.csv."]
     return lines
 
 
@@ -1071,68 +1656,85 @@ def fault_summary(text, buckets=20):
             "bucket_ms": width * 1e3, "timeline": timeline, "span_ms": (last - first) * 1e3}
 
 
-def render_sampling(directory, findings):
+SAMPLING_LABELS = {"cycles": "cycles", "cpu-clock": "cpu-clock (cycles:u unsupported; time-based fallback)", "branch-misses": "branch misses",
+                   "l1i-misses": "L1I misses", "l1d-misses": "L1D misses", "dtlb-misses": "dTLB misses"}
+
+
+def render_sampling(directory, findings, problems):
     base = os.path.join(directory, "sampling")
     lines = ["Samples carry skid (none of these events is precise on AMD without IBS): read symbols as reliable and lines as "
              "\"this loop\". Branch-miss samples land after the mispredicted branch; `tools/branch_miss_survey.py` uses LBR "
-             "for exact branches. Percentages are shares of the whole capture."]
-    labels = {"cycles": "cycles", "cpu-clock": "cpu-clock (cycles:u unsupported; time-based fallback)", "branch-misses": "branch misses",
-              "l1i-misses": "L1I misses", "l1d-misses": "L1D misses", "dtlb-misses": "dTLB misses"}
-    found = False
-    for name, label in labels.items():
-        text = read_text(os.path.join(base, name + ".self.txt"))
-        if text is None:
-            if name != "cpu-clock":
-                lines += ["", "**%s**: NA (%s)" % (label, _record_failure(os.path.join(base, name + ".record.log")))]
-            continue
-        found = True
-        entries = top_entries(text, 15)
-        sampled = [event for event in parse_report(text) if event]
-        if sampled and normalize_event(sampled[0]) != normalize_event(dict(SAMPLE_EVENTS).get(name, sampled[0])):
-            label += " (perf fell back to event '%s')" % sampled[0]
-        lines += ["", "**Top self symbols by %s** (sampling/%s.self.txt)" % (label, name), ""]
-        lines += table(["share", "symbol"], [("%.2f%%" % entry[0], "`%s`" % entry[2]) for entry in entries]) if entries else ["no samples"]
-        if entries:
-            findings.append("Hot by %s: %s (sampling/%s.self.txt)" % (label.replace(" (cycles:u unsupported; time-based fallback)", ""), ", ".join(
-                "`%s` %.1f%%" % (entry[2], entry[0]) for entry in entries[:5]), name))
-        annotations = sorted(file for file in os.listdir(os.path.join(base, "annotate")) if file.startswith(name + "-") and file.endswith(".txt")) \
-            if os.path.isdir(os.path.join(base, "annotate")) else []
-        for file in annotations:
-            hottest = parse_annotate(read_text(os.path.join(base, "annotate", file)) or "", 5)
-            lines += ["", "Hottest instructions in sampling/annotate/%s:" % file, ""]
-            lines += table(["share of symbol", "address", "instruction"], [("%.2f%%" % row[0], row[1], "`%s`" % row[2]) for row in hottest]) if hottest else ["NA (annotate produced no instruction lines; see the matching .log)"]
-        children = read_text(os.path.join(base, name + ".children.txt"))
-        if children is not None:
-            entries = [entry for entry in report_entries(children) if entry[1] is not None][:20]
-            lines += ["", "**Inclusive (children) time** (call trees in sampling/%s.children.txt)" % name, ""]
-            lines += table(["children", "self", "symbol"], [("%.2f%%" % entry[0], "%.2f%%" % entry[1], "`%s`" % entry[2]) for entry in entries])
-        srcline = read_text(os.path.join(base, name + ".srcline.txt"))
-        if srcline is not None:
-            entries = top_entries(srcline, 20)
-            lines += ["", "**Top source lines** (sampling/%s.srcline.txt)" % name, ""]
-            lines += table(["share", "line"], [("%.2f%%" % entry[0], "`%s`" % entry[2]) for entry in entries]) if entries else ["NA (see %s.srcline.log)" % name]
-    text = read_text(os.path.join(base, "faults.self.txt"))
-    if text is None:
-        lines += ["", "**Page faults**: NA (%s)" % _record_failure(os.path.join(base, "faults.record.log"))]
-    else:
-        found = True
-        entries = top_entries(text, 15)
-        lines += ["", "**Page faults by symbol** (every fault recorded; callers in sampling/faults.callers.txt)", ""]
-        lines += table(["share", "symbol"], [("%.2f%%" % entry[0], "`%s`" % entry[2]) for entry in entries])
-        if entries:
-            findings.append("Top fault sites: %s (sampling/faults.callers.txt)" % ", ".join("`%s` %.1f%%" % (entry[2], entry[0]) for entry in entries[:5]))
-        summary = fault_summary(read_text(os.path.join(base, "faults.script.txt")))
-        if summary:
-            root = load_meta(directory).get("config", {}).get("repo_root", "")
-            lines += ["", "%s faults over %.1f ms. Faulting data addresses by mapping (protection as mapped: perf does not see "
-                      "mprotect, so a `---p` reservation that faults was committed later):" % (fmt(summary["count"]), summary["span_ms"]), ""]
-            lines += table(["faults", "share", "region"], [(fmt(count), percent(count / summary["count"]), "`%s`" % (label.replace(root + "/", "") if root else label))
-                                                           for label, count in summary["regions"][:12]])
-            lines += ["", "Fault timeline (%.1f ms buckets from the first fault): %s" % (summary["bucket_ms"], " ".join(str(count) for count in summary["timeline"]))]
-            if summary["regions"]:
-                findings.append("Most-faulted region: `%s` (%s of faults)" % (summary["regions"][0][0], percent(summary["regions"][0][1] / summary["count"])))
+             "for exact branches. Percentages are shares of the whole capture; each capture is the workload process alone, so "
+             "no thread filter applies. An unresolved address is named by its binary (`ide 0x18f5ce`)."]
+    found = []
+    for name, label in SAMPLING_LABELS.items():
+        guarded(lines, problems, lambda name=name, label=label: sampling_capture_lines(base, name, label, findings, problems, found))
+    if not any(name in found for name in ("cycles", "cpu-clock")):
+        problems.append("neither cycles nor cpu-clock produced a report")
+    guarded(lines, problems, lambda: fault_lines(directory, base, findings, problems, found))
     if not found:
         lines.append("No capture produced a report.")
+    return lines
+
+
+def sampling_capture_lines(base, name, label, findings, problems, found):
+    text = read_text(os.path.join(base, name + ".self.txt"))
+    if text is None:
+        return [] if name == "cpu-clock" else ["", "**%s**: NA (%s)" % (label, _record_failure(os.path.join(base, name + ".record.log")))]
+    found.append(name)
+    entries = top_entries(text, 15)
+    if not entries:
+        problems.append("sampling %s: the report has no rows (sampling/%s.self.txt)" % (name, name))
+    sampled = [event for event in parse_report(text) if event]
+    if sampled and normalize_event(sampled[0]) != normalize_event(dict(SAMPLE_EVENTS).get(name, sampled[0])):
+        label += " (perf fell back to event '%s')" % sampled[0]
+    lines = ["", "**Top self symbols by %s** (sampling/%s.self.txt)" % (label, name), ""]
+    lines += table(["share", "symbol"], [("%.2f%%" % entry[0], "`%s`" % entry[2]) for entry in entries]) if entries else ["no samples"]
+    if entries:
+        findings.append("Hot by %s: %s (sampling/%s.self.txt)" % (label.replace(" (cycles:u unsupported; time-based fallback)", ""), ", ".join(
+            "`%s` %.1f%%" % (entry[2], entry[0]) for entry in entries[:5]), name))
+    annotations = sorted(file for file in os.listdir(os.path.join(base, "annotate")) if file.startswith(name + "-") and file.endswith(".txt")) \
+        if os.path.isdir(os.path.join(base, "annotate")) else []
+    for file in annotations:
+        hottest = parse_annotate(read_text(os.path.join(base, "annotate", file)) or "", 5)
+        lines += ["", "Hottest instructions in sampling/annotate/%s:" % file, ""]
+        lines += table(["share of symbol", "address", "instruction"], [("%.2f%%" % row[0], row[1], "`%s`" % row[2]) for row in hottest]) if hottest else ["NA (annotate produced no instruction lines; see the matching .log)"]
+    children = read_text(os.path.join(base, name + ".children.txt"))
+    if children is not None:
+        entries = [entry for entry in report_entries(children) if entry[1] is not None][:20]
+        lines += ["", "**Inclusive (children) time** (call trees in sampling/%s.children.txt)" % name, ""]
+        lines += table(["children", "self", "symbol"], [("%.2f%%" % entry[0], "%.2f%%" % entry[1], "`%s`" % entry[2]) for entry in entries])
+    srcline = read_text(os.path.join(base, name + ".srcline.txt"))
+    if srcline is not None:
+        entries = top_entries(srcline, 20)
+        lines += ["", "**Top source lines** (sampling/%s.srcline.txt)" % name, ""]
+        lines += table(["share", "line"], [("%.2f%%" % entry[0], "`%s`" % entry[2]) for entry in entries]) if entries else ["NA (see %s.srcline.log)" % name]
+    return lines
+
+
+def fault_lines(directory, base, findings, problems, found):
+    text = read_text(os.path.join(base, "faults.self.txt"))
+    if text is None:
+        problems.append("no page-fault capture (sampling/faults.record.log)")
+        return ["", "**Page faults**: NA (%s)" % _record_failure(os.path.join(base, "faults.record.log"))]
+    found.append("faults")
+    entries = top_entries(text, 15)
+    if not entries:
+        problems.append("page faults: the report has no rows (sampling/faults.self.txt)")
+    lines = ["", "**Page faults by symbol** (every fault recorded; callers in sampling/faults.callers.txt)", ""]
+    lines += table(["share", "symbol"], [("%.2f%%" % entry[0], "`%s`" % entry[2]) for entry in entries])
+    if entries:
+        findings.append("Top fault sites: %s (sampling/faults.callers.txt)" % ", ".join("`%s` %.1f%%" % (entry[2], entry[0]) for entry in entries[:5]))
+    summary = fault_summary(read_text(os.path.join(base, "faults.script.txt")))
+    if summary:
+        root = load_meta(directory).get("config", {}).get("repo_root", "")
+        lines += ["", "%s faults over %.1f ms. Faulting data addresses by mapping (protection as mapped: perf does not see "
+                  "mprotect, so a `---p` reservation that faults was committed later):" % (fmt(summary["count"]), summary["span_ms"]), ""]
+        lines += table(["faults", "share", "region"], [(fmt(count), percent(count / summary["count"]), "`%s`" % (label.replace(root + "/", "") if root else label))
+                                                       for label, count in summary["regions"][:12]])
+        lines += ["", "Fault timeline (%.1f ms buckets from the first fault): %s" % (summary["bucket_ms"], " ".join(str(count) for count in summary["timeline"]))]
+        if summary["regions"]:
+            findings.append("Most-faulted region: `%s` (%s of faults)" % (summary["regions"][0][0], percent(summary["regions"][0][1] / summary["count"])))
     return lines
 
 
@@ -1144,26 +1746,87 @@ def _record_failure(log_path):
     return reason[-1][:200] if reason else "failed"
 
 
-def render_ibs(directory, findings):
+def filter_description(selection):
+    if not selection:
+        return "filtered by exec name only (pre-fix report; the renamed main_thread is missing)"
+    if selection.get("method") == "tid":
+        return "threads %s (%s)" % (",".join(str(tid) for tid in selection["tids"]), ",".join(selection["comms"]))
+    return "command names %s (no thread had samples in the binary)" % ",".join(selection.get("comms", []))
+
+
+def render_ibs(directory, findings, problems):
     base = os.path.join(directory, "ibs")
     if not os.path.isdir(base):
         return ["Not run (needs --sudo and an AMD IBS PMU)."]
     lines = ["IBS tags individual micro-ops (op) and fetches, so attribution is precise; recorded system-wide on the pinned CPU and "
-             "filtered to the compiler's command name."]
+             "filtered to the workload's threads: the thread ids with samples in the workload binary, with their command names "
+             "(the compiler renames its main thread `main_thread`, so its exec name alone misses nearly every sample). Shares "
+             "are of the whole capture (perf's absolute percentages)."]
     for name in ("ibs_op", "ibs_fetch"):
-        text = read_text(os.path.join(base, name + ".self.txt"))
-        entries = top_entries(text, 15)
-        lines += ["", "**%s top symbols** (ibs/%s.self.txt)" % (name, name), ""]
-        lines += table(["share", "symbol"], [("%.2f%%" % entry[0], "`%s`" % entry[2]) for entry in entries]) if entries else ["NA (%s)" % _record_failure(os.path.join(base, name + ".record.log"))]
-    text = read_text(os.path.join(base, "mem.report.txt"))
-    lines += ["", "**perf mem: load source by symbol** (ibs/mem.report.txt)", ""]
-    lines += fenced("\n".join(line for line in (text or "").splitlines() if line.strip() and not line.startswith("#")), 30) if text else ["NA (%s)" % _record_failure(os.path.join(base, "mem.record.log"))]
+        guarded(lines, problems, lambda name=name: ibs_capture_lines(base, name, findings, problems))
+    guarded(lines, problems, lambda: mem_lines(base, findings, problems))
     return lines
 
 
-def render_micro(directory, findings):
+def capture_has_samples(base, name):
+    tasks = read_text(os.path.join(base, name + ".tasks.txt"))
+    if tasks is not None:
+        return bool(parse_task_report(tasks))
+    data = os.path.join(base, name + ".data")
+    return os.path.isfile(data) and os.path.getsize(data) > 0
+
+
+def ibs_capture_lines(base, name, findings, problems):
+    selection = json.loads(read_text(os.path.join(base, name + ".filter.json")) or "null")
+    file = name + ".workload.txt"
+    text = read_text(os.path.join(base, file))
+    if text is None and read_text(os.path.join(base, name + ".self.txt")) is not None:
+        file = name + ".self.txt"
+        text = read_text(os.path.join(base, file))
+        problems.append("ibs %s: only the pre-fix exec-name report exists; re-render with perf available (`report DIR --perf PATH`) "
+                        "to derive the per-thread report from ibs/%s.data" % (name, name))
+    entries = top_entries(text, 15)
+    lines = ["", "**%s top symbols** (ibs/%s; %s)" % (name, file, filter_description(selection)), ""]
+    if not entries:
+        if capture_has_samples(base, name):
+            problems.append("ibs %s: 0 report rows while the capture has samples (ibs/%s)" % (name, file))
+        return lines + ["NA (%s)" % _record_failure(os.path.join(base, name + ".record.log"))]
+    findings.append("Hot by %s (precise, workload threads): %s (ibs/%s)" % (name, ", ".join("`%s` %.2f%%" % (entry[2], entry[0]) for entry in entries[:3]), file))
+    return lines + table(["share", "symbol"], [("%.2f%%" % entry[0], "`%s`" % entry[2]) for entry in entries])
+
+
+def mem_lines(base, findings, problems):
+    lines = ["", "**perf mem: load source** (ibs/mem.levels.txt; %s)" % filter_description(
+        json.loads(read_text(os.path.join(base, "mem.filter.json")) or "null")), ""]
+    levels = parse_mem_levels(read_text(os.path.join(base, "mem.levels.txt")))
+    if levels:
+        total = sum(row[1] for row in levels)
+        lines += ["Shares are weighted by each sample's latency, so a large share can rest on a handful of samples: read the "
+                  "sample count beside it.", ""]
+        lines += table(["load source", "weighted share", "samples", "share of samples"],
+                       [(row[2], "%.2f%%" % row[0], fmt(row[1]), percent(ratio(row[1], total))) for row in levels])
+        findings.append("Load sources (perf mem, workload threads): %s (ibs/mem.levels.txt)" % ", ".join(
+            "%s %.2f%% (%s samples)" % (row[2], row[0], fmt(row[1])) for row in levels[:3]))
+    elif os.path.isfile(os.path.join(base, "mem.data")):
+        if capture_has_samples(base, "mem"):
+            problems.append("perf mem: no load-source rows while the capture has samples")
+        lines.append("NA (%s)" % _record_failure(os.path.join(base, "mem.record.log")))
+    else:
+        problems.append("no perf mem capture")
+        lines.append("NA (%s)" % _record_failure(os.path.join(base, "mem.record.log")))
+    file = "mem.workload.txt" if os.path.exists(os.path.join(base, "mem.workload.txt")) else "mem.report.txt"
+    text = read_text(os.path.join(base, file))
+    if file == "mem.report.txt" and text is not None:
+        problems.append("perf mem: only the pre-fix exec-name report exists; re-render with perf available")
+    lines += ["", "**perf mem: load source by symbol** (ibs/%s)" % file, ""]
+    lines += fenced("\n".join(line for line in (text or "").splitlines() if line.strip() and not line.startswith("#")), 30) if text else ["NA"]
+    return lines
+
+
+def render_micro(directory, findings, problems):
     text = read_text(os.path.join(directory, "micro", "bench.txt"))
     if not text or "BENCH_C_FRONTEND" not in text:
+        problems.append("`ide bench` unsupported or not run")
         return ["NA (`ide bench` unsupported or not run)."]
     lines = [line for line in text.splitlines() if "BENCH" in line]
     return ["In-process repetition of the C frontend on tests/basic_c_operations.c. Caveat (Lemire): repeating one identical "
@@ -1176,20 +1839,73 @@ RENDERERS = {"env": ("1. Environment", render_env), "timed": ("2. Timed runs", r
              "micro": ("7. Micro-benchmark", render_micro)}
 
 
-def render_report(directory):
+def render_section(directory, step, findings):
+    """(lines, problems) of one section; problems make an `ok` step `degraded`."""
+    problems = []
+    try:
+        lines = RENDERERS[step][1](directory, findings, problems)
+    except Exception as error:  # a malformed raw file must not hide the other sections
+        lines = ["Rendering failed: %s: %s" % (type(error).__name__, error)]
+        problems.append("rendering failed: %s: %s" % (type(error).__name__, error))
+    return lines, problems
+
+
+def effective_status(state, problems):
+    """`ok` only when the section has real data: a recorded ok/degraded step is
+    re-assessed from its raw files; failed and skipped stay as recorded."""
+    if state is None:
+        return "not run"
+    if state["status"] in ("ok", "degraded"):
+        return "degraded" if problems else "ok"
+    return state["status"]
+
+
+def problem_summary(problems, limit=1):
+    if not problems:
+        return ""
+    return "; ".join(problems[:limit]) + (" (+%d more)" % (len(problems) - limit) if len(problems) > limit else "")
+
+
+def workload_basename(meta, directory):
+    config = meta.get("config", {})
+    ide = config.get("ide") or json.loads(read_text(os.path.join(directory, "env", "env.json")) or "{}").get("ide") \
+        or (config.get("command") or "ide").split()[0]
+    return os.path.basename(ide)
+
+
+def resolve_perf(meta, explicit=None):
+    """The perf to derive missing reports with: --perf, the recorded one, or `perf` on PATH."""
+    for candidate in (explicit, meta.get("config", {}).get("perf"), "perf"):
+        if candidate and (shutil.which(candidate) or os.access(candidate, os.X_OK)):
+            return candidate
+    return None
+
+
+def render_report(directory, perf=None):
+    """report.md from the raw files.  With `perf`, reports derived from raw
+    perf.data that an older run lacks (the per-thread IBS filter) are derived
+    first; nothing re-runs the workload."""
     meta = load_meta(directory)
-    findings, body = [], []
+    if perf and os.path.isdir(os.path.join(directory, "ibs")):
+        notes = derive_ibs_reports(Lab(directory, perf, repo_root=directory), os.path.join(directory, "ibs"), workload_basename(meta, directory))
+        if notes:
+            print("uarch_lab: derived IBS reports: %s" % "; ".join(notes), file=sys.stderr)
+    findings, body, statuses = [], [], {}
+    steps = meta.get("steps", {})
     for step in STEPS:
-        title, renderer = RENDERERS[step]
-        body += ["", "## " + title, ""]
-        state = meta.get("steps", {}).get(step)
-        if state and state["status"] != "ok":
+        body += ["", "## " + RENDERERS[step][0], ""]
+        state = steps.get(step)
+        if state is not None and state["status"] not in ("ok", "degraded", "failed"):
             body.append("Step status: **%s** %s" % (state["status"], state.get("note", "")))
-        if state is None or state["status"] in ("ok", "failed"):
-            try:
-                body += renderer(directory, findings)
-            except Exception as error:  # a malformed raw file must not hide the other sections
-                body.append("Rendering failed: %s: %s" % (type(error).__name__, error))
+            statuses[step] = (state["status"], [])
+            continue
+        lines, problems = render_section(directory, step, findings)
+        status = effective_status(state, problems)
+        statuses[step] = (status, problems)
+        if status not in ("ok", "not run"):
+            body.append("Step status: **%s** %s" % (status, state.get("note", "")))
+            body += [""] + ["- %s" % problem for problem in problems[:8]] + (["- ... %d more" % (len(problems) - 8)] if len(problems) > 8 else []) + [""]
+        body += lines
     config = meta.get("config", {})
     head = ["# Micro-architecture lab report", "",
             "Workload: `%s`, pinned to CPU %s, %s timed runs. Raw files are beside this report; `python3 tools/uarch_lab.py report %s` "
@@ -1197,8 +1913,8 @@ def render_report(directory):
             "## Findings to investigate", "", "Data pointers, not conclusions; each names the raw file behind it.", ""]
     head += ["- " + finding for finding in findings] or ["- none (no step produced data)"]
     head += ["", "## Steps", ""] + table(["step", "status", "elapsed s", "note"], [
-        (step, meta.get("steps", {}).get(step, {}).get("status", "not run"), fmt(meta.get("steps", {}).get(step, {}).get("elapsed_s"), ".1f"),
-         meta.get("steps", {}).get(step, {}).get("note", "")) for step in STEPS])
+        (step, statuses[step][0], fmt(steps.get(step, {}).get("elapsed_s"), ".1f"),
+         " -- ".join(part for part in (steps.get(step, {}).get("note", ""), problem_summary(statuses[step][1])) if part)) for step in STEPS])
     text = "\n".join(head + body) + "\n"
     with open(os.path.join(directory, "report.md"), "w") as handle:
         handle.write(text)
@@ -1217,9 +1933,11 @@ def command_run(arguments):
     extra = arguments.extra[1:] if arguments.extra[:1] == ["--"] else arguments.extra
     lab = Lab(arguments.output, arguments.perf, cpu, ide, arguments.repo_root, extra, arguments.sudo)
     lab.meta["config"] = {"command": shell_join(lab.workload("OUT")), "cpu": cpu, "runs": arguments.runs, "perf": arguments.perf,
-                          "repo_root": lab.repo_root, "skip": arguments.skip, "sudo": arguments.sudo}
+                          "repo_root": lab.repo_root, "skip": arguments.skip, "sudo": arguments.sudo, "ide": ide,
+                          "target_minutes": arguments.target_minutes}
     lab.save_meta()
-    print("uarch_lab: output %s; at ~2 s per compile expect about %.0f min" % (lab.output, (arguments.runs + 70) * 2.2 / 60), flush=True)
+    print("uarch_lab: output %s; %s" % (lab.output, "%d timed runs (--runs)" % arguments.runs if arguments.runs is not None else
+                                        "timed-run count chosen after %d pilot runs to land near %g min" % (PILOT_RUNS, arguments.target_minutes)), flush=True)
     started = time.monotonic()
     for step in STEPS:
         if step in arguments.skip or (step == "ibs" and not arguments.sudo):
@@ -1232,7 +1950,9 @@ def command_run(arguments):
             if step == "env":
                 note = step_env(lab)
             elif step == "timed":
-                note = step_timed(lab, arguments.runs, arguments.warmups)
+                facts = json.loads(read_text(os.path.join(lab.output, "env", "env.json")) or "{}")
+                note = step_timed(lab, arguments.runs, arguments.warmups, arguments.target_minutes, started,
+                                  estimate_other_compiles(facts.get("metric_groups"), arguments.skip, arguments.sudo))
             elif step == "topdown":
                 facts = json.loads(read_text(os.path.join(lab.output, "env", "env.json")) or "{}")
                 groups = facts.get("metric_groups")
@@ -1255,13 +1975,18 @@ def command_run(arguments):
             state = {"status": "ok", "note": note or ""}
         except Exception as error:  # optional steps never abort the lab
             state = {"status": "failed", "note": "%s: %s" % (type(error).__name__, error)}
+        if state["status"] == "ok":
+            _, problems = render_section(lab.output, step, [])
+            if problems:
+                state.update(status="degraded", problems=problems[:20])
         state["elapsed_s"] = round(time.monotonic() - step_started, 1)
         lab.meta["steps"][step] = state
         lab.save_meta()
-        print("uarch_lab: step %s %s in %.1f s %s" % (step, state["status"], state["elapsed_s"], state["note"]), flush=True)
+        print("uarch_lab: step %s %s in %.1f s %s" % (step, state["status"], state["elapsed_s"],
+                                                     " -- ".join(part for part in (state["note"], problem_summary(state.get("problems"))) if part)), flush=True)
     lab.meta["total_s"] = round(time.monotonic() - started, 1)
     lab.save_meta()
-    render_report(lab.output)
+    render_report(lab.output, lab.perf)
     print("uarch_lab: total %.1f s; report %s" % (lab.meta["total_s"], os.path.join(lab.output, "report.md")))
 
 
@@ -1273,7 +1998,9 @@ def main(argv=None):
     run.add_argument("--repo-root", default=".")
     run.add_argument("--cpu", type=int, default=2, help="CPU to pin to (-1: unpinned)")
     run.add_argument("--output", required=True)
-    run.add_argument("--runs", type=int, default=30)
+    run.add_argument("--runs", type=int, default=None, help="timed runs (overrides --target-minutes)")
+    run.add_argument("--target-minutes", type=float, default=15.0,
+                     help="choose the timed-run count after %d pilot runs so the whole lab takes about this long" % PILOT_RUNS)
     run.add_argument("--warmups", type=int, default=1)
     run.add_argument("--perf", default="perf")
     run.add_argument("--sudo", action="store_true", help="enable the IBS / perf mem step")
@@ -1281,11 +2008,13 @@ def main(argv=None):
     run.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
     report = commands.add_parser("report", help="re-render DIR/report.md from raw files")
     report.add_argument("directory")
+    report.add_argument("--perf", default=None, help="perf used to derive reports an older run lacks (default: the recorded one, then PATH)")
     arguments = parser.parse_args(argv)
     if arguments.command == "run":
         command_run(arguments)
     else:
-        print(render_report(os.path.abspath(arguments.directory)), end="")
+        directory = os.path.abspath(arguments.directory)
+        print(render_report(directory, resolve_perf(load_meta(directory), arguments.perf)), end="")
 
 
 if __name__ == "__main__":
