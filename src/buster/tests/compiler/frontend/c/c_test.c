@@ -30232,23 +30232,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
     String8 diagnostic_input = buster_test_temporary_path(arguments->arena, S8("place-update-mask"), S8(".c"));
     bool diagnostic_written = written && file_write(diagnostic_input, BUSTER_SLICE_TO_BYTE_SLICE(diagnostic_source));
     BUSTER_TEST(arguments, diagnostic_written);
+    // GCC 15.2 diverges from the indexed compound-assignment call-count oracle.
+    // Keep all original case bodies, but call the other fourteen cases and a
+    // separately sequenced address neighbor in its mandatory reference main.
+    String8 gcc_neighbor = S8("int check_compound_index_sequenced(void) { double _Complex slots[2] = {0, 0}; __real__ slots[1] = 3; __imag__ slots[1] = 7; compound_calls = 0; double _Complex *selected = &slots[compound_next()]; double r = (__real__ *selected += 1.5); return r != 4.5 || compound_calls != 1 || __real__ slots[1] != 4.5 || __imag__ slots[1] != 7 || slots[0] != 0; }\n");
+    String8* gcc_parts = arena_allocate(arguments->arena, String8, BUSTER_ARRAY_LENGTH(cases) * 2 + 4);
+    u32 gcc_part_count = 0;
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        gcc_parts[gcc_part_count++] = cases[row].source;
+    }
+    gcc_parts[gcc_part_count++] = gcc_neighbor;
+    gcc_parts[gcc_part_count++] = S8("int main(void) {\n");
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        if (!string_equal(cases[row].name, S8("check_compound_index")))
+        {
+            gcc_parts[gcc_part_count++] = string_format(arguments->arena, S8("if ({S8}()) return {u32};\n"), cases[row].name, row + 1);
+        }
+    }
+    gcc_parts[gcc_part_count++] = S8("if (check_compound_index_sequenced()) return 16;\nreturn 0; }\n");
+    String8 gcc_source = string_join_arena(arguments->arena, (SliceString8){.pointer = gcc_parts, .length = gcc_part_count}, false);
+    String8 gcc_input = buster_test_temporary_path(arguments->arena, S8("place-update-gcc-reference"), S8(".c"));
+    bool gcc_written = written && file_write(gcc_input, BUSTER_SLICE_TO_BYTE_SLICE(gcc_source));
+    BUSTER_TEST(arguments, gcc_written);
     String8 reference_inputs[] = {input, diagnostic_input};
     String8 references[] = {S8("gcc"), S8("clang")};
     String8 reference_dialects[] = {S8("-std=gnu17"), S8("-std=gnu2x")};
-    for (u32 reference = 0; diagnostic_written && reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+    for (u32 reference = 0; diagnostic_written && gcc_written && reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
     {
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(reference_dialects); dialect += 1)
         {
             for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
             {
-                for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(reference_inputs); control += 1)
+                for (u32 control = 0; control < (reference == 0 ? 1 : BUSTER_ARRAY_LENGTH(reference_inputs)); control += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                     String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
                     String8 output = buster_test_temporary_path(temporary.arena, S8("place-update-reference"), S8(".exe"));
                     if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                     {
-                        String8 command[] = {compiler, reference_dialects[dialect], optimizations[optimization], S8("-nostdinc"), reference_inputs[control], S8("-o"), output};
+                        String8 reference_input = reference == 0 ? gcc_input : reference_inputs[control];
+                        String8 command[] = {compiler, reference_dialects[dialect], optimizations[optimization], S8("-nostdinc"), reference_input, S8("-o"), output};
                         ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
                             (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                                   .use_process_environment = true, .search_path = true});
@@ -30287,6 +30312,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
     if (diagnostic_written)
     {
         BUSTER_TEST(arguments, os_file_delete(diagnostic_input));
+    }
+    if (gcc_written)
+    {
+        BUSTER_TEST(arguments, os_file_delete(gcc_input));
     }
 #endif
     if (written)

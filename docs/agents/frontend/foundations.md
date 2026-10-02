@@ -994,15 +994,24 @@ postfix precedence: `(__imag__ z)++` updates the imaginary component, while
 operands remain rejected. Independent sources run through syntax, semantic and
 canonical APIs on six native layouts, GNU17/GNU23 and both frontend forms. A
 combined executable retains all literal oracles in every native allocator mode
-at O0/O2. Hosted Linux x86-64 GCC and Clang also compile and execute exactly
-that same source in GNU17/GNU2x at O0/O2, including the whole-complex postfix
-precedence oracle. Compiler and process failures are assertions, never skips or
-probes that adjust expected values. A separate indexed compound-assignment
-reference control returns bits 0..4 for mismatched returned result, index-call
-count, stored real component, stored imaginary component and untouched neighbor;
-its expected exit remains zero. This regression checkpoint adds no lowering
-behavior; hosted results must establish the current failures before a production
-repair is published.
+at O0/O2. Hosted Linux x86-64 Clang compiles and executes all fifteen original
+cases in GNU17/GNU2x at O0/O2, including whole-complex postfix precedence and
+indexed compound-assignment single evaluation. Its separate indexed assignment
+control returns bits 0..4 for mismatched result, index-call count, stored real,
+stored imaginary and untouched neighbor; the expected exit is zero.
+GCC 15.2 passed the other fourteen cases but diverged on the original indexed
+compound assignment: the index-call count differed from one while all four
+value/storage checks matched. The failed full/mask evidence remains pinned to
+regression head `63024bec`. Mandatory GCC acceptance therefore calls fourteen
+unchanged original cases plus a separate explicitly sequenced index/address
+neighbor. It retains the original fifteenth body without invoking it and excludes
+that diagnostic mask from active GCC acceptance. The neighbor protects its own
+fixed result/storage/counter values; it is not evidence for the original compound
+assignment's single evaluation. Buster's fifteen original oracles and Clang's
+full/mask controls remain unchanged. Compiler and process failures are assertions,
+and expected values never adapt to reference output. This regression checkpoint
+adds no lowering behavior; hosted results must establish current failures before
+a production repair is published.
 
 Raw IR tests cover both direct frontend SSA and its memory-form reference, so scalar
 parameter promotion cannot conceal complex construction temporaries.
