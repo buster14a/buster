@@ -782,8 +782,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bool_bit_field_loads(UnitTestArguments
                 {
                     IrProgram* program = lowered.program;
                     IrModule* module = program->modules;
-                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
-                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                    bool canonical = ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE;
+                    BUSTER_TEST(arguments, canonical);
+                    for (u32 name_index = 0; canonical && name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
                     {
                         IrFunction* function = c_test_find_ir_function(module, names[name_index]);
                         if (BUSTER_REQUIRE(arguments, function != 0))
@@ -810,7 +811,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bool_bit_field_loads(UnitTestArguments
                                             // a same-size integer load from an ordinary boolean place.
                                             bool saved_signed = access->is_signed;
                                             access->is_signed = true;
-                                            BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_OPERAND_TYPE);
+                                            IrValidationResult signed_unit = ir_validate_canonical_module(program, module);
+                                            BUSTER_TEST(arguments, signed_unit.error == IR_VALIDATION_OPERAND_TYPE &&
+                                                signed_unit.function.value == function->id.value && signed_unit.instruction.value == index);
                                             access->is_signed = saved_signed;
                                             IrInstruction* field_instruction = place->definition.value < function->instruction_count
                                                 ? function->instructions + place->definition.value : 0;
@@ -818,11 +821,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bool_bit_field_loads(UnitTestArguments
                                             {
                                                 IrType* aggregate = ir_type_from_id(&program->types,
                                                     function->values[field_instruction->operands[0].value].canonical_type);
-                                                IrField* field = aggregate->fields + field_instruction->immediates[0];
-                                                BUSTER_TEST(arguments, field->access_size == 0);
-                                                field->is_bit_field = false;
-                                                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_OPERAND_TYPE);
-                                                field->is_bit_field = true;
+                                                u64 field_index = field_instruction->immediates[0];
+                                                if (BUSTER_REQUIRE(arguments, aggregate && field_index < aggregate->field_count))
+                                                {
+                                                    IrField* field = aggregate->fields + field_index;
+                                                    BUSTER_TEST(arguments, field->access_size == 0);
+                                                    bool saved_bit_field = field->is_bit_field;
+                                                    field->is_bit_field = false;
+                                                    IrValidationResult ordinary_place = ir_validate_canonical_module(program, module);
+                                                    BUSTER_TEST(arguments, ordinary_place.error == IR_VALIDATION_OPERAND_TYPE &&
+                                                        ordinary_place.function.value == function->id.value && ordinary_place.instruction.value == index);
+                                                    field->is_bit_field = saved_bit_field;
+                                                }
                                             }
                                             BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
                                         }
@@ -871,6 +881,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bool_bit_field_loads(UnitTestArguments
                             string_format(temporary.arena, S8("bool field runtime {S8} {S8}: status={u32} timed_out={u32}"),
                                 modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                     }
+                    BUSTER_TEST(arguments, os_file_delete(output));
                 }
                 scratch_end(temporary);
             }
