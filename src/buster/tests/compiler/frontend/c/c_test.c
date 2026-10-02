@@ -6,6 +6,7 @@
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/work_ledger.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
@@ -31104,6 +31105,131 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_void_function_pointer_policy(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_work_and_scratch(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 counts[] = {1, 16, 17, 33, 65};
+    for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(counts); test += 1)
+    {
+        for (u32 control = 0; control < 3; control += 1)
+        {
+            // Independent expected constants distinguish last-arm selection,
+            // default selection and a compatible duplicate after growth.
+            u32 count = counts[test];
+            String8 parts[70];
+            u32 part_count = 0;
+            parts[part_count++] = string_format(arguments->arena,
+                S8("int query(void) {{ return _Generic((int (*)[{u32}])0,"), control == 1 ? count + 1 : count);
+            for (u32 arm = 1; arm <= count; arm += 1)
+                parts[part_count++] = string_format(arguments->arena, S8("int (*)[{u32}]: {u32},"), arm, arm);
+            if (control == 2) parts[part_count++] = S8("int (*)[1]: 99,");
+            // Long discarded spans must not increase association workspace.
+            parts[part_count++] = S8("default: ((((((((((((((((0))))))))))))))))); }\n");
+            String8 source = string_join_arena(arguments->arena, (SliceString8){.pointer = parts, .length = part_count}, false);
+            for (u32 replay = 0; replay < 2; replay += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                // Rewound bytes remain dirty on the second replay.
+                if (replay)
+                {
+                    u64 mark = temporary.arena->position;
+                    memset(arena_allocate(temporary.arena, u8, 8192), 0xa5, 8192);
+                    arena_set_position(temporary.arena, mark);
+                }
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                u64 before = c_test_generic_association_scratch_bytes();
+                CParseResult parsed = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                u64 bytes = c_test_generic_association_scratch_bytes() - before;
+                BUSTER_TEST(arguments, !tokens.diagnostic_count);
+                if (control == 2)
+                {
+                    BUSTER_TEST(arguments, parsed.diagnostic_count != 0);
+                    BUSTER_TEST(arguments, count <= 16 ? bytes == 0 : bytes > 0);
+                }
+                else if (BUSTER_REQUIRE(arguments, parsed.diagnostic_count == 0))
+                {
+                    BUSTER_TEST(arguments, count <= 16 ? bytes == 0 : bytes > 0 && bytes < (u64)count * 16);
+                    for (u32 form = 0; form < 2; form += 1)
+                    {
+                        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-scratch.c"), tokens, parsed, target_native,
+                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.program->module_count))
+                        {
+                            IrModule* module = lowered.program->modules;
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                            IrFunction* function = c_test_find_ir_function(module, S8("query"));
+                            u32 returns = 0;
+                            if (BUSTER_REQUIRE(arguments, function != 0))
+                            {
+                                for (u32 row = 0; row < function->instruction_count; row += 1)
+                                {
+                                    IrInstruction* instruction = function->instructions + row;
+                                    if (instruction->opcode == IR_OPCODE_RETURN && instruction->operand_count == 1)
+                                    {
+                                        IrValueId value = instruction->operands[0];
+                                        if (BUSTER_REQUIRE(arguments, value.value < function->value_count))
+                                        {
+                                            IrInstructionId definition = function->values[value.value].definition;
+                                            if (BUSTER_REQUIRE(arguments, definition.value < function->instruction_count))
+                                            {
+                                                IrInstruction* constant = function->instructions + definition.value;
+                                                if (BUSTER_REQUIRE(arguments, constant->opcode == IR_OPCODE_CONSTANT_INTEGER && constant->immediate_count))
+                                                    BUSTER_TEST(arguments, constant->immediates[0] == (control == 1 ? 0 : count));
+                                            }
+                                        }
+                                        returns += 1;
+                                    }
+                                }
+                                BUSTER_TEST(arguments, returns == 1);
+                            }
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("int query(int x) { return _Generic(x, int: x, default: 0); }\n"), (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+#if BUSTER_WORK_LEDGER
+        WorkLedgerCounters before = work_ledger_counters();
+#endif
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-work.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+#if BUSTER_WORK_LEDGER
+        WorkLedgerCounters after = work_ledger_counters();
+        BUSTER_TEST(arguments, after.values[WORK_LEDGER_REDERIVE_LOWER_TYPE_PREDICTIONS] == before.values[WORK_LEDGER_REDERIVE_LOWER_TYPE_PREDICTIONS]);
+#endif
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        scratch_end(temporary);
+    }
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("int query(int x) { return _Generic(x, int: missing_value, default: 0); }\n"), (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-invalid-child.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !lowered.program);
+        // Identifier binding rejects this selected value before lowering. The
+        // invalid semantic result must not become a successful partial module.
+        if (BUSTER_REQUIRE(arguments, parsed.diagnostic_count != 0))
+        {
+            BUSTER_TEST(arguments, parsed.diagnostics[0].kind == C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+            BUSTER_TEST(arguments, parsed.diagnostics[0].message.length != 0);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -31323,6 +31449,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_identity_authority);
+    BUSTER_TEST_FIXTURE(arguments, c_test_generic_work_and_scratch);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);

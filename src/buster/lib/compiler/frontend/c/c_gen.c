@@ -17839,8 +17839,7 @@ BUSTER_C_INTERNAL bool c_ir_type_identity_query(CIntegerIrBuilder* builder, u32 
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 token_index, u32 end, u32* selected_start_out, u32* selected_end_out,
-                                                IrTypeId* selected_type_out)
+BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 token_index, u32 end, u32* selected_start_out, u32* selected_end_out)
 {
     CTypeIdentityQuery answer;
     bool valid = c_ir_type_identity_query(builder, token_index, end, &answer) && answer.result_start != UINT32_MAX;
@@ -17848,8 +17847,6 @@ BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 to
     {
         *selected_start_out = answer.result_start;
         *selected_end_out = answer.result_end;
-        *selected_type_out = c_ir_predict_expression_type(builder, answer.result_start, answer.result_end);
-        valid = selected_type_out->value != IR_ID_UNDERLYING_INVALID;
     }
     return valid;
 }
@@ -19913,9 +19910,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         {
             u32 association_start = 0;
             u32 association_end = 0;
-            IrTypeId association_type = IR_TYPE_ID_INVALID;
             bool selection_valid =
-                c_ir_generic_selection(builder, selected->token_index, selected->close_index + 1, &association_start, &association_end, &association_type);
+                c_ir_generic_selection(builder, selected->token_index, selected->close_index + 1, &association_start, &association_end);
             if (!selection_valid)
             {
                 return false;
@@ -19936,7 +19932,6 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_GENERIC, association_start,
                                                              association_end, false);
             }
-            (void)association_type;
             selected->argument_count = 1;
             selected->emitted = true;
             remaining -= 1;
