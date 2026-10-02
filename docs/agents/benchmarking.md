@@ -480,6 +480,8 @@ lost their order. Timestamp ids sort chronologically, so the directory orders
 every audit past the closing id. `tools/new_audit.py --list` prints the whole
 history newest first, and `--check`, which CI runs, verifies the index and the
 directory agree.
+Their output can be piped to a consumer such as `head`: a closed output pipe
+ends quietly, while unrelated I/O failures remain errors.
 
 The id is the **UTC timestamp at which the audit is recorded**,
 `2026-08-22T140351Z` — ISO 8601 with the colons dropped, because Windows
