@@ -329,6 +329,12 @@ command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
 header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
 output rejects `-emit-llvm`, native link inputs, and `-S`.
 
+The direct backend consumes canonical integer bit-count operations at their
+semantic bit width, independently of the i32/i64 WebAssembly carrier. Leading
+and trailing zeros count within that width; a zero operand produces the width,
+and population count ignores carrier extension bits. This is the canonical IR
+contract rather than a promise about C builtins on undefined zero inputs.
+
 Static archive extraction uses `compiler_driver_archive_extract` in the
 private `driver/archive.c` implementation. Its invocation-owned name table
 records selected definitions and strong/weak undefined references once per

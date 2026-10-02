@@ -11,6 +11,7 @@
 // compiler_driver_test_sysv_indirect_variadic checks AL against a foreign probe.
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
+// compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -10868,6 +10869,281 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_stack(UnitTestArg
     return result;
 }
 
+enum
+{
+    COMPILER_DRIVER_WASM_BIT_COUNT_SIGN_COUNT = 2,
+    COMPILER_DRIVER_WASM_BIT_COUNT_OPERATION_COUNT = 3,
+    COMPILER_DRIVER_WASM_BIT_COUNT_LITERAL_COUNT = 12,
+};
+
+// Direct canonical rows keep narrow semantics visible; C builtin promotions
+// would hide the backend's carrier-width and signed-normalization boundary.
+BUSTER_GLOBAL_LOCAL IrInstruction compiler_driver_test_wasm_bit_count_row(IrOpcode opcode, IrTypeId type, IrValueId result)
+{
+    return (IrInstruction){.canonical_type = type, .symbol = IR_SYMBOL_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID,
+                           .next = IR_INSTRUCTION_ID_INVALID, .result = result, .opcode = (u8)opcode,
+                           .conversion_operation = IR_CONVERSION_COUNT, .unary_operation = IR_UNARY_COUNT,
+                           .binary_operation = IR_BINARY_COUNT, .memory_order = IR_MEMORY_ORDER_COUNT,
+                           .failure_memory_order = IR_MEMORY_ORDER_COUNT, .atomic_operation = IR_ATOMIC_COMPILER_DRIVER_WASM_BIT_COUNT_OPERATION_COUNT};
+}
+
+BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_bit_count_program(Arena* arena, Target target, u32 const* widths, u32 width_count, bool* committed_out)
+{
+    IrUnaryOperation operations[] = {
+        IR_UNARY_INTEGER_COUNT_LEADING_ZEROS, IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS, IR_UNARY_INTEGER_POPULATION_COUNT,
+    };
+    String8 names[] = {S8("clz"), S8("ctz"), S8("pop")};
+    IrProgram program = ir_program_initialize(arena, 1, 1 + width_count * COMPILER_DRIVER_WASM_BIT_COUNT_SIGN_COUNT * 2, width_count * COMPILER_DRIVER_WASM_BIT_COUNT_SIGN_COUNT * COMPILER_DRIVER_WASM_BIT_COUNT_OPERATION_COUNT, 0);
+    program.data_layout = target_data_layout(target);
+    IrModule* module = program.modules;
+    module->name = S8("wasm-bit-counts");
+    IrTypeId void_type = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}});
+    bool committed = true;
+    for (u32 width_index = 0; width_index < width_count; width_index += 1)
+    {
+        u32 width = widths[width_index];
+        u32 size = width <= 8 ? 1 : width <= 16 ? 2 : width <= 32 ? 4 : 8;
+        for (u32 sign = 0; sign < COMPILER_DRIVER_WASM_BIT_COUNT_SIGN_COUNT; sign += 1)
+        {
+            IrTypeId integer_type = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_INTEGER, .bit_width = width, .is_signed = sign != 0,
+                         .layout = {.size = size, .alignment = size, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+            IrTypeId* parameters = arena_allocate(arena, IrTypeId, 1);
+            parameters[0] = integer_type;
+            IrTypeId signature = ir_program_add_type(&program,
+                (IrType){.kind = IR_TYPE_FUNCTION, .return_type = integer_type, .parameter_types = parameters, .parameter_count = 1,
+                         .calling_convention = IR_CALLING_CONVENTION_C,
+                         .layout = {.size = program.data_layout.pointer.size, .alignment = program.data_layout.pointer.alignment,
+                                    .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+            for (u32 operation = 0; operation < COMPILER_DRIVER_WASM_BIT_COUNT_OPERATION_COUNT; operation += 1)
+            {
+                String8 name = string_format(arena, S8("bit_{S8}{u32}_{S8}"), sign ? S8("s") : S8("u"), width, names[operation]);
+                IrSymbolId symbol = ir_program_add_symbol(&program,
+                    (IrSymbol){.name = name, .link_name = name, .type = signature, .kind = IR_SYMBOL_FUNCTION,
+                               .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+                IrFunction* function = ir_module_add_function(arena, module,
+                    (IrFunction){.name = name, .symbol = symbol, .canonical_type = signature, .entry = {.value = 0},
+                                 .state = IR_FUNCTION_LOWERED});
+                ir_function_add_block(arena, function,
+                    (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID, .sealed = true});
+                IrValue value = {.canonical_type = integer_type, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE};
+                IrValueId argument = ir_function_add_value(arena, function, value);
+                IrValueId counted = ir_function_add_value(arena, function, value);
+                IrInstruction rows[] = {
+                    compiler_driver_test_wasm_bit_count_row(IR_OPCODE_ARGUMENT, integer_type, argument),
+                    compiler_driver_test_wasm_bit_count_row(IR_OPCODE_UNARY, integer_type, counted),
+                    compiler_driver_test_wasm_bit_count_row(IR_OPCODE_RETURN, void_type, IR_VALUE_ID_INVALID),
+                };
+                rows[0].immediates = arena_allocate(arena, u64, 1);
+                rows[0].immediates[0] = 0;
+                rows[0].immediate_count = 1;
+                rows[1].operands = arena_allocate(arena, IrValueId, 1);
+                rows[1].operands[0] = argument;
+                rows[1].operand_count = 1;
+                rows[1].unary_operation = (u8)operations[operation];
+                rows[2].operands = arena_allocate(arena, IrValueId, 1);
+                rows[2].operands[0] = counted;
+                rows[2].operand_count = 1;
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+                {
+                    IrCommitRefusal refusal = IR_COMMIT_REFUSAL_COUNT;
+                    IrInstructionId id = ir_block_append_instruction(arena, function, (IrBlockId){.value = 0}, rows[row],
+                                                                     (IrSourceRange){0}, &refusal);
+                    committed &= refusal == IR_COMMIT_ACCEPTED && id.value == row;
+                }
+            }
+        }
+    }
+    *committed_out = committed;
+    return program;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_bit_counts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 widths[] = {7, 8, 16, 24, 32, 33, 48, 64};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_WASM32, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WASI},
+        {.cpu_arch = CPU_ARCH_WASM64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_FREESTANDING},
+    };
+    String8 script_parts[] = {
+        S8(
+            "'use strict';\n"
+            "const fs = require('node:fs');\n"
+            "const crypto = require('node:crypto');\n"
+            "const assert = require('node:assert/strict');\n"
+            "const bytes = fs.readFileSync(process.argv[2]);\n"
+            "const digest = crypto.createHash('sha256').update(bytes).digest('hex');\n"
+            "const widths = process.argv[4].split(',').map(Number);\n"
+            "const expectedChecks = Number(process.argv[5]);\n"
+            "const pointerBytes = Number(process.argv[6]);\n"
+            "assert.equal(digest, process.argv[3], 'original compiler module consumed');\n"
+            "assert(WebAssembly.validate(bytes), 'valid direct canonical bit-count module');\n"
+            "const guest = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;\n"
+            "const operations = ['clz', 'ctz', 'pop'];\n"
+            "let checks = 0;\n"
+            "let failures = 0;\n"
+            "const firstFailure = new Map();\n"
+            "function check(width, signed, operation, raw, expected) {\n"
+            "    const name = 'bit_' + (signed ? 's' : 'u') + width + '_' + operation;\n"
+            "    assert.equal(typeof guest[name], 'function', 'export ' + name);\n"
+            "    const carrier = width <= 32 ? 32 : 64;\n"
+            "    const input = carrier === 32 ? Number(raw) : BigInt.asIntN(64, raw);\n"
+            "    const actual = BigInt(guest[name](input));\n"
+            "    checks += 1;\n"
+            "    if (actual !== expected) {\n"
+            "        failures += 1;\n"
+            "        if (!firstFailure.has(name)) {\n"
+            "            firstFailure.set(name, name + '(' + raw + '): expected=' + expected + ' actual=' + actual);\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "function oracle(width, operation, raw) {\n"
+            "    const bits = BigInt.asUintN(width, raw);\n"
+            "    let count = 0;\n"
+            "    if (operation === 'pop') {\n"
+            "        for (let bit = 0; bit < width; bit += 1) {\n"
+            "            count += Number((bits >> BigInt(bit)) & 1n);\n"
+            "        }\n"
+            "    } else if (bits === 0n) {\n"
+            "        count = width;\n"
+            "    } else if (operation === 'clz') {\n"
+            "        for (let bit = width - 1; bit >= 0 && ((bits >> BigInt(bit)) & 1n) === 0n; bit -= 1) count += 1;\n"
+            "    } else {\n"
+            "        for (let bit = 0; bit < width && ((bits >> BigInt(bit)) & 1n) === 0n; bit += 1) count += 1;\n"
+            "    }\n"
+            "    return BigInt(count);\n"
+            "}\n"),
+        S8(
+            "const literals = [\n"
+            "    [8, false, 'clz', 1n, 7n], [8, true, 'clz', 1n, 7n],\n"
+            "    [8, true, 'pop', -1n, 8n], [16, false, 'clz', 1n, 15n],\n"
+            "    [16, false, 'ctz', 0n, 16n], [64, false, 'ctz', 0n, 64n],\n"
+            "    [32, false, 'clz', 0n, 32n], [16, true, 'pop', -1n, 16n],\n"
+            "    [33, true, 'pop', -1n, 33n], [33, false, 'clz', 1n, 32n],\n"
+            "    [33, false, 'ctz', 0n, 33n], [64, false, 'pop', -1n, 64n],\n"
+            "];\n"
+            "for (const [width, signed, operation, raw, expected] of literals) {\n"
+            "    assert.equal(oracle(width, operation, raw), expected, 'independent literal oracle');\n"
+            "    check(width, signed, operation, raw, expected);\n"
+            "}\n"
+            "for (const width of widths) {\n"
+            "    const carrier = width <= 32 ? 32 : 64;\n"
+            "    const mask = (1n << BigInt(width)) - 1n;\n"
+            "    const top = 1n << BigInt(width - 1);\n"
+            "    const values = [];\n"
+            "    if (width <= 8) {\n"
+            "        for (let raw = 0n; raw <= mask; raw += 1n) values.push(raw);\n"
+            "    } else {\n"
+            "        const alternating = mask & 0xaaaaaaaaaaaaaaaan;\n"
+            "        values.push(0n, 1n, mask, mask - 1n, top, top - 1n, alternating, mask ^ alternating);\n"
+            "        for (let bit = 0; bit < width; bit += 1) {\n"
+            "            const single = 1n << BigInt(bit);\n"
+            "            values.push(single, mask ^ single);\n"
+            "        }\n"
+            "    }\n"
+            "    // Dirty carrier bits prove operand normalization independently of the ABI.\n"
+            "    values.push(mask + 1n, (1n << BigInt(carrier)) - 1n, 1n << BigInt(carrier - 1));\n"
+            "    for (const signed of [false, true]) {\n"
+            "        for (const operation of operations) {\n"
+            "            for (const raw of values) {\n"
+            "                const expected = oracle(width, operation, raw);\n"
+            "                check(width, signed, operation, raw, expected);\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "assert.equal(checks, expectedChecks, 'complete fixed matrix');\n"
+            "console.log('WASM_BIT_COUNTS sha256=' + digest + ' pointer_bytes=' + pointerBytes +\n"
+            "            ' checks=' + checks + ' failures=' + failures);\n"
+            "assert.equal(failures, 0, Array.from(firstFailure.values()).join('\\n'));\n"
+            "console.log(checks + '/' + checks + ' Wasm bit count engine checks passed');\n"),
+    };
+    // Shared with the inline oracle through its explicit expected-count
+    // argument; every call contributes exactly one semantic comparison.
+    u32 expected_checks = COMPILER_DRIVER_WASM_BIT_COUNT_LITERAL_COUNT;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(widths); index += 1)
+    {
+        u32 width = widths[index];
+        u32 samples = (width <= 8 ? (u32)1 << width : 8 + width * 2) + 3;
+        expected_checks += samples * COMPILER_DRIVER_WASM_BIT_COUNT_SIGN_COUNT * COMPILER_DRIVER_WASM_BIT_COUNT_OPERATION_COUNT;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        bool committed = false;
+        IrProgram program = compiler_driver_test_wasm_bit_count_program(arena, targets[target_index], widths, BUSTER_ARRAY_LENGTH(widths), &committed);
+        bool ready = BUSTER_REQUIRE(arguments, committed && program.modules->function_count ==
+                                               BUSTER_ARRAY_LENGTH(widths) * COMPILER_DRIVER_WASM_BIT_COUNT_SIGN_COUNT * COMPILER_DRIVER_WASM_BIT_COUNT_OPERATION_COUNT);
+        if (ready)
+        {
+            IrValidationResult validation = ir_prepare_canonical_module(&program, program.modules, false);
+            ready = BUSTER_REQUIRE(arguments, validation.error == IR_VALIDATION_NONE);
+        }
+        if (ready)
+        {
+            WasmOptions options = WASM64_OPTIONS_DEFAULT;
+            options.pointer_size = target_index == 0 ? 4 : 8;
+            WasmArtifact first = wasm_emit(arena, &program, program.modules, 1, options);
+            WasmArtifact second = wasm_emit(arena, &program, program.modules, 1, options);
+            BUSTER_TEST_RAW(arguments, first.success && second.success, first.error.message);
+            if (first.success && second.success)
+            {
+                BUSTER_TEST(arguments, first.bytes.length && first.bytes.length == second.bytes.length &&
+                                       memory_compare(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+                BUSTER_TEST(arguments, first.stats.memory64 == (options.pointer_size == 8) &&
+                                       first.stats.defined_function_count == program.modules->function_count);
+                String8 output = buster_test_temporary_path(arena, S8("buster-wasm-bit-counts"), S8(".wasm"));
+                String8 script_path = buster_test_temporary_path(arena, S8("buster-wasm-bit-counts"), S8(".cjs"));
+                String8 script = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(script_parts));
+                bool written = file_write(output, first.bytes) && file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
+                BUSTER_TEST(arguments, written);
+                ByteSlice emitted = file_read(arena, output, (FileReadOptions){0});
+                bool unchanged = emitted.length == first.bytes.length && emitted.pointer &&
+                                 memory_compare(emitted.pointer, first.bytes.pointer, emitted.length);
+                BUSTER_TEST(arguments, unchanged);
+                String8 node = executable_resolve_in_path(arena, S8("node"));
+                if (written && unchanged && node.length)
+                {
+                    Sha256 hash;
+                    char8 hash_bytes[SHA256_HEX_CAPACITY];
+                    sha256_init(&hash);
+                    sha256_add(&hash, first.bytes.pointer, first.bytes.length);
+                    sha256_finish_hex(&hash, hash_bytes);
+                    String8 width_parts[BUSTER_ARRAY_LENGTH(widths) * 2 - 1];
+                    u32 part_count = 0;
+                    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(widths); index += 1)
+                    {
+                        if (index) width_parts[part_count++] = S8(",");
+                        width_parts[part_count++] = string_format(arena, S8("{u32}"), widths[index]);
+                    }
+                    String8 width_list = string_join_arena(arena, (SliceString8){width_parts, part_count});
+                    String8 command[] = {node, script_path, output, (String8){hash_bytes, 64}, width_list,
+                        string_format(arena, S8("{u32}"), expected_checks),
+                        string_format(arena, S8("{u32}"), (u32)options.pointer_size)};
+                    CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                        arguments, arena, S8("bit-counts"),
+                        string_format(arena, S8("pointer-{u32}"), (u32)options.pointer_size),
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                        string_format(arena, S8("{u32}/{u32} Wasm bit count engine checks passed"), expected_checks, expected_checks),
+                        compiler_driver_test_wasm_node_deadline_microseconds());
+                    BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(run));
+                    ByteSlice consumed = file_read(arena, output, (FileReadOptions){0});
+                    BUSTER_TEST(arguments, consumed.length == first.bytes.length && consumed.pointer &&
+                                           memory_compare(consumed.pointer, first.bytes.pointer, consumed.length));
+                }
+                else if (!node.length)
+                {
+                    arguments->show(arguments, S8("Wasm bit count engine execution skipped: Node is not installed\n"));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Actual addresses cross an opaque import boundary. Canonical place-only
 // alignment controls and exact padding extents cannot be folded by the frontend.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_stack_alignment(UnitTestArguments* arguments)
@@ -16374,6 +16650,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_stack_alignment);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_bit_counts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_tls);
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
