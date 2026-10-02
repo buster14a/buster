@@ -37,6 +37,7 @@
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
 //   compatibility_spawn_self_test              harness environment/script contracts
+//   test_raddebugger_action                     pinned upstream unity compilation/link diagnostic
 //   test_cpython_reference_action              opt-in Clang-only harness replay
 //   process_arguments, main                      command dispatch
 
@@ -136,6 +137,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_QUICKJS,
     BUILD_COMMAND_TEST_MUSL,
     BUILD_COMMAND_TEST_CPYTHON,
+    BUILD_COMMAND_TEST_RADDEBUGGER,
     BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_DIFFERENTIAL,
     BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
@@ -722,6 +724,22 @@ struct TestSbaseOptions
 #define SBASE_PROCESS_TIMEOUT_US (120ull * 1000ull * 1000ull)
 
 #define STB_COMPATIBILITY_COMMIT "2c980bb59875b0d32144a71867fbdebb2f77cd20"
+
+// RAD Debugger stays in a caller-provided checkout. The harness consumes its
+// tracked generated files and exact unity sources without running metagen or
+// writing into upstream's ignored build/local directories.
+typedef struct TestRaddebuggerOptions TestRaddebuggerOptions;
+struct TestRaddebuggerOptions
+{
+    String8 source_directory;
+    String8 config;
+    bool self_test;
+};
+
+#define RADDEBUGGER_COMPATIBILITY_COMMIT "f6b4a38134652886239b91f940cd7a67fedf689d"
+#define RADDEBUGGER_PROCESS_TIMEOUT_US (600ull * 1000ull * 1000ull)
+#define RADDEBUGGER_RUNTIME_TIMEOUT_US (60ull * 1000ull * 1000ull)
+#define RADDEBUGGER_CAPTURE_LIMIT_BYTES (16ull * 1024ull * 1024ull)
 
 // DoomGeneric is consumed from a caller-provided pristine checkout, together
 // with an IWAD the caller supplies separately: no Doom data and no upstream
@@ -13915,6 +13933,1003 @@ BUSTER_GLOBAL_LOCAL void test_lz4_action_add(Arena* arena, TestLz4Options option
     TestLz4Options* options_copy = arena_allocate(arena, TestLz4Options, 1);
     *options_copy = options;
     *run = (ProcessRun){.callback = test_lz4_action, .callback_data = options_copy};
+}
+
+// --- RAD Debugger compatibility diagnostic ------------------------------
+// Replays the pinned build.sh unity targets without executing that script:
+// its ignored build/local directories must remain untouched. Every Buster
+// C object has an independent Clang reference. The host only assembles the
+// upstream BLAKE3 .S files and links already-produced objects; this does not
+// establish Buster assembler/linker or interactive debugger correctness.
+typedef struct RaddebuggerCommandResult RaddebuggerCommandResult;
+struct RaddebuggerCommandResult
+{
+    ProcessWaitResult wait;
+    String8 output;
+    bool recorded;
+};
+
+typedef struct RaddebuggerTarget RaddebuggerTarget;
+struct RaddebuggerTarget
+{
+    String8 name;
+    String8 source;
+    String8 register_allocator;
+    bool frontend_memory;
+    bool verify_codegen;
+    bool graphical;
+    bool non_graphical;
+    bool external_libraries;
+};
+
+typedef enum RaddebuggerEnvironment RaddebuggerEnvironment;
+enum RaddebuggerEnvironment
+{
+    RADDEBUGGER_ENVIRONMENT_INHERIT,
+    RADDEBUGGER_ENVIRONMENT_GIT,
+    RADDEBUGGER_ENVIRONMENT_HEADLESS,
+};
+
+typedef enum RaddebuggerProbeKind RaddebuggerProbeKind;
+enum RaddebuggerProbeKind
+{
+    RADDEBUGGER_PROBE_COMPILE,
+    RADDEBUGGER_PROBE_RUNTIME,
+    RADDEBUGGER_PROBE_RUNTIME_COMPARE,
+    RADDEBUGGER_PROBE_REJECT,
+};
+
+typedef enum RaddebuggerProbeHardware RaddebuggerProbeHardware;
+enum RaddebuggerProbeHardware
+{
+    RADDEBUGGER_PROBE_BASELINE,
+    RADDEBUGGER_PROBE_AVX2,
+    RADDEBUGGER_PROBE_AVX512,
+    RADDEBUGGER_PROBE_SHA,
+};
+
+typedef struct RaddebuggerProbe RaddebuggerProbe;
+struct RaddebuggerProbe
+{
+    String8 name;
+    String8 text;
+    String8 repository_source;
+    String8 expected;
+    String8 register_allocator;
+    bool frontend_memory;
+    bool verify_codegen;
+    RaddebuggerProbeKind kind;
+    RaddebuggerProbeHardware hardware;
+};
+
+BUSTER_GLOBAL_LOCAL RaddebuggerCommandResult raddebugger_command(Arena* arena, SliceString8 arguments, String8 working_directory, String8 prefix, RaddebuggerEnvironment environment, bool* stopped)
+{
+    RaddebuggerCommandResult result = {.wait = {.result = PROCESS_RESULT_FAILED}, .recorded = true};
+    if (prefix.length)
+    {
+        String8List command = {0};
+        for (u64 index = 0; index < arguments.length; index += 1)
+        {
+            string8_list_push(arena, &command, string_format(arena, S8("{u64}:{S8}\n"), arguments.pointer[index].length, arguments.pointer[index]));
+        }
+        String8 text = string_join_arena(arena, string8_list_to_slice(arena, command), false);
+        result.recorded = file_write(string_format_z(arena, S8("{S8}.command"), prefix), BUSTER_SLICE_TO_BYTE_SLICE(text));
+    }
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options = {
+            .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+            .use_process_environment = 1,
+            .new_process_group = 1,
+            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE,
+        },
+    };
+    if (environment != RADDEBUGGER_ENVIRONMENT_INHERIT)
+    {
+        // Use explicit snapshots: Git provenance probes omit repository/index
+        // overrides, and runtime smokes omit display-server variables. Neither
+        // policy changes this driver's environment or compiler invocations.
+        SliceString8 inherited_keys = program_state->input.environment_keys;
+        SliceString8 inherited_values = program_state->input.environment_values;
+        bool valid = inherited_keys.length == inherited_values.length &&
+                     (!inherited_keys.length || (inherited_keys.pointer && inherited_values.pointer));
+        if (valid)
+        {
+            String8* keys = arena_allocate(arena, String8, inherited_keys.length);
+            String8* values = arena_allocate(arena, String8, inherited_keys.length);
+            u64 count = 0;
+            for (u64 index = 0; index < inherited_keys.length; index += 1)
+            {
+                String8 key = inherited_keys.pointer[index];
+                bool git_override = key.length >= 4 && (key.pointer[0] == 'G' || key.pointer[0] == 'g') &&
+                                    (key.pointer[1] == 'I' || key.pointer[1] == 'i') && (key.pointer[2] == 'T' || key.pointer[2] == 't') && key.pointer[3] == '_';
+                bool display_override = string_equal(key, S8("DISPLAY")) || string_equal(key, S8("WAYLAND_DISPLAY"));
+                bool omitted = environment == RADDEBUGGER_ENVIRONMENT_GIT ? git_override : display_override;
+                if (!omitted)
+                {
+                    keys[count] = key;
+                    values[count++] = inherited_values.pointer[index];
+                }
+            }
+            run.environment_keys = (SliceString8){.pointer = keys, .length = count};
+            run.environment_values = (SliceString8){.pointer = values, .length = count};
+            run.spawn_options.use_process_environment = 0;
+        }
+        result.recorded = valid && result.recorded;
+    }
+    run.spawn_options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = RADDEBUGGER_CAPTURE_LIMIT_BYTES;
+    run.spawn_options.capture_limits.per_stream[STANDARD_STREAM_ERROR] = RADDEBUGGER_CAPTURE_LIMIT_BYTES;
+    run.spawn_options.capture_limits.total = 2 * RADDEBUGGER_CAPTURE_LIMIT_BYTES;
+    u64 started = os_now_microseconds();
+    command_print(arguments);
+    if (result.recorded && !*stopped)
+    {
+        run.spawn = process_run_spawn(arena, &run);
+        if (run.spawn.handle)
+        {
+            result.wait = os_process_wait_deadline(arena, run.spawn, environment == RADDEBUGGER_ENVIRONMENT_HEADLESS ? RADDEBUGGER_RUNTIME_TIMEOUT_US : RADDEBUGGER_PROCESS_TIMEOUT_US);
+        }
+    }
+    result.output = BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_OUTPUT]);
+    *stopped = build_compiler_query_cleanup_failed(result.wait) || *stopped;
+    if (prefix.length)
+    {
+        String8 status = string_format(arena, S8("result={u32}\nplatform_status={u32}\nelapsed_us={u64}\ntimed_out={u32}\ncapture_failed={u32}\n"
+                                                "output_truncated={u32}\ncleanup_failed={u32}\nspawn_failure={u32}\nspawn_error={u32}\nlaunched={u32}\nadmission_stopped={u32}\n"),
+                                       (u32)result.wait.result, result.wait.platform_status, os_now_microseconds() - started, (u32)result.wait.timed_out,
+                                       (u32)result.wait.capture_failed, (u32)result.wait.output_truncated, (u32)result.wait.process_tree_cleanup_failed,
+                                       (u32)run.spawn.failure, run.spawn.error.v, (u32)(run.spawn.handle != 0), (u32)*stopped);
+        bool output_written = file_write(string_format_z(arena, S8("{S8}.stdout"), prefix), result.wait.streams[STANDARD_STREAM_OUTPUT]);
+        bool error_written = file_write(string_format_z(arena, S8("{S8}.stderr"), prefix), result.wait.streams[STANDARD_STREAM_ERROR]);
+        bool status_written = file_write(string_format_z(arena, S8("{S8}.status"), prefix), BUSTER_SLICE_TO_BYTE_SLICE(status));
+        result.recorded = output_written && error_written && status_written && result.recorded;
+    }
+    if (result.wait.result != PROCESS_RESULT_SUCCESS || result.wait.timed_out || result.wait.output_truncated || !result.recorded)
+    {
+        string_print(S8("RADDEBUGGER_CHILD result={u32} timed_out={u32} truncated={u32} recorded={u32} logs={S8}\n{S8}\n"),
+                     (u32)result.wait.result, (u32)result.wait.timed_out, (u32)result.wait.output_truncated, (u32)result.recorded, prefix,
+                     BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_ERROR]));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_command_ok(RaddebuggerCommandResult command)
+{
+    bool result = command.recorded && command.wait.result == PROCESS_RESULT_SUCCESS && !command.wait.timed_out && !command.wait.capture_failed &&
+                  !command.wait.output_truncated && !build_compiler_query_cleanup_failed(command.wait);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_git_verify(Arena* arena, String8 git, String8 source_directory, String8 expected_commit, bool* stopped)
+{
+    String8 root_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("--show-toplevel")};
+    RaddebuggerCommandResult root = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(root_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+    String8 reported_root = os_path_absolute(arena, compat_trim_ascii_space(root.output), true);
+    bool valid = raddebugger_command_ok(root) && reported_root.length && string_equal(reported_root, source_directory);
+    String8 commit = {0};
+    if (valid)
+    {
+        String8 head_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("HEAD")};
+        RaddebuggerCommandResult head = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+        commit = compat_trim_ascii_space(head.output);
+        valid = raddebugger_command_ok(head) && string_equal(commit, expected_commit);
+    }
+    if (valid)
+    {
+        // Ignored local headers can override upstream includes. Index flags
+        // can conceal edited tracked files from status, so neither is accepted.
+        String8 status_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("status"), S8("--porcelain"), S8("--untracked-files=all"), S8("--ignored")};
+        RaddebuggerCommandResult status = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+        valid = raddebugger_command_ok(status) && !status.output.length;
+    }
+    if (valid)
+    {
+        String8 index_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("ls-files"), S8("-v"), S8("--stage"), S8("-z")};
+        RaddebuggerCommandResult index = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(index_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+        valid = raddebugger_command_ok(index) && index.output.length;
+        for (u64 offset = 0; valid && offset < index.output.length;)
+        {
+            u64 end = offset;
+            while (end < index.output.length && index.output.pointer[end])
+            {
+                end += 1;
+            }
+            String8 entry = string_slice(index.output, offset, end);
+            valid = end < index.output.length && entry.length > 9 && entry.pointer[0] == 'H' && entry.pointer[1] == ' ' &&
+                    (string_equal(string_slice(entry, 2, 8), S8("100644")) || string_equal(string_slice(entry, 2, 8), S8("100755")));
+            offset = end + 1;
+        }
+    }
+    if (valid)
+    {
+        String8 sparse_arguments[] = {git, S8("config"), S8("--bool"), S8("--default=false"), S8("--get"), S8("core.sparseCheckout")};
+        RaddebuggerCommandResult sparse = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(sparse_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+        valid = raddebugger_command_ok(sparse) && string_equal(compat_trim_ascii_space(sparse.output), S8("false"));
+    }
+    string_print(S8("RADDEBUGGER_SOURCE commit={S8} expected={S8} pristine={u32} path={S8}\n"), commit, expected_commit, (u32)valid, source_directory);
+    return valid;
+}
+
+// pkg-config prints shell-escaped words. Decode quoting directly rather than
+// passing the text through a shell or splitting an escaped include path.
+BUSTER_GLOBAL_LOCAL bool raddebugger_pkg_flags(Arena* arena, String8 text, SliceString8* flags)
+{
+    char8* decoded = arena_allocate(arena, char8, text.length);
+    u64 written = 0;
+    u64 start = 0;
+    char8 quote = 0;
+    bool escaped = false;
+    bool token = false;
+    String8List list = {0};
+    for (u64 index = 0; index < text.length; index += 1)
+    {
+        char8 character = text.pointer[index];
+        if (escaped)
+        {
+            decoded[written++] = character;
+            escaped = false;
+            token = true;
+        }
+        else if (character == '\\' && quote != '\'')
+        {
+            escaped = true;
+            token = true;
+        }
+        else if (quote)
+        {
+            if (character == quote) { quote = 0; }
+            else { decoded[written++] = character; }
+        }
+        else if (character == '\'' || character == '"')
+        {
+            quote = character;
+            token = true;
+        }
+        else if ((u8)character <= ' ')
+        {
+            if (token)
+            {
+                string8_list_push(arena, &list, (String8){.pointer = decoded + start, .length = written - start});
+                start = written;
+                token = false;
+            }
+        }
+        else
+        {
+            decoded[written++] = character;
+            token = true;
+        }
+    }
+    if (token)
+    {
+        string8_list_push(arena, &list, (String8){.pointer = decoded + start, .length = written - start});
+    }
+    bool valid = !quote && !escaped;
+    *flags = valid ? string8_list_to_slice(arena, list) : (SliceString8){0};
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_compile_capture(Arena* arena, String8 compiler, bool buster, String8 source_directory, String8 output_directory,
+                                                   String8 configuration, RaddebuggerTarget target, SliceString8 include_flags, String8 object, String8 prefix,
+                                                   bool* stopped, RaddebuggerCommandResult* captured)
+{
+    String8 include_src = string_format(arena, S8("-I{S8}/src"), source_directory);
+    String8 include_local = string_format(arena, S8("-I{S8}/local"), source_directory);
+    String8 source = path_join(arena, source_directory, target.source);
+    String8 metrics = string_format(arena, S8("-fsource-metrics={S8}.metrics"), prefix);
+    String8 allocator = target.register_allocator.length ? target.register_allocator : S8("fast");
+    String8 allocator_flag = buster ? string_format(arena, S8("-fregister-allocator={S8}"), allocator) : (String8){0};
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, compiler);
+    if (buster)
+    {
+        os_argument_builder_append(&builder, S8("cc"));
+        os_argument_builder_append(&builder, allocator_flag);
+        if (target.frontend_memory)
+        {
+            os_argument_builder_append(&builder, S8("-fno-frontend-ssa"));
+        }
+        if (target.verify_codegen)
+        {
+            os_argument_builder_append(&builder, S8("-fverify-codegen"));
+        }
+        // The native driver spells the same upstream CPU requirements as
+        // feature overrides rather than Clang's individual -m switches.
+        os_argument_builder_append(&builder, S8("-mcpu=baseline"));
+        os_argument_builder_append(&builder, S8("-mattr=+cx16,+sse2"));
+        os_argument_builder_append(&builder, metrics);
+        os_argument_builder_append(&builder, S8("-v"));
+    }
+    else
+    {
+        os_argument_builder_append(&builder, S8("-march=x86-64"));
+        os_argument_builder_append(&builder, S8("-mcx16"));
+        os_argument_builder_append(&builder, S8("-msse2"));
+    }
+    String8 common_flags[] = {
+        S8("-D_GNU_SOURCE"), S8("-g"), S8("-Wall"), S8("-Wno-missing-braces"), S8("-Wno-unused-function"),
+        S8("-Wno-unused-variable"), S8("-Wno-unused-but-set-variable"), S8("-Wno-unused-value"), S8("-D_USE_MATH_DEFINES"),
+        S8("-Dstrdup=_strdup"), S8("-Dgnu_printf=printf"), S8("-DBUILD_GIT_HASH=\"f6b4a38\""),
+        S8("-DBUILD_GIT_HASH_FULL=" RADDEBUGGER_COMPATIBILITY_COMMIT), S8("-fno-pie"),
+    };
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(common_flags); index += 1)
+    {
+        os_argument_builder_append(&builder, common_flags[index]);
+    }
+    os_argument_builder_append(&builder, string_equal(configuration, S8("Debug")) ? S8("-O0") : S8("-O2"));
+    os_argument_builder_append(&builder, string_equal(configuration, S8("Debug")) ? S8("-DBUILD_DEBUG=1") : S8("-DBUILD_DEBUG=0"));
+    os_argument_builder_append(&builder, include_src);
+    os_argument_builder_append(&builder, include_local);
+    if (target.graphical) { os_argument_builder_append(&builder, S8("-DLNX_WM_ICON=1")); }
+    if (target.non_graphical)
+    {
+        os_argument_builder_append(&builder, S8("-DWM_STUB=1"));
+        os_argument_builder_append(&builder, S8("-DR_BACKEND=R_BACKEND_STUB"));
+    }
+    if (target.external_libraries)
+    {
+        for (u64 index = 0; index < include_flags.length; index += 1)
+        {
+            os_argument_builder_append(&builder, include_flags.pointer[index]);
+        }
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, source);
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, object);
+    RaddebuggerCommandResult command = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, stopped);
+    if (captured)
+    {
+        *captured = command;
+    }
+    bool result = raddebugger_command_ok(command) && path_exists(arena, object);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_compile(Arena* arena, String8 compiler, bool buster, String8 source_directory, String8 output_directory,
+                                           String8 configuration, RaddebuggerTarget target, SliceString8 include_flags, String8 object, String8 prefix, bool* stopped)
+{
+    bool result = raddebugger_compile_capture(arena, compiler, buster, source_directory, output_directory, configuration, target, include_flags, object, prefix, stopped, 0);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_link(Arena* arena, String8 clang, String8 output_directory, RaddebuggerTarget target, String8 object,
+                                        SliceString8 assembly_objects, SliceString8 library_flags, String8 binary, String8 prefix, bool* stopped)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-no-pie"));
+    os_argument_builder_append(&builder, S8("-Wl,--start-group"));
+    os_argument_builder_append(&builder, object);
+    for (u64 index = 0; index < assembly_objects.length; index += 1)
+    {
+        os_argument_builder_append(&builder, assembly_objects.pointer[index]);
+    }
+    String8 common_libraries[] = {S8("-lpthread"), S8("-lm"), S8("-lrt"), S8("-ldl"), S8("-latomic")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(common_libraries); index += 1)
+    {
+        os_argument_builder_append(&builder, common_libraries[index]);
+    }
+    if (target.external_libraries)
+    {
+        for (u64 index = 0; index < library_flags.length; index += 1)
+        {
+            os_argument_builder_append(&builder, library_flags.pointer[index]);
+        }
+    }
+    os_argument_builder_append(&builder, S8("-Wl,--end-group"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, binary);
+    RaddebuggerCommandResult command = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, stopped);
+    bool result = raddebugger_command_ok(command) && path_exists(arena, binary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_output_expected(RaddebuggerCommandResult command, String8 expected)
+{
+    bool result = raddebugger_command_ok(command) && string_equal(command.output, expected) && !command.wait.streams[STANDARD_STREAM_ERROR].length;
+    return result;
+}
+
+// The queried register value depends on real hardware and OS state. Validate
+// the guard protocol independently, then compare both compilers' full value.
+BUSTER_GLOBAL_LOCAL bool raddebugger_xgetbv_output_expected(RaddebuggerCommandResult command)
+{
+    String8 prefix = S8("xgetbv guard=pass queried=1 value=");
+    bool result = raddebugger_command_ok(command) && !command.wait.streams[STANDARD_STREAM_ERROR].length &&
+                  command.output.length == prefix.length + 17 && command.output.pointer[command.output.length - 1] == '\n';
+    for (u64 index = 0; result && index < prefix.length; index += 1)
+    {
+        result = command.output.pointer[index] == prefix.pointer[index];
+    }
+    u64 value = 0;
+    for (u64 index = 0; result && index < 16; index += 1)
+    {
+        u8 character = command.output.pointer[prefix.length + index];
+        bool decimal = character >= '0' && character <= '9';
+        bool hexadecimal = character >= 'a' && character <= 'f';
+        result = decimal || hexadecimal;
+        value = (value << 4) | (decimal ? character - '0' : character - 'a' + 10);
+    }
+    result = (result && (value & 1)) || raddebugger_output_expected(command, S8("xgetbv guard=pass hardware-pending\n"));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_probe_hardware_available(RaddebuggerProbeHardware hardware)
+{
+    bool result;
+    switch (hardware)
+    {
+        case RADDEBUGGER_PROBE_BASELINE: result = true; break;
+        case RADDEBUGGER_PROBE_AVX2:
+            result = target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2);
+            break;
+        case RADDEBUGGER_PROBE_AVX512:
+            result = target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX512F) &&
+                     target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX512BW) &&
+                     target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX512VBMI);
+            break;
+        case RADDEBUGGER_PROBE_SHA:
+            result = target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_SHA) &&
+                     target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_SSSE3) &&
+                     target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_SSE4_1);
+            break;
+        default: BUSTER_TODO();
+    }
+    return result;
+}
+
+// These first-party witnesses separate header admission from reachable
+// operations. Advanced Clang references execute only when the repository's
+// detector admits their CPU and OS state; Buster's scalar semantic expansions
+// are required to answer the same explicit oracles on the baseline target.
+BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide, String8 clang, String8 output_directory, String8 configuration, bool* stopped)
+{
+    RaddebuggerProbe probes[] = {
+        {.name = S8("intrinsic-immintrin"), .text = S8("#include <immintrin.h>\nint header_admitted(void) { return 0; }\n")},
+        {.name = S8("intrinsic-x86intrin"), .text = S8("#include <x86intrin.h>\nint header_admitted(void) { return 0; }\n")},
+        {.name = S8("intrinsic-sse2-pause"), .kind = RADDEBUGGER_PROBE_RUNTIME,
+         .expected = S8("00000000 80000000 0000002a 11223344 11223344 0000002a 80000000 00000000\n"),
+         .text = S8("#include <immintrin.h>\n#include <stdio.h>\n"
+                    "volatile unsigned int left[4] = {0xffffffffu, 0x7fffffffu, 19u, 0x01020304u};\n"
+                    "volatile unsigned int right[4] = {1u, 1u, 23u, 0x10203040u};\n"
+                    "int main(void)\n{\n"
+                    "    __m128i a = _mm_set_epi32((int)left[3], (int)left[2], (int)left[1], (int)left[0]);\n"
+                    "    __m128i b = _mm_set_epi32((int)right[3], (int)right[2], (int)right[1], (int)right[0]);\n"
+                    "    __m128i sum = _mm_add_epi32(a, b);\n"
+                    "    unsigned int values[4], reverse[4];\n"
+                    "    _mm_pause();\n"
+                    "    _mm_storeu_si128((__m128i*)values, sum);\n"
+                    "    _mm_storeu_si128((__m128i*)reverse, _mm_shuffle_epi32(sum, 0x1b));\n"
+                    "    printf(\"%08x %08x %08x %08x %08x %08x %08x %08x\\n\", values[0], values[1], values[2], values[3], reverse[0], reverse[1], reverse[2], reverse[3]);\n"
+                    "    return 0;\n}\n")},
+        {.name = S8("intrinsic-xgetbv-guard"), .kind = RADDEBUGGER_PROBE_RUNTIME_COMPARE,
+         .expected = S8("Forced skip must evaluate neither query nor selector. Real query is CPUID OSXSAVE guarded, evaluates each once, and full XCR0 must match Clang. Absent OSXSAVE is hardware-pending.\n"),
+         .text = S8("#include <immintrin.h>\n"
+                    "#include <cpuid.h>\n"
+                    "#include <stdio.h>\n"
+                    "volatile unsigned int argument_count, query_count;\n"
+                    "volatile int forced_skip = 1;\n"
+                    "static unsigned int selector(void)\n"
+                    "{\n"
+                    "    argument_count += 1;\n"
+                    "    return 0;\n"
+                    "}\n"
+                    "__attribute__((target(\"xsave\"))) static unsigned long long query(void)\n"
+                    "{\n"
+                    "    query_count += 1;\n"
+                    "    return _xgetbv(selector());\n"
+                    "}\n"
+                    "static int osxsave_available(void)\n"
+                    "{\n"
+                    "    unsigned int a, b, c, d;\n"
+                    "    int result = __get_cpuid(1, &a, &b, &c, &d) && (c & (1u << 27));\n"
+                    "    return result;\n"
+                    "}\n"
+                    "int main(void)\n"
+                    "{\n"
+                    "    int result = 0;\n"
+                    "    unsigned long long value = 0;\n"
+                    "    if (!forced_skip && osxsave_available()) { value = query(); }\n"
+                    "    if (value || query_count || argument_count) { result = 1; }\n"
+                    "    query_count = 0;\n"
+                    "    argument_count = 0;\n"
+                    "    if (!result)\n"
+                    "    {\n"
+                    "        int available = osxsave_available();\n"
+                    "        if (available) { value = query(); }\n"
+                    "        if (available)\n"
+                    "        {\n"
+                    "            if (query_count != 1 || argument_count != 1 || !(value & 1ull)) { result = 2; }\n"
+                    "            if (!result) { printf(\"xgetbv guard=pass queried=1 value=%016llx\\n\", value); }\n"
+                    "        }\n"
+                    "        else\n"
+                    "        {\n"
+                    "            if (value || query_count || argument_count) { result = 3; }\n"
+                    "            if (!result) { puts(\"xgetbv guard=pass hardware-pending\"); }\n"
+                    "        }\n"
+                    "    }\n"
+                    "    return result;\n"
+                    "}\n")},
+        {.name = S8("intrinsic-clui-reject"), .kind = RADDEBUGGER_PROBE_REJECT,
+         .expected = S8("unsupported target builtin '__builtin_ia32_clui'"),
+         .text = S8("#include <immintrin.h>\n"
+                    "__attribute__((target(\"uintr\"))) void unsupported_reachable(void) { _clui(); }\n"
+                    "int main(void) { unsupported_reachable(); return 0; }\n")},
+        {.name = S8("intrinsic-avx2"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_AVX2,
+         .expected = S8("0 80000001\n"),
+         .text = S8("#include <immintrin.h>\n#include <stdio.h>\n"
+                    "volatile unsigned char input[32] = {0x81};\n"
+                    "__attribute__((target(\"avx2\"))) int main(void)\n{\n"
+                    "    input[31] = 0x80;\n"
+                    "    __m256i a = _mm256_loadu_si256((const __m256i*)input);\n"
+                    "    __m256i b = _mm256_set_epi64x(0, 0, 0, 1);\n"
+                    "    printf(\"%d %08x\\n\", _mm256_testz_si256(a, b), (unsigned int)_mm256_movemask_epi8(a));\n"
+                    "    return 0;\n}\n")},
+        {.name = S8("intrinsic-avx512"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_AVX512,
+         .expected = S8("11 22 33 44 10 4f 80 bf 10 bf 40 ff\n"),
+         .text = S8("#include <immintrin.h>\n#include <stdio.h>\n#include <sys/mman.h>\n#include <unistd.h>\n"
+                    "volatile unsigned long long active = 15, zero = 0, permute_mask = 63;\n"
+                    "__attribute__((target(\"avx512f,avx512bw,avx512vbmi\"))) int main(void)\n{\n"
+                    "    int result = 0;\n"
+                    "    long page = sysconf(_SC_PAGESIZE);\n"
+                    "    unsigned char* memory = page > 0 ? mmap(0, (unsigned long)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : (void*)-1;\n"
+                    "    if (memory == (void*)-1) { result = 1; }\n"
+                    "    else\n    {\n"
+                    "        if (mprotect(memory + page, (unsigned long)page, PROT_NONE)) { result = 2; }\n"
+                    "        else\n        {\n"
+                    "            unsigned char* edge = memory + page - 4;\n"
+                    "            edge[0] = 0x11; edge[1] = 0x22; edge[2] = 0x33; edge[3] = 0x44;\n"
+                    "            unsigned char loaded[64], empty[64], a[64], b[64], indices[64] = {0}, output[64];\n"
+                    "            _mm512_storeu_si512((void*)loaded, _mm512_maskz_loadu_epi8((__mmask64)active, edge));\n"
+                    "            _mm512_storeu_si512((void*)empty, _mm512_maskz_loadu_epi8((__mmask64)zero, (void*)0));\n"
+                    "            for (unsigned int index = 0; index < 64; index += 1)\n            {\n"
+                    "                result |= empty[index] != 0;\n"
+                    "                if (index >= 4) { result |= loaded[index] != 0; }\n"
+                    "                a[index] = (unsigned char)(0x10 + index); b[index] = (unsigned char)(0x80 + index);\n"
+                    "            }\n"
+                    "            indices[0] = 0; indices[1] = 63; indices[2] = 64; indices[3] = 127; indices[4] = 128; indices[5] = 255; indices[6] = 64; indices[7] = 255;\n"
+                    "            __m512i va = _mm512_loadu_si512((const void*)a), vb = _mm512_loadu_si512((const void*)b), vi = _mm512_loadu_si512((const void*)indices);\n"
+                    "            _mm512_storeu_si512((void*)output, _mm512_mask2_permutex2var_epi8(va, vi, (__mmask64)permute_mask, vb));\n"
+                    "            for (unsigned int index = 8; index < 64; index += 1) { result |= output[index] != 0; }\n"
+                    "            if (!result) { printf(\"%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\\n\", loaded[0], loaded[1], loaded[2], loaded[3], output[0], output[1], output[2], output[3], output[4], output[5], output[6], output[7]); }\n"
+                    "        }\n"
+                    "        if (munmap(memory, (unsigned long)page * 2)) { result = 3; }\n"
+                    "    }\n"
+                    "    return result;\n}\n")},
+        {.name = S8("intrinsic-sha-nist"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
+         .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
+        // Keep the default fast/SSA result visible while these same-source
+        // diagnostic axes isolate register allocation and frontend loop state.
+        {.name = S8("intrinsic-sha-nist-mir-stack"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
+         .register_allocator = S8("mir-stack"), .verify_codegen = true,
+         .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
+        {.name = S8("intrinsic-sha-nist-none"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
+         .register_allocator = S8("none"), .verify_codegen = true,
+         .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
+        {.name = S8("intrinsic-sha-nist-memory"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
+         .frontend_memory = true, .verify_codegen = true,
+         .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
+    };
+    bool passed = true;
+    u64 hardware_pending = 0;
+    String8List summary = {0};
+    string8_list_push(arena, &summary, S8("probe\tcompiler\tcompile\tlink\truntime\n"));
+    for (u64 probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(probes); probe_index += 1)
+    {
+        RaddebuggerProbe probe = probes[probe_index];
+        String8 source_directory = probe.repository_source.length ? os_path_absolute(arena, S8("."), true) : output_directory;
+        String8 source_name = probe.repository_source.length ? probe.repository_source : string_format(arena, S8("{S8}.c"), probe.name);
+        String8 source = path_join(arena, source_directory, source_name);
+        bool source_ready = probe.repository_source.length ? path_exists(arena, source) : file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(probe.text));
+        bool expected_written = file_write(path_join(arena, output_directory, string_format(arena, S8("{S8}.expected"), probe.name)), BUSTER_SLICE_TO_BYTE_SLICE(probe.expected));
+        bool probe_passed = source_ready && expected_written;
+        RaddebuggerCommandResult runs[2];
+        bool ran[2];
+        for (u32 compiler_index = 0; compiler_index < 2; compiler_index += 1)
+        {
+            bool buster = compiler_index == 0;
+            String8 compiler_name = buster ? S8("buster") : S8("clang");
+            String8 directory = path_join(arena, output_directory, compiler_name);
+            make_directory_recursive(arena, directory);
+            String8 prefix = path_join(arena, directory, probe.name);
+            String8 object = string_format(arena, S8("{S8}.o"), prefix);
+            String8 link_prefix = string_format(arena, S8("{S8}-link"), prefix);
+            String8 run_prefix = string_format(arena, S8("{S8}-run"), prefix);
+            RaddebuggerTarget target = {.name = probe.name, .source = source_name, .register_allocator = probe.register_allocator,
+                                       .frontend_memory = probe.frontend_memory, .verify_codegen = probe.verify_codegen};
+            RaddebuggerCommandResult compiled_command = {.wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
+            bool compile_run = source_ready && !*stopped;
+            bool compiled = compile_run && raddebugger_compile_capture(arena, buster ? ide : clang, buster, source_directory, output_directory, configuration,
+                                                                       target, (SliceString8){0}, object, prefix, stopped, &compiled_command);
+            bool expected_rejection = probe.kind == RADDEBUGGER_PROBE_REJECT && buster;
+            bool rejected = expected_rejection && compiled_command.recorded && compiled_command.wait.result == PROCESS_RESULT_FAILED &&
+                            !compiled_command.wait.timed_out && !compiled_command.wait.capture_failed && !compiled_command.wait.output_truncated &&
+                            !build_compiler_query_cleanup_failed(compiled_command.wait) && !path_exists(arena, object) &&
+                            self_host_audit_contains(BYTE_SLICE_TO_STRING(8, compiled_command.wait.streams[STANDARD_STREAM_ERROR]), probe.expected);
+            bool compile_passed = expected_rejection ? rejected : compiled;
+            bool runtime_probe = probe.kind == RADDEBUGGER_PROBE_RUNTIME || probe.kind == RADDEBUGGER_PROBE_RUNTIME_COMPARE;
+            bool link_run = compiled && runtime_probe && !*stopped;
+            bool linked = link_run && raddebugger_link(arena, clang, output_directory, target, object, (SliceString8){0}, (SliceString8){0}, prefix, link_prefix, stopped);
+            bool hardware_available = buster || raddebugger_probe_hardware_available(probe.hardware);
+            runs[compiler_index] = (RaddebuggerCommandResult){.wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
+            ran[compiler_index] = linked && hardware_available && !*stopped;
+            if (ran[compiler_index])
+            {
+                String8 arguments[] = {prefix};
+                runs[compiler_index] = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), output_directory, run_prefix, RADDEBUGGER_ENVIRONMENT_HEADLESS, stopped);
+            }
+            bool runtime_passed = ran[compiler_index] && (probe.kind == RADDEBUGGER_PROBE_RUNTIME_COMPARE ?
+                                  raddebugger_xgetbv_output_expected(runs[compiler_index]) : raddebugger_output_expected(runs[compiler_index], probe.expected));
+            bool guarded_pending = probe.kind == RADDEBUGGER_PROBE_RUNTIME_COMPARE && runtime_passed &&
+                                   string_equal(runs[compiler_index].output, S8("xgetbv guard=pass hardware-pending\n"));
+            bool pending = (linked && !hardware_available) || guarded_pending;
+            hardware_pending += pending && !buster;
+            String8 compile_status = compile_run ? (compile_passed ? (expected_rejection ? S8("expected-rejection") : S8("pass")) : S8("fail")) : S8("not-run");
+            String8 link_status = link_run ? (linked ? S8("pass") : S8("fail")) : S8("not-run");
+            String8 runtime_status = pending ? S8("hardware-pending") : (ran[compiler_index] ? (runtime_passed ? S8("pass") : S8("fail")) : S8("not-run"));
+            string8_list_push(arena, &summary, string_format(arena, S8("{S8}\t{S8}\t{S8}\t{S8}\t{S8}\n"), probe.name, compiler_name, compile_status, link_status, runtime_status));
+            string_print(S8("RADDEBUGGER_INTRINSIC probe={S8} compiler={S8} compile={S8} link={S8} runtime={S8}\n"), probe.name, compiler_name, compile_status, link_status, runtime_status);
+            probe_passed = compile_passed && (!runtime_probe || (linked && (runtime_passed || pending))) && probe_passed;
+        }
+        if (ran[0] && ran[1])
+        {
+            probe_passed = string_equal(runs[0].output, runs[1].output) && probe_passed;
+        }
+        passed = probe_passed && passed;
+    }
+    String8 text = string_join_arena(arena, string8_list_to_slice(arena, summary), false);
+    bool summary_written = file_write(path_join(arena, output_directory, S8("intrinsic-summary.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(text));
+    passed = summary_written && !*stopped && passed;
+    String8 status = passed ? (hardware_pending ? S8("hardware-pending") : S8("pass")) : S8("fail");
+    string_print(S8("RADDEBUGGER_INTRINSIC_RESULT status={S8} clang_runtime_hardware_pending={u64}\n"), status, hardware_pending);
+    return passed;
+}
+
+// Volatile inputs prevent a constant-folding-only success. The explicit
+// oracle covers zero, a normal count, width wrapping, and a negative count.
+// It runs independently of the larger upstream units so missing SIMD support
+// does not conceal the scalar transform result.
+BUSTER_GLOBAL_LOCAL bool raddebugger_scalar_probe(Arena* arena, String8 ide, String8 clang, String8 output_directory, String8 configuration, bool* stopped)
+{
+    String8 source = path_join(arena, output_directory, S8("scalar-transform.c"));
+    String8 expected = S8("78563412 12345678 34567812 12345678 091a2b3c\n");
+    String8 text = S8("#include <stdio.h>\n"
+                      "volatile unsigned int input = 0x12345678u;\n"
+                      "volatile int counts[4] = {0, 8, 32, -1};\n"
+                      "int main(void)\n"
+                      "{\n"
+                      "    unsigned int swapped = __builtin_bswap32(input);\n"
+                      "    unsigned int r0 = __builtin_rotateleft32(input, counts[0]);\n"
+                      "    unsigned int r1 = __builtin_rotateleft32(input, counts[1]);\n"
+                      "    unsigned int r2 = __builtin_rotateleft32(input, counts[2]);\n"
+                      "    unsigned int r3 = __builtin_rotateleft32(input, counts[3]);\n"
+                      "    printf(\"%08x %08x %08x %08x %08x\\n\", swapped, r0, r1, r2, r3);\n"
+                      "    return 0;\n"
+                      "}\n");
+    bool passed = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)) &&
+                  file_write(path_join(arena, output_directory, S8("scalar-transform.expected")), BUSTER_SLICE_TO_BYTE_SLICE(expected));
+    RaddebuggerTarget target = {.name = S8("scalar-transform"), .source = S8("scalar-transform.c")};
+    RaddebuggerCommandResult runs[2];
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        bool buster = index == 0;
+        String8 compiler_name = buster ? S8("buster") : S8("clang");
+        String8 directory = path_join(arena, output_directory, compiler_name);
+        make_directory_recursive(arena, directory);
+        String8 prefix = path_join(arena, directory, S8("scalar-transform"));
+        String8 object = string_format(arena, S8("{S8}.o"), prefix);
+        String8 binary = prefix;
+        String8 link_prefix = string_format(arena, S8("{S8}-link"), prefix);
+        String8 run_prefix = string_format(arena, S8("{S8}-run"), prefix);
+        bool compile_run = !*stopped && path_exists(arena, source);
+        bool compiled = compile_run && raddebugger_compile(arena, buster ? ide : clang, buster, output_directory, output_directory, configuration,
+                                                          target, (SliceString8){0}, object, prefix, stopped);
+        bool link_run = compiled && !*stopped;
+        bool linked = link_run && raddebugger_link(arena, clang, output_directory, target, object, (SliceString8){0}, (SliceString8){0}, binary, link_prefix, stopped);
+        runs[index] = (RaddebuggerCommandResult){.wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
+        bool runtime_run = linked && !*stopped;
+        if (runtime_run)
+        {
+            String8 arguments[] = {binary};
+            runs[index] = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), output_directory, run_prefix, RADDEBUGGER_ENVIRONMENT_HEADLESS, stopped);
+        }
+        bool runtime_passed = runtime_run && raddebugger_output_expected(runs[index], expected);
+        String8 compile_status = compile_run ? (compiled ? S8("pass") : S8("fail")) : S8("not-run");
+        String8 link_status = link_run ? (linked ? S8("pass") : S8("fail")) : S8("not-run");
+        String8 runtime_status = runtime_run ? (runtime_passed ? S8("pass") : S8("fail")) : S8("not-run");
+        string_print(S8("RADDEBUGGER_SCALAR compiler={S8} compile={S8} link={S8} runtime={S8}\n"), compiler_name, compile_status, link_status, runtime_status);
+        passed = compiled && linked && runtime_passed && passed;
+    }
+    passed = passed && string_equal(runs[0].output, runs[1].output);
+    return passed;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_elf_smoke(Arena* arena, String8 clang, String8 output_directory, RaddebuggerTarget* targets, u64 target_count,
+                                             String8* binaries, bool* linked, bool* stopped)
+{
+    String8 expected = S8("//\n// .note.buster\n//\n{\n  Owner:     BUS\n  Data Size: 0x4\n  Type:      0x42535452\n}\n");
+    String8 fixture_source = path_join(arena, output_directory, S8("elf-note.S"));
+    String8 fixture_object = path_join(arena, output_directory, S8("elf-note.o"));
+    String8 fixture_prefix = path_join(arena, output_directory, S8("elf-note-assemble"));
+    String8 fixture = S8(".section .note.buster,\"a\",@note\n.balign 4\n.long 4\n.long 4\n.long 0x42535452\n.ascii \"BUS\\0\"\n.long 0x12345678\n");
+    bool passed = file_write(fixture_source, BUSTER_SLICE_TO_BYTE_SLICE(fixture)) &&
+                  file_write(path_join(arena, output_directory, S8("elf-note.expected")), BUSTER_SLICE_TO_BYTE_SLICE(expected));
+    bool fixture_needed = false;
+    for (u64 index = 0; index < target_count; index += 1)
+    {
+        bool applicable = targets[index].graphical || string_equal(targets[index].name, S8("radbin"));
+        fixture_needed = (applicable && linked[2 * index] && linked[2 * index + 1]) || fixture_needed;
+    }
+    bool assembled = false;
+    if (fixture_needed && passed && !*stopped)
+    {
+        String8 arguments[] = {clang, S8("-c"), fixture_source, S8("-o"), fixture_object};
+        assembled = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), output_directory, fixture_prefix,
+                                                              RADDEBUGGER_ENVIRONMENT_INHERIT, stopped)) && path_exists(arena, fixture_object);
+    }
+    String8List summary = {0};
+    string8_list_push(arena, &summary, S8("target\tcompiler\truntime\n"));
+    for (u64 target_index = 0; target_index < target_count; target_index += 1)
+    {
+        RaddebuggerTarget target = targets[target_index];
+        if (target.graphical || string_equal(target.name, S8("radbin")))
+        {
+            bool pair_ready = linked[2 * target_index] && linked[2 * target_index + 1];
+            RaddebuggerCommandResult runs[2];
+            bool pair_passed = true;
+            for (u32 compiler_index = 0; compiler_index < 2; compiler_index += 1)
+            {
+                String8 compiler_name = compiler_index ? S8("clang") : S8("buster");
+                String8 directory = path_join(arena, output_directory, compiler_name);
+                String8 prefix = path_join(arena, directory, string_format(arena, S8("{S8}-elf-note"), target.name));
+                String8 logs_directory = path_join(arena, directory, string_format(arena, S8("{S8}-runtime-logs"), target.name));
+                String8 logs_flag = string_format(arena, S8("--logs:{S8}"), logs_directory);
+                bool runtime_run = pair_ready && assembled && !*stopped;
+                runs[compiler_index] = (RaddebuggerCommandResult){.wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
+                if (runtime_run)
+                {
+                    make_directory_recursive(arena, logs_directory);
+                    OsArgumentBuilder builder = os_argument_builder_start(arena);
+                    os_argument_builder_append(&builder, binaries[2 * target_index + compiler_index]);
+                    if (target.graphical)
+                    {
+                        os_argument_builder_append(&builder, S8("--bin"));
+                        os_argument_builder_append(&builder, S8("--async_thread_count:1"));
+                        os_argument_builder_append(&builder, logs_flag);
+                    }
+                    os_argument_builder_append(&builder, S8("--dump"));
+                    os_argument_builder_append(&builder, S8("--deterministic"));
+                    os_argument_builder_append(&builder, S8("--thread_count:1"));
+                    os_argument_builder_append(&builder, fixture_object);
+                    runs[compiler_index] = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory, prefix, RADDEBUGGER_ENVIRONMENT_HEADLESS, stopped);
+                }
+                bool runtime_passed = runtime_run && raddebugger_output_expected(runs[compiler_index], expected);
+                String8 status = runtime_run ? (runtime_passed ? S8("pass") : S8("fail")) : S8("not-run");
+                string8_list_push(arena, &summary, string_format(arena, S8("{S8}\t{S8}\t{S8}\n"), target.name, compiler_name, status));
+                string_print(S8("RADDEBUGGER_RUNTIME target={S8} compiler={S8} oracle=elf-note status={S8} gui=not-run\n"), target.name, compiler_name, status);
+                pair_passed = runtime_passed && pair_passed;
+            }
+            pair_passed = pair_passed && string_equal(runs[0].output, runs[1].output);
+            passed = (!pair_ready || pair_passed) && passed;
+        }
+    }
+    String8 text = string_join_arena(arena, string8_list_to_slice(arena, summary), false);
+    bool summary_written = file_write(path_join(arena, output_directory, S8("runtime-summary.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(text));
+    passed = summary_written && (!fixture_needed || assembled) && passed;
+    return passed;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult raddebugger_self_test(Arena* arena)
+{
+    bool stopped = false;
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    make_directory_recursive(arena, S8("build"));
+    String8 directory = string_format_z(arena, S8("build/raddebugger-self-test-{u64}-{u64}"), os_get_current_process_id(), os_now_microseconds());
+    OsDirectoryCreateResult created = os_make_directory_exclusive(directory);
+    bool passed = git.length && created.created;
+    if (passed)
+    {
+        directory = os_path_absolute(arena, directory, true);
+        String8 fixture = path_join(arena, directory, S8("fixture.txt"));
+        String8 ignored = path_join(arena, directory, S8("ignored.txt"));
+        String8 untracked = path_join(arena, directory, S8("untracked.txt"));
+        bool files_written = file_write(fixture, BUSTER_SLICE_TO_BYTE_SLICE(S8("original\n"))) &&
+                             file_write(path_join(arena, directory, S8(".gitignore")), BUSTER_SLICE_TO_BYTE_SLICE(S8("ignored.txt\n")));
+        String8 initialize[] = {git, S8("init"), S8("--quiet")};
+        String8 add[] = {git, S8("add"), S8("fixture.txt"), S8(".gitignore")};
+        String8 commit[] = {git, S8("-c"), S8("user.name=Buster Harness"), S8("-c"), S8("user.email=harness@example.invalid"),
+                            S8("-c"), S8("commit.gpgsign=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("commit"), S8("--quiet"), S8("-m"), S8("isolated provenance fixture")};
+        passed = files_written && raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(initialize), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) &&
+                 raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(add), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) &&
+                 raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(commit), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped));
+        if (passed)
+        {
+            String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+            RaddebuggerCommandResult head = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped);
+            String8 fixture_commit = compat_trim_ascii_space(head.output);
+            bool pristine = raddebugger_command_ok(head) && raddebugger_git_verify(arena, git, directory, fixture_commit, &stopped);
+            bool wrong_revision = !raddebugger_git_verify(arena, git, directory, S8(RADDEBUGGER_COMPATIBILITY_COMMIT), &stopped);
+            bool dirty = file_write(fixture, BUSTER_SLICE_TO_BYTE_SLICE(S8("changed\n"))) && !raddebugger_git_verify(arena, git, directory, fixture_commit, &stopped);
+            bool restored = file_write(fixture, BUSTER_SLICE_TO_BYTE_SLICE(S8("original\n")));
+            bool untracked_rejected = file_write(untracked, BUSTER_SLICE_TO_BYTE_SLICE(S8("untracked\n"))) &&
+                                      !raddebugger_git_verify(arena, git, directory, fixture_commit, &stopped);
+            bool untracked_removed = os_file_delete(untracked);
+            bool ignored_rejected = file_write(ignored, BUSTER_SLICE_TO_BYTE_SLICE(S8("ignored input\n"))) &&
+                                    !raddebugger_git_verify(arena, git, directory, fixture_commit, &stopped);
+            bool ignored_removed = os_file_delete(ignored);
+            String8 assume[] = {git, S8("update-index"), S8("--assume-unchanged"), S8("fixture.txt")};
+            String8 normal[] = {git, S8("update-index"), S8("--no-assume-unchanged"), S8("fixture.txt")};
+            String8 skip[] = {git, S8("update-index"), S8("--skip-worktree"), S8("fixture.txt")};
+            bool assume_rejected = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assume), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) &&
+                                   !raddebugger_git_verify(arena, git, directory, fixture_commit, &stopped);
+            bool normal_restored = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(normal), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped));
+            bool skip_rejected = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(skip), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) &&
+                                 !raddebugger_git_verify(arena, git, directory, fixture_commit, &stopped);
+            passed = pristine && wrong_revision && dirty && restored && untracked_rejected && untracked_removed && ignored_rejected && ignored_removed &&
+                     assume_rejected && normal_restored && skip_rejected;
+            string_print(S8("RADDEBUGGER_SELF_TEST pristine={u32} wrong_revision={u32} dirty={u32} untracked={u32} ignored={u32} "
+                            "assume_unchanged={u32} skip_worktree={u32} compiler_invocations=0 status={S8}\n"),
+                         (u32)pristine, (u32)wrong_revision, (u32)dirty, (u32)untracked_rejected, (u32)ignored_rejected, (u32)assume_rejected,
+                         (u32)skip_rejected, passed ? S8("pass") : S8("fail"));
+        }
+    }
+    bool removed = !created.created || os_directory_delete(directory);
+    ProcessResult result = passed && removed && !stopped ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_raddebugger_action(Arena* arena, void* data)
+{
+    TestRaddebuggerOptions options = *(TestRaddebuggerOptions*)data;
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    if (options.self_test)
+    {
+        result = raddebugger_self_test(arena);
+    }
+    else
+    {
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        bool stopped = false;
+        String8 configuration = options.config.length ? options.config : S8("Release");
+        String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+        String8 git = executable_resolve_in_path(arena, S8("git"));
+        bool admitted = source_directory.length && git.length &&
+                        (string_equal(configuration, S8("Release")) || string_equal(configuration, S8("Debug")));
+        if (admitted)
+        {
+            admitted = raddebugger_git_verify(arena, git, source_directory, S8(RADDEBUGGER_COMPATIBILITY_COMMIT), &stopped);
+        }
+        String8 clang = executable_resolve_in_path(arena, S8("clang"));
+        String8 pkg_config = executable_resolve_in_path(arena, S8("pkg-config"));
+        String8 ide = compat_ide_path(arena, configuration);
+        String8 build_parent = os_path_absolute(arena, S8("build"), true);
+        if (admitted)
+        {
+            String8 upstream_prefix = string_format(arena, S8("{S8}/"), source_directory);
+            admitted = clang.length && pkg_config.length && ide.length && build_parent.length && !string_equal(build_parent, source_directory) &&
+                       !string_starts_with_sequence(build_parent, upstream_prefix);
+        }
+        if (!admitted)
+        {
+            string_print(S8("error: test_raddebugger requires Linux x86-64, a pristine pinned checkout, built ide, clang and pkg-config; outputs must be outside upstream\n"));
+            string_print(S8("usage: ./build.sh test_raddebugger [--config Debug|Release] /path/to/raddebugger\n"));
+        }
+        else
+        {
+            ide = os_path_absolute(arena, ide, true);
+            String8 output_directory = path_join(arena, build_parent, string_format(arena, S8("raddebugger-{u64}-{u64}"), os_get_current_process_id(), os_now_microseconds()));
+            OsDirectoryCreateResult created = os_make_directory_exclusive(output_directory);
+            bool passed = created.created && ide.length;
+            bool scalar_passed = passed && raddebugger_scalar_probe(arena, ide, clang, output_directory, configuration, &stopped);
+            bool intrinsic_passed = passed && raddebugger_intrinsic_probes(arena, ide, clang, output_directory, configuration, &stopped);
+            String8 packages[] = {S8("x11"), S8("xext"), S8("xfixes"), S8("xrandr"), S8("gl"), S8("egl"), S8("freetype2")};
+            SliceString8 include_flags = {0};
+            SliceString8 library_flags = {0};
+            for (u32 query = 0; passed && query < 2; query += 1)
+            {
+                String8 prefix = path_join(arena, output_directory, query ? S8("pkg-libs") : S8("pkg-cflags"));
+                OsArgumentBuilder builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, pkg_config);
+                os_argument_builder_append(&builder, query ? S8("--libs") : S8("--cflags"));
+                for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(packages); index += 1)
+                {
+                    os_argument_builder_append(&builder, packages[index]);
+                }
+                RaddebuggerCommandResult query_result = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped);
+                passed = raddebugger_command_ok(query_result) && raddebugger_pkg_flags(arena, query_result.output, query ? &library_flags : &include_flags);
+            }
+            if (passed)
+            {
+                String8 assembly_directory = path_join(arena, output_directory, S8("assembly"));
+                make_directory_recursive(arena, assembly_directory);
+                String8 isas[] = {S8("sse2"), S8("sse41"), S8("avx2"), S8("avx512")};
+                String8 assembly_objects[BUSTER_ARRAY_LENGTH(isas)];
+                bool assembly_passed = true;
+                for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(isas); index += 1)
+                {
+                    String8 name = string_format(arena, S8("blake3_{S8}_x86-64_unix"), isas[index]);
+                    String8 source = path_join(arena, source_directory, string_format(arena, S8("src/third_party/blake3/{S8}.S"), name));
+                    String8 prefix = path_join(arena, assembly_directory, name);
+                    assembly_objects[index] = string_format(arena, S8("{S8}.o"), prefix);
+                    String8 arguments[] = {clang, S8("-c"), S8("-g"), source, S8("-o"), assembly_objects[index]};
+                    bool unit_ok = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), output_directory, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped)) &&
+                                   path_exists(arena, assembly_objects[index]);
+                    assembly_passed = unit_ok && assembly_passed;
+                }
+                RaddebuggerTarget targets[] = {
+                    {.name = S8("raddbg"), .source = S8("src/raddbg/raddbg_main.c"), .graphical = true, .external_libraries = true},
+                    {.name = S8("raddbg_non_graphical"), .source = S8("src/raddbg/raddbg_main.c"), .non_graphical = true, .external_libraries = true},
+                    {.name = S8("radbin"), .source = S8("src/radbin/radbin_main.c")},
+                    {.name = S8("torture"), .source = S8("src/torture/torture_main.c"), .external_libraries = true},
+                };
+                String8* binaries = arena_allocate(arena, String8, 2 * BUSTER_ARRAY_LENGTH(targets));
+                bool* target_linked = arena_allocate(arena, bool, 2 * BUSTER_ARRAY_LENGTH(targets));
+                String8List summary = {0};
+                string8_list_push(arena, &summary, S8("target\tcompiler\tcompile\tlink\n"));
+                passed = assembly_passed;
+                for (u64 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+                {
+                    RaddebuggerTarget target = targets[target_index];
+                    // Every reference runs even when its Buster counterpart
+                    // fails. A failed reference is an environment/input gap.
+                    for (u32 compiler_index = 0; compiler_index < 2; compiler_index += 1)
+                    {
+                        bool buster = compiler_index == 0;
+                        String8 compiler_name = buster ? S8("buster") : S8("clang");
+                        String8 directory = path_join(arena, output_directory, compiler_name);
+                        make_directory_recursive(arena, directory);
+                        String8 prefix = path_join(arena, directory, target.name);
+                        String8 object = string_format(arena, S8("{S8}.o"), prefix);
+                        String8 binary = path_join(arena, directory, target.name);
+                        String8 link_prefix = string_format(arena, S8("{S8}-link"), prefix);
+                        bool compile_run = !stopped;
+                        bool compiled = compile_run && raddebugger_compile(arena, buster ? ide : clang, buster, source_directory, output_directory, configuration,
+                                                                          target, include_flags, object, prefix, &stopped);
+                        bool linked = false;
+                        bool link_run = compiled && assembly_passed && !stopped;
+                        if (link_run)
+                        {
+                            linked = raddebugger_link(arena, clang, output_directory, target, object, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_objects),
+                                                     library_flags, binary, link_prefix, &stopped);
+                        }
+                        passed = compiled && linked && passed;
+                        String8 compile_status = compile_run ? (compiled ? S8("pass") : S8("fail")) : S8("not-run");
+                        String8 link_status = link_run ? (linked ? S8("pass") : S8("fail")) : S8("not-run");
+                        binaries[2 * target_index + compiler_index] = binary;
+                        target_linked[2 * target_index + compiler_index] = linked;
+                        string8_list_push(arena, &summary, string_format(arena, S8("{S8}\t{S8}\t{S8}\t{S8}\n"), target.name, compiler_name, compile_status, link_status));
+                        string_print(S8("RADDEBUGGER_TARGET target={S8} compiler={S8} compile={S8} link={S8}\n"),
+                                     target.name, compiler_name, compile_status, link_status);
+                    }
+                }
+                String8 text = string_join_arena(arena, string8_list_to_slice(arena, summary), false);
+                bool summary_written = file_write(path_join(arena, output_directory, S8("summary.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(text));
+                bool runtime_passed = raddebugger_elf_smoke(arena, clang, output_directory, targets, BUSTER_ARRAY_LENGTH(targets), binaries, target_linked, &stopped);
+                bool source_unchanged = raddebugger_git_verify(arena, git, source_directory, S8(RADDEBUGGER_COMPATIBILITY_COMMIT), &stopped);
+                passed = summary_written && runtime_passed && source_unchanged && passed;
+            }
+            passed = scalar_passed && intrinsic_passed && passed;
+            string_print(S8("RADDEBUGGER_RESULT commit={S8} configuration={S8} allocator=fast assembler=host-clang linker=host-clang "
+                            "runtime=see-runtime-summary gui=not-run performance_acceptance=not-run status={S8} artifacts={S8}\n"),
+                         S8(RADDEBUGGER_COMPATIBILITY_COMMIT), configuration, passed ? S8("pass") : S8("fail"), output_directory);
+            result = passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        }
+#else
+        string_print(S8("error: test_raddebugger currently requires Linux x86-64; other platform gates are unrun\n"));
+#endif
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void test_raddebugger_action_add(Arena* arena, TestRaddebuggerOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestRaddebuggerOptions* options_copy = arena_allocate(arena, TestRaddebuggerOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_raddebugger_action, .callback_data = options_copy};
 }
 
 // The opt-in SQLite compatibility harness.  SQLite is the industrial C target:
@@ -40834,6 +41849,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_QUICKJS] = S8_INITIALIZER("test_quickjs"),
         [BUILD_COMMAND_TEST_MUSL] = S8_INITIALIZER("test_musl"),
         [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
+        [BUILD_COMMAND_TEST_RADDEBUGGER] = S8_INITIALIZER("test_raddebugger"),
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
         [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
@@ -40924,6 +41940,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     TestQuickjsOptions test_quickjs_options = {0};
     TestMuslOptions test_musl_options = {0};
     TestCpythonOptions test_cpython_options = {0};
+    TestRaddebuggerOptions test_raddebugger_options = {0};
 
     bool command_owns_arguments = build_command_owns_arguments(command);
     if (command_owns_arguments)
@@ -41136,6 +42153,17 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             else if (command == BUILD_COMMAND_TEST_CPYTHON && string_equal(argument, S8("--reference-only")))
             {
                 test_cpython_options.reference_only = true;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_RADDEBUGGER && string_equal(argument, S8("--self-test")))
+            {
+                test_raddebugger_options.self_test = true;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_RADDEBUGGER && !test_raddebugger_options.source_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_raddebugger_options.source_directory = argument;
                 argument_i += 1;
             }
             // The second positional path is the optional libc-test checkout.
@@ -41421,6 +42449,10 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
                 else if (command == BUILD_COMMAND_TEST_CPYTHON)
                 {
                     test_cpython_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_RADDEBUGGER)
+                {
+                    test_raddebugger_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -42149,6 +43181,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_CPYTHON:
         {
             test_cpython_action_add(arena, test_cpython_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_RADDEBUGGER:
+        {
+            test_raddebugger_action_add(arena, test_raddebugger_options);
         }
         break;
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
