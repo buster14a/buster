@@ -983,8 +983,21 @@ Complex rvalues use this same operation through `c_ir_complex_compose`, not a
 This bounded projection does not apply to the `__real__`/`__imag__` lvalue path:
 component assignments must continue to designate their original object.
 Qualifiers, volatile memory, and non-constructor values retain their existing
-explicit load/store path. No whole-function cleanup pass is required. Raw IR
-tests cover both direct frontend SSA and its memory-form reference, so scalar
+explicit load/store path. No whole-function cleanup pass is required.
+
+The registered `c_test_runtime_place_updates` requires compound-literal scalar,
+member and indexed prefix/postfix updates, and GNU complex-part assignments used
+as values (#1261). Fixed returned/stored values and indexed call counters protect
+old/new results, original-object identity, one evaluation, volatile accesses and
+postfix precedence: `(__imag__ z)++` updates the imaginary component, while
+`__imag__ z++` projects the previous whole-complex update. Const and nonplace
+operands remain rejected. Independent sources run through syntax, semantic and
+canonical APIs on six native layouts, GNU17/GNU23 and both frontend forms. A
+combined executable retains all literal oracles in every native allocator mode
+at O0/O2. This regression checkpoint adds no lowering behavior; hosted results
+must establish the current failures before a production repair is published.
+
+Raw IR tests cover both direct frontend SSA and its memory-form reference, so scalar
 parameter promotion cannot conceal complex construction temporaries.
 
 `c_ir_emit_initializer_capture` keeps the exact constructor operand contract.
