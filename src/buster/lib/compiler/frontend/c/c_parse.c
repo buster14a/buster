@@ -18499,9 +18499,10 @@ BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine*
 // Declares in `scope` the enumeration constants a block-scope type parse
 // appended from `member_start` on: the specifiers of a local declaration, or
 // an enum a controlling expression or direct expression type name defines.
-BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 declaration_index, u32 member_start)
+BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 declaration_index, u32 member_start, u32 member_end)
 {
-    for (u32 member_index = member_start; member_index < result->enum_member_count; member_index += 1)
+    BUSTER_VALIDATE(member_start <= member_end && member_end <= result->enum_member_count);
+    for (u32 member_index = member_start; member_index < member_end; member_index += 1)
     {
         CEnumMember* member = &result->enum_members[member_index];
         if (member->is_published)
@@ -18717,7 +18718,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     }
     CCleanupAttributeInfo declaration_cleanup = {0};
     c_parse_cleanup_attribute_scan(preprocess, start, declarator_start, true, &declaration_cleanup);
-    c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_member_start);
+    c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_member_start, result->enum_member_count);
     u32 segment_start = declarator_start;
     while (segment_start < end)
     {
@@ -19112,6 +19113,10 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 }
             }
         }
+        CTypeKind initializer_kind = type.value < result->type_count ? result->types[type.value].kind : C_TYPE_INVALID;
+        bool scalar_initializer = !is_auto_type && !is_constexpr &&
+            (c_parse_expression_real_kind(initializer_kind) || c_type_kind_is_complex(initializer_kind) ||
+             initializer_kind == C_TYPE_POINTER || initializer_kind == C_TYPE_NULLPTR);
         u32 attribute_resume = UINT32_MAX;
         for (u32 use_index = initializer_start; use_index < segment_end; use_index += 1)
         {
@@ -19138,6 +19143,24 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             u32 aggregate_end = 0;
             if (c_parse_aggregate_definition_at(preprocess, use_index, segment_end, &aggregate_end))
             {
+                // A direct enum type name introduces ordinary identifiers
+                // here, before its operand and the next comma declarator.
+                // Keep earlier initializer uses bound before publication.
+                if (scalar_initializer && use.kind == C_TOKEN_IDENTIFIER &&
+                    c_token_is_well_known(preprocess.spelling_base, use, C_SYMBOL_WELL_KNOWN_ENUM) &&
+                    use_index > initializer_start &&
+                    c_token_is_punctuator(&preprocess.tokens[use_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 expression_declarator_start = use_index;
+                    CTypeId enumeration = c_parse_scalar_type_in_scope(machine, result, preprocess, scope, use_index, aggregate_end + 1,
+                                                                        &expression_declarator_start);
+                    if (enumeration.value < result->type_count && result->types[enumeration.value].kind == C_TYPE_ENUM)
+                    {
+                        CType const* enumeration_type = result->types + enumeration.value;
+                        c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enumeration_type->enum_member_start,
+                                                     enumeration_type->enum_member_start + enumeration_type->enum_member_count);
+                    }
+                }
                 use_index = aggregate_end;
                 continue;
             }
@@ -19954,7 +19977,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 c_parse_scalar_type_in_scope(machine, result, preprocess, statement_scope, index, aggregate_close + 1, &declarator_start);
                 if (enumeration)
                 {
-                    c_parse_publish_enum_members(result, preprocess, statement_scope, declaration_index, enum_member_start);
+                    c_parse_publish_enum_members(result, preprocess, statement_scope, declaration_index, enum_member_start, result->enum_member_count);
                 }
             }
             if (enumeration)
