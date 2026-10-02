@@ -15906,8 +15906,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             CParserResult syntax = c_parse_ast(temporary.arena, tokens);
             CIRLowerResult refused = c_analyze_with_options(temporary.arena, S8("alignof-member-refused.c"), tokens, syntax, target_native,
                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
-            String8 context = string_format(temporary.arena, S8("member refusal {u32} form={u32} diagnostics={u32} program={bool} certified={bool}: {S8}"),
-                index, form, refused.diagnostic_count, refused.program != 0, refused.canonical_ir_certified, rejected[index]);
+            String8 context = string_format(temporary.arena, S8("member refusal {u32} form={u32} diagnostics={u32} program={u32} certified={u32}: {S8}"),
+                index, form, refused.diagnostic_count, (u32)(refused.program != 0), (u32)refused.canonical_ir_certified, rejected[index]);
             BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && refused.diagnostic_count &&
                 !refused.canonical_ir_certified && (index == 1 || !refused.program), context);
             // A refused chain must clear its thread's sticky refusal.
