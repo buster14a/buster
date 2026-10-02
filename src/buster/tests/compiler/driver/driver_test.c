@@ -10817,7 +10817,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_en
                 arguments, arena, S8("function-address"), string_format(arena, S8("pointer-{u32}-topology-{u32}-mode-{u32}"), pointer_bytes, topology, mode),
                 (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), S8("1/1 Wasm function-address engine check passed"),
                 compiler_driver_test_wasm_node_deadline_microseconds());
-            arguments->show(arguments, S8("{S8}"), run.wait.output);
+            arguments->show(arguments, S8("{S8}"), BYTE_SLICE_TO_STRING(8, run.wait.streams[STANDARD_STREAM_OUTPUT]));
             BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(run));
             ByteSlice after = file_read(arena, output, (FileReadOptions){0});
             BUSTER_TEST(arguments, after.pointer && after.length == bytes.length && memory_compare(after.pointer, bytes.pointer, bytes.length));
