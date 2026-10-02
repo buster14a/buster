@@ -17975,11 +17975,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
                                 C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                 S8("in function 'strict_range': GNU case ranges are only available in GNU dialects"));
     {
-        // Control falling off the end of a non-void function is undefined only
-        // if the caller uses the value (C 6.9.1p12), so the body lowers and
-        // its final block ends in unreachable, exactly as Clang and GCC emit.
-        // sbase's dc ends a function this way, after a call to its own
-        // non-noreturn error().
+        // The branch with a source return and the ordinary closing brace both
+        // retain a RETURN edge. C 6.9.1p12 only makes a fallen-off result
+        // undefined when used; a discarded call still returns to its caller.
         CPreprocessResult falls_off_tokens = c_preprocess(control_flow_temporary.arena,
                                                           S8("int falls_off(int value) {\n"
                                                              "    if (value) {\n"
@@ -17998,6 +17996,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
         if (falls_off_ir.program)
         {
             IrModule* falls_off_module = &falls_off_ir.program->modules[0];
+            u32 falls_off_returns = 0;
             bool falls_off_unreachable = false;
             for (u32 function_index = 0; function_index < falls_off_module->function_count; function_index += 1)
             {
@@ -18008,10 +18007,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
                 }
                 for (u32 instruction_index = 0; instruction_index < falls_off_function->instruction_count; instruction_index += 1)
                 {
-                    falls_off_unreachable |= falls_off_function->instructions[instruction_index].opcode == IR_OPCODE_UNREACHABLE;
+                    IrOpcode opcode = falls_off_function->instructions[instruction_index].opcode;
+                    falls_off_returns += opcode == IR_OPCODE_RETURN;
+                    falls_off_unreachable |= opcode == IR_OPCODE_UNREACHABLE;
                 }
             }
-            BUSTER_TEST(arguments, falls_off_unreachable);
+            BUSTER_TEST(arguments, falls_off_returns == 2 && !falls_off_unreachable);
             BUSTER_TEST(arguments, ir_validate_canonical_module(falls_off_ir.program, falls_off_module).error == IR_VALIDATION_NONE);
         }
     }

@@ -300,7 +300,11 @@ falls off only after checking the exact effects, so its defined zero is also
 exercised. Bare/incompatible returns and wrong arity remain refused. No runtime
 oracle uses an unspecified fallen-off result.
 
-This regression is published before the bounded lowering repair. Its hosted
-baseline must retain the existing control-flow fixture's historical
-UNREACHABLE expectation; the production candidate will replace that false
-contract after the failed baseline is recorded.
+The final ordinary non-void root-body path uses the existing iterative typed
+zero-value constructor and canonical RETURN. That deterministic carrier is an
+implementation detail, not a guarantee for a source program that uses a missing
+result. Scope cleanup and stack restoration run before it; statement-expression
+continuations, explicit returns, main and actual noreturn calls retain their
+existing paths. The historical control-flow expectation now requires both
+returning branches and no manufactured UNREACHABLE. Constructor allocation
+and aggregate materialization costs are unmeasured; no performance claim is made.
