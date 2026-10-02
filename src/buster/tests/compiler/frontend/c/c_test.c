@@ -19743,8 +19743,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
                         index, dialect, form, lowered.diagnostic_count, (u32)lowered.canonical_ir_certified));
                 if (index == 0 && BUSTER_REQUIRE(arguments, lowered.diagnostic_count != 0))
                 {
-                    BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message,
-                        S8("in function 'bad': a call target must have pointer-to-function type"));
+                    BUSTER_TEST_RAW(arguments, string_equal(lowered.diagnostics[0].message,
+                        S8("in function 'bad': a call target must have pointer-to-function type")),
+                        string_format(temporary.arena, S8("scalar call result dialect={u32} form={u32}: {S8}"),
+                            dialect, form, lowered.diagnostics[0].message));
                 }
                 scratch_end(temporary);
             }
