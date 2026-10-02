@@ -23,6 +23,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Install independent debugger
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gdb
       - name: Freeze baseline source and consumer identities
         shell: bash
         run: |
