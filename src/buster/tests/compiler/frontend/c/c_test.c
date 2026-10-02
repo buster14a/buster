@@ -5015,9 +5015,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
                 {
                     String8 names[] = {S8("static_inline"), S8("static_force"), S8("external_inline"), S8("external_force"),
                                        S8("bare_inline"), S8("bare_force"), S8("inline_probe"), S8("api_inline"), S8("api_force")};
-                    // Windows aliases preprocess to plain inline. In GNU17,
-                    // a bare inline body supplies no external definition.
-                    bool definitions[] = {true, true, true, true, false, false, true, false, false};
+                    // Needed Windows aliases supply callable header bodies.
+                    bool definitions[] = {true, true, true, true, true, true, true, false, false};
                     for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
                     {
                         u32 matches = 0;
@@ -5039,8 +5038,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
                                         if (function->symbol.value == symbol->id.value)
                                         {
                                             functions += 1;
-                                            BUSTER_TEST_RAW(arguments, function->state == IR_FUNCTION_DECLARATION &&
-                                                                      function->instruction_count == 0, names[name_index]);
+                                            BUSTER_TEST_RAW(arguments, function->state == IR_FUNCTION_LOWERED &&
+                                                                      function->instruction_count != 0, names[name_index]);
                                         }
                                     }
                                     BUSTER_TEST_RAW(arguments, functions == 1, names[name_index]);
@@ -30700,6 +30699,170 @@ BUSTER_GLOBAL_LOCAL bool c_test_inline_linkage_spawn(Arena* arena, SliceString8 
 }
 #endif
 
+// Needed Windows header-inline bodies retain their shared external identity.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_inline_bodies(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 core = S8(
+        "extern unsigned unavailable_header_state;\n"
+        "__inline int unused_header(void) { return unavailable_header_state; }\n"
+        "__declspec(noinline) __inline unsigned long long *options(void) { static unsigned long long word; return &word; }\n"
+        "__inline unsigned long long *options_view(void) { return options(); }\n"
+        "__inline int bridge(int x) { *options() = (unsigned long long)x; return (int)*options() + 7; }\n"
+        "__forceinline int forced(int x) { return x + 3; }\n"
+        "static __inline int local(int x) { return x + 2; }\n"
+        "extern __inline int external(int x) { return x + 4; }\n"
+        "int (*saved)(int) = bridge;\n"
+        "int probe(void) { return bridge(5) + forced(2) + local(1) + external(1) != 25 || saved != bridge || options_view() != options_view() || *options_view() != 5; }\n");
+    String8 neighbors = S8(
+        "inline int ordinary(int x) { return x + 1; }\n"
+        "__inline__ int gnu_alias(int x) { return x + 1; }\n"
+        "extern __inline __attribute__((gnu_inline)) int gnu_only(int x) { return x + 1; }\n"
+        "int use_neighbors(int x) { return ordinary(x) + gnu_alias(x) + gnu_only(x); }\n");
+    String8 parts[] = {core, neighbors};
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+    String8 names[] = {S8("options"), S8("options_view"), S8("bridge"), S8("forced"), S8("local"), S8("external"), S8("ordinary"), S8("gnu_alias"), S8("gnu_only")};
+    bool definitions[] = {true, true, true, true, true, true, false, false, false};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C23};
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 architecture = 0; architecture < 2; architecture += 1)
+        {
+            Target target = target_native;
+            target.os = OPERATING_SYSTEM_WINDOWS;
+            target.cpu_arch = architecture ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect],
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("windows-inline-bodies.c"), tokens, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                String8 context = string_format(temporary.arena, S8("Windows inline dialect={u32} arch={u32} form={u32}"), dialect, architecture, form);
+                BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : context);
+                if (lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count &&
+                    BUSTER_REQUIRE(arguments, lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                    {
+                        u32 found = 0;
+                        for (u32 index = 0; index < module->function_count; index += 1)
+                        {
+                            IrFunction* function = module->functions + index;
+                            if (!string_equal(function->name, names[name]))
+                            {
+                                continue;
+                            }
+                            found += 1;
+                            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, function->symbol);
+                            BUSTER_TEST_RAW(arguments, symbol && symbol->is_definition == definitions[name] &&
+                                symbol->linkage == (name == 4 ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL) &&
+                                function->state == (definitions[name] ? IR_FUNCTION_LOWERED : IR_FUNCTION_DECLARATION) &&
+                                (definitions[name] ? function->instruction_count != 0 : function->instruction_count == 0),
+                                string_format(temporary.arena, S8("{S8} {S8}"), context, names[name]));
+                        }
+                        BUSTER_TEST_RAW(arguments, found == 1, context);
+                    }
+                    for (u32 index = 0; index < module->function_count; index += 1)
+                    {
+                        IrFunction* function = module->functions + index;
+                        if (string_equal(function->name, S8("unused_header")))
+                        {
+                            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, function->symbol);
+                            BUSTER_TEST(arguments, symbol && !symbol->is_definition &&
+                                                   function->state == IR_FUNCTION_NOT_LOWERED && !function->instruction_count);
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    // The same GNU spelling on Linux retains ordinary C99 inline semantics.
+    String8 linux_source = S8("__inline int f(int x) { return x + 1; } int use(int x) { return f(x); }");
+    Target linux_target = target_native;
+    linux_target.os = OPERATING_SYSTEM_LINUX;
+    linux_target.cpu_arch = CPU_ARCH_X86_64;
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, linux_source, (CPreprocessOptions){
+            .target = linux_target, .data_layout = target_data_layout(linux_target), .dialect = C_PREPROCESS_DIALECT_C17,
+        });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("linux-inline-alias.c"), tokens, syntax, linux_target,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count &&
+                               lowered.program && lowered.canonical_ir_certified);
+        if (lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count)
+        {
+            u32 found = 0;
+            IrModule* module = lowered.program->modules;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction* function = module->functions + index;
+                if (string_equal(function->name, S8("f")))
+                {
+                    found += 1;
+                    IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, function->symbol);
+                    BUSTER_TEST(arguments, symbol && !symbol->is_definition && symbol->linkage == IR_LINKAGE_EXTERNAL &&
+                                           function->state == IR_FUNCTION_DECLARATION && !function->instruction_count);
+                }
+            }
+            BUSTER_TEST(arguments, found == 1);
+        }
+        scratch_end(temporary);
+    }
+#if BUSTER_WINDOWS && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 native_parts[] = {core, S8("int main(void) { return probe(); }\n")};
+    String8 native_source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_parts), false);
+    String8 sources[] = {
+        native_source,
+        S8("#include <stdio.h>\nint main(void) { char buffer[16]; int n = snprintf(buffer, sizeof buffer, \"%d\", 37); return n != 2 || buffer[0] != '3' || buffer[1] != '7' || buffer[2] != 0; }\n"),
+    };
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        String8 input = buster_test_temporary_path(arguments->arena, S8("windows-inline-runtime"), S8(".c"));
+        bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index]));
+        BUSTER_TEST(arguments, written);
+        for (u32 mode = 0; written && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("windows-inline-runtime"), S8(".exe"));
+                String8 command[] = {S8("-std=c17"), modes[mode], forms[form], S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult linked = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    BUSTER_TEST(arguments, c_test_inline_linkage_spawn(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run)));
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                scratch_end(temporary);
+            }
+        }
+        if (written)
+        {
+            BUSTER_TEST(arguments, os_file_delete(input));
+        }
+    }
+#endif
+    return result;
+}
+
 // #1277: C99 inline bodies share the external function's single identity.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* arguments)
 {
@@ -32155,6 +32318,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_windows_inline_bodies);
     BUSTER_TEST_FIXTURE(arguments, c_test_c99_inline_linkage);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);
     BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
