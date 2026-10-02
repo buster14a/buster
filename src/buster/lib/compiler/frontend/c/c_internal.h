@@ -700,6 +700,8 @@ struct CSymbolTable
     u32 slot_capacity;
     u32 name_capacity;
     u32 count;
+    // Cold source spelling normalization enables the fused final respell pass.
+    bool has_ucn_names;
 };
 
 // The names a pass compares an identifier token against by hand, and their

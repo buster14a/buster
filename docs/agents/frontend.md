@@ -130,6 +130,33 @@ Registered `c_trigraph_preprocess_tests` checks directives, literals, comments,
 stringizing and included source, and compares fixed semantic token expectations
 with both GCC and Clang on hosted Linux x86-64 in C99/C11/C17/GNU17 modes.
 
+## Universal character names in identifiers
+
+C99/GNU99 identifier escapes use [N1256 Annex D](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf),
+including its initial-digit exclusion. C11/C17 and GNU11/GNU17 use
+[N1570 Annex D](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf):
+the four combining ranges are continuation-only, and supplementary ranges
+end at each plane's FFFD through EFFFD. The public lexers use GNU17 admission.
+C23/GNU23 and GNU89 retain their previous identifier-escape behavior; this
+change does not implement C23 XID or NFC. Raw UTF-8 retains encoding-only
+validation, without retroactively imposing escape-specific Annex D ranges.
+
+Lexing follows phase-one translation and splicing. A valid identifier UCN
+is interned as UTF-8; raw and escaped spellings share the same symbol.
+Original token bytes remain available to macro stringization and paste.
+After macro replacement, the existing final identifier-respelling pass copies
+canonical bytes under source-map stamps, preserving original physical columns.
+Literal UCN decoding is unchanged. Synthesized and preprocessed input still
+skip phase one, while their identifier grammar uses the selected dialect.
+
+Registered `c_test_ucn_lex`, `c_test_ucn_preprocess`, `c_test_ucn_semantic`
+and `c_test_ucn_runtime` cover range differences, errors, chunk boundaries,
+macros, paste, labels, members, raw equivalence and source locations. The
+runtime fixture exercises both frontends and all four allocation modes in
+C99/C11/C17; hosted Linux x86-64 also requires GCC and Clang to compile and
+execute the same self-checking source. These are registered validation paths,
+not claims that a local compiler or external performance host was run.
+
 ## Source translation limits
 
 The source translator accepts at most `UINT32_MAX - 2` raw bytes so its
