@@ -30,4 +30,3 @@ directory and removes the compiler and in-progress outputs.
 
 The musl and libc-test guides form one investigation in that order; references
 to preceding stages and later tests cross that boundary.
-
