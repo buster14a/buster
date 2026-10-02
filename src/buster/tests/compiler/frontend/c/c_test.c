@@ -972,7 +972,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
 {
     UnitTestResult result = {0};
     String8 source = S8(
-        "enum B : bool { BF, BT }; typedef enum B BoolEnum;\n"
+        "enum B : bool { BF, BT }; typedef enum B BoolEnum; enum I : int { IF, IT };\n"
         "enum { X = (enum B)2, Y = (enum B)0.5, ZERO_INTEGER = (enum B)0, ZERO_FLOAT = (enum B)0.0,\n"
         "       NEGATIVE_INTEGER = (enum B)-2, NEGATIVE_FLOAT = (enum B)-0.5,\n"
         "       HIGH_LIMB = (enum B)((unsigned __int128)1 << 100), NEGATIVE_ZERO = (enum B)-0.0,\n"
@@ -981,6 +981,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
         "static int static_two = (enum B)2, static_half = (enum B)0.5, static_zero = (enum B)0.0;\n"
         "static enum B static_enum = (enum B)2;\n"
         "static const enum B static_qualified = (const enum B)-0.5;\n"
+        "static int static_alias = (BoolEnum)2, static_alias_half = (const BoolEnum)0.5;\n"
+        "static int static_integer = (enum I)2;\n"
         "static_assert(X == 1 && Y == 1 && ZERO_INTEGER == 0 && ZERO_FLOAT == 0, \"positive and zero truth\");\n"
         "static_assert(NEGATIVE_INTEGER == 1 && NEGATIVE_FLOAT == 1 && HIGH_LIMB == 1 && NEGATIVE_ZERO == 0, \"whole value truth\");\n"
         "static_assert(ALIAS_INTEGER == 1 && QUALIFIED_FLOAT == 1, \"enum context parity\");\n"
@@ -990,7 +992,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
         "    BoolEnum n = (BoolEnum)negative; const enum B f = (const enum B)negative_half;\n"
         "    return X != 1 || Y != 1 || sizeof arr != 2 || sizeof fraction_arr != 2 ||\n"
         "           (int)r != 1 || (int)q != 1 || (int)z != 0 || (int)n != 1 || (int)f != 1 ||\n"
-        "           static_two != 1 || static_half != 1 || static_zero != 0 || static_enum != 1 || static_qualified != 1;\n"
+        "           static_two != 1 || static_half != 1 || static_zero != 0 || static_enum != 1 || static_qualified != 1 ||\n"
+        "           static_alias != 1 || static_alias_half != 1 || static_integer != 2;\n"
         "}\n");
     typedef struct CTestBoolEnumConstant CTestBoolEnumConstant;
     struct CTestBoolEnumConstant
@@ -999,7 +1002,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
         u64 value;
     };
     CTestBoolEnumConstant expected[] = {
-        {S8("BF"), 0}, {S8("BT"), 1}, {S8("X"), 1}, {S8("Y"), 1},
+        {S8("BF"), 0}, {S8("BT"), 1}, {S8("IF"), 0}, {S8("IT"), 1}, {S8("X"), 1}, {S8("Y"), 1},
         {S8("ZERO_INTEGER"), 0}, {S8("ZERO_FLOAT"), 0}, {S8("NEGATIVE_INTEGER"), 1},
         {S8("NEGATIVE_FLOAT"), 1}, {S8("HIGH_LIMB"), 1}, {S8("NEGATIVE_ZERO"), 0},
         {S8("ALIAS_INTEGER"), 1}, {S8("QUALIFIED_FLOAT"), 1},
@@ -1055,6 +1058,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
                 scratch_end(temporary);
             }
         }
+    }
+    String8 invalid[] = {
+        S8("enum B : bool { BF, BT }; static int s = (enum B)missing; int main(void) { return s; }"),
+        S8("enum B : bool { BF, BT }; int value = 2; static int s = (enum B)value; int main(void) { return s; }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, invalid[index], (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C23,
+        });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult lowered = c_analyze(temporary.arena, S8("enum-bool-invalid-static.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, invalid[index]);
+        scratch_end(temporary);
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 path = buster_test_temporary_path(arguments->arena, S8("enum-bool-conversion"), S8(".c"));

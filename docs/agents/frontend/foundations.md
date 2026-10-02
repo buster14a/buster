@@ -1146,7 +1146,9 @@ runtime operands under every allocator. Semantic `sizeof` over cast-spelled
 array bounds remains a separate layout limitation (#1238/#1247); the execution
 fixture still checks both exact extents. Fixed-base
 initializer representability and implicit-successor diagnostics retain their
-separate declaration constraints.
+separate declaration constraints. Static scalar validation skips enum tag names
+as type-specifier tokens before the typed fold; a tag is not an ordinary value
+identifier. Unknown and nonconstant value operands remain refused.
 
 Pending lookup respects lexical scope and declaration order, including a nearer
 ordinary identifier shadowing an outer enumerator. Published names use ordinary

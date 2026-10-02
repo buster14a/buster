@@ -24684,7 +24684,14 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
     for (u32 cursor = start; numeric && cursor < end; cursor += 1)
     {
         CToken token = preprocess.tokens[cursor];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
+        // Enum tags belong to the type specifier, not to value lookup.
+        // The typed fold below still resolves and validates the full cast.
+        if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_ENUM) && cursor + 1 < end &&
+            preprocess.tokens[cursor + 1].kind == C_TOKEN_IDENTIFIER)
+        {
+            cursor += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND)) numeric = false;
         else if (token.kind == C_TOKEN_IDENTIFIER && (!c_parse_declaration_keyword_at(result, preprocess, cursor) ||
                  string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) ||
                  c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token))))
