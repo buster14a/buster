@@ -376,18 +376,28 @@ without facts for identical bitcode and diagnostics.
   promotions and conversions: `0u - 1 == 4294967295u` holds and
   `-1 < sizeof(int)` fails. The legacy retokenizer still runs first and
   still decides which assertions wait for the deferred typed check (casts,
-  unary `sizeof`, enumerators), so deferred diagnostics keep their wording;
-  its `intmax_t` arithmetic (preprocessing's rule, C17 6.10.1p4) answers
+  unary `sizeof`, enumerators); its `intmax_t` arithmetic
+  (preprocessing's rule, C17 6.10.1p4) answers
   only shapes the typed evaluator does not model. A typed fault (division by
   zero, a shift count outside the promoted width) is final. An assertion
-  decided at the declaration reports `static assertion failed: "<message>"`
-  (GitHub #1238).
+  reports `static assertion failed: "<message>"` at every scope and evaluation
+  route (GitHub #1238, #1646). `c_parse_static_assert_diagnostic_message` shares
+  formatting between immediate parsing, semantic-only deferred checks and
+  lowering. It retains raw literal spelling, including quotes, escapes and
+  adjacent literal runs; the C23 message-less form reports
+  `static assertion failed`. Nonconstant assertions quote the complete expression
+  using source adjacency with comments/line breaks folded to spaces.
   Immediate assertions belong to parsing; `c_lower_to_ir`'s translation-unit
   deferred loop owns the remaining checks at every scope. Function-body walks
   consume their declarations without evaluating or diagnosing them again.
   `c_test_deferred_assert_diagnostic_ownership` pins one source-located
   diagnostic per failed assertion, including nonconstant controls, nested
   blocks and multiple failures, through both frontend SSA forms (GitHub #1783).
+  `c_test_static_assert_diagnostic_messages` pins exact messages for enums,
+  `_Generic`, `offsetof`, local `sizeof`, narrowing, member assertions and
+  nonconstant controls through parsing/lowering, AST analysis and semantic-only
+  analysis. The driver local-`sizeof` fixture compares syntax-only and object
+  diagnostics in both frontend forms.
 - Compile-time integer arithmetic has one implementation, `ir_integer_*`
   (`ir_integer.c`): fixed-width two's-complement values of 1..128 bits and
   the canonical operations, each result carrying its exact-value faults
