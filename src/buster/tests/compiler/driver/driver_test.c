@@ -13981,7 +13981,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integers(
                     }
                     else
                     {
-                        BUSTER_TEST_RAW(arguments, !os_file_replacement_target_stats(output).valid, rejected[row].source);
+                        FileStats stats = os_file_replacement_target_stats(output);
+                        BUSTER_TEST_RAW(arguments, stats.valid && stats.kind == OS_FILE_KIND_MISSING, rejected[row].source);
                     }
                 }
                 os_file_delete(output);
