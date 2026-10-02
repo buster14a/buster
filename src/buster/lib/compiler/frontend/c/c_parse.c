@@ -22508,23 +22508,30 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         u64 size = 0;
         u32 alignment = 0;
         CTypeParseMachine* layout_machine = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE ? 0 : machine;
-        value.valid = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_ENUM
+        // A member's declared placement can resolve an alignof operand
+        // which the enum-only natural-layout reader cannot type.
+        u32 member_alignment = 0;
+        bool is_alignof = c_parse_alignof_word(spelling);
+        bool member_valid = !is_alignof || c_semantic_alignof_member(arena, preprocess, result, scope, operand_start, operand_end, &member_alignment);
+        bool member_answer = is_alignof && (!member_valid || member_alignment != 0);
+        value.valid = member_answer ? member_valid : machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_ENUM
             ? c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope, operand_start, operand_end, &size, &alignment)
             : c_parse_type_layout(layout_machine, arena, preprocess, result, type, &size, &alignment);
-        if (!value.valid && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE)
+        if (member_answer) alignment = member_alignment;
+        if (!member_answer && !value.valid && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE)
         {
             // An earlier incomplete array's plain initializer may establish
             // its size before semantic completion publishes the inferred count.
             value.valid = c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope,
                                                                     operand_start, operand_end, &size, &alignment);
         }
-        if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION)
+        if (!member_answer && type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION)
         {
             size = 1;
             alignment = 4;
             value.valid = true;
         }
-        if (value.valid && c_parse_alignof_word(spelling) && !(type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION))
+        if (!member_answer && value.valid && is_alignof && !(type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION))
         {
             value.valid = c_parse_alignof_object_alignment(machine, result, preprocess, scope, operand_start, operand_end, &alignment);
         }

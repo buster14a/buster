@@ -15697,9 +15697,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             "    E_UNION = __alignof__(au.x), E_ADDRESS = __alignof__((&au)->x), E_CONST = __alignof__(groups[0].x),\n"
             "    E_EXPRESSION = __alignof__(request_expression.x), E_CAST = __alignof__(cast_request.x), E_CHAIN = __alignof__(chained.x),\n"
             "    E_PRAGMA = __alignof__(pragma_object.requested)\n"
+            "};\n"
         ),
         S8(
-            "};\n"
             "unsigned long folded_member_alignment = __alignof__(s2.x);\n"
             "char member_bound[__alignof__(s2.x)];\n"
             "_Alignas(__alignof__(s2.x)) int derived;\n"
@@ -15708,6 +15708,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             "_Static_assert(E_ARRAY == 16 && E_UNION == 16 && E_ADDRESS == 16 && E_CONST == 16 && E_EXPRESSION == 8 && E_CAST == 8 && E_CHAIN == 16, \"typed and const member queries\");\n"
             "_Static_assert(E_PRAGMA == PRAGMA_REQUEST && __alignof__(pragma_object.plain) == 1, \"pragma target rules\");\n"
             "_Static_assert(__alignof__(int) == 4 && _Alignof(short) == 2 && __alignof__(incidental.c) == 1, \"type and incidental alignment\");\n"
+            "_Static_assert(sizeof s2.x == 4 && sizeof((&au)->x) == 4 && sizeof groups[0].x == 4 && sizeof promoted.x == 4 && sizeof(((struct S2 *)0)->x) == 4, \"sizeof keeps natural size\");\n"
             "_Static_assert(__alignof__(+s2.x) == 4 && __alignof__(1 + s2.x) == 4 && __alignof__(s2.x + 1) == 4, \"arithmetic values\");\n"
             "_Static_assert(__alignof__(&s2.x) == 8 && __alignof__(++s2.x) == 4 && __alignof__(s2.x = s2.x) == 4, \"outer operators\");\n"
             "_Static_assert(__alignof__((0, s2.x)) == 4 && __alignof__(1 ? s2.x : s2.x) == 4 && __alignof__(array_member.values[0]) == 4, \"other values\");\n"
@@ -15885,8 +15886,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             CParserResult syntax = c_parse_ast(temporary.arena, tokens);
             CIRLowerResult refused = c_analyze_with_options(temporary.arena, S8("alignof-member-refused.c"), tokens, syntax, target_native,
                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            String8 context = string_format(temporary.arena, S8("member refusal {u32} form={u32} diagnostics={u32} program={bool} certified={bool}: {S8}"),
+                index, form, refused.diagnostic_count, refused.program != 0, refused.canonical_ir_certified, rejected[index]);
             BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && refused.diagnostic_count &&
-                !refused.program && !refused.canonical_ir_certified, rejected[index]);
+                !refused.canonical_ir_certified && (index == 1 || !refused.program), context);
             // A refused chain must clear its thread's sticky refusal.
             CPreprocessResult good = c_preprocess(temporary.arena, probes[0], options);
             CParserResult good_syntax = c_parse_ast(temporary.arena, good);

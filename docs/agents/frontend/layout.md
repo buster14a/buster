@@ -443,7 +443,10 @@ final alignment number escapes. The query bypasses committed type-layout rows
 to visit the selected placement; its alignment requests use the protected typed
 integer query in their original source scopes. Other layout solves retain their
 existing evaluation path. Member-query nesting uses the same fixed limit of
-four with a thread-local sticky refusal, including across private models.
+four with a thread-local sticky refusal, including across private models. Member
+answers precede the enum-only natural-layout reader, which cannot type promoted
+or address-derived operands. The canonical constant fold consults object
+alignment only for alignof spellings; sizeof retains its natural size path.
 
 The grammar check applies declaration alignment only to an outer final member
 expression. Unary, arithmetic, assignment, comma and conditional values keep
