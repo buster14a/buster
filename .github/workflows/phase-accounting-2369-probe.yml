@@ -4,6 +4,7 @@ on:
     branches: [codex/2369-phase-accounting-probe]
 permissions:
   contents: read
+  actions: read
 jobs:
   phase-accounting:
     if: github.repository == 'buster14a/buster'
@@ -50,3 +51,111 @@ jobs:
               raise SystemExit("candidate controls failed")
           print("CANDIDATE_ACCOUNTING_PASS tests=" + str(result.testsRun) + " head=" + candidate_head)
           PY
+
+      - name: Hash-bound production journal replay
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import importlib.util
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+          import urllib.error
+          import urllib.request
+          import zipfile
+          sys.path.insert(0, "tools")
+          import ci_matrix_phases as candidate
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          request = urllib.request.Request(
+              "https://api.github.com/repos/buster14a/buster/actions/artifacts/11235228166/zip",
+              headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                       "Accept": "application/vnd.github+json"})
+          opener = urllib.request.build_opener(NoRedirect())
+          try:
+              response = opener.open(request, timeout=30)
+          except urllib.error.HTTPError as error:
+              if error.code != 302:
+                  raise
+              response = urllib.request.urlopen(error.headers["Location"], timeout=30)
+          with response:
+              raw = response.read(5000001)
+          digest = hashlib.sha256(raw).hexdigest()
+          if digest != "9b108746d0109287be3eb014688d49d8f698597a0344b94caf73cc9f199c8f1b":
+              raise SystemExit("artifact bytes differ from independently pinned digest")
+          spec = importlib.util.spec_from_loader("phase_production_baseline", loader=None)
+          baseline = importlib.util.module_from_spec(spec)
+          source = subprocess.check_output(["git", "show", "f73f75ed4a59594eb1f43ec505c100457bc35185:tools/ci_matrix_phases.py"])
+          exec(compile(source, "baseline-ci_matrix_phases.py", "exec"), baseline.__dict__)
+          with tempfile.TemporaryDirectory() as directory:
+              temporary = Path(directory)
+              with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                  if sum(member.file_size for member in archive.infolist()) > 64000000:
+                      raise SystemExit("artifact uncompressed size exceeds diagnostic bound")
+                  for member in archive.infolist():
+                      path = Path(member.filename)
+                      if path.is_absolute() or ".." in path.parts or ((member.external_attr >> 16) & 0o170000) == 0o120000:
+                          raise SystemExit("unsafe archive member")
+                  archive.extractall(temporary)
+              plans = list(temporary.rglob("matrix-phases/plan.json"))
+              coverages = list(temporary.rglob("coverage.json"))
+              if len(plans) != 1 or len(coverages) != 1:
+                  raise SystemExit("ambiguous phase/coverage source")
+              root = plans[0].parent
+              before = {str(p.relative_to(temporary)): p.read_bytes() for p in temporary.rglob("*") if p.is_file()}
+              plan = baseline.read(plans[0])
+              identity = plan["identity"]
+              expected = dict(source_revision="457b0f2b5fd6b388dda1ea1c94390a56ae1db279",
+                              source_tree="801052fd8169a2767ef1b7352bd913dd9a9cfb29",
+                              run_id="37023134687", run_attempt="1", platform="windows", architecture="x86_64", shard="checks")
+              if any(identity.get(key) != value for key, value in expected.items()):
+                  raise SystemExit("producer identity differs from independent receipt")
+              environment = dict(GITHUB_SHA=expected["source_revision"], GITHUB_REPOSITORY="buster14a/buster",
+                                 GITHUB_RUN_ID=expected["run_id"], GITHUB_RUN_ATTEMPT="1")
+              coverage = baseline.read(coverages[0])
+              old = baseline.analyze(root, coverage, environment)
+              new = candidate.analyze(root, coverage, environment)
+              old_trees = {tree["id"]: tree for tree in old["trees"]}
+              new_trees = {tree["id"]: tree for tree in new["trees"]}
+              events = {event["id"]: event for event in new["events"]}
+              gap_total = 0
+              for tree_id, tree in new_trees.items():
+                  gap = sum(event["child_start_us"] - event["start_us"] for event in new["events"]
+                            if event["tree"] == tree_id and event["phase"] == "test")
+                  previous = old_trees[tree_id]
+                  if tree["elapsed_us"]["build"] - previous["elapsed_us"]["build"] != gap:
+                      raise SystemExit("production correction differs from recorded setup gap")
+                  for phase in tree["elapsed_us"]:
+                      if phase != "build" and tree["elapsed_us"][phase] != previous["elapsed_us"][phase]:
+                          raise SystemExit("unrelated phase duration changed")
+                  gap_total += gap
+                  print("PRODUCTION_PHASE_ACCOUNTING " + json.dumps(dict(tree=tree_id,
+                      before_us=previous["elapsed_us"], after_us=tree["elapsed_us"], recovered_setup_us=gap), sort_keys=True))
+              if old["predictions"] != new["predictions"] or old["timeline"] != new["timeline"]:
+                  raise SystemExit("scheduling evidence changed")
+              after = {str(p.relative_to(temporary)): p.read_bytes() for p in temporary.rglob("*") if p.is_file()}
+              if before != after:
+                  raise SystemExit("raw artifact/summary bytes changed")
+              print("PRODUCTION_ACCOUNTING_REPLAY_PASS " + json.dumps(dict(artifact=11235228166,
+                  sha256=digest, identity=identity, recovered_setup_us=gap_total, raw_files_unchanged=len(before),
+                  qualification=False, performance_acceptance=False), sort_keys=True))
+          PY
+  macos-phase-controls:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Native observer and reader phase controls
+        shell: bash
+        run: python3 tools/ci_matrix_phases_test.py -v
