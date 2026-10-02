@@ -52592,6 +52592,26 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         u32 candidate_index = entity_function_declarations[use.entity.value];
         if (candidate_index == UINT32_MAX)
         {
+            // Block-scope linkage declarations retain source-local rows.
+            // Their uses still reach the named function's definition, including
+            // a visible static function, rather than an automatic object.
+            CEntity entity = parse.entities[use.entity.value];
+            if (entity.kind == C_ENTITY_LOCAL && entity.is_extern && entity.type.value < parse.type_count &&
+                parse.types[entity.type.value].kind == C_TYPE_FUNCTION)
+            {
+                CIrFunctionNameResolution* resolution = c_ir_function_name_resolution_symbol(&constant_builder, entity.symbol, entity.name);
+                if (resolution && resolution->unique)
+                {
+                    CEntityId target_entity = parse.declarations[resolution->declaration_index].entity;
+                    if (target_entity.value < parse.entity_count)
+                    {
+                        candidate_index = entity_function_declarations[target_entity.value];
+                    }
+                }
+            }
+        }
+        if (candidate_index == UINT32_MAX)
+        {
             continue;
         }
         u32 owner_index = use.token_index < preprocess.token_count ? token_function_declarations_plus_one[use.token_index] - 1 : UINT32_MAX;

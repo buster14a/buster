@@ -42,6 +42,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   An omitted request or `_Alignas(0)` keeps an earlier request, and an incomplete
   array or unprototyped function spelling keeps an earlier complete type.
   Function alignment specifiers remain invalid even when their request is zero.
+  Lowering resolves linked local function uses through the function-name index
+  when building definition dependencies, retaining called static functions
+  without rooting unused function bodies or their dependencies.
   No-linkage object duplicates remain redefinitions. Registered
   `c_test_local_linkage_redeclarations` checks semantic-only analysis and both
   canonical-IR frontend forms. Its runtime companion exercises syntax-only,

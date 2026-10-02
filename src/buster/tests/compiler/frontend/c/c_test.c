@@ -2262,11 +2262,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations(UnitTestA
         S8("int test(void) { extern int z; extern int z; return z - 3; } int z = 3;"),
         S8("int test(void) { int add(int); extern int add(int); int add(int); return add(3) - 4; } int add(int x) { return x + 1; }"),
         S8("typedef int F(int); int test(void) { F add; extern F add; int add(int); return add(3) - 4; } int add(int x) { return x + 1; }"),
-        S8("static int z = 17; static int add(int x) { return z + x; } int test(void) { extern int z; extern int z; int add(int); extern int add(int); return add(2) - z - 2; }"),
+        S8("static int z = 17; static int ignored(void) { return 99; } static int add(int x) { return z + x; } int test(void) { extern int z; extern int z; int add(int); extern int add(int); return add(2) - z - 2; }"),
         S8("int values[3] = {1, 2, 7}; int test(void) { extern int values[3]; extern int values[]; extern int values[3]; _Static_assert(sizeof values == 3 * sizeof(int), \"complete\"); return values[2] - 7; }"),
         S8("_Alignas(16) int z = 3; int test(void) { _Alignas(0) extern int z; _Alignas(16) extern int z; extern int z; _Alignas(0) extern int z; return z - 3; }"),
         S8("int add(int x) { return x + 1; } int (*callback)(int) = add; int test(void) { extern int (*callback)(int); extern int (*callback)(int); return callback(3) - 4; }"),
         S8("int z = 3; int test(void) { extern int z, z; { extern int z; extern int z; } return z - 3; }"),
+        S8("static int dead_target(int x) { return x; } static int dead_owner(void) { int dead_target(int); extern int dead_target(int); return dead_target(1); } int test(void) { return 0; }"),
+        S8("static int add(int x) { return x + 1; } int test(void) { int add(int); extern int add(int); return (&add)(3) - 4; }"),
         S8("int add(int x) { return x + 1; } int test(void) { int add(int); int add(); return add(3) - 4; }"),
     };
     typedef struct CLocalRedeclarationFailure CLocalRedeclarationFailure;
@@ -2326,10 +2328,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations(UnitTestA
                     }
                     CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("local-redeclarations.c"), tokens, analysis,
                         target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
-                    if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count && lowered.program->module_count))
+                    bool has_module = lowered.program && !lowered.diagnostic_count && lowered.program->module_count;
+                    BUSTER_TEST_RAW(arguments, has_module, string_format(temporary.arena, S8("source={S8}\ndiagnostic={S8}"), accepted[index],
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : (String8){0}));
+                    if (has_module)
                     {
                         IrModule* module = lowered.program->modules;
                         BUSTER_TEST_RAW(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE, accepted[index]);
+                        if (index == 4 || index == 10)
+                        {
+                            IrFunction* linked = c_test_find_ir_function(module, S8("add"));
+                            BUSTER_TEST(arguments, linked && linked->state == IR_FUNCTION_LOWERED);
+                        }
+                        if (index == 4)
+                        {
+                            BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("ignored")) == 0);
+                        }
+                        if (index == 9)
+                        {
+                            BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("dead_owner")) == 0);
+                            BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("dead_target")) == 0);
+                        }
                         IrFunction* function = c_test_find_ir_function(module, S8("test"));
                         if (BUSTER_REQUIRE(arguments, function != 0))
                         {
