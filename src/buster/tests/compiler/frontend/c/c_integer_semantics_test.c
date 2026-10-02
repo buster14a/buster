@@ -185,6 +185,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_semantics_agreement(UnitTestAr
     }
     BUSTER_TEST(arguments, elevens == 1 && twenty_twos == 0);
     BUSTER_TEST(arguments, masks != 0 && noncanonical == 0);
+
+    // #1577: both assertion routes must prefer the nearest object over an
+    // outer typedef for every sizeof/alignof spelling. False neighbors ensure
+    // each route actually consumes its asserted value.
+    typedef struct CIntegerShadowQuery CIntegerShadowQuery;
+    struct CIntegerShadowQuery
+    {
+        String8 operand;
+        String8 legacy_value;
+        String8 deferred_value;
+        String8 legacy_wrong;
+        String8 deferred_wrong;
+    };
+    CIntegerShadowQuery shadow_queries[] = {
+        {S8("sizeof(string)"), S8("256"), S8("N"), S8("257"), S8("N + 1")},
+        {S8("sizeof string"), S8("256"), S8("N"), S8("257"), S8("N + 1")},
+        {S8("_Alignof(string)"), S8("1"), S8("N - N + 1"), S8("2"), S8("N - N + 2")},
+    };
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = c_integer_semantics_target();
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX :
+                    target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 query = 0; query < BUSTER_ARRAY_LENGTH(shadow_queries); query += 1)
+        {
+            for (u32 route = 0; route < 2; route += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    for (u32 rejected = 0; rejected < 2; rejected += 1)
+                    {
+                        TemporalArena case_temporary = arena_begin_temporal(arena);
+                        CIntegerShadowQuery row = shadow_queries[query];
+                        String8 expected = rejected ? (route ? row.deferred_wrong : row.legacy_wrong) :
+                                                      (route ? row.deferred_value : row.legacy_value);
+                        String8 source = string_format(arena,
+                            S8("{S8} char string[{S8}]; (void)string; _Static_assert(({S8}) == ({S8}), \"shadowed object\"); return 0; {S8}"),
+                            S8("typedef void *string; enum { N = 256 }; int probe(void) {"),
+                            route ? S8("N") : S8("256"), row.operand, expected, S8("}"));
+                        CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){
+                            .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+                        });
+                        CParserResult syntax = c_parse_ast(arena, tokens);
+                        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count))
+                        {
+                            CAnalysisResult semantic = c_analyze_semantics_only(arena, tokens, syntax);
+                            CIRLowerResult lowered = c_analyze_with_options(arena, S8("shadowed-object-query.c"), tokens, syntax, target,
+                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                            if (rejected)
+                            {
+                                bool semantic_assertion = false;
+                                bool lowered_assertion = false;
+                                for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                                {
+                                    semantic_assertion |= semantic.diagnostics[index].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED;
+                                }
+                                for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                                {
+                                    lowered_assertion |= lowered.diagnostics[index].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED;
+                                }
+                                BUSTER_TEST_RAW(arguments, semantic_assertion && lowered_assertion && !lowered.program, source);
+                                BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                            }
+                            else
+                            {
+                                CParseResult parsed = c_parse(arena, tokens);
+                                BUSTER_TEST_RAW(arguments, !parsed.diagnostic_count && !semantic.diagnostic_count && !lowered.diagnostic_count, source);
+                                if (BUSTER_REQUIRE(arguments, lowered.program && lowered.canonical_ir_certified && lowered.program->module_count == 1))
+                                {
+                                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                                }
+                            }
+                        }
+                        scratch_end(case_temporary);
+                    }
+                }
+            }
+        }
+    }
+
     scratch_end(temporary);
     return result;
 }
