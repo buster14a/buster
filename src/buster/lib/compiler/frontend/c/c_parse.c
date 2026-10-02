@@ -76,8 +76,8 @@
 //   c_parse_word_bits_compute,                    specifier words answered
 //   c_parse_word_bits_token                       from the interned symbol
 //                                                 id (C_WORD_* bits), with
-//                                                 the spelling ladders as
-//                                                 the symbol-0 fallback
+//                                                 spelling fallback only for
+//                                                 identifiers/unclassified rows
 //   c_type_parse_alignment_step ..                the type-parse machine
 //   c_type_parse_machine_run                      steps
 //   c_parse_scalar_type_core_begin,               declarators: pointers,
@@ -194,8 +194,9 @@ enum
 // The `_token` specifier predicates: same answers as their String8
 // counterparts, but an interned token settles on one word_bits load instead
 // of a spelling ladder. Symbol 0 (pasted, synthesized, or test-built tokens)
-// falls back to the spelling compute, so a missed path costs speed and never
-// correctness; a symbol above predefined_limit is a constant-time "no"
+// falls back to the spelling compute for identifier or unclassified hand-built
+// kinds, so a missed path costs speed and never correctness; a symbol above
+// predefined_limit is a constant-time "no"
 // because every specifier-word spelling is interned into the predefined
 // range. Defined after the spelling ladders they derive from.
 BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CToken token);
@@ -11425,9 +11426,15 @@ BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CTok
     {
         bits = token.symbol <= preprocess.symbols->predefined_limit ? preprocess.symbols->word_bits[token.symbol] : 0;
     }
-    else
+    else if (c_token_may_spell_word(token))
     {
         bits = c_parse_word_bits_compute(c_token_spelling(preprocess.spelling_base, token));
+    }
+    else
+    {
+        // Known non-word kinds cannot match a specifier. Keep unclassified
+        // hand-built rows on the spelling path, as identifier queries do.
+        bits = 0;
     }
     return bits;
 }
@@ -11516,6 +11523,28 @@ BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix_token(CPreprocessResult
     c_parse_qualifier_bits_apply(bits, qualifiers);
     return (bits & mask) != 0;
 }
+
+#if BUSTER_INCLUDE_TESTS
+u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token)
+{
+    CType qualifier = {0};
+    CType prefix = {0};
+    u32 classes = 0;
+    classes |= c_parse_type_word_for_dialect_token(preprocess, token) ? C_TEST_WORD_CLASS_TYPE : 0;
+    classes |= c_parse_auto_type_word_token(preprocess, token) ? C_TEST_WORD_CLASS_AUTO_TYPE : 0;
+    classes |= c_parse_type_name_start_word_token(preprocess, token) ? C_TEST_WORD_CLASS_TYPE_NAME_START : 0;
+    classes |= c_parse_type_qualifier_word_token(preprocess, token, &qualifier) ? C_TEST_WORD_CLASS_QUALIFIER : 0;
+    classes |= c_parse_atomic_declaration_prefix_token(preprocess, token, &prefix) ? C_TEST_WORD_CLASS_ATOMIC_PREFIX : 0;
+    classes |= qualifier.is_const ? C_TEST_WORD_CLASS_CONST : 0;
+    classes |= qualifier.is_volatile ? C_TEST_WORD_CLASS_VOLATILE : 0;
+    classes |= qualifier.is_restrict ? C_TEST_WORD_CLASS_RESTRICT : 0;
+    classes |= qualifier.is_atomic ? C_TEST_WORD_CLASS_ATOMIC : 0;
+    classes |= prefix.is_const == qualifier.is_const && prefix.is_volatile == qualifier.is_volatile &&
+                       prefix.is_restrict == qualifier.is_restrict && prefix.is_atomic == qualifier.is_atomic
+                   ? C_TEST_WORD_CLASS_QUALIFIERS_AGREE : 0;
+    return classes;
+}
+#endif
 
 BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
@@ -13769,15 +13798,15 @@ BUSTER_C_INTERNAL u32 c_parse_parameter_list_reserved_count(CPreprocessResult pr
     return reserved;
 }
 
-// `()` -- an empty parameter list -- declares a function with no prototype,
-// which C11 6.2.7p3 makes compatible with a non-variadic prototype; `(void)`
-// declares a prototype with zero parameters and is compatible with no other
-// list. Both produce zero parameter records, so the shape is read back off
-// the tokens: the list is empty exactly when its closing parenthesis abuts
-// its opening one.
+// Before C23, `()` leaves the parameters unspecified; `(void)` declares a
+// zero-parameter prototype. C23 makes both spellings zero-parameter
+// prototypes (N3096 6.7.6.3p13). Every function-type constructor records
+// that distinction here, before type compatibility or call checks consume it.
+// Both spellings produce zero parameter rows, so token adjacency identifies
+// the empty list.
 BUSTER_C_INTERNAL bool c_parse_parameter_list_unprototyped(CPreprocessResult preprocess, u32 list_close)
 {
-    return list_close && list_close - 1 < preprocess.token_count &&
+    return !c_preprocess_dialect_is_c23(preprocess.dialect) && list_close && list_close - 1 < preprocess.token_count &&
            c_token_is_punctuator(&preprocess.tokens[list_close - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
 }
 
@@ -16288,7 +16317,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                     if (list_end) list_close = index;
                     if (list_end && !segment_count && !written_parameter_count)
                     {
-                        unprototyped = true;
+                        unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close);
                         break;
                     }
                     if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_ELLIPSIS))

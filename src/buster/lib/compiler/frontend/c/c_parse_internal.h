@@ -1,12 +1,28 @@
 #pragma once
 
 // Private test seams for production constexpr, call arity, expression typing, binding, aggregate-tag, definition-index,
-// label-provenance gate, validation-candidate, type-compatibility walk and layout-solve queries.
+// label-provenance gate, validation-candidate, specifier-word, type-compatibility walk and layout-solve queries.
 // Tests own their storage and observe production behavior, not a duplicate
 // implementation. No declarations enter production builds.
 #include <buster/lib/compiler/frontend/c/c.h>
 
 #if BUSTER_INCLUDE_TESTS
+// Observable answers of the five production specifier-word token queries,
+// including their qualifier writes. No counters or state enter production.
+enum
+{
+    C_TEST_WORD_CLASS_TYPE = 1 << 0,
+    C_TEST_WORD_CLASS_AUTO_TYPE = 1 << 1,
+    C_TEST_WORD_CLASS_TYPE_NAME_START = 1 << 2,
+    C_TEST_WORD_CLASS_QUALIFIER = 1 << 3,
+    C_TEST_WORD_CLASS_ATOMIC_PREFIX = 1 << 4,
+    C_TEST_WORD_CLASS_CONST = 1 << 5,
+    C_TEST_WORD_CLASS_VOLATILE = 1 << 6,
+    C_TEST_WORD_CLASS_RESTRICT = 1 << 7,
+    C_TEST_WORD_CLASS_ATOMIC = 1 << 8,
+    C_TEST_WORD_CLASS_QUALIFIERS_AGREE = 1 << 9,
+};
+BUSTER_F_DECL u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token);
 BUSTER_F_DECL CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess,
                                                         u32 start, u32 end);
 BUSTER_F_DECL bool c_test_validate_constexpr_declaration(Arena* arena, CParseResult* result, CPreprocessResult preprocess,

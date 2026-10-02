@@ -733,7 +733,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* a
 //
 // `reason_out`, when the caller asks for one, receives the rule's own words for
 // the refusal instead of leaving the driver to report an opcode number (#831).
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(Arena* arena, String8 source, String8* reason_out)
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(Arena* arena, String8 source, bool balanced_cpuid,
+                                                                      String8* reason_out)
 {
     u64 index = 0;
     while (index < source.length)
@@ -758,7 +759,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(Arena* are
             .length = index - mnemonic_start,
         };
         bool directive = mnemonic.length && mnemonic.pointer[0] == '.';
-        if (!directive && !codegen_inline_assembly_mnemonic_allowed(mnemonic))
+        if (!directive && !codegen_inline_assembly_mnemonic_allowed(mnemonic) &&
+            !(balanced_cpuid && string_equal(mnemonic, S8("cpuid"))))
         {
             if (reason_out)
             {
@@ -988,6 +990,45 @@ bool codegen_inline_assembly_protected_cpuid(IrProgram* program, IrFunction* fun
     return valid;
 }
 
+// A fifth read/write u64 output may pin RBX explicitly. Removing only that
+// operand must leave the exact protected profile; this admits its CPUID
+// instruction without licensing an arbitrary compound.
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_balanced_cpuid(IrProgram* program, IrFunction* function,
+                                                               IrInstruction* instruction, IrInstructionExtra extra)
+{
+    bool valid = codegen_inline_assembly_protected_cpuid(program, function, instruction, extra);
+    if (!valid && program && function && instruction &&
+        (instruction->operand_count == 6 || instruction->operand_count == 7) &&
+        instruction->immediate_count == instruction->operand_count && instruction->immediates && instruction->operands)
+    {
+        u64 sentinel_constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_B | IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT |
+                                  IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE;
+        IrValueId sentinel = instruction->operands[4];
+        bool explicit_rbx = instruction->immediates[4] == sentinel_constraint && sentinel.value < function->value_count;
+        IrType* type = explicit_rbx ? ir_type_from_id(&program->types, function->values[sentinel.value].canonical_type) : 0;
+        explicit_rbx = explicit_rbx && type && type->kind == IR_TYPE_INTEGER && type->layout.resolved && type->layout.size == 8 &&
+                       type->bit_width == 64 && !type->is_signed;
+        if (explicit_rbx)
+        {
+            IrValueId operands[6];
+            u64 constraints[6];
+            IrInstruction protected_instruction = *instruction;
+            protected_instruction.operand_count -= 1;
+            protected_instruction.immediate_count -= 1;
+            protected_instruction.operands = operands;
+            protected_instruction.immediates = constraints;
+            for (u32 index = 0; index < protected_instruction.operand_count; index += 1)
+            {
+                u32 source = index < 4 ? index : index + 1;
+                operands[index] = instruction->operands[source];
+                constraints[index] = instruction->immediates[source];
+            }
+            valid = codegen_inline_assembly_protected_cpuid(program, function, &protected_instruction, extra);
+        }
+    }
+    return valid;
+}
+
 bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
                                               IrInstructionExtra extra, X64Register* registers, u32* vector_registers,
                                               AssemblySyntax syntax, String8* source_out, String8* reason_out)
@@ -1181,7 +1222,8 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
     // The shape check runs before the prefix is folded in, so LOCK is still a
     // statement of its own there and is checked against the mnemonic list like
     // every other one.
-    if (!codegen_inline_assembly_register_only_source(arena, *source_out, reason_out))
+    if (!codegen_inline_assembly_register_only_source(arena, *source_out,
+                                                     codegen_inline_assembly_balanced_cpuid(program, function, instruction, extra), reason_out))
     {
         return false;
     }

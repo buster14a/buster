@@ -632,9 +632,19 @@ ArenaBenchmarkCounters arena_benchmark_counters(void)
     return arena_benchmark_kind_counters(ARENA_BENCHMARK_ARENA);
 }
 
+BUSTER_NORETURN BUSTER_COLD BUSTER_GLOBAL_LOCAL void arena_benchmark_exhausted(Arena* arena, u64 size, u64 alignment, u64 aligned_offset,
+                                                                             String8 file, String8 function, u32 line);
+
 void* arena_benchmark_allocate(Arena* arena, u64 size, u64 alignment, bool zeroed, String8 file, String8 function, u32 line)
 {
     u64 start = arena->position;
+    u64 aligned_offset = 0;
+    if (size <= ARENA_MAX_RESERVATION && start >= arena_minimum_position && start <= arena->reserved_size &&
+        align_forward_checked(start, alignment, &aligned_offset) && aligned_offset <= arena->reserved_size &&
+        size > arena->reserved_size - aligned_offset)
+    {
+        arena_benchmark_exhausted(arena, size, alignment, aligned_offset, file, function, line);
+    }
     u64 dirty = zeroed ? arena_dirty_position(arena) : 0;
     void* result = zeroed ? arena_benchmark_allocate_zeroed_bytes_raw(arena, size, alignment)
                           : arena_benchmark_allocate_bytes_raw(arena, size, alignment);
@@ -719,6 +729,54 @@ BUSTER_GLOBAL_LOCAL void arena_benchmark_write(char* buffer, u64 length)
     // including partial writes, without depending on a platform's PIPE_BUF.
     buffer[length++] = '\n';
     arena_benchmark_raw_write((ByteSlice){.pointer = (u8*)buffer, .length = length});
+}
+
+BUSTER_NORETURN BUSTER_COLD BUSTER_GLOBAL_LOCAL void arena_benchmark_exhausted(Arena* arena, u64 size, u64 alignment, u64 aligned_offset,
+                                                                             String8 file, String8 function, u32 line)
+{
+    // This failure record uses the observer's bounded stack writer. Reporting
+    // reservation exhaustion must not borrow the scratch arena that exhausted.
+    ThreadContext* context = thread_context_selected();
+    u64 scratch_index_plus_one = 0;
+    if (context)
+    {
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(context->arenas); index += 1)
+        {
+            if (context->arenas[index] == arena)
+            {
+                scratch_index_plus_one = index + 1;
+            }
+        }
+    }
+    String8 names[] = {
+        S8("line"), S8("arena_address"), S8("reserved"), S8("position"), S8("committed"), S8("request"),
+        S8("alignment"), S8("aligned_offset"), S8("scratch_index_plus_one"), S8("lane_arena"), S8("lane"), S8("lanes"),
+    };
+    u64 values[] = {
+        line, (u64)(uintptr_t)arena, arena->reserved_size, arena->position, arena->os_position, size, alignment, aligned_offset,
+        scratch_index_plus_one, context && context->lane_arena == arena, context ? context->lane_context.lane_index : 0,
+        context ? context->lane_context.lane_count : 0,
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == BUSTER_ARRAY_LENGTH(values));
+    char buffer[4096];
+    u64 capacity = sizeof(buffer) - 1;
+    u64 length = arena_benchmark_append(buffer, 0, capacity, S8("BUSTER_ALLOC_CAPACITY"));
+    length = arena_benchmark_separator(buffer, length, capacity);
+    length = arena_benchmark_append(buffer, length, capacity, S8("file"));
+    length = arena_benchmark_separator(buffer, length, capacity);
+    length = arena_benchmark_append(buffer, length, capacity, file);
+    length = arena_benchmark_separator(buffer, length, capacity);
+    length = arena_benchmark_append(buffer, length, capacity, S8("function"));
+    length = arena_benchmark_separator(buffer, length, capacity);
+    length = arena_benchmark_append(buffer, length, capacity, function);
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(values); index += 1)
+    {
+        length = arena_benchmark_separator(buffer, length, capacity);
+        length = arena_benchmark_append(buffer, length, capacity, names[index]);
+        length = arena_benchmark_number(buffer, length, capacity, values[index]);
+    }
+    arena_benchmark_write(buffer, length);
+    os_fail_raw(line, function, file, S8("arena reservation exhausted"));
 }
 
 void arena_benchmark_flush(bool final)
