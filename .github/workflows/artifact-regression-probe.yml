@@ -50,9 +50,9 @@ jobs:
               if [[ "$variant" == baseline ]]; then
                 test "$status" -eq 1
                 if [[ "$module" == object_tests ]]; then
-                  rg 'object_test_coff_x64_tls_index_addends' "$evidence/$variant-$module.log"
+                  grep -E ' failed at .*:object_test_coff_x64_tls_index_addends:[0-9]+$' "$evidence/$variant-$module.log"
                 else
-                  rg 'jit_test_imported_function_data_pc32' "$evidence/$variant-$module.log"
+                  grep -E ' failed at .*:jit_test_imported_function_data_pc32:[0-9]+$' "$evidence/$variant-$module.log"
                 fi
               else
                 test "$status" -eq 0
