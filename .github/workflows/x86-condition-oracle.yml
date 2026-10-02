@@ -11,19 +11,19 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: d94bc762efb0579dd751dca7964757dab8b8107d
+          ref: cf9ead61485111571a1de7f8ac2e4f4b6eebb825
           persist-credentials: false
       - name: Verify exact source and independent tool identities
         run: |
-          test "$(git rev-parse HEAD)" = "d94bc762efb0579dd751dca7964757dab8b8107d"
+          test "$(git rev-parse HEAD)" = "cf9ead61485111571a1de7f8ac2e4f4b6eebb825"
           git rev-parse HEAD
           as --version
           clang --version
           objcopy --version
-          dpkg-query -W binutils clang
+          dpkg-query -W binutils clang-21
           python3 - <<'PY'
           from pathlib import Path
-          for path in [Path('/usr/share/doc/binutils/copyright'), Path('/usr/share/doc/clang/copyright')]:
+          for path in [Path('/usr/share/doc/binutils/copyright'), Path('/usr/share/doc/clang-21/copyright')]:
               print('TOOL_LICENSE_FILE', path, 'available=', path.exists())
               if path.exists():
                   text = path.read_text()
