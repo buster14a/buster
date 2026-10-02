@@ -350,5 +350,17 @@ standard source and fixed images. Only Clang with `-fms-extensions` observes the
 separate ui8/ui16 source. Compiler/process errors and 30-second timeouts are
 failures; expected values never adapt to reference output. Existing frozen
 long-double inputs, rounding/special/refusal fixtures and support policy remain
-unchanged. This initial regression checkpoint changes no production behavior;
-actual unchanged-source failures must be recorded before publishing a repair.
+unchanged.
+
+The bounded folder retains one promoted unsigned-width byte alongside an
+integer's exact x87 encoding. Both direct and grouped unary signs share the
+same integer-domain operation: unsigned 32/64-bit negation wraps before real
+conversion, narrow unsigned literals promote to signed int, and integer zero
+remains positive. Real negation continues to flip the format's sign bit,
+including zero. Every successful real conversion clears the integer fact,
+including zero/special values and exact long-double widening; failures do not
+commit a partial conversion. A nonzero unsigned width beyond 64 declines
+negation rather than substituting a u64 wrap. The existing signed-128 selection
+for parsed u64 magnitudes is preserved. Integer binary operations still refuse
+and the existing depth limit is unchanged; no new recursion, pass, allocation
+or dependency is introduced.
