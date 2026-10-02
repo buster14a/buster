@@ -2280,7 +2280,10 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_section_at(ByteSlice bytes, u32 index, 
         if (valid)
         {
             u64 length = 0;
-            while (length < string_size - name_offset && bytes.pointer[string_offset + name_offset + length]) length += 1;
+            while (length < string_size - name_offset && bytes.pointer[string_offset + name_offset + length])
+            {
+                length += 1;
+            }
             valid = length < string_size - name_offset;
             if (valid)
             {
@@ -2378,7 +2381,10 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_shape_readback(Arena* arena, ObjectFile
     };
     u32 capacity = object->section_count + object_test_priority_groups(object);
     ObjectSection* expected = arena_allocate(arena, ObjectSection, capacity ? capacity : 1);
-    if (object->section_count) memcpy(expected, object->sections, (u64)object->section_count * sizeof(*expected));
+    if (object->section_count)
+    {
+        memcpy(expected, object->sections, (u64)object->section_count * sizeof(*expected));
+    }
     u32 expected_count = object->section_count;
     u32* entry_sections[2] = {0};
     u64* entry_offsets[2] = {0};
@@ -2397,7 +2403,10 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_shape_readback(Arena* arena, ObjectFile
             while (first < entries && priorities[first] != 0x10000u)
             {
                 u32 last = first + 1;
-                while (last < entries && priorities[last] == priorities[first]) last += 1;
+                while (last < entries && priorities[last] == priorities[first])
+                {
+                    last += 1;
+                }
                 u32 group = expected_count++;
                 expected[group] = (ObjectSection){
                     .name = slot ? string_format(arena, S8(".fini_array.{u32:width=[0,5]}"), priorities[first])
@@ -2455,7 +2464,10 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_shape_readback(Arena* arena, ObjectFile
     {
         ObjectSymbol const* source = object->symbols + symbol;
         locals += source->global ? 0 : 1;
-        if (source->section != OBJECT_SECTION_UNDEFINED) indices[source->section] = 1;
+        if (source->section != OBJECT_SECTION_UNDEFINED)
+        {
+            indices[source->section] = 1;
+        }
     }
     u32 emitted_count = 0;
     u32 tables = 0;
