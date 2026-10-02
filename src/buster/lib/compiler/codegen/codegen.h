@@ -549,6 +549,7 @@ typedef enum CodegenThreadLocalModel
 } CodegenThreadLocalModel;
 
 typedef struct BootstrapTrace BootstrapTrace;
+typedef struct InvestigationCapture InvestigationCapture;
 typedef struct CodegenModuleOptions CodegenModuleOptions;
 struct CodegenModuleOptions
 {
@@ -569,11 +570,12 @@ struct CodegenModuleOptions
     // other target's address materialization is a different one and this flag
     // does not reach it.
     bool position_independent;
-    // A CodegenRegisterAllocatorMode value; byte storage keeps the options
-    // record within one native argument eightbyte.
+    // A CodegenRegisterAllocatorMode value; byte storage keeps hot flags compact.
     u8 register_allocator;
     // An AssemblySyntax value, also stored as one byte.
     u8 assembly_syntax;
+    // Optional cold sink. No source resolution or retention when null.
+    InvestigationCapture* investigation;
 };
 
 // Fills the per-abi target cache. Emission reads that cache without ever

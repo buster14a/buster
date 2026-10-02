@@ -534,6 +534,31 @@ first. Missing firmware or mismatched pins fail explicitly. See
 [the reference lane](../uefi-target.md#reference-firmware-execution-gate) for
 prerequisites, negative controls, pins and the runtime success contract.
 
+## Investigation capture compiler identity
+
+`BUSTER_INVESTIGATION_REVISION` is an optional CMake string, empty by default.
+For a compiler investigation build, supply the exact clean checkout revision:
+
+```sh
+revision=$(git rev-parse --verify HEAD)
+./build.sh generate --build-directory build/investigation --ci -- -DBUSTER_INVESTIGATION_REVISION="$revision"
+./build.sh build --build-directory build/investigation --config Release -t ide
+```
+
+Configuration requires one 40-character lowercase hexadecimal commit ID,
+Git `HEAD` matching that ID, and no tracked changes outside `build/`. Failed
+or timed-out Git reads, malformed IDs, mismatches and tracked source changes
+fail configuration. Only `ide` receives the verified string as a compile
+definition. Untracked files and external build inputs are not authenticated
+by this check. Keep the checkout unchanged from configuration through build
+and capture; configuring an identity is not a durable build receipt.
+
+With the option omitted, the macro is undefined and an investigation capture
+reports the revision as unavailable. Ordinary capture-disabled builds and
+default self-hosting retain their existing configuration. Captures and any
+hosted on/off overhead measurements remain diagnostics, separate from the
+qualified native-retirement performance route.
+
 ## Production Clang PGO/LTO
 
 The opt-in production-throughput workflow, profile provenance contract,
