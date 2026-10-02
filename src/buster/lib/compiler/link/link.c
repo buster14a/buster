@@ -99,7 +99,7 @@
 // and every hosted executable writer exports its own definition of such a
 // name, as ld does, so a library can call back into the program that loads
 // it without -rdynamic (link_elf_symbol_referenced_by_library). ELF executable
-// TLS exports reuse link_elf_thread_local_offset and the loaded section index;
+// TLS exports reuse link_elf_thread_local_offset and packed loaded section indices;
 // their dynamic symbols carry STT_TLS offsets rather than image addresses.
 
 #include <buster/lib/compiler/link/link.h>
@@ -139,8 +139,9 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_loaded_kinds[] = {
     OBJECT_SECTION_UNWIND,
 };
 
-// The index link_elf_section_table_append gives a loaded section: its
-// position in link_elf_loaded_kinds, after the null header.
+// Membership in the loaded-section family, asked before final layout.
+// Packed output indices depend on nonempty sections and copy-created .bss;
+// link_elf_loaded_section_indices supplies those after placement.
 BUSTER_GLOBAL_LOCAL u16 link_elf_loaded_section_index(u32 section)
 {
     u16 result = 0;
@@ -149,6 +150,32 @@ BUSTER_GLOBAL_LOCAL u16 link_elf_loaded_section_index(u32 section)
         result = link_elf_loaded_kinds[index] == (ObjectSectionKind)section ? (u16)(index + 1) : result;
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 link_elf_loaded_section_size(ObjectFile* object, ObjectSectionKind kind, u64 copy_zero_size)
+{
+    ObjectSection* section = object->sections + kind;
+    u64 result = BUSTER_MAX(section->data.length, section->virtual_size);
+    if (kind == OBJECT_SECTION_ZERO)
+    {
+        result = BUSTER_MAX(result, copy_zero_size);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void link_elf_loaded_section_indices(ObjectFile* object, u64 copy_zero_size, u16* indices)
+{
+    memset(indices, 0, sizeof(*indices) * OBJECT_SECTION_COUNT);
+    u16 output_index = 1; // The first header is the null section.
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
+    {
+        ObjectSectionKind kind = link_elf_loaded_kinds[index];
+        if (link_elf_loaded_section_size(object, kind, copy_zero_size))
+        {
+            indices[kind] = output_index++;
+        }
+    }
+    return;
 }
 
 #define BUSTER_LINK_ELF_SECTION_HEADER_SIZE 64
@@ -3990,11 +4017,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
         {
             ObjectSectionKind kind = link_elf_loaded_kinds[index];
             ObjectSection* section = &object->sections[kind];
-            u64 size = BUSTER_MAX(section->data.length, section->virtual_size);
-            if (kind == OBJECT_SECTION_ZERO)
-            {
-                size = BUSTER_MAX(size, layout.copy_zero_size);
-            }
+            u64 size = link_elf_loaded_section_size(object, kind, layout.copy_zero_size);
             if (!size)
             {
                 continue;
@@ -6142,6 +6165,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     }
     link_elf_copy_aliases_write(&copies, import_count, copy_slot_addresses, bytes, dynamic_symbol_offset, (u64)import_count + 1, dynamic_string_offset,
                                 &dynamic_name_cursor, 0xfff1);
+    u16 loaded_section_indices[OBJECT_SECTION_COUNT];
+    link_elf_loaded_section_indices(object, copy_slot_count ? copy_slot_cursor - section_offsets[OBJECT_SECTION_ZERO] : 0, loaded_section_indices);
     u64 export_symbol_slot = (u64)import_count + 1 + alias_count;
     for (u32 export_index = 0; export_index < export_count; export_index += 1)
     {
@@ -6156,7 +6181,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         bool thread_local_symbol = export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
         u32 symbol_type = thread_local_symbol ? 6u : export_symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2u : 1u;
         bytes[symbol_offset + 4] = (u8)(((export_symbol->weak ? 2u : 1u) << 4) | symbol_type);
-        link_write_u16(bytes, symbol_offset + 6, thread_local_symbol ? link_elf_loaded_section_index(export_symbol->section) : 0xfff1);
+        link_write_u16(bytes, symbol_offset + 6, thread_local_symbol ? loaded_section_indices[export_symbol->section] : 0xfff1);
         u64 symbol_value = thread_local_symbol ? link_elf_thread_local_offset(object, export_symbol)
                                               : image_base + section_offsets[export_symbol->section] + export_symbol->value;
         link_write_u64(bytes, symbol_offset + 8, symbol_value);
@@ -7703,6 +7728,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
             memcpy(bytes + dynamic_string_offset + library_name_offsets[library + 1], name.pointer, name.length);
         }
         if (soname.length) memcpy(bytes + dynamic_string_offset + soname_offset, soname.pointer, soname.length);
+        u16 loaded_section_indices[OBJECT_SECTION_COUNT];
+        link_elf_loaded_section_indices(object, copies.slot_count ? writable_end - section_offsets[OBJECT_SECTION_ZERO] : 0, loaded_section_indices);
         u64 dynamic_name_cursor = dynamic_string_offset + symbol_name_offset;
         for (u32 dynamic = 1; dynamic < first_alias; dynamic += 1)
         {
@@ -7717,7 +7744,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
             bytes[entry + 4] = (u8)((symbol->weak ? 0x20 : 0x10) | type);
             if (symbol->section != OBJECT_SECTION_UNDEFINED)
             {
-                link_write_u16(bytes, entry + 6, link_elf_loaded_section_index(symbol->section));
+                link_write_u16(bytes, entry + 6, loaded_section_indices[symbol->section]);
                 link_write_u64(bytes, entry + 8, link_elf_symbol_is_thread_local(symbol) ? link_elf_thread_local_offset(object, symbol)
                                                                                           : section_offsets[symbol->section] + symbol->value);
                 link_write_u64(bytes, entry + 16, symbol->size);
@@ -7726,13 +7753,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
             {
                 // A real section index, not SHN_ABS: the loader adds the
                 // load base only to a section-relative value.
-                link_write_u16(bytes, entry + 6, link_elf_loaded_section_index(OBJECT_SECTION_ZERO));
+                link_write_u16(bytes, entry + 6, loaded_section_indices[OBJECT_SECTION_ZERO]);
                 link_write_u64(bytes, entry + 8, image.copy_addresses[dynamic - 1]);
                 link_write_u64(bytes, entry + 16, copies.sizes[copies.owners[dynamic - 1]]);
             }
         }
         link_elf_copy_aliases_write(&copies, image.import_count, image.copy_addresses, bytes, dynamic_symbol_offset, first_alias, dynamic_string_offset,
-                                    &dynamic_name_cursor, link_elf_loaded_section_index(OBJECT_SECTION_ZERO));
+                                    &dynamic_name_cursor, loaded_section_indices[OBJECT_SECTION_ZERO]);
         if (versions.version_count)
         {
             // Imports carry the version they bound to and definitions

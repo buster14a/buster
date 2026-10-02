@@ -250,7 +250,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_tls_export_tests(UnitTestArgu
         String8 main_program = S8("_Thread_local int shared_tdata __attribute__((aligned(16))) = 42;\n"
             "_Thread_local int shared_tbss __attribute__((aligned(32)));\n"
             "_Thread_local int spare_tls = 7;\n"
-            "_Thread_local int private_tls __attribute__((visibility(\"hidden\"))) = 9;\n"
+            "_Thread_local int private_tls = 9;\n"
+            "__asm__(\".hidden private_tls\");\n"
             "int read_tls(void);\n"
             "int main(void) { return read_tls() || shared_tdata != 43 || shared_tbss != 11 || spare_tls != 7 || private_tls != 9; }\n");
         BUSTER_TEST(arguments, file_write(library_source, BUSTER_SLICE_TO_BYTE_SLICE(library_program)));
@@ -343,7 +344,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_tls_export_tests(UnitTestArgu
             }
         }
         String8 hidden_source = string_format_z(arena, S8("{S8}/hidden.c"), root);
-        String8 hidden_program = S8("extern _Thread_local int hidden_tls __attribute__((visibility(\"hidden\")));\n"
+        String8 hidden_program = S8("extern _Thread_local int hidden_tls;\n"
+                                   "__asm__(\".hidden hidden_tls\");\n"
                                    "int main(void) { return hidden_tls; }\n");
         BUSTER_TEST(arguments, file_write(hidden_source, BUSTER_SLICE_TO_BYTE_SLICE(hidden_program)));
         for (u32 pie = 0; pie < image_count; pie += 1)
