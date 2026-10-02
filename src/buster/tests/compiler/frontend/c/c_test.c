@@ -30225,6 +30225,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
             }
         }
     }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    // The configured independent compilers execute exactly the Buster source.
+    String8 references[] = {S8("gcc"), S8("clang")};
+    String8 reference_dialects[] = {S8("-std=gnu17"), S8("-std=gnu2x")};
+    for (u32 reference = 0; written && reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(reference_dialects); dialect += 1)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("place-update-reference"), S8(".exe"));
+                if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                {
+                    String8 command[] = {compiler, reference_dialects[dialect], optimizations[optimization], S8("-nostdinc"), input, S8("-o"), output};
+                    ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                              .use_process_environment = true, .search_path = true});
+                    if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                    {
+                        ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, 30000000);
+                        bool compiled = !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS;
+                        BUSTER_TEST_RAW(arguments, compiled,
+                            string_format(temporary.arena, S8("place update reference {S8} {S8} {S8}: status={u32} timeout={u32}\n{S8}{S8}"),
+                                          compiler, reference_dialects[dialect], optimizations[optimization],
+                                          compilation.platform_status, (u32)compilation.timed_out,
+                                          BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_OUTPUT]),
+                                          BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR])));
+                        if (compiled)
+                        {
+                            String8 run[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena, S8("place update reference runtime {S8} {S8} {S8}: status={u32} timeout={u32}"),
+                                                  compiler, reference_dialects[dialect], optimizations[optimization],
+                                                  execution.platform_status, (u32)execution.timed_out));
+                            }
+                            BUSTER_TEST(arguments, os_file_delete(output));
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
     if (written)
     {
         BUSTER_TEST(arguments, os_file_delete(input));

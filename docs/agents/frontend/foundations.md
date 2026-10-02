@@ -994,8 +994,12 @@ postfix precedence: `(__imag__ z)++` updates the imaginary component, while
 operands remain rejected. Independent sources run through syntax, semantic and
 canonical APIs on six native layouts, GNU17/GNU23 and both frontend forms. A
 combined executable retains all literal oracles in every native allocator mode
-at O0/O2. This regression checkpoint adds no lowering behavior; hosted results
-must establish the current failures before a production repair is published.
+at O0/O2. Hosted Linux x86-64 GCC and Clang also compile and execute exactly
+that same source in GNU17/GNU2x at O0/O2, including the whole-complex postfix
+precedence oracle. Compiler and process failures are assertions, never skips or
+probes that adjust expected values. This regression checkpoint adds no lowering
+behavior; hosted results must establish the current failures before a production
+repair is published.
 
 Raw IR tests cover both direct frontend SSA and its memory-form reference, so scalar
 parameter promotion cannot conceal complex construction temporaries.
