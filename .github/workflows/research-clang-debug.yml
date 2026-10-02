@@ -1,0 +1,107 @@
+name: Buster debug versus Clang research
+
+on:
+  push:
+    branches: [codex/2297-debug-clang-comparison]
+    paths:
+      - .github/workflows/research-clang-debug.yml
+      - tools/research/clang-debug-2297/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-clang-debug-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external-cjson
+          persist-credentials: false
+      - name: Install existing build and debugger tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold gdb
+          command -v clang-21
+          command -v llvm-dwarfdump-21
+          mkdir -p clang-debug-evidence/package-notices
+          dpkg-query -W clang-21 llvm-21 mold gdb binutils > clang-debug-evidence/packages.txt
+          for package in clang-21 llvm-21 mold gdb binutils; do
+            if test -f "/usr/share/doc/$package/copyright"; then
+              cp "/usr/share/doc/$package/copyright" "clang-debug-evidence/package-notices/$package.txt"
+            fi
+          done
+          mold --version > clang-debug-evidence/mold-version.txt
+          ld --version > clang-debug-evidence/ld-version.txt
+      - name: Build trusted Release compiler through native driver
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p clang-debug-evidence
+          exec > >(tee clang-debug-evidence/build.log) 2>&1
+          git rev-parse HEAD 'HEAD^{tree}'
+          git fetch --no-tags --depth=1 origin d4ca72fb4e97ae0a410b0d03258b00495fa45e13
+          git diff --exit-code d4ca72fb4e97ae0a410b0d03258b00495fa45e13 -- src build.c cmake CMakeLists.txt
+          clang-21 --version
+          uname -a
+          lscpu
+          mkdir -p "$RUNNER_TEMP/clang-debug-toolchain"
+          ln -s "$(command -v clang-21)" "$RUNNER_TEMP/clang-debug-toolchain/clang"
+          export PATH="$RUNNER_TEMP/clang-debug-toolchain:$PATH"
+          clang --version
+          clang-21 -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-clang-debug-build"
+          "$RUNNER_TEMP/buster-clang-debug-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=ON -DBUSTER_INCLUDE_TESTS=OFF
+          "$RUNNER_TEMP/buster-clang-debug-build" build --config Release -t ide -- -j2
+          clang-21 -O2 -Wall -Werror tools/research/clang-debug-2297/measure_child.c -o "$RUNNER_TEMP/clang-debug-measure-child"
+          sha256sum build/Release/ide > clang-debug-evidence/compiler.sha256
+          cp build/CMakeCache.txt build/compile_commands.json clang-debug-evidence/
+      - name: Capture matched debug and optimized outputs
+        shell: bash
+        env:
+          BUSTER_RESEARCH_PRODUCTION_BASE: d4ca72fb4e97ae0a410b0d03258b00495fa45e13
+          BUSTER_SOURCE_REVISION: ${{ github.sha }}
+          BUSTER_PRODUCER_CONFIGURATION: Clang-built CI Release, O2, unity, tests disabled
+          CJSON_SOURCE_REVISION: c859b25da02955fef659d658b8f324b5cde87be3
+        run: |
+          set -euo pipefail
+          python3 tools/research/clang-debug-2297/generate_sources.py --sources tools/research/clang-debug-2297/sources
+          cp external-cjson/cJSON.c external-cjson/cJSON.h tools/research/clang-debug-2297/sources/
+          cp external-cjson/LICENSE clang-debug-evidence/cJSON_LICENSE
+          python3 tools/research/clang-debug-2297/capture.py --buster "$PWD/build/Release/ide" --clang "$(command -v clang-21)" --sources "$PWD/tools/research/clang-debug-2297/sources" --output "$PWD/clang-debug-evidence/measurements" --measure-child "$RUNNER_TEMP/clang-debug-measure-child"
+      - name: Check executed debugger observations separately
+        if: ${{ !cancelled() && steps.build.outcome != 'failure' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/research/clang-debug-2297/debug_probe.py --buster "$PWD/build/Release/ide" --clang "$(command -v clang-21)" --output "$PWD/clang-debug-evidence/debugger"
+      - name: Publish measured summary
+        if: always()
+        shell: bash
+        run: |
+          if test -f clang-debug-evidence/measurements/summary.md; then
+            cat clang-debug-evidence/measurements/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if test -f clang-debug-evidence/debugger/summary.md; then
+            cat clang-debug-evidence/debugger/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: clang-debug-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: clang-debug-evidence
+          retention-days: 30
+          if-no-files-found: error
