@@ -2381,11 +2381,138 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_elf_ldst(UnitTestArgument
     return result;
 }
 
+// Named golden rows are independent of production table order. New enum
+// members require an explicit field contract and cannot hide in a default.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_relocation_properties(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct ObjectRelocationExpectation ObjectRelocationExpectation;
+    struct ObjectRelocationExpectation
+    {
+        ObjectRelocationKind kind;
+        u32 width;
+        bool tls;
+    };
+    ObjectRelocationExpectation expected[] = {
+        {OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12, 4, false},
+        {OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12, 4, false},
+        {OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12, 4, false},
+        {OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12, 4, false},
+        {OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12, 4, false},
+        {OBJECT_RELOCATION_AARCH64_PREL64, 8, false},
+        {OBJECT_RELOCATION_X86_64_PC64, 8, false},
+        {OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12, 4, false},
+        {OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21, 4, false},
+        {OBJECT_RELOCATION_X86_64_DTPOFF64, 8, true},
+        {OBJECT_RELOCATION_X86_64_DTPOFF32, 4, true},
+        {OBJECT_RELOCATION_X86_64_TLSLD, 4, true},
+        {OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX, 4, false},
+        {OBJECT_RELOCATION_X86_64_REX_GOTPCRELX, 4, false},
+        {OBJECT_RELOCATION_X86_64_GOTPCRELX, 4, false},
+        {OBJECT_RELOCATION_X86_64_GOTPCREL, 4, false},
+        {OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, 4, false},
+        {OBJECT_RELOCATION_AARCH64_MACH_PAGE21, 4, false},
+        {OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, 4, false},
+        {OBJECT_RELOCATION_AARCH64_ELF_PAGE21, 4, false},
+        {OBJECT_RELOCATION_AARCH64_JUMP26, 4, false},
+        {OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12, 4, true},
+        {OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21, 4, true},
+        {OBJECT_RELOCATION_X86_64_MACH_TLV_PC32, 4, true},
+        {OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12, 4, true},
+        {OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12, 4, true},
+        {OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L, 4, false},
+        {OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, 4, false},
+        {OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, 4, false},
+        {OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12, 4, true},
+        {OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12, 4, true},
+        {OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP, 4, true},
+        {OBJECT_RELOCATION_PE_TLS_OFFSET32, 4, true},
+        {OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32, 4, true},
+        {OBJECT_RELOCATION_X86_64_PLT32, 4, false},
+        {OBJECT_RELOCATION_X86_64_TLSGD, 4, true},
+        {OBJECT_RELOCATION_X86_64_GOTTPOFF, 4, true},
+        {OBJECT_RELOCATION_X86_64_TPOFF32, 4, true},
+        {OBJECT_RELOCATION_COFF_ADDR32NB, 4, false},
+        {OBJECT_RELOCATION_COFF_SECTION16, 2, false},
+        {OBJECT_RELOCATION_COFF_SECREL32, 4, false},
+        {OBJECT_RELOCATION_X86_64_ABSOLUTE32S, 4, false},
+        {OBJECT_RELOCATION_ABSOLUTE32, 4, false},
+        {OBJECT_RELOCATION_ABSOLUTE64, 8, false},
+        {OBJECT_RELOCATION_AARCH64_PREL32, 4, false},
+        {OBJECT_RELOCATION_AARCH64_CALL26, 4, false},
+        {OBJECT_RELOCATION_X86_64_PC32, 4, false},
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(expected) == OBJECT_RELOCATION_COUNT);
+    bool seen[OBJECT_RELOCATION_COUNT] = {0};
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(expected); row += 1)
+    {
+        ObjectRelocationExpectation entry = expected[row];
+        if (BUSTER_REQUIRE(arguments, (u32)entry.kind < OBJECT_RELOCATION_COUNT && !seen[(u32)entry.kind]))
+        {
+            seen[(u32)entry.kind] = true;
+            BUSTER_TEST(arguments, object_relocation_kind_width(entry.kind) == entry.width);
+            BUSTER_TEST(arguments, object_relocation_kind_is_tls(entry.kind) == entry.tls);
+        }
+    }
+    for (u32 kind = 0; kind < OBJECT_RELOCATION_COUNT; kind += 1)
+    {
+        BUSTER_TEST(arguments, seen[kind]);
+    }
+    BUSTER_TEST(arguments, object_relocation_kind_width(OBJECT_RELOCATION_COUNT) == 0 &&
+                           !object_relocation_kind_is_tls(OBJECT_RELOCATION_COUNT));
+    BUSTER_TEST(arguments, object_relocation_kind_width((ObjectRelocationKind)-1) == 0 &&
+                           !object_relocation_kind_is_tls((ObjectRelocationKind)-1));
+    // SECTION is a two-byte COFF field even at the very end of a payload.
+    // Read raw offsets/type/addend instead of trusting a same-model reader.
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        u8 bytes[] = {0xa1, 0xb2, 0xc3, 0, 0};
+        ObjectSection section = {.name = S8(".data"), .kind = OBJECT_SECTION_DATA,
+                                 .data = {.pointer = bytes, .length = sizeof(bytes)}, .alignment = 1};
+        ObjectSymbol symbol = {.name = S8("boundary"), .section = 0, .kind = OBJECT_SYMBOL_DATA};
+        ObjectRelocation relocation = {.offset = 3, .section = 0, .symbol = 0, .addend = 7,
+                                       .kind = OBJECT_RELOCATION_COFF_SECTION16};
+        ObjectFile object = {.sections = &section, .section_count = 1, .symbols = &symbol, .symbol_count = 1,
+                             .relocations = &relocation, .relocation_count = 1,
+                             .target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_WINDOWS}};
+        ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
+        if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.length >= 60))
+        {
+            u32 offset = 0;
+            u32 relocations = 0;
+            memcpy(&offset, artifact.bytes.pointer + 40, sizeof(offset));
+            memcpy(&relocations, artifact.bytes.pointer + 44, sizeof(relocations));
+            bool bounded = offset <= artifact.bytes.length && sizeof(bytes) <= artifact.bytes.length - offset &&
+                           relocations <= artifact.bytes.length && 10 <= artifact.bytes.length - relocations;
+            if (BUSTER_REQUIRE(arguments, bounded))
+            {
+                u8 payload[] = {0xa1, 0xb2, 0xc3, 7, 0};
+                u16 type = 0;
+                u16 count = 0;
+                u32 field_offset = 0;
+                memcpy(&count, artifact.bytes.pointer + 52, sizeof(count));
+                memcpy(&field_offset, artifact.bytes.pointer + relocations, sizeof(field_offset));
+                memcpy(&type, artifact.bytes.pointer + relocations + 8, sizeof(type));
+                BUSTER_TEST(arguments, count == 1 && field_offset == 3);
+                BUSTER_TEST(arguments, memcmp(artifact.bytes.pointer + offset, payload, sizeof(payload)) == 0);
+                BUSTER_TEST(arguments, type == (architectures[architecture] == CPU_ARCH_X86_64 ? 0x000a : 0x000d));
+            }
+        }
+        BUSTER_TEST(arguments, bytes[3] == 0 && bytes[4] == 0);
+        relocation.offset = 4;
+        ObjectArtifact truncated = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
+        BUSTER_TEST(arguments, truncated.error == OBJECT_ERROR_INVALID_INPUT && !truncated.bytes.pointer && !truncated.bytes.length);
+    }
+    return result;
+}
+
 #include <buster/tests/compiler/object/executable_test.c>
 
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    BUSTER_TEST_FIXTURE(arguments, object_test_relocation_properties);
     UnitTestResult executable_sections = object_test_executable_sections(arguments);
     result.test_count += executable_sections.test_count;
     result.succeeded_test_count += executable_sections.succeeded_test_count;
