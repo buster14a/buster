@@ -318,7 +318,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_transform(UnitTestArguments* argum
             if (BUSTER_REQUIRE(arguments, module.valid && module.multiply_offset))
             {
                 ByteSlice mutated = {.pointer = arena_allocate(arena, u8, bytes.length), .length = bytes.length};
-                memory_copy(mutated.pointer, bytes.pointer, bytes.length);
+                memcpy(mutated.pointer, bytes.pointer, bytes.length);
                 spirv_test_write_word(mutated, module.multiply_offset, (5u << 16) | 128u);
                 u32 wrong[] = {1};
                 SpirvTestExecution control = spirv_test_emulate(mutated, wrong, 1, 0);
