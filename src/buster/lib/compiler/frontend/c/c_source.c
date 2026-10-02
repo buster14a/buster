@@ -4973,7 +4973,10 @@ struct CMacroReplacementToken
     // first argument token cannot form one preprocessing token and would
     // refuse every non-empty call.
     bool comma_paste;
+    // GNU omitted-varargs comma deletion discards the removed boundary.
+    bool reset_space;
 };
+BUSTER_CT_CHECK(sizeof(CMacroReplacementToken) == 20);
 
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling)
 {
@@ -5671,6 +5674,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 if (item.comma_paste && arguments[definition->parameter_count - 1].omitted)
                 {
                     left->placemarker = true;
+                    left->reset_space = true;
                 }
                 continue;
             }
@@ -5763,9 +5767,9 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 CMacroReplacementToken item = materialized[index];
                 if (item.placemarker)
                 {
-                    // A remaining placemarker was removed without pasting.
-                    // Keep its boundary for the next surviving output token.
-                    pending_space = pending_space || item.token.preceded_by_space;
+                    // Ordinary empty parameters preserve their boundary. GNU
+                    // omitted-comma elision discards the pending boundary too.
+                    pending_space = item.reset_space ? false : pending_space || item.token.preceded_by_space;
                 }
                 else
                 {

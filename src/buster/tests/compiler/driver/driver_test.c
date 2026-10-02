@@ -345,11 +345,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_prepr
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries_file(UnitTestArguments* arguments, String8 source_path, bool expanded)
 {
     UnitTestResult result = {0};
 #if !BUSTER_ANDROID && !BUSTER_IOS
-    String8 source_path = S8("tests/basic_c_preprocess_boundaries.txt");
     ByteSlice source_bytes = file_read(arguments->arena, source_path, (FileReadOptions){0});
     if (BUSTER_REQUIRE(arguments, source_bytes.pointer != 0))
     {
@@ -376,7 +375,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
             BUSTER_TEST(arguments, !stdout_waited.timed_out && stdout_waited.result == PROCESS_RESULT_SUCCESS);
             BUSTER_TEST(arguments, stdout_waited.streams[STANDARD_STREAM_ERROR].length == 0);
             String8 stdout_text = BYTE_SLICE_TO_STRING(8, stdout_waited.streams[STANDARD_STREAM_OUTPUT]);
-            String8 required[] = {
+            String8 base_required[] = {
                 S8("_Bool flag;"),
                 S8("_Bool spaced_flag;"),
                 S8("long macro_name;"),
@@ -391,6 +390,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                 S8(". . . ellipsis_tokens;"),
                 S8("/ / line_comment_tokens;"),
                 S8("/ * block_comment_tokens;"),
+                S8("_Bool included_flag;"),
+                S8("int main(void)\n{\n"),
+            };
+            String8 expanded_required[] = {
                 S8("adjacent_tail: \"tail\";"),
                 S8("spaced_tail: \"tail\" ;"),
                 S8("comment_tail: \"tail\" ;"),
@@ -406,10 +409,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                 S8("nested_empty_tail: left;"),
                 S8("stringified_empty: \"a +b\";"),
                 S8("stringified_parameter: \"left +B\";"),
-                S8("_Bool included_flag;"),
-                S8("int main(void)\n{\n"),
+                S8("stringified_omitted_comma: \"A+D\";"),
+                S8("stringified_empty_comma: \"A ,+D\";"),
+                S8("stringified_empty_pair: \"A+D\";"),
             };
-            for (u32 required_index = 0; required_index < BUSTER_ARRAY_LENGTH(required); required_index += 1)
+            String8* required = expanded ? expanded_required : base_required;
+            u32 required_count = expanded ? BUSTER_ARRAY_LENGTH(expanded_required) : BUSTER_ARRAY_LENGTH(base_required);
+            for (u32 required_index = 0; required_index < required_count; required_index += 1)
             {
                 BUSTER_TEST(arguments, string_first_sequence(stdout_text, required[required_index]) != BUSTER_STRING_NO_MATCH);
             }
@@ -455,7 +461,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
 
         String8 backslash_path = S8("tests/basic_c_preprocess_backslash.txt");
         ByteSlice backslash_bytes = file_read(arguments->arena, backslash_path, (FileReadOptions){0});
-        if (BUSTER_REQUIRE(arguments, backslash_bytes.pointer != 0))
+        if (!expanded && BUSTER_REQUIRE(arguments, backslash_bytes.pointer != 0))
         {
             CPreprocessorDefinition definition = {
                 .name = S8("B"),
@@ -495,7 +501,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
     }
 #else
     BUSTER_UNUSED(arguments);
+    BUSTER_UNUSED(source_path);
+    BUSTER_UNUSED(expanded);
 #endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = compiler_driver_test_preprocess_boundaries_file(arguments, S8("tests/basic_c_preprocess_boundaries.txt"), false);
+    UnitTestResult expanded = compiler_driver_test_preprocess_boundaries_file(arguments, S8("tests/basic_c_preprocess_expansion_boundaries.txt"), true);
+    result.test_count += expanded.test_count;
+    result.succeeded_test_count += expanded.succeeded_test_count;
     return result;
 }
 
@@ -17486,7 +17503,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess_command_line));
     CompilerDriverResult preprocess = compiler_driver_execute_invocation(arguments->arena, preprocess_invocation);
     BUSTER_TEST(arguments, preprocess.error == COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_TEST(arguments, string_first_sequence(preprocess.output, S8("int answer = 37 ;")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(preprocess.output, S8("int answer = 37;")) != BUSTER_STRING_NO_MATCH);
     // `-D` values: an `=` with nothing after it is an empty replacement list --
     // the spelling a build uses to switch a decoration off -- while the form
     // with no `=` at all is the one that means `1`.
@@ -17503,8 +17520,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         String8 define_expected[] = {
             S8("int probe = 0 ;"),
-            S8("int probe = 0 1 ;"),
-            S8("int probe = 0 7 ;"),
+            S8("int probe = 0 1;"),
+            S8("int probe = 0 7;"),
         };
         for (u32 define_index = 0; define_index < BUSTER_ARRAY_LENGTH(define_values); define_index += 1)
         {
@@ -17583,9 +17600,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 expected_sequences[] = {
             S8("9"),              S8("2"),                S8("1"),           S8("empty_begin"),
             S8("empty_end"),
-            S8("99"),             S8("CLANG_ABSENT"),     S8("( ( 21 ) + ( 21 ) )"), S8("zero"),
-            S8("2 * 3"),          S8("( ( 2 ) + ( 2 ) )"), S8("\"two words\""), S8("joined"),
-            S8("1 + 2 + 3"),      S8("1 == 1"),           S8("3 + 3"),
+            S8("99"),             S8("CLANG_ABSENT"),     S8("((21)+(21))"), S8("zero"),
+            S8("2*3"),          S8("((2)+(2))"), S8("\"two words\""), S8("joined"),
+            S8("1+2 + 3"),      S8("1==1"),           S8("3 + 3"),
             S8("empty_function_begin"), S8("empty_function_end"),
         };
         for (u32 sequence_index = 0; sequence_index < BUSTER_ARRAY_LENGTH(expected_sequences); sequence_index += 1)
@@ -17636,7 +17653,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         CompilerDriverResult legacy_result = compiler_driver_execute_invocation(arguments->arena, legacy_invocation);
         BUSTER_TEST(arguments, legacy_result.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, string_first_sequence(legacy_result.output, S8("ORDERED_ABSENT")) != BUSTER_STRING_NO_MATCH);
-        BUSTER_TEST(arguments, string_first_sequence(legacy_result.output, S8("( ( 21 ) + ( 21 ) )")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(legacy_result.output, S8("((21)+(21))")) != BUSTER_STRING_NO_MATCH);
     }
     String8 warning_command_line[] = {
         S8("-fsyntax-only"),

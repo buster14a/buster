@@ -2,10 +2,10 @@ name: Clang suite foundation
 
 on:
   pull_request:
-    paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_boundaries*', 'docs/agents/compatibility/clang-suite.md', '.github/workflows/clang-suite.yml']
+    paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_*boundaries*', 'docs/agents/compatibility/clang-suite.md', '.github/workflows/clang-suite.yml']
   push:
     branches: [main]
-    paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_boundaries*', '.github/workflows/clang-suite.yml']
+    paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_*boundaries*', '.github/workflows/clang-suite.yml']
   workflow_dispatch:
 
 permissions:

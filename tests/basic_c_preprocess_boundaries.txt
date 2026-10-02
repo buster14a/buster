@@ -23,34 +23,6 @@ D.. ellipsis_tokens;
 S/ line_comment_tokens;
 S* block_comment_tokens;
 
-#define TAIL() "tail"
-#define EMPTY
-#define FORWARD(x) x
-#define COMPACT a+b
-#define SPACED a + b
-#define EMPTY_LEADING(x) x+
-#define EMPTY_MIDDLE(x) left x+B
-#define EMPTY_TRAILING(x) left x
-#define SPELL(x) #x
-#define STRINGIFY(x) SPELL(x)
-#define INNER_EMPTY() left EMPTY
-#define OUTER_EMPTY(x) x;
-adjacent_tail: TAIL();
-spaced_tail: TAIL() ;
-comment_tail: TAIL()/**/;
-nested_tail: FORWARD(TAIL());
-empty_adjacent: TAIL()EMPTY;
-empty_spaced: TAIL() EMPTY;
-empty_chain: TAIL() EMPTY EMPTY;
-compact_tokens: COMPACT;
-spaced_tokens: SPACED;
-empty_leading: before EMPTY_LEADING(EMPTY);
-empty_middle: EMPTY_MIDDLE(EMPTY);
-empty_trailing: EMPTY_TRAILING(EMPTY);
-nested_empty_tail: OUTER_EMPTY(INNER_EMPTY())
-stringified_empty: STRINGIFY(a EMPTY+b);
-stringified_parameter: STRINGIFY(EMPTY_MIDDLE(EMPTY));
-
 #include "basic_c_preprocess_boundaries.h"
 #line 200 "logical-boundaries.c"
 int main(void)

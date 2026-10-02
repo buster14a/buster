@@ -275,7 +275,7 @@ class ClangSuiteTests(unittest.TestCase):
 
     def test_macro_output_boundaries_against_clang(self):
         self.require_smoke()
-        source = Path(__file__).resolve().parents[1] / "tests/basic_c_preprocess_boundaries.txt"
+        source = Path(__file__).resolve().parents[1] / "tests/basic_c_preprocess_expansion_boundaries.txt"
         expected = (
             b'adjacent_tail: "tail";',
             b'spaced_tail: "tail" ;',
@@ -292,6 +292,9 @@ class ClangSuiteTests(unittest.TestCase):
             b'nested_empty_tail: left;',
             b'stringified_empty: "a +b";',
             b'stringified_parameter: "left +B";',
+            b'stringified_omitted_comma: "A+D";',
+            b'stringified_empty_comma: "A ,+D";',
+            b'stringified_empty_pair: "A+D";',
         )
         for name, executable, prefix in (("clang", self.clang, []), ("buster", self.ide, ["cc"])):
             with self.subTest(compiler=name):
