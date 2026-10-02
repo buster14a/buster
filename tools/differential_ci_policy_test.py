@@ -275,6 +275,11 @@ class DifferentialCampaignTests(unittest.TestCase):
                 status = harness.main()
             except SystemExit as error:
                 status = error.code
+            except ValueError as error:
+                # Legacy invalid worker counts raise instead of reaching the
+                # argument guard. Preserve that as a failing legacy outcome.
+                status = 1
+                errors.write("uncaught worker argument error: " + str(error))
         return status, output.getvalue(), errors.getvalue(), directories, evaluate, run
 
     def test_zero_or_negative_work_arguments_are_rejected_before_work(self):
