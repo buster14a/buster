@@ -8532,6 +8532,430 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_trigraph_translation(UnitTestArguments
     return result;
 }
 
+// UCN admission is a source-spelling rule: C99 Annex D differs from
+// C11/C17, while raw UTF-8 keeps its existing encoding-only contract.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_lex(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C99, C_PREPROCESS_DIALECT_GNU99,
+        C_PREPROCESS_DIALECT_C11, C_PREPROCESS_DIALECT_GNU11, C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
+    struct
+    {
+        String8 spelling;
+        bool c99;
+        bool c11;
+    } ranges[] = {
+        {S8("\\u00e9"), true, true}, {S8("\\U000003B1"), true, true},
+        {S8("\\u00A8"), false, true}, {S8("\\u0660"), false, true}, {S8("a\\u0660"), true, true},
+        {S8("\\u0300"), false, false}, {S8("a\\u0300"), false, true},
+        {S8("\\u05B0"), true, true}, {S8("\\u0EA5"), true, true},
+        {S8("\\u0EA6"), false, true}, {S8("\\u0EA7"), true, true},
+        {S8("\\u0E50"), false, true}, {S8("a\\u0E50"), true, true},
+        {S8("\\u1DC0"), false, false}, {S8("a\\u1DC0"), false, true},
+        {S8("\\u20D0"), false, false}, {S8("a\\u20D0"), false, true},
+        {S8("\\uFE20"), false, false}, {S8("a\\uFE20"), false, true},
+        {S8("\\U00010000"), false, true}, {S8("\\U000EFFFD"), false, true},
+        {S8("\\U000EFFFE"), false, false}, {S8("\\U000F0000"), false, false},
+        {S8("\\u0024"), false, false}, {S8("\\u0040"), false, false}, {S8("\\u0060"), false, false},
+    };
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(dialects); mode += 1)
+    {
+        for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(ranges); test += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CLexResult actual = c_test_lex_dialect(temporary.arena, ranges[test].spelling, dialects[mode], false);
+            CLexResult reference = c_test_lex_dialect(temporary.arena, ranges[test].spelling, dialects[mode], true);
+            bool allowed = mode < 2 ? ranges[test].c99 : ranges[test].c11;
+            String8 context = string_format(temporary.arena, S8("UCN range mode={u32} source={S8}"), mode, ranges[test].spelling);
+            BUSTER_TEST_RAW(arguments, c_test_lex_results_agree(actual, reference), context);
+            BUSTER_TEST_RAW(arguments, actual.diagnostic_count == (allowed ? 0 : 1), context);
+            c_test_token(arguments, &result, actual, 0, C_TOKEN_IDENTIFIER, ranges[test].spelling);
+            if (!allowed && BUSTER_REQUIRE(arguments, actual.diagnostic_count == 1))
+            {
+                BUSTER_TEST(arguments, actual.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_CHARACTER);
+                BUSTER_STRING_TEST(arguments, actual.diagnostics[0].message,
+                    S8("universal character name is not allowed in this identifier position"));
+            }
+            scratch_end(temporary);
+        }
+    }
+
+    struct
+    {
+        String8 source;
+        String8 message;
+    } invalid[] = {
+        {S8("\\u"), S8("malformed universal character name in identifier")},
+        {S8("\\u03"), S8("malformed universal character name in identifier")},
+        {S8("\\u03xz"), S8("malformed universal character name in identifier")},
+        {S8("\\U000003"), S8("malformed universal character name in identifier")},
+        {S8("\\uD800"), S8("surrogate universal character name in identifier")},
+        {S8("\\U0000DFFF"), S8("surrogate universal character name in identifier")},
+        {S8("\\U00110000"), S8("universal character name exceeds Unicode range in identifier")},
+        {S8("\\UFFFFFFFF"), S8("universal character name exceeds Unicode range in identifier")},
+        {S8("\\u0041"), S8("universal character name is not allowed in this identifier position")},
+    };
+    for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(invalid); test += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("  prefix{S8}\n"), invalid[test].source);
+        CLexResult actual = c_test_lex_dialect(temporary.arena, source, C_PREPROCESS_DIALECT_C17, false);
+        BUSTER_TEST(arguments, c_test_lex_results_agree(actual,
+            c_test_lex_dialect(temporary.arena, source, C_PREPROCESS_DIALECT_C17, true)));
+        if (BUSTER_REQUIRE(arguments, actual.diagnostic_count == 1))
+        {
+            CDiagnostic diagnostic = actual.diagnostics[0];
+            BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_CHARACTER);
+            BUSTER_STRING_TEST(arguments, diagnostic.message, invalid[test].message);
+            BUSTER_TEST(arguments, diagnostic.location.offset == 8 && diagnostic.location.line == 1 && diagnostic.location.column == 9);
+        }
+        scratch_end(temporary);
+    }
+
+    String8 windows[] = {
+        S8("\\u03b1"), S8("prefix\\U000003B1suffix"), S8("α\\u03b1β"),
+        S8("1e+\\u03b1"), S8("x\\u0300"), S8("\\u03"), S8("\\U000003"),
+        S8("/* \\u0041 */ kept // \\uD800\n"), S8("\"\\u03b1\" '\\u03b1'"),
+        S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\u03b1tail"),
+    };
+    for (u32 phase = 0; phase < 64; phase += 1)
+    {
+        for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(windows); test += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u64 length = phase + windows[test].length;
+            char8* bytes = arena_allocate(temporary.arena, char8, length);
+            memset(bytes, ' ', phase);
+            memcpy(bytes + phase, windows[test].pointer, windows[test].length);
+            String8 source = {.pointer = bytes, .length = length};
+            CLexResult actual = c_test_lex_dialect(temporary.arena, source, C_PREPROCESS_DIALECT_C17, false);
+            CLexResult reference = c_test_lex_dialect(temporary.arena, source, C_PREPROCESS_DIALECT_C17, true);
+            BUSTER_TEST_RAW(arguments, c_test_lex_results_agree(actual, reference),
+                string_format(temporary.arena, S8("UCN chunk phase={u32} case={u32}"), phase, test));
+            scratch_end(temporary);
+        }
+    }
+    CPreprocessDialect unchanged[] = {C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23, C_PREPROCESS_DIALECT_GNU89};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(unchanged); mode += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CLexResult actual = c_test_lex_dialect(temporary.arena, S8("\\u03b1"), unchanged[mode], false);
+        BUSTER_TEST(arguments, actual.diagnostic_count == 1);
+        c_test_token(arguments, &result, actual, 0, C_TOKEN_INVALID, S8("\\"));
+        BUSTER_TEST(arguments, c_test_lex_results_agree(actual,
+            c_test_lex_dialect(temporary.arena, S8("\\u03b1"), unchanged[mode], true)));
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_ucn_release(CPreprocessResult* preprocess)
+{
+    if (preprocess->recovery)
+    {
+        arena_destroy(preprocess->recovery->spelling_arena, 1);
+        arena_destroy(preprocess->recovery->token_arena, 1);
+        arena_destroy(preprocess->recovery->token_shape_arena, 1);
+    }
+}
+
+// Macros see canonical identity but # and ## still see original spellings.
+// Final canonical bytes are stamped back to the unshortened source positions.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_preprocess(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 expected;
+    } cases[] = {
+        {S8("#define \\u03b1 7\nα\n"), S8("7")},
+        {S8("#define α 7\n\\U000003B1\n"), S8("7")},
+        {S8("#define \\u03b1 7\n#if defined(α)\n#ifdef \\U000003B1\n9\n#endif\n#endif\n#undef α\n\\u03b1\n"), S8("9 α")},
+        {S8("#define F(\\u03b1) α + \\U000003B1\nF(3)\n"), S8("3 + 3")},
+        {S8("#define CAT(a,b) a##b\n#define αtail 5\nCAT(\\u03b1,tail)\n"), S8("5")},
+        {S8("#define RAW(x) #x\nRAW(\\u03b1) RAW(\\U000003B1) RAW(α)\n"),
+         S8("\"\\\\u03b1\" \"\\\\U000003B1\" \"α\"")},
+        {S8("\\u03b1 α \\U000003B1\n"), S8("α α α")},
+        {S8("/* \\u0041 */ \"\\u03b1\" '\\u03b1'\n"), S8("\"\\u03b1\" '\\u03b1'")},
+    };
+    CPreprocessDialect modes[] = {C_PREPROCESS_DIALECT_C99, C_PREPROCESS_DIALECT_C11, C_PREPROCESS_DIALECT_C17,
+        C_PREPROCESS_DIALECT_GNU99, C_PREPROCESS_DIALECT_GNU11, C_PREPROCESS_DIALECT_GNU17};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(cases); test += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult actual = c_preprocess(temporary.arena, cases[test].source,
+                (CPreprocessOptions){.dialect = modes[mode], .source_path = S8("ucn-macro.c")});
+            CLexResult expected = c_lex(temporary.arena, cases[test].expected);
+            String8 context = string_format(temporary.arena, S8("UCN macro mode={u32} case={u32}"), mode, test);
+            BUSTER_TEST_RAW(arguments, actual.diagnostic_count == 0, context);
+            if (BUSTER_REQUIRE(arguments, actual.tokens && expected.tokens && actual.token_count == expected.token_count))
+            {
+                for (u64 token = 0; token < actual.token_count; token += 1)
+                {
+                    BUSTER_TEST_RAW(arguments, actual.tokens[token].kind == expected.tokens[token].kind, context);
+                    BUSTER_TEST_RAW(arguments, string_equal(c_token_spelling(actual.spelling_base, actual.tokens[token]),
+                        c_token_spelling(expected.spelling_base, expected.tokens[token])), context);
+                }
+                if (test == 6 && BUSTER_REQUIRE(arguments, actual.symbols != 0))
+                {
+                    u32 symbol = c_test_symbol_find(actual.symbols, S8("α"));
+                    BUSTER_TEST(arguments, symbol != 0);
+                    BUSTER_TEST(arguments, actual.tokens[0].symbol == symbol && actual.tokens[1].symbol == symbol && actual.tokens[2].symbol == symbol);
+                }
+            }
+            c_test_ucn_release(&actual);
+            scratch_end(temporary);
+        }
+    }
+
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult duplicate = c_preprocess(temporary.arena, S8("#define F(\\u03b1,α) 7\n"),
+        (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_C17});
+    if (BUSTER_REQUIRE(arguments, duplicate.diagnostic_count != 0))
+    {
+        BUSTER_TEST(arguments, duplicate.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_MACRO_DEFINITION);
+    }
+    c_test_ucn_release(&duplicate);
+
+    CPreprocessorOperation operations[] = {
+        {.kind = C_PREPROCESSOR_OPERATION_DEFINE, .operand = S8("\\u03b1=8")},
+        {.kind = C_PREPROCESSOR_OPERATION_UNDEFINE, .operand = S8("α")},
+    };
+    for (u32 boundary = 0; boundary < 3; boundary += 1)
+    {
+        CPreprocessOptions options = {.dialect = C_PREPROCESS_DIALECT_C17};
+        if (boundary < 2)
+        {
+            options.macro_operations = operations;
+            options.macro_operation_count = boundary + 1;
+        }
+        else
+        {
+            options.already_preprocessed = true;
+        }
+        CPreprocessResult actual = c_preprocess(temporary.arena, boundary == 2 ? S8("\\u03b1") : S8("α"), options);
+        BUSTER_TEST(arguments, actual.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, actual.token_count == 2))
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[0]), boundary == 0 ? S8("8") : S8("α"));
+        }
+        c_test_ucn_release(&actual);
+    }
+
+    struct
+    {
+        String8 source;
+        u32 second_offset;
+        u32 second_line;
+        u32 second_column;
+    } maps[] = {
+        {S8("  \\u03b1 tail"), 9, 1, 10},
+        {S8("  ?" "?/u03b1 tail"), 11, 1, 12},
+        {S8("a\\u03\\\r\nb1 tail"), 11, 2, 4},
+    };
+    for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(maps); test += 1)
+    {
+        CPreprocessResult actual = c_preprocess(temporary.arena, maps[test].source,
+            (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_C17, .source_path = S8("ucn-map.c")});
+        BUSTER_TEST(arguments, actual.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, actual.token_count == 3))
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[0]), test == 2 ? S8("aα") : S8("α"));
+            CSourceLocation first = c_preprocess_token_location(&actual, actual.tokens[0]);
+            CSourceLocation second = c_preprocess_token_location(&actual, actual.tokens[1]);
+            BUSTER_TEST(arguments, first.offset == (test == 2 ? 0 : 2) && first.line == 1 && first.column == (test == 2 ? 1 : 3));
+            BUSTER_TEST(arguments, second.offset == maps[test].second_offset && second.line == maps[test].second_line &&
+                                   second.column == maps[test].second_column);
+            if (BUSTER_REQUIRE(arguments, first.file < actual.file_count))
+            {
+                BUSTER_STRING_TEST(arguments, actual.files[first.file], S8("ucn-map.c"));
+            }
+        }
+        c_test_ucn_release(&actual);
+    }
+    CLexResult invalid = c_test_lex_dialect(temporary.arena, S8("  ?" "?/uD800\n"), C_PREPROCESS_DIALECT_C17, false);
+    if (BUSTER_REQUIRE(arguments, invalid.diagnostic_count == 1))
+    {
+        BUSTER_TEST(arguments, invalid.diagnostics[0].location.offset == 2 && invalid.diagnostics[0].location.column == 3);
+    }
+
+    String8 header = buster_test_temporary_path(temporary.arena, S8("ucn-header"), S8(".h"));
+    String8 contents = S8("#define \\u03b1 7\n");
+    if (BUSTER_REQUIRE(arguments, file_write(header, BUSTER_SLICE_TO_BYTE_SLICE(contents))))
+    {
+        String8 source = string_format(temporary.arena, S8("#include \"{S8}\"\nα\n"), header);
+        CPreprocessResult included = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_C17, .source_path = S8("ucn-include.c")});
+        BUSTER_TEST(arguments, included.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, included.token_count == 2))
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(included.spelling_base, included.tokens[0]), S8("7"));
+        }
+        c_test_ucn_release(&included);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// The same self-checking source is compiled by both Buster frontends and,
+// on hosted Linux, by GCC and Clang. It avoids implementation-defined UCN
+// stringization, which the separate preprocessing fixture pins for Buster.
+BUSTER_GLOBAL_LOCAL String8 const c_test_ucn_runtime_source = S8_INITIALIZER(
+    "#define CAT(a,b) a##b\n"
+    "#define \\u03b1_MAC 7\n"
+    "#define ID(\\u03b7) η\n"
+    "typedef int \\u03c4;\n"
+    "struct \\u03a3 { τ \\u03b2; };\n"
+    "static struct Σ global = {3};\n"
+    "enum { \\u03b5_1 = 5 };\n"
+    "static int CAT(\\u03c0,tail) = 11;\n"
+    "int \\u03bb(int \\u03b4) {\n"
+    "    τ value = δ;\n"
+    "    if (value) goto \\u03ba;\n"
+    "    return 99;\n"
+    "κ: return global.β + value + ε_1 + α_MAC;\n"
+    "}\n"
+    "int main(void) {\n"
+    "    char const* literal = \"\\u03b1\";\n"
+    "    return λ(ID(2)) != 17 || πtail != 11 ||\n"
+    "        (unsigned char)literal[0] != 0xCE || (unsigned char)literal[1] != 0xB1 || literal[2] != 0;\n"
+    "}\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_semantic(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C99, C_PREPROCESS_DIALECT_C11, C_PREPROCESS_DIALECT_C17};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(dialects); mode += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, c_test_ucn_runtime_source,
+            (CPreprocessOptions){.dialect = dialects[mode], .source_path = S8("ucn-identity.c"),
+                                 .target = target_native, .data_layout = target_data_layout(target_native)});
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && preprocess.symbols != 0))
+        {
+            u32 count = c_test_symbol_count(preprocess.symbols);
+            u32 lambda = c_test_symbol_find(preprocess.symbols, S8("λ"));
+            BUSTER_TEST(arguments, lambda != 0);
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, c_test_symbol_count(preprocess.symbols) == count);
+            if (BUSTER_REQUIRE(arguments, parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("ucn-identity.c"), preprocess, parse, target_native);
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                BUSTER_TEST(arguments, c_test_symbol_count(preprocess.symbols) == count);
+                if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+                {
+                    IrModule* module = &lowered.program->modules[0];
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("λ")) != 0);
+                }
+            }
+        }
+        c_test_ucn_release(&preprocess);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=c99"), S8("-std=c11"), S8("-std=c17")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("ucn-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_ucn_runtime_source))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("ucn-runtime-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
+                        S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("UCN {S8} {S8} {S8}: {S8}"),
+                            dialects[dialect], modes[mode], frontends[form], compiled.diagnostic));
+                    if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("UCN runtime {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                    dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        String8 references[] = {S8("gcc"), S8("clang")};
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+        {
+            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("ucn-reference-run"), S8(".exe"));
+                if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                {
+                    String8 command[] = {compiler, dialects[dialect], S8("-pedantic-errors"), S8("-nostdinc"), S8("-o"), output, source};
+                    ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                              .use_process_environment = true, .search_path = true});
+                    if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                    {
+                        ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, 30000000);
+                        String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
+                        BUSTER_TEST_RAW(arguments, !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("UCN oracle {S8} {S8}: status={u32} timeout={u32}\n{S8}"),
+                                compiler, dialects[dialect], compilation.platform_status, (u32)compilation.timed_out,
+                                string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                        if (BUSTER_REQUIRE(arguments, !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS))
+                        {
+                            String8 run[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena, S8("UCN oracle run {S8} {S8}: status={u32} timeout={u32}"),
+                                        compiler, dialects[dialect], execution.platform_status, (u32)execution.timed_out));
+                            }
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Exercise rejected sentinel lengths without materializing their imaginary
 // source bytes, and query the exact standalone translation allocation bound.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_size_limit(UnitTestArguments* arguments)
@@ -30357,6 +30781,10 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
     BUSTER_TEST_FIXTURE(arguments, c_test_malformed_initializer_progress_and_identifier_uses);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_utf8);
+    BUSTER_TEST_FIXTURE(arguments, c_test_ucn_lex);
+    BUSTER_TEST_FIXTURE(arguments, c_test_ucn_preprocess);
+    BUSTER_TEST_FIXTURE(arguments, c_test_ucn_semantic);
+    BUSTER_TEST_FIXTURE(arguments, c_test_ucn_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_intern_scan_by_shape);
     BUSTER_TEST_FIXTURE(arguments, c_test_pp_class_masks);

@@ -27,6 +27,7 @@
 //                                              kept in differential agreement
 //   c_source_metrics_add,                      the SOURCE table counters and
 //   c_source_metrics_file_row                  the per-file attribution rows
+//   c_ucn_decode, c_ucn_identifier_allowed      dialect-owned identifier escapes
 //   c_lex_validate_word_utf8                   bounded word encoding checks
 //   c_lex_scan_one, c_lex_scalar               the scalar lexer
 //   c_lex_compact_tables_build,                the SIMD lexer (Validark

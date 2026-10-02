@@ -467,6 +467,15 @@ without facts for identical bitcode and diagnostics.
   validity oracle, guard-page/window differential cases and driver failures are
   registered in the frontend/driver suites; `basic_c_utf8_identifiers.c` checks
   valid source through every native allocator (GitHub #253).
+- In C99/GNU99 and C11/C17/GNU11/GNU17, identifier UCNs are decoded under
+  the dialect's Annex D policy before symbol interning. Raw and escaped
+  spellings then share canonical UTF-8 identity. Original token spellings
+  survive macro `#` and `##`; only the final fused identifier-respelling
+  pass exposes canonical bytes to semantic/lowering consumers, under stamps
+  retaining the original source location. C23/GNU23/GNU89 identifier-escape
+  admission is unchanged. Literal conversion remains separate; raw UTF-8
+  keeps the encoding-only rule above. See the dialect boundary and registered
+  UCN fixtures in [frontend.md](../frontend.md).
 - Arena ownership is part of the API contract. Returned source, syntax,
   semantic, and IR structures may reference earlier-stage storage; callers must
   retain the translation-unit arena until every downstream consumer finishes.
