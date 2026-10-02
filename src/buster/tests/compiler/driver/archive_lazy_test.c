@@ -171,6 +171,24 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_no_marker(ObjectFile* obj
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_unresolved(ObjectFile* object, String8 name)
+{
+    u32 references = 0;
+    bool definition = false;
+    for (u32 index = 0; index < object->symbol_count; index += 1)
+    {
+        ObjectSymbol* symbol = &object->symbols[index];
+        if (symbol->global && string_equal(symbol->name, name))
+        {
+            references += symbol->section == OBJECT_SECTION_UNDEFINED && !symbol->weak;
+            definition |= symbol->section != OBJECT_SECTION_UNDEFINED;
+        }
+    }
+    bool result = references == 1 && !definition;
+    return result;
+}
+
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
 BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_process(UnitTestArguments* arguments, Arena* arena, SliceString8 command,
                                                               ProcessResult expected, String8 diagnostic)
@@ -302,6 +320,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_cases(UnitTestA
     {
         ByteSlice named = {0};
         String8 named_diagnostic = {0};
+        CompilerDriverError named_error = COMPILER_DRIVER_ERROR_COUNT;
         for (u32 direct = 0; direct < 2; direct += 1)
         {
             String8 output = string_format_z(arena, S8("{S8}/buster-{u32}-{u32}"), root, row, direct);
@@ -311,7 +330,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_cases(UnitTestA
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
             CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
             bool success = !rows[row].unresolved.length;
-            BUSTER_TEST_RAW(arguments, compiled.error == (success ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_LINK),
+            BUSTER_TEST_RAW(arguments, success ? compiled.error == COMPILER_DRIVER_ERROR_NONE
+                                    : compiled.has_object && (compiled.error == COMPILER_DRIVER_ERROR_LINK || (!host && compiled.error == COMPILER_DRIVER_ERROR_NONE)),
                             string_format(arena, S8("library-order {S8} row {u32}, direct {u32}: {S8}"), target, row, direct, compiled.diagnostic));
             if (success && BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object))
             {
@@ -332,12 +352,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_cases(UnitTestA
             }
             else if (!success)
             {
-                BUSTER_TEST(arguments, compiled.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL &&
-                                       string_equal(compiled.native_link.symbol, rows[row].unresolved));
-                BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, rows[row].unresolved) != BUSTER_STRING_NO_MATCH &&
-                                       !compiler_driver_library_order_exists(output));
-                if (!direct) named_diagnostic = compiled.diagnostic;
-                else BUSTER_STRING_TEST(arguments, named_diagnostic, compiled.diagnostic);
+                if (BUSTER_REQUIRE(arguments, compiled.has_object))
+                {
+                    BUSTER_TEST(arguments, compiler_driver_library_order_unresolved(&compiled.object, rows[row].unresolved));
+                    // A foreign target may lack a libc export table and defer
+                    // final dynamic lookup. Close that world explicitly through
+                    // the public writer API, without changing driver policy.
+                    String8 closed_output = string_format_z(arena, S8("{S8}/closed-{u32}-{u32}"), root, row, direct);
+                    NativeExecutableLinkResult closed = link_native_executable(arena, &compiled.object,
+                        (NativeExecutableLinkOptions){.output_path = closed_output, .runtime_exports_known = true});
+                    BUSTER_TEST(arguments, closed.error == LINK_ERROR_UNRESOLVED_SYMBOL && string_equal(closed.symbol, rows[row].unresolved));
+                    BUSTER_TEST(arguments, !closed.executable.length && !compiler_driver_library_order_exists(closed_output));
+                }
+                if (host || compiled.error == COMPILER_DRIVER_ERROR_LINK)
+                {
+                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_LINK && compiled.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL &&
+                                           string_equal(compiled.native_link.symbol, rows[row].unresolved));
+                    BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, rows[row].unresolved) != BUSTER_STRING_NO_MATCH &&
+                                           !compiler_driver_library_order_exists(output));
+                }
+                else BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && !compiled.diagnostic.length &&
+                                           compiler_driver_library_order_exists(output));
+                if (!direct)
+                {
+                    named_diagnostic = compiled.diagnostic;
+                    named_error = compiled.error;
+                }
+                else
+                {
+                    BUSTER_STRING_TEST(arguments, named_diagnostic, compiled.diagnostic);
+                    BUSTER_TEST(arguments, compiled.error == named_error);
+                }
             }
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
             if (host)
@@ -375,8 +420,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_cases(UnitTestA
     legacy.link_operations = 0;
     legacy.link_operation_count = 0;
     CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, legacy);
-    BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_LINK && rejected.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL &&
-                           string_equal(rejected.native_link.symbol, S8("bar")) && !compiler_driver_library_order_exists(legacy_output));
+    if (BUSTER_REQUIRE(arguments, rejected.has_object))
+    {
+        BUSTER_TEST(arguments, compiler_driver_library_order_unresolved(&rejected.object, S8("bar")));
+        String8 closed_output = string_format_z(arena, S8("{S8}/legacy-closed-refusal"), root);
+        NativeExecutableLinkResult closed = link_native_executable(arena, &rejected.object,
+            (NativeExecutableLinkOptions){.output_path = closed_output, .runtime_exports_known = true});
+        BUSTER_TEST(arguments, closed.error == LINK_ERROR_UNRESOLVED_SYMBOL && string_equal(closed.symbol, S8("bar")) &&
+                               !closed.executable.length && !compiler_driver_library_order_exists(closed_output));
+    }
+    BUSTER_TEST(arguments, host ? rejected.error == COMPILER_DRIVER_ERROR_LINK &&
+                                 rejected.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL && string_equal(rejected.native_link.symbol, S8("bar")) &&
+                                 !compiler_driver_library_order_exists(legacy_output)
+                               : rejected.error == COMPILER_DRIVER_ERROR_NONE ||
+                                 (rejected.error == COMPILER_DRIVER_ERROR_LINK && rejected.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL &&
+                                  string_equal(rejected.native_link.symbol, S8("bar")) && !compiler_driver_library_order_exists(legacy_output)));
     legacy_output = string_format_z(arena, S8("{S8}/legacy-tail-success"), root);
     String8 legacy_success[] = {S8("-target"), target, S8("-g0"), S8("-L"), root, S8("-o"), legacy_output,
                                objects[0], S8("-lfoo"), S8("-l:libbar.a")};
