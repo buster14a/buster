@@ -312,6 +312,9 @@ BUSTER_GLOBAL_LOCAL void ir_oracle_preflight(IrOracleRun* run, IrFunction* funct
                     owners[id.value] = block;
                     positions[id.value] = position++;
                     IrInstruction* row = function->instructions + id.value;
+                    run->last_function = function;
+                    run->last_row = id.value;
+                    run->last_opcode = row->opcode;
                     switch (row->opcode)
                     {
                         case IR_OPCODE_ARGUMENT: case IR_OPCODE_LOCAL: case IR_OPCODE_GLOBAL:
@@ -599,8 +602,12 @@ BUSTER_GLOBAL_LOCAL IrOracleRun* ir_oracle_evaluate(Arena* arena, IrProgram* pro
                         case IR_OPCODE_INDEX:
                         {
                             IrType* base = ir_oracle_type(program, current->values[row->operands[0].value].canonical_type);
+                            IrType* index_type = ir_oracle_type(program, current->values[row->operands[1].value].canonical_type);
+                            u32 index_width = ir_oracle_width(index_type);
                             if (!width || !base || base->kind != IR_TYPE_POINTER || operands[0].kind != IR_ORACLE_POINTER ||
                                 operands[1].kind != IR_ORACLE_INTEGER) run->status = IR_ORACLE_UNSUPPORTED;
+                            else if (index_width && index_type->is_signed && (operands[1].bits & (UINT64_C(1) << (index_width - 1))))
+                                run->status = IR_ORACLE_UNSUPPORTED;
                             else
                             {
                                 u64 size = type->layout.size;

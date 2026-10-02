@@ -418,6 +418,15 @@ failure reduction. See [metamorphic testing](../metamorphic-testing.md) for the
 transformation preconditions, reproducible seeds, strict execution mode and
 failure bundles. Cross-target compilation is not a behavioral pass.
 
+## Canonical IR executable oracle
+
+The test-only `ir_oracle_tests` module provides an independent bounded canonical
+IR interpreter and isolated native comparison. Run
+`build/Release/ide test --ci=1 --verbose=1 --module=ir_oracle_tests`.
+See [canonical IR oracle](../canonical-ir-oracle.md) for the admitted subset,
+resource bounds, observable results, mutation controls and unavailable native
+legs. The private `ir_oracle_native_tests` module is an internal child payload.
+
 ## Constant name-binding oracle
 
 `tools/scope_oracle/` is a hand-run, stdlib-only detector for a subset the other

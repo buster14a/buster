@@ -19,6 +19,7 @@ contract; this page does not maintain a second copy of command-line flags.
 | `compiler.artifacts` | Compile, assemble and link through the headless driver; reusable toolchain modules have their own boundaries. | [Driver guide](../agents/driver.md) and [source map](../agents/project.md). |
 | `compiler.wasm64` | Direct core Wasm64 output. | [Wasm64 contract](../../WASM64.md). |
 | `compiler.llvm-bitcode` | Direct binary LLVM bitcode output. | [Bitcode contract](../../LLVM_BITCODE.md). |
+| `compiler.ir-oracle` | Test-only bounded canonical IR interpreter and isolated native comparison. | [Executable-semantics boundary](../canonical-ir-oracle.md). |
 
 These are navigation entries, not an exhaustive language or target-support matrix.
 The target/ABI/mode and limitations in each detailed contract remain decisive.

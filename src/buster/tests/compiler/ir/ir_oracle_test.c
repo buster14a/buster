@@ -66,10 +66,12 @@ BUSTER_GLOBAL_LOCAL IrProgram* ir_oracle_fixture(Arena* arena, u32 fixture, u32 
         String8 source = fixture == 4 ?
             S8("static unsigned long long sink; unsigned long long helper(unsigned long long a,unsigned long long b){unsigned long long x=a;sink=(x^b)+7;return sink;}"
                "unsigned long long probe(unsigned long long a,unsigned long long b){if(a>b)return helper(a,b);else return helper(b,a)+3;}"
-               "unsigned long long observe(void){return sink;}") :
+               "unsigned long long observe(void){return sink;}") : fixture == 5 ?
             S8("static unsigned long long sink; unsigned long long probe(unsigned long long a,unsigned long long b){unsigned long long x=a,y=b;"
                "for(unsigned long long i=0;i<3;i++){unsigned long long t=x;x=y;y=t;}sink=y;return x;}"
-               "unsigned long long observe(void){return sink;}");
+               "unsigned long long observe(void){return sink;}") :
+            S8("static unsigned long long sink; unsigned long long probe(unsigned long long a,unsigned long long b){"
+               "(void)a;(void)b;for(;;){}return 0;}unsigned long long observe(void){return sink;}");
         CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
         CParseResult parse = c_parse(arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir(arena, S8("ir-oracle.c"), tokens, parse, target);
@@ -237,7 +239,7 @@ UnitTestResult ir_oracle_native_tests(UnitTestArguments* arguments)
         u32 mutation = selection.length > 1 ? selection.pointer[1] - (u8)'0' : 0;
         u32 mode = selection.length > 2 ? selection.pointer[2] - (u8)'0' : 0;
         IrProgram* program = ir_oracle_fixture(arguments->arena, fixture, mutation);
-        if (BUSTER_REQUIRE(arguments, program && fixture < IR_ORACLE_FIXTURES && mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT))
+        if (BUSTER_REQUIRE(arguments, program && fixture <= IR_ORACLE_FIXTURES && mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT))
         {
             IrModule* module = program->modules;
             IrFunction* probe = ir_oracle_named(module, S8("probe"));
@@ -378,6 +380,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_rejection_controls(UnitTestArgument
             BUSTER_TEST(arguments, run->status == IR_ORACLE_UNSUPPORTED);
         }
     }
+    program = ir_oracle_fixture(arguments->arena, IR_ORACLE_FIXTURES, 0);
+    if (BUSTER_REQUIRE(arguments, program))
+    {
+        IrOracleValue inputs[] = {ir_oracle_integer(1), ir_oracle_integer(2)};
+        IrOracleRun* run = ir_oracle_evaluate(arguments->arena, program, program->modules,
+            ir_oracle_named(program->modules, S8("probe")), inputs, 2, IR_ORACLE_STEPS);
+        BUSTER_TEST(arguments, run->status == IR_ORACLE_LIMIT && run->steps == IR_ORACLE_STEPS);
+    }
     return result;
 }
 
@@ -387,6 +397,35 @@ BUSTER_GLOBAL_LOCAL bool ir_oracle_clean(ProcessWaitResult wait)
         !wait.capture_failed && !wait.capture_limit_exceeded && !wait.output_truncated && !wait.process_tree_cleanup_failed &&
         !wait.process_group_reservation_retained && !wait.process_group_ownership_lost && !wait.streams[STANDARD_STREAM_ERROR].length;
 }
+
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_SANITIZE
+BUSTER_GLOBAL_LOCAL ProcessSpawnResult ir_oracle_spawn(Arena* arena, u32 fixture, u32 mutation, u32 mode)
+{
+    String8 argv[] = {program_state->input.arguments.pointer[0], S8("test"), S8("--ci=1"), S8("--verbose=1"),
+                     S8("--module=ir_oracle_native_tests")};
+    SliceString8 inherited_keys = program_state->input.environment_keys;
+    SliceString8 inherited_values = program_state->input.environment_values;
+    String8* keys = arena_allocate(arena, String8, inherited_keys.length + 4);
+    String8* values = arena_allocate(arena, String8, inherited_keys.length + 4);
+    keys[0] = S8("BUSTER_IR_ORACLE_CHILD");
+    values[0] = string_format_z(arena, S8("{u32}{u32}{u32}"), fixture, mutation, mode);
+    keys[1] = S8("BUSTER_TEST_JOBS"); values[1] = S8("1");
+    keys[2] = S8("BUSTER_TEST_MODULE_GROUP"); values[2] = S8("");
+    keys[3] = S8("BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS"); values[3] = S8("0");
+    u64 count = 4;
+    for (u64 i = 0; i < inherited_keys.length; i += 1)
+    {
+        bool overridden = false;
+        for (u32 k = 0; k < 4; k += 1) overridden = overridden || string_equal(keys[k], inherited_keys.pointer[i]);
+        if (!overridden) { keys[count] = inherited_keys.pointer[i]; values[count++] = inherited_values.pointer[i]; }
+    }
+    return os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
+        (SliceString8){keys, count}, (SliceString8){values, count},
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .new_process_group = true, .search_path = true, .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL,
+            .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = 32768, [STANDARD_STREAM_ERROR] = 4096}, .total = 36864}});
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL bool ir_oracle_record_token(String8 block, u64* cursor, String8 token)
 {
@@ -472,6 +511,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_report_controls(UnitTestArguments* 
     wait.process_group_ownership_lost = false;
     wait.result = PROCESS_RESULT_FAILED;
     BUSTER_TEST(arguments, !ir_oracle_clean(wait));
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_SANITIZE
+    // Deliberately generated infinite loop: a real timeout cannot become either
+    // agreement or a successfully detected semantic mutation.
+    ProcessSpawnResult spawn = ir_oracle_spawn(arguments->arena, IR_ORACLE_FIXTURES, 0, CODEGEN_REGISTER_ALLOCATOR_FAST);
+    if (BUSTER_REQUIRE(arguments, spawn.handle))
+    {
+        wait = os_process_wait_deadline(arguments->arena, spawn, 5000000);
+        BUSTER_TEST(arguments, wait.timed_out && !ir_oracle_clean(wait) && !wait.process_tree_cleanup_failed &&
+                               !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
+        arguments->show(arguments, S8("IR_ORACLE_TIMEOUT_CONTROL_V1 timed_out={u32} status=inconclusive\n"), (u32)wait.timed_out);
+    }
+#endif
     return result;
 }
 
@@ -486,6 +537,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
         {
             IrFunction* probe = ir_oracle_named(program->modules, S8("probe"));
             String8 expected = S8("IR_ORACLE_BEGIN_V1\n");
+            if (fixture == 4)
+            {
+                IrModule* module = program->modules;
+                arguments->show(arguments, S8("IR_ORACLE_MODULE_V1 globals={u32} initializers={u32} assemblies={u32} aliases={u32}\n"),
+                                module->global_count, module->initializer_count, module->assembly_count, module->alias_count);
+                for (u32 i = 0; i < module->global_count; i += 1)
+                {
+                    IrGlobal* global = module->globals + i;
+                    IrType* type = ir_oracle_type(program, global->type);
+                    arguments->show(arguments, S8("IR_ORACLE_GLOBAL_V1 index={u32} kind={u32} width={u32} size={u64} alignment={u64} initializer={u32} relocations={u32} tls={u32}\n"),
+                        i, (u32)type->kind, type->bit_width, type->layout.size, type->layout.alignment,
+                        (u32)global->initializer_kind, global->relocation_count, (u32)global->is_thread_local);
+                }
+            }
             bool evaluated = true;
             for (u32 input = 0; input < IR_ORACLE_INPUTS; input += 1)
             {
@@ -544,29 +609,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
             {
                 for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
                 {
-                    String8 argv[] = {program_state->input.arguments.pointer[0], S8("test"), S8("--ci=1"), S8("--verbose=1"),
-                                     S8("--module=ir_oracle_native_tests")};
-                    SliceString8 inherited_keys = program_state->input.environment_keys;
-                    SliceString8 inherited_values = program_state->input.environment_values;
-                    String8* keys = arena_allocate(arguments->arena, String8, inherited_keys.length + 4);
-                    String8* values = arena_allocate(arguments->arena, String8, inherited_keys.length + 4);
-                    keys[0] = S8("BUSTER_IR_ORACLE_CHILD");
-                    values[0] = string_format_z(arguments->arena, S8("{u32}{u32}{u32}"), fixture, mutation, mode);
-                    keys[1] = S8("BUSTER_TEST_JOBS"); values[1] = S8("1");
-                    keys[2] = S8("BUSTER_TEST_MODULE_GROUP"); values[2] = S8("");
-                    keys[3] = S8("BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS"); values[3] = S8("0");
-                    u64 count = 4;
-                    for (u64 i = 0; i < inherited_keys.length; i += 1)
-                    {
-                        bool overridden = false;
-                        for (u32 k = 0; k < 4; k += 1) overridden = overridden || string_equal(keys[k], inherited_keys.pointer[i]);
-                        if (!overridden) { keys[count] = inherited_keys.pointer[i]; values[count++] = inherited_values.pointer[i]; }
-                    }
-                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
-                        (SliceString8){keys, count}, (SliceString8){values, count},
-                        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                            .new_process_group = true, .search_path = true, .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL,
-                            .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = 32768, [STANDARD_STREAM_ERROR] = 4096}, .total = 36864}});
+                    ProcessSpawnResult spawn = ir_oracle_spawn(arguments->arena, fixture, mutation, mode);
                     if (BUSTER_REQUIRE(arguments, spawn.handle))
                     {
                         ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
