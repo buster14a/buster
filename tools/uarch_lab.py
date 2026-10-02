@@ -322,6 +322,8 @@ def metric_text(value, decimals):
     if decimals is None:
         return significant(value)
     step = 10.0 ** -decimals
+    if value == 0 and decimals >= 6:
+        return "0 (to %d decimals)" % decimals
     if value == 0:
         return "< %g (perf printed %.*f; rounded to %g)" % (step / 2, decimals, 0.0, step)
     if decimals >= 6:

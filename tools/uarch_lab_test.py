@@ -664,6 +664,7 @@ class FindingTests(Fakes, unittest.TestCase):
         self.assertEqual(rows[0]["metric_unit"], "per_branch")
         self.assertEqual(lab.metric_text(rows[0]["metric_value"], rows[0]["metric_decimals"]), "< 0.05 (perf printed 0.0; rounded to 0.1)")
         self.assertEqual(lab.metric_text(0.4, 1), "0.4 (rounded to 0.1)")
+        self.assertEqual(lab.metric_text(0.0, 6), "0 (to 6 decimals)")
         value, formula = lab.recompute_metric(rows[0], lab.stat_values(rows), None)
         self.assertAlmostEqual(value, 73900351 / 4120569627)
         # A group run cannot assign events to metrics: no partial recompute.
