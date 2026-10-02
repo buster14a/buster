@@ -555,7 +555,7 @@ BUSTER_GLOBAL_LOCAL void raster_native_xim_provider_callback(xcb_im_t* server, x
     BUSTER_UNUSED(client);
     BUSTER_UNUSED(frame);
     BUSTER_UNUSED(argument);
-    RasterNativeXimProvider* provider = user_data;
+    RasterNativeXimProvider* provider = (RasterNativeXimProvider*)user_data;
     if (header->major_opcode == XCB_XIM_CREATE_IC && input_context &&
         xcb_im_input_context_get_client_window(input_context) == provider->target)
     {
