@@ -1,0 +1,230 @@
+name: XGETBV baseline diagnostic
+
+# Temporary issue-1487 evidence transport; remove before opening the source PR.
+# Build policy stays in build.c; ordinary PR CI owns machine tests/self-hosting.
+on:
+  push:
+    branches: [codex/1487-baseline-xgetbv]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xgetbv-baseline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 2
+      BUSTER_MATRIX_THREADS: 2
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Checkout frozen baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 1899ace6a9431126132521aea57996e7b37c45fc
+          path: baseline
+          persist-credentials: false
+      - name: Record identities and build isolated compiler trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          clang --version > evidence/clang-version.txt
+          cmake --version > evidence/cmake-version.txt
+          ninja --version > evidence/ninja-version.txt
+          for tree in baseline candidate; do
+            (
+              cd "$tree"
+              git rev-parse HEAD HEAD^{tree} > "../evidence/$tree-git.txt"
+              git status --porcelain > "../evidence/$tree-status.txt"
+              git diff --exit-code
+              mkdir -p .ci-tools
+              # Hosted Clang bootstrap exception; retain the normal driver flags.
+              clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+                -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build \
+                2>&1 | tee "../evidence/$tree-bootstrap.log"
+              .ci-tools/build generate --config Release --ci --cc clang --no-sanitize --no-fuzz --no-lto \
+                --no-include-tests --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF \
+                2>&1 | tee "../evidence/$tree-generate.log"
+              .ci-tools/build build --config Release -t ide \
+                2>&1 | tee "../evidence/$tree-build.log"
+              sha256sum .ci-tools/build build/Release/ide > "../evidence/$tree-compiler.sha256"
+            )
+          done
+      - name: Reproduce refusal and check guarded runtime and frozen unity input
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > evidence/xgetbv.c <<'C'
+          extern int printf(char const *, ...);
+          static unsigned long long read_xcr0(void)
+          {
+              unsigned lo, hi;
+              __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+              return ((unsigned long long)hi << 32) | lo;
+          }
+          int main(int argc, char **argv)
+          {
+              unsigned available = 0;
+              unsigned long long observed = 0;
+              (void)argv;
+              if (argc == 1)
+              {
+                  unsigned a, b, c, d;
+                  __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+                  available = (c >> 27) & 1u;
+                  if (available) observed = read_xcr0();
+              }
+              printf("osxsave=%u xcr0=%016llx\n", available, observed);
+              return 0;
+          }
+          C
+          python3 -B - <<'PY'
+          import hashlib, json, os, pathlib, re, signal, subprocess
+
+          root = pathlib.Path.cwd()
+          evidence = root / "evidence"
+          source = evidence / "xgetbv.c"
+          records = []
+          paths = ["src/buster/lib/compiler/codegen/machine_x86_64.c",
+                   "src/buster/lib/compiler/codegen/codegen.c",
+                   "src/buster/tests/compiler/codegen/machine_test.c", "docs/agents/machine.md",
+                   "src/buster/apps/ide/ide.c", "src/buster/lib/x86_64.c"]
+          hashes = {}
+          for stage in ["baseline", "candidate"]:
+              checkout = root / stage
+              stage_paths = paths + [str(path.relative_to(checkout))
+                                     for path in sorted((checkout / "build/generated").rglob("*"))
+                                     if path.is_file()]
+              hashes[stage] = {path: hashlib.sha256((checkout / path).read_bytes()).hexdigest()
+                               for path in stage_paths}
+          hashes["probe"] = hashlib.sha256(source.read_bytes()).hexdigest()
+          (evidence / "source-sha256.json").write_text(json.dumps(hashes, indent=2) + "\n")
+
+          def run(label, argv, cwd=root, timeout=120):
+              process = subprocess.Popen([str(arg) for arg in argv], cwd=cwd,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         start_new_session=True)
+              expired = False
+              try:
+                  out, err = process.communicate(timeout=timeout)
+              except subprocess.TimeoutExpired:
+                  expired = True
+                  os.killpg(process.pid, signal.SIGKILL)
+                  out, err = process.communicate()
+              (evidence / (label + ".stdout")).write_bytes(out)
+              (evidence / (label + ".stderr")).write_bytes(err)
+              record = dict(label=label, argv=[str(arg) for arg in argv], cwd=str(cwd),
+                            returncode=process.returncode, timed_out=expired, timeout_seconds=timeout)
+              records.append(record)
+              (evidence / "commands.json").write_text(json.dumps(records, indent=2) + "\n")
+              print(label + ": exit=" + str(process.returncode) + " timed_out=" + str(expired), flush=True)
+              if expired:
+                  raise RuntimeError("timed out: " + label)
+              return process.returncode, out, err.decode("utf-8", errors="replace")
+
+          def success(label, argv, cwd=root, timeout=120):
+              code, out, err = run(label, argv, cwd, timeout)
+              if code != 0:
+                  raise RuntimeError("unexpected failure: " + label + "\n" + err)
+              text = out.decode("utf-8", errors="replace") + err
+              for line in text.splitlines():
+                  if line.startswith("CODEGEN_VERIFY "):
+                      print(label + ": " + line, flush=True)
+              return out, text
+
+          def refused(label, argv, function, cwd=root, timeout=120):
+              code, out, err = run(label, argv, cwd, timeout)
+              text = out.decode("utf-8", errors="replace") + err
+              required = ["kind=codegen.unsupported-instruction", "function='" + function + "'",
+                          "opcode=inline-assembly"]
+              matching = [line for line in text.splitlines() if all(token in line for token in required)]
+              if code <= 0 or len(matching) != 1:
+                  raise RuntimeError("missing specific XGETBV refusal: " + label + "\n" + text)
+
+          def verified(label, text, mode):
+              pattern = r"^CODEGEN_VERIFY version=1 ir=(\d+) mir=(\d+) scheduled=(\d+) allocator=(\S+)$"
+              rows = re.findall(pattern, text, re.MULTILINE)
+              if len(rows) != 1 or rows[0][3] != mode or int(rows[0][0]) == 0:
+                  raise RuntimeError("verification evidence missing or inconsistent: " + label)
+              mir = int(rows[0][1])
+              if (mode == "none" and mir != 0) or (mode != "none" and mir == 0):
+                  raise RuntimeError("wrong selected-MIR verification count: " + label)
+
+          oracle = evidence / "oracle"
+          success("oracle-build", ["clang", "-std=gnu17", "-O0", "-march=x86-64", "-Wall", "-Wextra",
+                                    "-Werror", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char",
+                                    source, "-o", oracle])
+          expected = {}
+          for case, args in [("host", []), ("skip", ["skip"])]:
+              expected[case], _ = success("oracle-" + case, [oracle] + args)
+          if expected["skip"] != b"osxsave=0 xcr0=0000000000000000\n":
+              raise RuntimeError("independent forced-skip oracle failed")
+          print("independent runtime oracle: " + expected["host"].decode("ascii").strip(), flush=True)
+
+          frontends = [("ssa", "-ffrontend-ssa"), ("memory", "-fno-frontend-ssa")]
+          targets = [("baseline", ["-march=baseline"]),
+                     ("disabled", ["-march=haswell", "-mattr=-xsave"])]
+          for stage in ["baseline", "candidate"]:
+              compiler = root / stage / "build/Release/ide"
+              for target, target_flags in targets:
+                  for frontend, frontend_flag in frontends:
+                      for mode in ["none", "mir-stack", "fast", "quality"]:
+                          label = "-".join([stage, target, frontend, mode])
+                          flags = ["-target", "x86_64-unknown-linux", "-std=gnu17", "-g0"]
+                          flags += target_flags + [frontend_flag, "-fregister-allocator=" + mode,
+                                                   "-fverify-codegen"]
+                          if mode != "none":
+                              flags += ["-fno-machine-fallback"]
+                          output = evidence / label
+                          command = [compiler, "cc"] + flags
+                          if stage == "baseline":
+                              refused(label, command + ["-c", source, "-o", str(output) + ".o"], "read_xcr0")
+                          else:
+                              _, err = success(label + "-build", command + [source, "-o", output])
+                              verified(label, err, mode)
+                              for case, args in [("host", []), ("skip", ["skip"])]:
+                                  observed, _ = success(label + "-" + case, [output] + args)
+                                  if observed != expected[case]:
+                                      raise RuntimeError("runtime oracle mismatch: " + label + "-" + case)
+
+              # Both compilers consume the baseline's exact source/generated headers.
+              # Pinned source audit identifies the literal in xgetbv() in src/buster/lib/x86_64.c.
+              for frontend, frontend_flag in frontends:
+                  label = stage + "-unity-baseline-fast-" + frontend
+                  output = evidence / (label + ".o")
+                  command = [compiler, "cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
+                             "-DBUSTER_INCLUDE_TESTS=0", "-g0", "-target", "x86_64-unknown-linux",
+                             "-march=baseline", "-fregister-allocator=fast", "-fno-machine-fallback",
+                             "-fverify-codegen", frontend_flag, "-c", "src/buster/apps/ide/ide.c", "-o", output]
+                  if stage == "baseline":
+                      refused(label, command, "xgetbv", root / "baseline", 600)
+                  else:
+                      _, err = success(label, command, root / "baseline", 600)
+                      verified(label, err, "fast")
+                      raw = output.read_bytes()
+                      (evidence / (label + ".object.json")).write_text(json.dumps(
+                          dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()), indent=2) + "\n")
+
+          print("XGETBV diagnostic passed: 16 specific pre-fix refusals, 16 post-fix executable builds, "
+                "32 guarded/forced-skip observations, and both frozen unity frontend forms.")
+          PY
+      - name: Retain exact diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: issue-1487-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          if-no-files-found: error
+          retention-days: 14

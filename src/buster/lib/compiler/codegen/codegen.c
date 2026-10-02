@@ -20355,33 +20355,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         else if (xgetbv)
                         {
-                            AssemblyEncodeResult encoded = assembly_encode(arena, asm_extra.literal,
-                                                                            (AssemblyEncodeOptions){
-                                                                                .target = target,
-                                                                                .syntax = codegen_inline_assembly_syntax(options),
-                                                                            });
-                            if (encoded.diagnostic_count || encoded.relocation_count)
+                            // This existing literal form permits runtime CPU
+                            // dispatch even when the compile target lacks XSAVE.
+                            String8 feature_names[] = {S8("xsave")};
+                            if (!codegen_canonical_x64_metadata_emit_features(
+                                    &buffer, S8("XGETBV"), 0, 0,
+                                    (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)}))
                             {
-                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                result.error = buffer.error;
                                 return result;
-                            }
-                            for (u32 symbol_index = 0; symbol_index < encoded.symbol_count; symbol_index += 1)
-                            {
-                                if (!encoded.symbols[symbol_index].defined)
-                                {
-                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                                    return result;
-                                }
-                            }
-                            u8* encoded_bytes = 0;
-                            if (!codegen_buffer_reserve(&buffer, encoded.bytes.length, &encoded_bytes))
-                            {
-                                result.error = CODEGEN_ERROR_CAPACITY;
-                                return result;
-                            }
-                            if (encoded.bytes.length)
-                            {
-                                memcpy(encoded_bytes, encoded.bytes.pointer, encoded.bytes.length);
                             }
                         }
                         else if (pause)
