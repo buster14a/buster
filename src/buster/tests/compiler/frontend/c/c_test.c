@@ -4640,7 +4640,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_enum_scope(UnitTestArgument
             for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources) + BUSTER_ARRAY_LENGTH(rejected); fixture += 1)
             {
                 bool accepted = fixture < BUSTER_ARRAY_LENGTH(sources);
-                u32 rejected_index = accepted ? 0 : fixture - BUSTER_ARRAY_LENGTH(sources);
+                u32 rejected_index = accepted ? 0 : fixture - (u32)BUSTER_ARRAY_LENGTH(sources);
                 String8 source = accepted ? sources[fixture] : rejected[rejected_index];
                 TemporalArena temporary = scratch_begin(0, 0);
                 Target target = targets[target_index];
