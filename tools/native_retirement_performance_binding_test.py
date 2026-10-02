@@ -2172,5 +2172,49 @@ class BindingTests(unittest.TestCase):
                 binding.validate(path, evidence)
 
 
+class BootstrapSupportPinsTests(unittest.TestCase):
+    def test_only_exact_predecessor_and_bootstrap_successor_bytes_reach_manifest_validation(self):
+        data = (ROOT / binding.SUPPORT_DECLARATION_PATH).read_bytes()
+        bridge = b"tests/github_runner_bridge_test.py\t"
+        archived = b"tests/retired/github_runner_bridge_test.py.txt\t"
+        data = data.replace(archived, bridge)
+        lines = data.splitlines()
+        data = b"\n".join([lines[0], *sorted(lines[1:])]) + b"\n"
+        prefix = b"tests/bootstrap_wrapper_test.py\tsupport-file\tdependency-only\t"
+        row = next(line for line in data.splitlines() if line.startswith(prefix))
+        revisions = (
+            (b"22359\tdd082faa22b7daaa836d779f68267b45fea03515d0c058484bb27c1ce7bb7a09",
+             binding.MAIN_CI_REUSE_SUPPORT_DECLARATION_SHA256, False),
+            (b"19588\te03036ea0a44e47f62bb743abaa7c5e381c6f76df3dfc75ba349da1a15506862",
+             binding.BOOTSTRAP_WORKFLOW_SUPPORT_DECLARATION_SHA256, False),
+            (b"19588\te03036ea0a44e47f62bb743abaa7c5e381c6f76df3dfc75ba349da1a15506862",
+             binding.RETIRED_BRIDGE_SUPPORT_DECLARATION_SHA256, True),
+        )
+        for replacement, digest, retire_bridge in revisions:
+            declaration = data.replace(row, prefix + replacement)
+            if retire_bridge:
+                declaration = declaration.replace(bridge, archived)
+                lines = declaration.splitlines()
+                declaration = b"\n".join([lines[0], *sorted(lines[1:])]) + b"\n"
+            self.assertEqual(hashlib.sha256(declaration).hexdigest(), digest)
+            files = [{"path": binding.SUPPORT_DECLARATION_PATH, "sha256": digest}
+                     for _ in binding.SUPPORT_FILE_ROLES]
+            record = {"support": {"files": files}}
+            with self.subTest(digest=digest):
+                # The real validator authenticates the complete ledger first;
+                # this intentionally empty manifest is its next required gate.
+                with mock.patch.object(binding, "_evidence_bytes", side_effect=[declaration, b""]), \
+                     self.assertRaisesRegex(ValueError, "manifest is empty"):
+                    binding._check_support_output(ROOT, record, None)
+                with mock.patch.object(binding, "_evidence_bytes", return_value=declaration + b"\n"), \
+                     self.assertRaisesRegex(ValueError, "support declaration bytes changed"):
+                    binding._check_support_output(ROOT, record, None)
+        files[0]["sha256"] = "0" * 64
+        with mock.patch.object(binding, "_evidence_bytes") as read, \
+             self.assertRaisesRegex(ValueError, "not the approved immutable input"):
+            binding._check_support_output(ROOT, record, None)
+        read.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
