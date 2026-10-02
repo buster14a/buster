@@ -5522,6 +5522,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_array_declarators(UnitTestArgum
         {S8("member_incomplete"), S8("int member_incomplete(void) { int c = 8; struct T { int n; char c[]; }; return c; }\n"), 8},
         {S8("member_qualified_sizeof"), S8("int member_qualified_sizeof(void) { int c = 2; return c + sizeof(const struct { char c[8]; }); }\n"), 10},
         {S8("member_qualified_union"), S8("int member_qualified_union(void) { int c = 3; return c + sizeof(const volatile union { char c[5]; char other[2]; }); }\n"), 8},
+        {S8("member_qualified_bound"), S8("int member_qualified_bound(void) { int c[2] = {1, 2}; return sizeof(const struct { char a[sizeof(c[0])]; }); }\n"), 4},
         {S8("member_scalar"), S8("int member_scalar(void) { int c = 4; struct T { char c; } t = {3}; return c + t.c; }\n"), 7},
     };
     String8 refused[] = {
@@ -5531,6 +5532,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_array_declarators(UnitTestArgum
         S8("int f(void) { struct T { int c; } t = {0}; return t.c[0]; }\n"),
         S8("int f(void) { struct S { int c; } s = {0}; struct T { char a[sizeof(s.c[0])]; }; return 0; }\n"),
         S8("int f(void) { int c = 0; return sizeof(const struct { char a[sizeof(c[0])]; }); }\n"),
+        S8("int f(void) { int c = 0; int a[sizeof(c[0])]; return 0; }\n"),
     };
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},

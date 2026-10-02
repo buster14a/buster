@@ -23736,7 +23736,13 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     {
         CToken token = preprocess.tokens[index];
         bool direct_identifier_assignment = c_parse_assignment_punctuator(token) && c_parse_assignment_identifier_is_operand(preprocess, start, index);
-        if ((declaration_tokens[index - start] && !direct_identifier_assignment) ||
+        bool expression_subscript = index > start && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) &&
+                                    !(array_declarator_openers && (array_declarator_openers[index >> 6] & (UINT64_C(1) << (index & 63)))) &&
+                                    c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]);
+        // A declarator may contain a bound expression. Its expression
+        // subscripts remain constraints even when the declaration mask
+        // covers the whole range; only parsed declarator openers are exempt.
+        if ((declaration_tokens[index - start] && !direct_identifier_assignment && !expression_subscript) ||
             ((skipped && skipped[index - start]) && !direct_identifier_assignment))
         {
             continue;
@@ -23783,9 +23789,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 }
             }
         }
-        if (index > start && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) &&
-            !(array_declarator_openers && (array_declarator_openers[index >> 6] & (UINT64_C(1) << (index & 63)))) &&
-            c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]))
+        if (expression_subscript)
         {
             u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
             CScopeId scope = c_parse_scope_for_token(result, declaration->scope, index);
