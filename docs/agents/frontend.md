@@ -24,6 +24,17 @@ allocation invariants live in [the machine guide](machine.md); command-line
 options and action dispatch live in [the driver guide](driver.md).
 The cross-frontend/backend ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+## Macro argument rescan boundaries
+
+Argument collection preserves `no_expand` on identifiers whose definition is
+disabled when the token is collected. Collection can consume the producer's
+ENABLE marker before argument prescan begins; clearing that definition's
+disabled bit must not make the captured identifier eligible again. Raw
+stringization and token-paste construction retain their existing rules.
+The registered argument-demand controls in `macro_conditional_test.c` cover
+this boundary in C17/GNU17, including duplicate substitution and raw/paste
+controls. The external Clang `macro_disable.c` assertion remains unchanged.
+
 ## Preprocessor include identity
 
 The once-file index shared by `#import`, `#pragma once` and proven whole-file

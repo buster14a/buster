@@ -76,6 +76,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_demand_tests(UnitTestArgumen
         {S8("#define N 7\n#define ID(x) x\nID(ID(N))\n"), S8("7"), 3, 0},
         // disabled
         {S8("#define SELF a.SELF\n#define ID(x) x\nID(ID(SELF))\n"), S8("a.SELF"), 3, 0},
+        // An argument token precedes its producer's ENABLE marker. Later
+        // prescan must retain that producer's disabled identity.
+        {S8("#define START(x) APPLY(x\n#define APPLY(x) x(7)\nSTART(START))\n"), S8("START(7)"), 2, 0},
+        {S8("#define START(x) APPLY(x\n#define APPLY(x) x x\nSTART(START))\n"), S8("START START"), 2, 0},
+        // Raw spelling and newly pasted identifiers keep their own rules.
+        {S8("#define START(x) TEXT(x\n#define TEXT(x) #x\nSTART(START))\n"), S8("\"START\""), 2, 0},
+        {S8("#define START(x) JOIN(x\n#define JOIN(x) x##END\n#define STARTEND 19\nSTART(START))\n"), S8("19"), 3, 0},
         // raw-line-file
         {S8("#define RAW(x) #x\n#define UNUSED(x) 7\nRAW(__LINE__) UNUSED(__FILE__)\n"), S8("\"__LINE__\" 7"), 2, 0},
         // empty
