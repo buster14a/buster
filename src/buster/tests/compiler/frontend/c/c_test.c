@@ -6359,31 +6359,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_diagnostic_ownership(U
         u32 assertion_count;
         u32 diagnostic_count;
         CDiagnosticKind kind;
+        String8 messages[2];
     } const cases[] = {
         {S8("static int arr[] = { [(unsigned char)256] = 1 };\n"
             "_Static_assert(sizeof(arr) == 4, \"file positive\");\n"),
-         1, 0, C_DIAGNOSTIC_KIND_COUNT},
+         1, 0, C_DIAGNOSTIC_KIND_COUNT, {{0}}},
         {S8("int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
             "_Static_assert(sizeof(arr) == 4, \"block positive\"); return 0; }\n"),
-         1, 0, C_DIAGNOSTIC_KIND_COUNT},
+         1, 0, C_DIAGNOSTIC_KIND_COUNT, {{0}}},
         {S8("static int arr[] = { [(unsigned char)256] = 1 };\n"
             "_Static_assert(sizeof(arr) == 8, \"file false\");\n"),
-         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_FAILED, {S8("static assertion failed: \"file false\"")}},
         {S8("int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
             "_Static_assert(sizeof(arr) == 8, \"block false\"); return 0; }\n"),
-         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_FAILED, {S8("static assertion failed: \"block false\"")}},
         {S8("int runtime(void);\n"
             "int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
             "_Static_assert(sizeof(arr) == runtime(), \"nonconstant\"); return 0; }\n"),
-         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+         {S8("static assertion expression is not an integer constant expression: sizeof(arr) == runtime()")}},
         {S8("static int arr[2];\n"
             "int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
             "{ _Static_assert(sizeof(arr) == 8, \"nested shadow\"); } return 0; }\n"),
-         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+         1, 1, C_DIAGNOSTIC_STATIC_ASSERT_FAILED, {S8("static assertion failed: \"nested shadow\"")}},
         {S8("int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
             "_Static_assert(sizeof(arr) == 8, \"first false\");\n"
             "_Static_assert(sizeof(arr) == 12, \"second false\"); return 0; }\n"),
-         2, 2, C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+         2, 2, C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
+         {S8("static assertion failed: \"first false\""), S8("static assertion failed: \"second false\"")}},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -6412,10 +6415,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_diagnostic_ownership(U
                     BUSTER_TEST(arguments, diagnostic.kind == cases[case_index].kind);
                     BUSTER_TEST(arguments, diagnostic.location.file == location.file && diagnostic.location.offset == location.offset &&
                                           diagnostic.location.map_offset == location.map_offset);
-                    BUSTER_STRING_TEST(arguments, diagnostic.message,
-                                       cases[case_index].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED
-                                           ? S8("static assertion expression is not a true integer constant expression")
-                                           : S8("static assertion expression is not an integer constant expression"));
+                    BUSTER_STRING_TEST(arguments, diagnostic.message, cases[case_index].messages[diagnostic_index]);
                 }
             }
             scratch_end(temporary);
@@ -6458,8 +6458,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_nonconstant(UnitTestAr
 // The quote once stopped at the first `,` or `)` at any depth (#1573), so a
 // parenthesized operand or a call printed truncated and unbalanced. Tokens
 // keep their source adjacency; a comment, line break or macro boundary reads
-// as one space. A `_Generic` assertion is deferred and its diagnostic, which
-// quotes nothing, is pinned unchanged.
+// as one space. Deferred assertions use the same complete quote (#1646).
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6485,7 +6484,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTe
         {S8("#define NEGATIVE -1\nint pair(int, int);\n_Static_assert(pair(-NEGATIVE, 2), \"macro\");\n"),
          S8("static assertion expression is not an integer constant expression: pair(- - 1 , 2)")},
         {S8("int pair(int, int);\n_Static_assert(_Generic(0, int: pair(1, 2), default: 0), \"generic\");\n"),
-         S8("static assertion expression is not an integer constant expression")},
+         S8("static assertion expression is not an integer constant expression: _Generic(0, int: pair(1, 2), default: 0)")},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -6506,6 +6505,126 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_nonconstant_quote(UnitTe
             BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, cases[case_index].message);
         }
         scratch_end(temporary);
+    }
+    return result;
+}
+
+// Immediate, semantic-only and deferred lowering failures preserve the same
+// user spelling (#1646), including nested commas and C23 message omission.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_diagnostic_messages(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestStaticAssertDiagnosticCase
+    {
+        String8 source;
+        String8 message;
+        CDiagnosticKind kind;
+    } CTestStaticAssertDiagnosticCase;
+    CTestStaticAssertDiagnosticCase const cases[] = {
+        {S8("_Static_assert(0, \"plain message\");\n"),
+         S8("static assertion failed: \"plain message\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("enum { E = 0 };\n_Static_assert(E, \"enum message\");\n"),
+         S8("static assertion failed: \"enum message\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int f(void) { enum { L = 0 }; _Static_assert(L, \"local enum message\"); return 0; }\n"),
+         S8("static assertion failed: \"local enum message\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("_Static_assert(_Generic(0, int: 0, default: 1), \"generic message\");\n"),
+         S8("static assertion failed: \"generic message\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("struct S { int value; };\n_Static_assert(__builtin_offsetof(struct S, value), \"offset message\");\n"),
+         S8("static assertion failed: \"offset message\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int f(void) { char value; _Static_assert(sizeof value == 2, \"sizeof message\"); return 0; }\n"),
+         S8("static assertion failed: \"sizeof message\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("_Static_assert((unsigned char)256, \"narrowing message\");\n"),
+         S8("static assertion failed: \"narrowing message\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("struct S { int value; _Static_assert(_Generic(0, int: 0, default: 1), \"member message\"); };\n"),
+         S8("static assertion failed: \"member message\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("_Static_assert(_Generic(\"expression literal\", char *: 0, default: 0), \"message literal\");\n"),
+         S8("static assertion failed: \"message literal\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("enum { E = 0 }; _Static_assert(E, \"\");\n"),
+         S8("static assertion failed: \"\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("enum { E = 0 }; _Static_assert(E, \"line\\nzero\\0quote\\\"slash\\\\\");\n"),
+         S8("static assertion failed: \"line\\nzero\\0quote\\\"slash\\\\\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("_Static_assert(0, \"one\" /* message boundary */ \"two\");\n"),
+         S8("static assertion failed: \"one\" \"two\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("enum { E = 0 }; _Static_assert(E, \"one\" \"two\");\n"),
+         S8("static assertion failed: \"one\" \"two\""), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("enum { E = 0 }; static_assert(E);\n"),
+         S8("static assertion failed"), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int f(void) { char value; static_assert(sizeof value == 2); return 0; }\n"),
+         S8("static assertion failed"), C_DIAGNOSTIC_STATIC_ASSERT_FAILED},
+        {S8("int pair(int, int); static int arr[] = { [(unsigned char)256] = 1 };\n"
+            "_Static_assert(sizeof(arr) == pair(1, 2), \"runtime message\");\n"),
+         S8("static assertion expression is not an integer constant expression: sizeof(arr) == pair(1, 2)"),
+         C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+        {S8("int pair(int, int);\n_Static_assert(_Generic(0, int: pair(1, 2), default: 0), \"runtime generic\");\n"),
+         S8("static assertion expression is not an integer constant expression: _Generic(0, int: pair(1, 2), default: 0)"),
+         C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+        {S8("int f(int n) { enum { L = 1 }; _Static_assert(L + n, \"runtime enum\"); return n; }\n"),
+         S8("static assertion expression is not an integer constant expression: L + n"), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT},
+        {S8("enum { E = 1 }; static_assert(E); _Static_assert(_Generic(0, int: 1, default: 0), \"true\");\n"
+            "int f(void) { char value; _Static_assert(sizeof value == 1, \"local true\"); return 0; }\n"),
+         {0}, C_DIAGNOSTIC_KIND_COUNT},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 route = 0; route < 3; route += 1)
+        {
+            u32 form_count = route == 2 ? 1 : 2;
+            for (u32 form = 0; form < form_count; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                    (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23});
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, cases[case_index].source);
+                CDiagnostic* diagnostics;
+                u32 diagnostic_count;
+                if (route == 0)
+                {
+                    CParseResult parse = c_parse(temporary.arena, tokens);
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("static-assert-message.c"), tokens, parse,
+                        target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (parse.diagnostic_count)
+                    {
+                        diagnostics = parse.diagnostics;
+                        diagnostic_count = parse.diagnostic_count;
+                        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                    }
+                    else
+                    {
+                        diagnostics = lowered.diagnostics;
+                        diagnostic_count = lowered.diagnostic_count;
+                    }
+                    BUSTER_TEST(arguments, lowered.canonical_ir_certified == (cases[case_index].kind == C_DIAGNOSTIC_KIND_COUNT));
+                }
+                else
+                {
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 0, cases[case_index].source);
+                    if (route == 1)
+                    {
+                        CIRLowerResult analyzed = c_analyze_with_options(temporary.arena, S8("static-assert-message.c"), tokens, syntax,
+                            target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        diagnostics = analyzed.diagnostics;
+                        diagnostic_count = analyzed.diagnostic_count;
+                        BUSTER_TEST(arguments, analyzed.canonical_ir_certified == (cases[case_index].kind == C_DIAGNOSTIC_KIND_COUNT));
+                    }
+                    else
+                    {
+                        CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                        diagnostics = semantic.diagnostics;
+                        diagnostic_count = semantic.diagnostic_count;
+                    }
+                }
+                u32 expected_count = cases[case_index].kind == C_DIAGNOSTIC_KIND_COUNT ? 0 : 1;
+                BUSTER_TEST_RAW(arguments, diagnostic_count == expected_count,
+                    string_format(temporary.arena, S8("route={u32} form={u32} source={S8}"), route, form, cases[case_index].source));
+                if (diagnostic_count == 1 && expected_count == 1)
+                {
+                    BUSTER_TEST(arguments, diagnostics[0].kind == cases[case_index].kind);
+                    BUSTER_STRING_TEST(arguments, diagnostics[0].message, cases[case_index].message);
+                }
+                scratch_end(temporary);
+            }
+        }
     }
     return result;
 }
@@ -29977,6 +30096,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
+    BUSTER_TEST_FIXTURE(arguments, c_test_static_assert_diagnostic_messages);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_local_tls);
 
