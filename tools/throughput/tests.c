@@ -552,8 +552,21 @@ static void test_launch_errors(char const* executable, char const* root)
             for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
             {
                 TpProcess failed = tp_process(cases[i].argv, cases[i].directory, log, 2, -1, 0);
+                unsigned failures = test_failures;
                 CHECK(failed.exit_code == 125 && !failed.signal_number && !failed.timed_out &&
                       failed.launch_error == cases[i].error && failed.launch_stage == cases[i].stage);
+                if (test_failures != failures)
+                {
+                    fprintf(stderr,
+                            "THROUGHPUT_LAUNCH_ERROR_MISMATCH round=%u case=%u argv0=%s directory=%s "
+                            "exit_code=%d expected_exit_code=125 signal_number=%d expected_signal_number=0 "
+                            "timed_out=%d expected_timed_out=0 launch_error=%d expected_launch_error=%d "
+                            "launch_stage=%s expected_launch_stage=%s wall_seconds=%.3f log=%s\n",
+                            round + 1, i + 1, cases[i].argv[0], cases[i].directory ? cases[i].directory : "<inherited>",
+                            failed.exit_code, failed.signal_number, failed.timed_out, failed.launch_error, cases[i].error,
+                            tp_launch_stage_name(failed.launch_stage), tp_launch_stage_name(cases[i].stage),
+                            failed.wall_seconds, log);
+                }
             }
         }
         CHECK(test_open_descriptor_count() == descriptors);
