@@ -8640,8 +8640,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_lex(UnitTestArguments* arguments)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CLexResult actual = c_test_lex_dialect(temporary.arena, S8("\\u03b1"), unchanged[mode], false);
-        BUSTER_TEST(arguments, actual.diagnostic_count == 1);
-        c_test_token(arguments, &result, actual, 0, C_TOKEN_INVALID, S8("\\"));
+        // Existing modes retain a backslash punctuator followed by an ASCII
+        // identifier; they do not acquire identifier-UCN admission here.
+        BUSTER_TEST(arguments, actual.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, actual.tokens && actual.token_count == 3))
+        {
+            c_test_token(arguments, &result, actual, 0, C_TOKEN_PUNCTUATOR, S8("\\"));
+            BUSTER_TEST(arguments, actual.tokens[0].punctuator == C_PUNCTUATOR_BACKSLASH);
+            c_test_token(arguments, &result, actual, 1, C_TOKEN_IDENTIFIER, S8("u03b1"));
+            BUSTER_TEST(arguments, actual.tokens[2].kind == C_TOKEN_END_OF_FILE);
+        }
         BUSTER_TEST(arguments, c_test_lex_results_agree(actual,
             c_test_lex_dialect(temporary.arena, S8("\\u03b1"), unchanged[mode], true)));
         scratch_end(temporary);
