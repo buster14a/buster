@@ -470,9 +470,10 @@ def run_self_test() -> int:
     assert evaluator.order_statistic_rank(63) is None and evaluator.order_statistic_rank(64) == 64
     assert evaluator.order_statistic_rank(132) == 129
     assert not evaluator.protocol_problems(evaluator.template_protocol())
-    # The protocol frozen for window 2 must be structurally valid and leave no reviewer choice unset.
-    frozen = evaluator.load_json(Path(__file__).resolve().parents[1] / "docs" / "zen5-aa-protocol-v1.json")
-    assert not evaluator.protocol_problems(frozen) and not evaluator.protocol_unset(frozen)
+    # The protocols frozen for windows 2 and 3 must be structurally valid and leave no reviewer choice unset.
+    for name in ("zen5-aa-protocol-v1.json", "zen5-aa-protocol-window3.json"):
+        frozen = evaluator.load_json(Path(__file__).resolve().parents[1] / "docs" / name)
+        assert not evaluator.protocol_problems(frozen) and not evaluator.protocol_unset(frozen), name
     with tempfile.TemporaryDirectory(prefix="zen5-aa-evaluator-") as temporary:
         root = Path(temporary)
         pmu = synthetic_pmu()
