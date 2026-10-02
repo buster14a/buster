@@ -2165,22 +2165,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_reused_home_bounda
             s32 second_frame = shared ? first_frame : x64 ? 48 : -48;
             // These are explicit row-point expectations, independently applied
             // to both recorders. Fresh stores publish from the following row.
-            // Shared-home validity ends at a block entry, or at the final own
-            // event + 1: v1 is available at rows 5 and 6, then unavailable.
-            // v0's last store at row 8 has no later certified read; the dead
-            // value is unavailable at row 9 rather than being republished.
+            // Shared-frame validity ends at a block entry or final own event
+            // + 1. Certified registers survive until a physical clobber:
+            // v1 remains in register 0 at row 7, then v0 overwrites it at row 8.
+            // v0's final definition retains register 0 through the final NOP.
             DebugLocationSeed shared_expected[] = {
                 {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 100, .end = 110,
                  .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
                 {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 110, .end = 140,
                  .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = first_frame}},
-                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 140, .end = 200,
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 140, .end = 190,
                  .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 190, .end = 200,
+                 .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = x64 ? DEBUG_REGISTER_X86_RAX : DEBUG_REGISTER_AARCH64_X0}},
                 {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 100, .end = 150,
                  .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
                 {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 150, .end = 170,
                  .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = second_frame}},
-                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 170, .end = 200,
+                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 170, .end = 180,
+                 .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = x64 ? DEBUG_REGISTER_X86_RAX : DEBUG_REGISTER_AARCH64_X0}},
+                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 180, .end = 200,
                  .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
             };
             // Distinct offsets are the negative control: no other virtual
