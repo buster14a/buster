@@ -25738,6 +25738,50 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
     BUSTER_UNUSED(arena);
 }
 
+// This diagnostic-only fallback has no declaration-dependent operands. The
+// TYPE reader normally requires a declaration-point model; limiting its input
+// to literals, integer builtin type words and constant-expression operators
+// makes later bindings and completed tags irrelevant here. Its syntax walk
+// still decides whether those tokens form an integer constant expression.
+BUSTER_C_INTERNAL bool c_parse_bit_field_width_literal_expression(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    bool supported = start < end && end <= preprocess.token_count;
+    for (u32 index = start; supported && index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            supported = string_equal(spelling, S8("_Bool")) || string_equal(spelling, S8("char")) ||
+                        string_equal(spelling, S8("short")) || string_equal(spelling, S8("int")) ||
+                        string_equal(spelling, S8("long")) || string_equal(spelling, S8("signed")) ||
+                        string_equal(spelling, S8("__signed")) || string_equal(spelling, S8("__signed__")) ||
+                        string_equal(spelling, S8("unsigned")) || string_equal(spelling, S8("__int128"));
+        }
+        else if (token.kind == C_TOKEN_PUNCTUATOR)
+        {
+            u64 operators = C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_PLUS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_MINUS) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_STAR) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_SLASH) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_PERCENT) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_TILDE) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_EXCLAMATION) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_AMPERSAND) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_PIPE) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_CARET) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_SHIFT_LEFT) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_SHIFT_RIGHT) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_LESS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LESS_EQUAL) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_GREATER) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_GREATER_EQUAL) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_EQUAL) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_NOT_EQUAL) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_AMPERSAND_AMPERSAND) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_PIPE_PIPE) |
+                            C_PUNCTUATOR_BIT(C_PUNCTUATOR_QUESTION) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_COLON);
+            supported = (operators & C_PUNCTUATOR_BIT(token.punctuator)) != 0;
+        }
+        else
+        {
+            supported = token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_CHARACTER_LITERAL;
+        }
+    }
+    return supported;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                           CPreprocessResult preprocess)
 {
@@ -25765,11 +25809,14 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
             if (!member.bit_width_resolved && member.bit_width_token_count)
             {
                 CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, member.bit_width_token_start);
-                CConstantEvaluationMode previous_mode = machine->constant_evaluation_mode;
-                machine->constant_evaluation_mode = C_CONSTANT_EVALUATION_ENUM;
                 width = c_parse_typed_integer_constant(machine, machine->scratch_arena, preprocess, result, scope,
                                                        member.bit_width_token_start, member.bit_width_token_start + member.bit_width_token_count);
-                machine->constant_evaluation_mode = previous_mode;
+                if (!width.valid && c_parse_bit_field_width_literal_expression(preprocess, member.bit_width_token_start,
+                                                                               member.bit_width_token_start + member.bit_width_token_count))
+                {
+                    width = c_parse_type_integer_constant(machine->scratch_arena, preprocess, result, scope,
+                                                          member.bit_width_token_start, member.bit_width_token_start + member.bit_width_token_count);
+                }
             }
             String8 width_message = {0};
             if (!width.valid)
