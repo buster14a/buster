@@ -1,0 +1,27 @@
+name: Research compatibility selector 1920
+on:
+  push:
+    branches: [codex/1920-compat-selector-proof]
+    paths:
+      - tools/research/compat_selector_1920.py
+      - .github/workflows/research-compat-selector-1920.yml
+permissions:
+  contents: read
+jobs:
+  characterize:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Characterize original CLI and selectors with inert files
+        run: python3 tools/research/compat_selector_1920.py
+      - name: Retain raw research observations
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: selector-1920-evidence
+          path: selector-1920-evidence/
+          if-no-files-found: error
+          retention-days: 30
