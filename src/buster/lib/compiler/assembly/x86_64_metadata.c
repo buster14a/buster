@@ -1485,6 +1485,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_operand_view(BusterX86Gene
                                                                       BusterX86GeneratedOperand operand,
                                                                       u8* physical_class, u16* physical_width_flags);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_input_equal(u32 offset, String8 input);
+BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_lowercase_character(char8 character);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_input_string_equal(String8 left, String8 right);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_string_has_token(u32 offset, String8 token);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_is_fixed_not16_nop(BusterX86MetadataForm form);
