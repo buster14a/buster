@@ -2145,6 +2145,8 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     ${BUSTER_COMPILER_PLATFORM_MODULES}
 )
 
+include(cmake/HotReloadDemo.cmake)
+
 if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
      CMAKE_SYSTEM_PROCESSOR MATCHES
         "^(x86_64|amd64|X86_64|X86-64|AMD64)$") OR
