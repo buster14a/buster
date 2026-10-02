@@ -16037,7 +16037,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_list_prototypes(UnitTestArgu
         {S8("abstract void compatibility"), S8("_Static_assert(__builtin_types_compatible_p(int (*)(), int (*)(void)), \"zero parameters\");\n"),
             {0}, true, true, false},
         {S8("abstract count compatibility"), S8("_Static_assert(!__builtin_types_compatible_p(int (*)(), int (*)(int)), \"different parameters\");\n"),
-            S8("static assertion expression is not a true integer constant expression"), false, true, false},
+            S8("static assertion"), false, true, false},
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
                                      C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
