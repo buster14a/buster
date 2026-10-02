@@ -17,6 +17,9 @@ struct LinkInitializerEntry
 };
 
 #if BUSTER_INCLUDE_TESTS
+// Exact production TLS-site membership with work counters, independent of image IO.
+BUSTER_F_DECL bool link_elf_test_tls_membership(Arena* temporary, ObjectFile* object, bool* matches,
+                                             u64* build_rows, u64* queries, u64* probes);
 // The exact production collector, with caller-owned output storage so tests
 // can exercise dirty/reused slots, holes, duplicate relocations and bounds.
 BUSTER_F_DECL u32 link_initializer_entries_collect_test(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse);
