@@ -25816,11 +25816,9 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
             }
             if (width_message.length)
             {
-                CSourceLocation location = c_preprocess_site_location(&preprocess, member.location);
-                if (!member.name.length && member.bit_width_token_start < preprocess.token_count)
-                {
-                    location = c_preprocess_token_location(&preprocess, preprocess.tokens[member.bit_width_token_start]);
-                }
+                CSourceLocation location = !member.name.length && member.bit_width_token_start < preprocess.token_count
+                    ? c_preprocess_token_location(&preprocess, preprocess.tokens[member.bit_width_token_start])
+                    : c_preprocess_site_location(&preprocess, member.location);
                 c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH, width_message);
             }
             arena_set_position(machine->scratch_arena, mark);
