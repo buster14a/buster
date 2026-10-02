@@ -16048,6 +16048,131 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_then_prototyped(UnitTestA
     return result;
 }
 
+// Names in separate/nested prototype scopes may agree; a completed list
+// must reject its first repeated name before parameter binding can overwrite
+// it. Expected source sites refer to the first and later declarations.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+        u32 line;
+        u32 column;
+        bool valid;
+        bool c23_only;
+        bool check_outer_names;
+    } cases[] = {
+        {S8("int g(int a, int a) { return a; }\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 18, false, false, false},
+        {S8("int g(int a, int a) { return a; } int main(void) { return g(3, 5); }\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 18, false, false, false},
+        {S8("int k(int a, int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 18, false, false, false},
+        {S8("int g(int (a), int (a));\n"), S8("redefinition of parameter 'a' (previous declaration at 1:12)"), 1, 21, false, false, false},
+        {S8("typedef int F(int a, int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:19)"), 1, 26, false, false, false},
+        {S8("int (*p)(int a, int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:14)"), 1, 21, false, false, false},
+        {S8("int f(int (*cb)(int a, int a));\n"), S8("redefinition of parameter 'a' (previous declaration at 1:21)"), 1, 28, false, false, false},
+        {S8("int (*factory(int a, int a))(int z);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:19)"), 1, 26, false, false, false},
+        {S8("int (*factory(int z))(int a, int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:27)"), 1, 34, false, false, false},
+        {S8("void f(void) { extern int k(int a, int a); }\n"), S8("redefinition of parameter 'a' (previous declaration at 1:33)"), 1, 40, false, false, false},
+        {S8("void f(void) { int (*p)(int a, int a); }\n"), S8("redefinition of parameter 'a' (previous declaration at 1:29)"), 1, 36, false, false, false},
+        {S8("void f(void) { extern int k(int (*cb)(int a, int a)); }\n"), S8("redefinition of parameter 'a' (previous declaration at 1:43)"), 1, 50, false, false, false},
+        {S8("int f(int a[2], int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 21, false, false, false},
+        {S8("int f(int a[static 2], int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 28, false, false, false},
+        {S8("int f(int a, char a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 1, 19, false, false, false},
+        {S8("int f(int, int a, int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:16)"), 1, 23, false, false, false},
+        {S8("int f(int a,\n      int a);\n"), S8("redefinition of parameter 'a' (previous declaration at 1:11)"), 2, 11, false, false, false},
+        {S8("int g(int a, int b) { return a + b; }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int g(int a); int h(int a);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int g(int a); int g(int b);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("typedef int F(int a); typedef int G(int a);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int f(int, int);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int f(int a, int);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int f(int a, int (*cb)(int a));\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int f(int (*cb)(int a), int a);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("int (*factory(int a))(int a);\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("void f(void) { extern int k(int a, int b); }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("void f(void) { extern int k(int a); { extern int h(int a); } }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("void f(void) { int (*p)(int a, int b); }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, false},
+        {S8("void f(void) { extern int local_api(int (*cb)(int x), int x); }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, true},
+        {S8("void f(void) { extern int local_api(int cb, int (*x)(int cb)); }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, false, true},
+        {S8("int f(int, int) { return 0; }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, true, false},
+        {S8("int f(int a, int) { return a; }\nint parameter_name_probe(void) { return 0; }\n"), {0}, 0, 0, true, true, false},
+    };
+    for (u32 dialect = 0; dialect < 2; dialect += 1)
+    {
+        for (u32 symbols = 0; symbols < 2; symbols += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+                {
+                    if (cases[case_index].c23_only && !dialect) continue;
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source, (CPreprocessOptions){
+                        .target = target_native, .data_layout = target_data_layout(target_native),
+                        .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                    });
+                    if (!symbols)
+                    {
+                        tokens.symbols = 0;
+                        for (u64 token = 0; token < tokens.token_count; token += 1) tokens.tokens[token].symbol = 0;
+                    }
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].source);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == (cases[case_index].valid ? 0u : 1u), cases[case_index].source);
+                    if (!cases[case_index].valid && BUSTER_REQUIRE(arguments, semantic.diagnostic_count == 1))
+                    {
+                        CDiagnostic row = semantic.diagnostics[0];
+                        BUSTER_TEST(arguments, row.kind == C_DIAGNOSTIC_REDEFINITION && row.severity == C_DIAGNOSTIC_ERROR);
+                        BUSTER_TEST_RAW(arguments, string_equal(row.message, cases[case_index].message),
+                            string_format(temporary.arena, S8("parameter source={S8} expected={S8} actual={S8}"),
+                                          cases[case_index].source, cases[case_index].message, row.message));
+                        BUSTER_TEST_RAW(arguments, row.location.line == cases[case_index].line &&
+                                                   row.location.column == cases[case_index].column, cases[case_index].source);
+                    }
+                    if (cases[case_index].valid && cases[case_index].check_outer_names)
+                    {
+                        u32 found = 0;
+                        for (u32 entity_index = 0; entity_index < semantic.entity_count; entity_index += 1)
+                        {
+                            CEntity entity = semantic.entities[entity_index];
+                            if (!string_equal(entity.name, S8("local_api"))) continue;
+                            found += 1;
+                            CType* type = c_type_from_id(&semantic, entity.type);
+                            if (BUSTER_REQUIRE(arguments, type && type->kind == C_TYPE_FUNCTION && type->parameter_count == 2))
+                            {
+                                BUSTER_STRING_TEST(arguments, semantic.parameters[type->parameter_start].name, S8("cb"));
+                                BUSTER_STRING_TEST(arguments, semantic.parameters[type->parameter_start + 1].name, S8("x"));
+                            }
+                        }
+                        BUSTER_TEST(arguments, found == 1);
+                    }
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("duplicate-parameter-names.c"), tokens, syntax,
+                        target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    {
+                        CDiagnostic left = semantic.diagnostics[diagnostic];
+                        CDiagnostic right = lowered.diagnostics[diagnostic];
+                        BUSTER_TEST(arguments, left.kind == right.kind && left.severity == right.severity &&
+                                               left.location.line == right.location.line && left.location.column == right.location.column);
+                        BUSTER_STRING_TEST(arguments, left.message, right.message);
+                    }
+                    if (cases[case_index].valid)
+                    {
+                        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count && lowered.canonical_ir_certified))
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                    else BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 /* C23 made `()` mean `(void)`, so the same calls are a constraint violation
    there, and every dialect refuses a call that overruns a real parameter list.
    Both used to report only that the call could not be prepared, which named
@@ -31070,6 +31195,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
+    BUSTER_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);
