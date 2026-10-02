@@ -2535,7 +2535,7 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_shape_readback(Arena* arena, ObjectFile
              image.pointer[strtab.offset] == 0;
     u16 header_count = 0;
     u16 section_strings = 0;
-    if (image.length >= 64)
+    if (image.pointer && image.length >= 64)
     {
         memcpy(&header_count, image.pointer + 60, sizeof(header_count));
         memcpy(&section_strings, image.pointer + 62, sizeof(section_strings));
