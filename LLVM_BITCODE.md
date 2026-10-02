@@ -82,6 +82,18 @@ allocation maps canonical stack saves and restores to LLVM's `llvm.stacksave`
 and `llvm.stackrestore` intrinsics, preserving the block position of each
 operation and the lifetime of outer allocations.
 
+Canonical module constructor and destructor registrations emit
+`llvm.global_ctors` and `llvm.global_dtors` as appending arrays of
+`{i32, ptr, ptr}`. Each row retains its priority and callback symbol; the
+associated-data pointer is null. The native default-priority sentinel 65536
+maps to LLVM's default 65535. LLVM runs constructors in increasing priority
+and destructors in decreasing priority; equal-priority order is unspecified.
+Selected modules contribute to at most one array of each kind. Empty kinds
+add no types, globals or constants, preserving zero-registration output.
+The existing canonical validator rejects malformed registration targets and
+priorities; duplicate reserved linkage names or record/value count overflow
+fail without publishing artifact bytes.
+
 Canonical scalar integer leading-zero count, trailing-zero count, and
 population count emit overloaded `llvm.ctlz.iN`, `llvm.cttz.iN`, and
 `llvm.ctpop.iN` declarations for widths 1 through 64. The first two pass
@@ -181,7 +193,7 @@ The test module also checks that a later unsupported operation cannot replace
 an existing output. When Clang is available, the fixture is consumed and run
 at both `-O0` and `-O2` for both frontend modes.
 
-## Lifecycle registration regression
+## Lifecycle registration validation
 
 The registered `llvm_bitcode_test_lifecycle` fixture preserves the C frontend's
 canonical `IrModule.initializers` boundary across both frontend forms and six
@@ -208,8 +220,7 @@ children have 30-second deadlines, and source and emitted bytes remain checked
 against their original inputs after consumption. Other hosts retain the
 canonical target checks and report native execution as unsupported.
 
-This is a regression boundary for the missing lifecycle records tracked by
-[#1336](https://github.com/buster14a/buster/issues/1336); recording a fixture does
-not establish successful lifecycle emission. The LLVM contract is
+The fixture covers the lifecycle records tracked by
+[#1336](https://github.com/buster14a/buster/issues/1336). The LLVM contract is
 [`llvm.global_ctors` and `llvm.global_dtors`](https://llvm.org/docs/LangRef.html#the-llvm-global-ctors-global-variable):
 appending arrays of priority, function pointer and associated-data pointer.
