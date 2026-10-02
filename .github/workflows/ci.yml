@@ -42,6 +42,7 @@ env:
   # second workflow default would conceal precedence regressions.
   BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
   BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && 'split' || 'combined' }}
+  BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
 
 jobs:
   lint:
@@ -116,7 +117,7 @@ jobs:
         env:
           GOTOOLCHAIN: local
           GOSUMDB: sum.golang.org
-          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
         run: |
           set -euo pipefail
           # The pinned actionlint predates GitHub's queue: max field. The
@@ -1041,7 +1042,7 @@ jobs:
         if: ${{ matrix.os == 'android' }}
         shell: bash
         env:
-          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
           BUSTER_ANDROID_AVD: buster-ci
           BUSTER_ANDROID_DEVICE: pixel_6
           BUSTER_ANDROID_EMULATOR_GPU: swiftshader_indirect
@@ -1093,7 +1094,7 @@ jobs:
         if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
-          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
           BUSTER_IOS_ARCH: arm64
           BUSTER_IOS_CONSOLE_LOG: ${{ runner.temp }}/buster-ci/ios-console.log
         run: |
@@ -1175,7 +1176,7 @@ jobs:
       - name: Build compiler and boot both architectures in all allocators
         shell: bash
         env:
-          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
         run: |
           set -euo pipefail
           build/uefi-driver generate --build-directory build/uefi-compiler --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
@@ -1300,7 +1301,7 @@ jobs:
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
-          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
         run: |
           set -euo pipefail
           build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
