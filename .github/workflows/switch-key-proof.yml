@@ -1,0 +1,49 @@
+name: Switch key failure-first proof
+on:
+  push:
+    branches: [codex/2378-switch-key-proof]
+permissions:
+  contents: read
+jobs:
+  proof:
+    if: ${{ github.ref == 'refs/heads/codex/2378-switch-key-proof' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 5632078ec5b6246bbdda7afe4758a4532e05d40b
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prove base rejection gap and candidate repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "5632078ec5b6246bbdda7afe4758a4532e05d40b"
+          mkdir -p "$RUNNER_TEMP/switch-proof"
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/switch-proof/build-driver"
+          driver="$RUNNER_TEMP/switch-proof/build-driver"
+          git show 97c62802a732ce6374d29f3f74e01d0603d9e39d:src/buster/lib/compiler/ir/ir.c > src/buster/lib/compiler/ir/ir.c
+          "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$driver" build --config Release -t ide
+          set +e
+          BUSTER_TEST_JOBS=2 build/Release/ide test --module=ir_tests --verbose=1 --ci=1 > "$RUNNER_TEMP/switch-proof/base.log" 2>&1
+          base_status=$?
+          set -e
+          cat "$RUNNER_TEMP/switch-proof/base.log"
+          test "$base_status" -eq 1
+          failures="$(grep -Fc 'validation.error == expected' "$RUNNER_TEMP/switch-proof/base.log")"
+          test "$failures" -eq 17
+          printf 'SWITCH_KEY_BASE_FAILURES=%s base=%s tests=%s\n' "$failures" "97c62802a732ce6374d29f3f74e01d0603d9e39d" "5632078ec5b6246bbdda7afe4758a4532e05d40b"
+          git show 5632078ec5b6246bbdda7afe4758a4532e05d40b:src/buster/lib/compiler/ir/ir.c > src/buster/lib/compiler/ir/ir.c
+          "$driver" build --config Release -t ide
+          BUSTER_TEST_JOBS=2 build/Release/ide test --module=ir_tests --verbose=1 --ci=1 2>&1 | tee "$RUNNER_TEMP/switch-proof/candidate.log"
+          printf 'SWITCH_KEY_CANDIDATE_PASS=%s\n' "5632078ec5b6246bbdda7afe4758a4532e05d40b"
+      - name: Retain proof logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: binary-switch-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/switch-proof/*.log
+          if-no-files-found: error
