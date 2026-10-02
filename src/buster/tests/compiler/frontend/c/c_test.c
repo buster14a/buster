@@ -11326,6 +11326,163 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_void_return(UnitTestArguments* arg
     return result;
 }
 
+// The double infinity spelling uses the existing canonical float constant path.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_infinity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("#if !__has_builtin(__builtin_inf)\n#error double infinity is implemented\n#endif\n#if __has_builtin(__builtin_inf_typo)\n#error near spelling must stay unavailable\n#endif\n_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_inf()), double), \"exact double result\");\n_Static_assert(sizeof(__builtin_inf()) == sizeof(double), \"double size\");\n_Static_assert(_Generic(__builtin_inf(), double: 1, default: 0), \"generic double\");\n_Static_assert(__builtin_types_compatible_p(__typeof__(1 ? __builtin_inf() : __builtin_inff()), double), \"conditional double\");\ntypedef union InfinityBits { double value; unsigned long long bits; } InfinityBits;\ndouble global_infinity = __builtin_inf();\ndouble global_negative_infinity = -__builtin_inf();\ndouble infinity_positive(void) { return __builtin_inf(); }\ndouble infinity_negative(void) { return -__builtin_inf(); }\ndouble infinity_select(int choose) { return choose ? __builtin_inf() : 4.0; }\nint main(void)\n{\n    InfinityBits value;\n    int error = 0;\n    volatile int choose = 1;\n    value.value = global_infinity;\n    error |= value.bits != 0x7ff0000000000000ULL;\n    value.value = global_negative_infinity;\n    error |= value.bits != 0xfff0000000000000ULL;\n    value.value = infinity_positive();\n    error |= value.bits != 0x7ff0000000000000ULL;\n    value.value = infinity_negative();\n    error |= value.bits != 0xfff0000000000000ULL;\n    value.value = infinity_select(choose);\n    error |= value.bits != 0x7ff0000000000000ULL;\n    choose = 0;\n    value.value = infinity_select(choose);\n    error |= value.bits != 0x4010000000000000ULL;\n    return error;\n}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-infinity.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("infinity target={u32} form={u32}: first diagnostic {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                String8 names[] = {S8("infinity_positive"), S8("infinity_negative"), S8("infinity_select")};
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, names[index]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+                        IrType* returned = signature ? ir_type_from_id(&program->types, signature->return_type) : 0;
+                        BUSTER_TEST(arguments, returned && returned->kind == IR_TYPE_FLOAT && returned->bit_width == 64);
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                        if (index == 0)
+                        {
+                            bool found = false;
+                            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                            {
+                                IrInstruction* instruction = function->instructions + instruction_index;
+                                if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT)
+                                {
+                                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                                    found |= type && type->kind == IR_TYPE_FLOAT && type->bit_width == 64 &&
+                                        instruction->immediate_count == 1 && instruction->immediates &&
+                                        instruction->immediates[0] == UINT64_C(0x7ff0000000000000);
+                                }
+                            }
+                            BUSTER_TEST(arguments, found);
+                        }
+                    }
+                }
+                IrGlobal* positive = c_test_find_ir_global(module, program, S8("global_infinity"));
+                IrGlobal* negative = c_test_find_ir_global(module, program, S8("global_negative_infinity"));
+                BUSTER_TEST(arguments, positive && positive->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT &&
+                    positive->initializer_bits == UINT64_C(0x7ff0000000000000));
+                BUSTER_TEST(arguments, negative && negative->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT &&
+                    negative->initializer_bits == UINT64_C(0xfff0000000000000));
+                bool imported = false;
+                for (u32 index = 0; index < program->symbols.count; index += 1)
+                {
+                    IrSymbol* symbol = program->symbols.symbols + index;
+                    imported |= symbol->kind == IR_SYMBOL_FUNCTION && symbol->linkage == IR_LINKAGE_IMPORT &&
+                        (string_equal(symbol->link_name, S8("__builtin_inf")) || string_equal(symbol->link_name, S8("huge_val")));
+                }
+                BUSTER_TEST(arguments, !imported);
+            }
+            scratch_end(temporary);
+        }
+    }
+    typedef struct CTestInfinityInvalid CTestInfinityInvalid;
+    struct CTestInfinityInvalid
+    {
+        String8 source;
+        String8 name;
+    };
+    CTestInfinityInvalid invalid[] = {
+        {S8("double bad(void) { return __builtin_inf(1); }"), S8("__builtin_inf")},
+        {S8("double bad(void) { return __builtin_inf(1,2); }"), S8("__builtin_inf")},
+        {S8("static inline double unused_bad(void) { return __builtin_inf(1); } int live(void) { return 0; }"), S8("__builtin_inf")},
+        {S8("static double bad = __builtin_inf(1);"), S8("__builtin_inf")},
+        {S8("_Static_assert(sizeof(__builtin_inf(1)) == sizeof(double), \"unevaluated arity\");"), S8("__builtin_inf")},
+        {S8("typedef __typeof__(__builtin_inf(1)) Bad;"), S8("__builtin_inf")},
+        {S8("int bad = _Generic(__builtin_inf(1), double:1, default:0);"), S8("__builtin_inf")},
+        {S8("static inline float bad(void) { return __builtin_inff(1); }"), S8("__builtin_inff")},
+        {S8("static inline double bad(void) { return __builtin_huge_val(1); }"), S8("__builtin_huge_val")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[0];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index].source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-infinity-invalid.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, invalid[index].source);
+            bool found = false;
+            for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+            {
+                String8 message = lowered.diagnostics[diagnostic].message;
+                found |= lowered.diagnostics[diagnostic].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                    string_first_sequence(message, invalid[index].name) != BUSTER_STRING_NO_MATCH &&
+                    string_first_sequence(message, S8("too many arguments")) != BUSTER_STRING_NO_MATCH &&
+                    string_first_sequence(message, S8("declares no parameters")) != BUSTER_STRING_NO_MATCH;
+            }
+            BUSTER_TEST_RAW(arguments, found, string_format(temporary.arena,
+                S8("infinity invalid case={u32} form={u32}: first diagnostic {S8}"), index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            BUSTER_TEST(arguments, !lowered.canonical_ir_certified && lowered.program == 0);
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = buster_test_temporary_path(arguments->arena, S8("builtin-infinity-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("builtin-infinity-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fregister-allocator=mir-stack"),
+#if BUSTER_CPU_ARCH_X86_64
+                S8("-mattr=+sse2,+cx16"),
+#endif
+                form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
+
 // #665: query the real preprocessor with an independent exact-name census.
 // Do not infer support from a prefix or advertise native atomic IR to the
 // Wasm64/eBPF backends, which explicitly reject it.
@@ -31859,6 +32016,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_vendor_builtin_admission);
     BUSTER_TEST_FIXTURE(arguments, c_test_vendor_sse2_shift_counts);
     BUSTER_TEST_FIXTURE(arguments, c_test_gnu_void_return);
+    BUSTER_TEST_FIXTURE(arguments, c_test_builtin_infinity);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);

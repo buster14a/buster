@@ -264,3 +264,10 @@ Protected type-constant queries keep growable type/cache state in model scratch.
 Their three fixed append buffers retain the full unit capacities in a separate
 private arena sized with checked allocation arithmetic and released after the
 query; published rows and caller spare slots remain unchanged.
+
+The exact `__builtin_inf()` spelling belongs to the existing math-constant
+path: its result is double, its canonical bits are positive IEEE infinity,
+and its signature takes no arguments in evaluated, unused and unevaluated
+contexts. Its existing float counterpart is `__builtin_inff()`; admission
+and availability use the fixed math spelling census, without vendor metadata
+changes or a runtime library import.
