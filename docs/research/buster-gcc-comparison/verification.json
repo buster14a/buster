@@ -1,0 +1,60 @@
+{
+  "all_18_source_and_object_hashes_match": true,
+  "all_samples_successful": true,
+  "archives": [
+    {
+      "archive_path": "docs/research/buster-gcc-comparison/evidence/run-37004946749-setup-failure.zip",
+      "artifact_id": 11225512379,
+      "bytes": 442,
+      "classification": "Failed before compiler build; no benchmark data.",
+      "crc_verified": true,
+      "file_name": "run-37004946749-setup-failure.zip",
+      "run_id": 37004946749,
+      "sha256": "7b2576cfb9fae66d1fbfb7d6878a03855660c69458f5cfa5821ec9d96e24a8f0"
+    },
+    {
+      "archive_path": "docs/research/buster-gcc-comparison/evidence/run-37005042712-rejected-wall-timing.zip",
+      "artifact_id": 11224892963,
+      "bytes": 451047,
+      "classification": "Every elapsed-time inference rejected because timed waiting quantized results. Behavior probes retained.",
+      "crc_verified": true,
+      "entries": 1257,
+      "file_name": "run-37005042712-rejected-wall-timing.zip",
+      "run_id": 37005042712,
+      "sha256": "619d7c825ece0752362c9f62b56195da2e3641c29e007026c1226ee5ef4642e4"
+    },
+    {
+      "archive_path": "docs/research/buster-gcc-comparison/evidence/run-37005475203-current-diagnostic.zip",
+      "artifact_id": 11225068516,
+      "bytes": 451176,
+      "classification": "Current bounded diagnostic measurements; no qualified performance acceptance.",
+      "crc_verified": true,
+      "entries": 1257,
+      "file_name": "run-37005475203-current-diagnostic.zip",
+      "run_id": 37005475203,
+      "sha256": "47c04b2c3f12e26c1346c4dbde0face10643dbc7a0256e364495a5686fec94ec"
+    }
+  ],
+  "cells": 18,
+  "paired_comparisons": 20,
+  "probes": 56,
+  "report_deliveries": [
+    {
+      "bytes": 160900,
+      "matches_workspace_bytes": false,
+      "path": "buster-vs-gcc-comparison.pdf",
+      "sha256": "064f0f8cf30ec5c2261e129bd7102f495dbf2fa537f2064ece10f4bd75ba7be6",
+      "workspace_sha256": "3ac207e77a13a63935ba6f378f4442aa3894f6db21141e70176be7b2f07af511"
+    },
+    {
+      "bytes": 63909,
+      "matches_workspace_bytes": true,
+      "path": "buster-vs-gcc-report.html",
+      "sha256": "90b1346875cc01b9b2be5b9176de568b595d52a64451ebe22c75495321711341",
+      "workspace_sha256": "90b1346875cc01b9b2be5b9176de568b595d52a64451ebe22c75495321711341"
+    }
+  ],
+  "samples": 390,
+  "scope": "Artifact integrity and statistic replay only; no compiler build or generated-program execution.",
+  "summary_values_independently_replayed": 270
+}

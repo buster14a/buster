@@ -1,0 +1,33 @@
+
+/tmp/tmpjc9h0se4/scalar_float-gcc-O2.o:     file format elf64-x86-64
+
+
+Disassembly of section .text.startup:
+
+0000000000000000 <main>:
+   0:	f3 0f 1e fa          	endbr64
+   4:	48 83 ec 08          	sub    $0x8,%rsp
+   8:	f2 0f 10 05 00 00 00 	movsd  0x0(%rip),%xmm0        # 10 <main+0x10>
+   f:	00 
+			c: R_X86_64_PC32	seed-0x4
+  10:	b8 80 f0 fa 02       	mov    $0x2faf080,%eax
+  15:	f2 0f 10 15 00 00 00 	movsd  0x0(%rip),%xmm2        # 1d <main+0x1d>
+  1c:	00 
+			19: R_X86_64_PC32	.LC0-0x4
+  1d:	f2 0f 10 0d 00 00 00 	movsd  0x0(%rip),%xmm1        # 25 <main+0x25>
+  24:	00 
+			21: R_X86_64_PC32	.LC1-0x4
+  25:	66 66 2e 0f 1f 84 00 	data16 cs nopw 0x0(%rax,%rax,1)
+  2c:	00 00 00 00 
+  30:	f2 0f 59 c2          	mulsd  %xmm2,%xmm0
+  34:	f2 0f 58 c1          	addsd  %xmm1,%xmm0
+  38:	83 e8 01             	sub    $0x1,%eax
+  3b:	75 f3                	jne    30 <main+0x30>
+  3d:	bf 00 00 00 00       	mov    $0x0,%edi
+			3e: R_X86_64_32	.rodata.str1.1
+  42:	b8 01 00 00 00       	mov    $0x1,%eax
+  47:	e8 00 00 00 00       	call   4c <main+0x4c>
+			48: R_X86_64_PLT32	printf-0x4
+  4c:	31 c0                	xor    %eax,%eax
+  4e:	48 83 c4 08          	add    $0x8,%rsp
+  52:	c3                   	ret

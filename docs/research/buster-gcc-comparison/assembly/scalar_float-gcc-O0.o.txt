@@ -1,0 +1,40 @@
+
+/tmp/tmpjc9h0se4/scalar_float-gcc-O0.o:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <main>:
+   0:	f3 0f 1e fa          	endbr64
+   4:	55                   	push   %rbp
+   5:	48 89 e5             	mov    %rsp,%rbp
+   8:	48 83 ec 10          	sub    $0x10,%rsp
+   c:	f2 0f 10 05 00 00 00 	movsd  0x0(%rip),%xmm0        # 14 <main+0x14>
+  13:	00 
+			10: R_X86_64_PC32	seed-0x4
+  14:	f2 0f 11 45 f8       	movsd  %xmm0,-0x8(%rbp)
+  19:	c7 45 f4 00 00 00 00 	movl   $0x0,-0xc(%rbp)
+  20:	eb 26                	jmp    48 <main+0x48>
+  22:	f2 0f 10 4d f8       	movsd  -0x8(%rbp),%xmm1
+  27:	f2 0f 10 05 00 00 00 	movsd  0x0(%rip),%xmm0        # 2f <main+0x2f>
+  2e:	00 
+			2b: R_X86_64_PC32	.rodata+0x4
+  2f:	f2 0f 59 c8          	mulsd  %xmm0,%xmm1
+  33:	f2 0f 10 05 00 00 00 	movsd  0x0(%rip),%xmm0        # 3b <main+0x3b>
+  3a:	00 
+			37: R_X86_64_PC32	.rodata+0xc
+  3b:	f2 0f 58 c1          	addsd  %xmm1,%xmm0
+  3f:	f2 0f 11 45 f8       	movsd  %xmm0,-0x8(%rbp)
+  44:	83 45 f4 01          	addl   $0x1,-0xc(%rbp)
+  48:	81 7d f4 7f f0 fa 02 	cmpl   $0x2faf07f,-0xc(%rbp)
+  4f:	76 d1                	jbe    22 <main+0x22>
+  51:	48 8b 45 f8          	mov    -0x8(%rbp),%rax
+  55:	66 48 0f 6e c0       	movq   %rax,%xmm0
+  5a:	bf 00 00 00 00       	mov    $0x0,%edi
+			5b: R_X86_64_32	.rodata
+  5f:	b8 01 00 00 00       	mov    $0x1,%eax
+  64:	e8 00 00 00 00       	call   69 <main+0x69>
+			65: R_X86_64_PLT32	printf-0x4
+  69:	b8 00 00 00 00       	mov    $0x0,%eax
+  6e:	c9                   	leave
+  6f:	c3                   	ret

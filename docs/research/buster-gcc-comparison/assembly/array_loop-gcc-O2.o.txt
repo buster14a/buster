@@ -1,0 +1,101 @@
+
+/tmp/tmpjc9h0se4/array_loop-gcc-O2.o:     file format elf64-x86-64
+
+
+Disassembly of section .text.startup:
+
+0000000000000000 <main>:
+   0:	f3 0f 1e fa          	endbr64
+   4:	48 81 ec 00 10 00 00 	sub    $0x1000,%rsp
+   b:	48 83 0c 24 00       	orq    $0x0,(%rsp)
+  10:	48 83 ec 18          	sub    $0x18,%rsp
+  14:	bf 04 00 00 00       	mov    $0x4,%edi
+  19:	66 0f 6f 05 00 00 00 	movdqa 0x0(%rip),%xmm0        # 21 <main+0x21>
+  20:	00 
+			1d: R_X86_64_PC32	.LC0-0x4
+  21:	66 0f 6e cf          	movd   %edi,%xmm1
+  25:	66 0f 70 c9 00       	pshufd $0x0,%xmm1,%xmm1
+  2a:	64 48 8b 34 25 28 00 	mov    %fs:0x28,%rsi
+  31:	00 00 
+  33:	48 89 b4 24 08 10 00 	mov    %rsi,0x1008(%rsp)
+  3a:	00 
+  3b:	48 89 e6             	mov    %rsp,%rsi
+  3e:	48 8d 94 24 00 10 00 	lea    0x1000(%rsp),%rdx
+  45:	00 
+  46:	48 89 f0             	mov    %rsi,%rax
+  49:	0f 29 00             	movaps %xmm0,(%rax)
+  4c:	48 83 c0 10          	add    $0x10,%rax
+  50:	66 0f fe c1          	paddd  %xmm1,%xmm0
+  54:	48 39 c2             	cmp    %rax,%rdx
+  57:	75 f0                	jne    49 <main+0x49>
+  59:	b8 5f f3 6e 3c       	mov    $0x3c6ef35f,%eax
+  5e:	31 c9                	xor    %ecx,%ecx
+  60:	66 0f 6e e0          	movd   %eax,%xmm4
+  64:	66 0f 70 e4 00       	pshufd $0x0,%xmm4,%xmm4
+  69:	66 0f 6e e9          	movd   %ecx,%xmm5
+  6d:	48 89 f0             	mov    %rsi,%rax
+  70:	66 0f 70 dd 00       	pshufd $0x0,%xmm5,%xmm3
+  75:	66 66 2e 0f 1f 84 00 	data16 cs nopw 0x0(%rax,%rax,1)
+  7c:	00 00 00 00 
+  80:	66 0f 6f 08          	movdqa (%rax),%xmm1
+  84:	48 83 c0 10          	add    $0x10,%rax
+  88:	66 0f fe cb          	paddd  %xmm3,%xmm1
+  8c:	66 0f 6f d1          	movdqa %xmm1,%xmm2
+  90:	66 0f 72 f2 02       	pslld  $0x2,%xmm2
+  95:	66 0f fe d1          	paddd  %xmm1,%xmm2
+  99:	66 0f 6f c2          	movdqa %xmm2,%xmm0
+  9d:	66 0f 72 f0 06       	pslld  $0x6,%xmm0
+  a2:	66 0f fa c2          	psubd  %xmm2,%xmm0
+  a6:	66 0f 72 f0 02       	pslld  $0x2,%xmm0
+  ab:	66 0f fe c1          	paddd  %xmm1,%xmm0
+  af:	66 0f 6f d0          	movdqa %xmm0,%xmm2
+  b3:	66 0f 72 f2 05       	pslld  $0x5,%xmm2
+  b8:	66 0f fe c2          	paddd  %xmm2,%xmm0
+  bc:	66 0f 72 f0 03       	pslld  $0x3,%xmm0
+  c1:	66 0f fe c1          	paddd  %xmm1,%xmm0
+  c5:	66 0f 6f c8          	movdqa %xmm0,%xmm1
+  c9:	66 0f 72 f1 02       	pslld  $0x2,%xmm1
+  ce:	66 0f fe c1          	paddd  %xmm1,%xmm0
+  d2:	66 0f fe c4          	paddd  %xmm4,%xmm0
+  d6:	0f 29 40 f0          	movaps %xmm0,-0x10(%rax)
+  da:	48 39 d0             	cmp    %rdx,%rax
+  dd:	75 a1                	jne    80 <main+0x80>
+  df:	83 c1 01             	add    $0x1,%ecx
+  e2:	81 f9 a0 86 01 00    	cmp    $0x186a0,%ecx
+  e8:	0f 85 7b ff ff ff    	jne    69 <main+0x69>
+  ee:	48 89 d0             	mov    %rdx,%rax
+  f1:	66 0f ef c0          	pxor   %xmm0,%xmm0
+  f5:	48 29 f0             	sub    %rsi,%rax
+  f8:	a8 10                	test   $0x10,%al
+  fa:	74 0d                	je     109 <main+0x109>
+  fc:	66 0f 6f 06          	movdqa (%rsi),%xmm0
+ 100:	48 83 c6 10          	add    $0x10,%rsi
+ 104:	48 39 f2             	cmp    %rsi,%rdx
+ 107:	74 12                	je     11b <main+0x11b>
+ 109:	66 0f fe 06          	paddd  (%rsi),%xmm0
+ 10d:	48 83 c6 20          	add    $0x20,%rsi
+ 111:	66 0f fe 46 f0       	paddd  -0x10(%rsi),%xmm0
+ 116:	48 39 f2             	cmp    %rsi,%rdx
+ 119:	75 ee                	jne    109 <main+0x109>
+ 11b:	66 0f 6f c8          	movdqa %xmm0,%xmm1
+ 11f:	31 c0                	xor    %eax,%eax
+ 121:	bf 00 00 00 00       	mov    $0x0,%edi
+			122: R_X86_64_32	.rodata.str1.1
+ 126:	66 0f 73 d9 08       	psrldq $0x8,%xmm1
+ 12b:	66 0f fe c1          	paddd  %xmm1,%xmm0
+ 12f:	66 0f 6f c8          	movdqa %xmm0,%xmm1
+ 133:	66 0f 73 d9 04       	psrldq $0x4,%xmm1
+ 138:	66 0f fe c1          	paddd  %xmm1,%xmm0
+ 13c:	66 0f 7e c6          	movd   %xmm0,%esi
+ 140:	e8 00 00 00 00       	call   145 <main+0x145>
+			141: R_X86_64_PLT32	printf-0x4
+ 145:	48 8b 84 24 08 10 00 	mov    0x1008(%rsp),%rax
+ 14c:	00 
+ 14d:	64 48 2b 04 25 28 00 	sub    %fs:0x28,%rax
+ 154:	00 00 
+ 156:	75 0a                	jne    162 <main+0x162>
+ 158:	31 c0                	xor    %eax,%eax
+ 15a:	48 81 c4 18 10 00 00 	add    $0x1018,%rsp
+ 161:	c3                   	ret
+ 162:	e8 00 00 00 00       	call   167 <main+0x167>
+			163: R_X86_64_PLT32	__stack_chk_fail-0x4

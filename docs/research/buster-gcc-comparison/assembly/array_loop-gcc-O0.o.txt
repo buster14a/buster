@@ -1,0 +1,77 @@
+
+/tmp/tmpjc9h0se4/array_loop-gcc-O0.o:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <main>:
+   0:	f3 0f 1e fa          	endbr64
+   4:	55                   	push   %rbp
+   5:	48 89 e5             	mov    %rsp,%rbp
+   8:	48 81 ec 00 10 00 00 	sub    $0x1000,%rsp
+   f:	48 83 0c 24 00       	orq    $0x0,(%rsp)
+  14:	48 83 ec 30          	sub    $0x30,%rsp
+  18:	64 48 8b 04 25 28 00 	mov    %fs:0x28,%rax
+  1f:	00 00 
+  21:	48 89 45 f8          	mov    %rax,-0x8(%rbp)
+  25:	31 c0                	xor    %eax,%eax
+  27:	c7 85 dc ef ff ff 00 	movl   $0x0,-0x1024(%rbp)
+  2e:	00 00 00 
+  31:	eb 1a                	jmp    4d <main+0x4d>
+  33:	8b 85 dc ef ff ff    	mov    -0x1024(%rbp),%eax
+  39:	8b 95 dc ef ff ff    	mov    -0x1024(%rbp),%edx
+  3f:	89 94 85 f0 ef ff ff 	mov    %edx,-0x1010(%rbp,%rax,4)
+  46:	83 85 dc ef ff ff 01 	addl   $0x1,-0x1024(%rbp)
+  4d:	81 bd dc ef ff ff ff 	cmpl   $0x3ff,-0x1024(%rbp)
+  54:	03 00 00 
+  57:	76 da                	jbe    33 <main+0x33>
+  59:	c7 85 e0 ef ff ff 00 	movl   $0x0,-0x1020(%rbp)
+  60:	00 00 00 
+  63:	eb 54                	jmp    b9 <main+0xb9>
+  65:	c7 85 e4 ef ff ff 00 	movl   $0x0,-0x101c(%rbp)
+  6c:	00 00 00 
+  6f:	eb 35                	jmp    a6 <main+0xa6>
+  71:	8b 85 e4 ef ff ff    	mov    -0x101c(%rbp),%eax
+  77:	8b 94 85 f0 ef ff ff 	mov    -0x1010(%rbp,%rax,4),%edx
+  7e:	8b 85 e0 ef ff ff    	mov    -0x1020(%rbp),%eax
+  84:	01 d0                	add    %edx,%eax
+  86:	69 c0 0d 66 19 00    	imul   $0x19660d,%eax,%eax
+  8c:	8d 90 5f f3 6e 3c    	lea    0x3c6ef35f(%rax),%edx
+  92:	8b 85 e4 ef ff ff    	mov    -0x101c(%rbp),%eax
+  98:	89 94 85 f0 ef ff ff 	mov    %edx,-0x1010(%rbp,%rax,4)
+  9f:	83 85 e4 ef ff ff 01 	addl   $0x1,-0x101c(%rbp)
+  a6:	81 bd e4 ef ff ff ff 	cmpl   $0x3ff,-0x101c(%rbp)
+  ad:	03 00 00 
+  b0:	76 bf                	jbe    71 <main+0x71>
+  b2:	83 85 e0 ef ff ff 01 	addl   $0x1,-0x1020(%rbp)
+  b9:	81 bd e0 ef ff ff 9f 	cmpl   $0x1869f,-0x1020(%rbp)
+  c0:	86 01 00 
+  c3:	76 a0                	jbe    65 <main+0x65>
+  c5:	c7 85 e8 ef ff ff 00 	movl   $0x0,-0x1018(%rbp)
+  cc:	00 00 00 
+  cf:	c7 85 ec ef ff ff 00 	movl   $0x0,-0x1014(%rbp)
+  d6:	00 00 00 
+  d9:	eb 1a                	jmp    f5 <main+0xf5>
+  db:	8b 85 ec ef ff ff    	mov    -0x1014(%rbp),%eax
+  e1:	8b 84 85 f0 ef ff ff 	mov    -0x1010(%rbp,%rax,4),%eax
+  e8:	01 85 e8 ef ff ff    	add    %eax,-0x1018(%rbp)
+  ee:	83 85 ec ef ff ff 01 	addl   $0x1,-0x1014(%rbp)
+  f5:	81 bd ec ef ff ff ff 	cmpl   $0x3ff,-0x1014(%rbp)
+  fc:	03 00 00 
+  ff:	76 da                	jbe    db <main+0xdb>
+ 101:	8b 85 e8 ef ff ff    	mov    -0x1018(%rbp),%eax
+ 107:	89 c6                	mov    %eax,%esi
+ 109:	bf 00 00 00 00       	mov    $0x0,%edi
+			10a: R_X86_64_32	.rodata
+ 10e:	b8 00 00 00 00       	mov    $0x0,%eax
+ 113:	e8 00 00 00 00       	call   118 <main+0x118>
+			114: R_X86_64_PLT32	printf-0x4
+ 118:	b8 00 00 00 00       	mov    $0x0,%eax
+ 11d:	48 8b 55 f8          	mov    -0x8(%rbp),%rdx
+ 121:	64 48 2b 14 25 28 00 	sub    %fs:0x28,%rdx
+ 128:	00 00 
+ 12a:	74 05                	je     131 <main+0x131>
+ 12c:	e8 00 00 00 00       	call   131 <main+0x131>
+			12d: R_X86_64_PLT32	__stack_chk_fail-0x4
+ 131:	c9                   	leave
+ 132:	c3                   	ret

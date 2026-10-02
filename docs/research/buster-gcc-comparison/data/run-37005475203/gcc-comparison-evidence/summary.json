@@ -1,0 +1,1298 @@
+[
+  {
+    "workload": "tiny",
+    "tool": "buster-fast",
+    "accepted": true,
+    "input_sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949",
+    "object_bytes": 2400,
+    "output_sha256": "560cab000b5f787316ff50eb7f9dd56c25edfe74f155f5a2a9c51c87daac6735",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/tiny-buster-fast.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/tiny-buster-fast.o  :\nsection              size   addr\n.text                   8      0\n.rodata                 0      0\n.data                   0      0\n.bss                    0      0\n.tdata                  0      0\n.tbss                   0      0\n.init_array             0      0\n.fini_array             0      0\n.eh_frame              56      0\n.pdata                  0      0\n.xdata                  0      0\n.debug_info             0      0\n.debug_abbrev           0      0\n.debug_line             0      0\n.debug_str              0      0\n.debug_loc              0      0\n.debug_ranges           0      0\n.debug$S                0      0\n.debug$T                0      0\n.debug_addr             0      0\n.debug_str_offsets      0      0\n.debug_line_str         0      0\n.debug_rnglists         0      0\n.debug_loclists         0      0\nTotal                  64\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 8,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/tiny-buster-fast.o",
+        "-o",
+        "gcc-comparison-evidence/tiny-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/tiny-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.021099478000010663,
+        "min": 0.0160694479999961,
+        "max": 0.02436282299998993
+      },
+      "cpu_s": {
+        "median": 0.01,
+        "min": 0.0,
+        "max": 0.01
+      },
+      "maxrss_kib": {
+        "median": 22232.0,
+        "min": 22064,
+        "max": 22432
+      }
+    },
+    "runtime_valid": false
+  },
+  {
+    "workload": "tiny",
+    "tool": "gcc-O0",
+    "accepted": true,
+    "input_sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949",
+    "object_bytes": 1216,
+    "output_sha256": "beb4beb92ea38931e4348505d097e892cdfa27ca52ea75e9bac2fda1f66524c3",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/tiny-gcc-O0.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/tiny-gcc-O0.o  :\nsection              size   addr\n.text                  15      0\n.data                   0      0\n.bss                    0      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              56      0\nTotal                 142\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 15,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/tiny-gcc-O0.o",
+        "-o",
+        "gcc-comparison-evidence/tiny-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/tiny-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.015821683999988068,
+        "min": 0.015321881999994957,
+        "max": 0.017041841000008162
+      },
+      "cpu_s": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "maxrss_kib": {
+        "median": 18840.0,
+        "min": 18768,
+        "max": 18896
+      }
+    },
+    "runtime_valid": false
+  },
+  {
+    "workload": "tiny",
+    "tool": "gcc-O2",
+    "accepted": true,
+    "input_sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949",
+    "object_bytes": 1280,
+    "output_sha256": "5e74c99a84b30103ed23aa26c9a300f2e46629c5ea815a2052a57bb4bada81b1",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/tiny-gcc-O2.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/tiny-gcc-O2.o  :\nsection              size   addr\n.text                   0      0\n.data                   0      0\n.bss                    0      0\n.text.startup           7      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              48      0\nTotal                 126\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 7,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/tiny-gcc-O2.o",
+        "-o",
+        "gcc-comparison-evidence/tiny-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/tiny-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.016726578000003656,
+        "min": 0.01615421500000025,
+        "max": 0.018027069999988043
+      },
+      "cpu_s": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.01
+      },
+      "maxrss_kib": {
+        "median": 21868.0,
+        "min": 21748,
+        "max": 21964
+      }
+    },
+    "runtime_valid": false
+  },
+  {
+    "workload": "integer_mix",
+    "tool": "buster-fast",
+    "accepted": true,
+    "input_sha256": "3fa91e5b719303a6d1f89b3e72803593106931e84a55196141d98b11444a1cc2",
+    "object_bytes": 2864,
+    "output_sha256": "eaa1e00926ac6804fd73e76c5292b4e6bc2f8eb0449a7e2e576a4f5c59d0ce3d",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/integer_mix-buster-fast.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/integer_mix-buster-fast.o  :\nsection              size   addr\n.text                 265      0\n.rodata                 4      0\n.data                   0      0\n.bss                    0      0\n.tdata                  0      0\n.tbss                   0      0\n.init_array             0      0\n.fini_array             0      0\n.eh_frame              56      0\n.pdata                  0      0\n.xdata                  0      0\n.debug_info             0      0\n.debug_abbrev           0      0\n.debug_line             0      0\n.debug_str              0      0\n.debug_loc              0      0\n.debug_ranges           0      0\n.debug$S                0      0\n.debug$T                0      0\n.debug_addr             0      0\n.debug_str_offsets      0      0\n.debug_line_str         0      0\n.debug_rnglists         0      0\n.debug_loclists         0      0\nTotal                 325\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 265,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/integer_mix-buster-fast.o",
+        "-o",
+        "gcc-comparison-evidence/integer_mix-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/integer_mix-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "376378803\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.019019010499988553,
+        "min": 0.01753173299999844,
+        "max": 0.025289772000007815
+      },
+      "cpu_s": {
+        "median": 0.01,
+        "min": 0.0,
+        "max": 0.01
+      },
+      "maxrss_kib": {
+        "median": 22332.0,
+        "min": 22244,
+        "max": 22420
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.17401390599998479,
+        "min": 0.17367889600001263,
+        "max": 0.1751179709999917
+      },
+      "cpu_s": {
+        "median": 0.17,
+        "min": 0.17,
+        "max": 0.17
+      },
+      "maxrss_kib": {
+        "median": 1544.0,
+        "min": 1540,
+        "max": 1544
+      }
+    }
+  },
+  {
+    "workload": "integer_mix",
+    "tool": "gcc-O0",
+    "accepted": true,
+    "input_sha256": "3fa91e5b719303a6d1f89b3e72803593106931e84a55196141d98b11444a1cc2",
+    "object_bytes": 1560,
+    "output_sha256": "ec57e25fa1a18739d10b19bb77fb72c467875a9e1b52817a8a6f636808c3580c",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/integer_mix-gcc-O0.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/integer_mix-gcc-O0.o  :\nsection              size   addr\n.text                  95      0\n.data                   0      0\n.bss                    0      0\n.rodata                 4      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              56      0\nTotal                 226\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 95,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/integer_mix-gcc-O0.o",
+        "-o",
+        "gcc-comparison-evidence/integer_mix-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/integer_mix-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "376378803\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.01699406200000908,
+        "min": 0.01645675000000324,
+        "max": 0.017983732000004693
+      },
+      "cpu_s": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.01
+      },
+      "maxrss_kib": {
+        "median": 22928.0,
+        "min": 22756,
+        "max": 23032
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.10182616399998778,
+        "min": 0.10174139699998364,
+        "max": 0.10195715899999414
+      },
+      "cpu_s": {
+        "median": 0.1,
+        "min": 0.09,
+        "max": 0.1
+      },
+      "maxrss_kib": {
+        "median": 1544.0,
+        "min": 1540,
+        "max": 1544
+      }
+    }
+  },
+  {
+    "workload": "integer_mix",
+    "tool": "gcc-O2",
+    "accepted": true,
+    "input_sha256": "3fa91e5b719303a6d1f89b3e72803593106931e84a55196141d98b11444a1cc2",
+    "object_bytes": 1624,
+    "output_sha256": "4d0677e6d2a10c092c09c54fec23163a6ced8d1f79e11456779264882ab80222",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/integer_mix-gcc-O2.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/integer_mix-gcc-O2.o  :\nsection              size   addr\n.text                   0      0\n.data                   0      0\n.bss                    0      0\n.rodata.str1.1          4      0\n.text.startup          77      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              48      0\nTotal                 200\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 77,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/integer_mix-gcc-O2.o",
+        "-o",
+        "gcc-comparison-evidence/integer_mix-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/integer_mix-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "376378803\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.02008590149999634,
+        "min": 0.019414920000002667,
+        "max": 0.02069540899998401
+      },
+      "cpu_s": {
+        "median": 0.01,
+        "min": 0.0,
+        "max": 0.01
+      },
+      "maxrss_kib": {
+        "median": 24880.0,
+        "min": 24720,
+        "max": 25052
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.09591165199999807,
+        "min": 0.09572272500000167,
+        "max": 0.09644342999999367
+      },
+      "cpu_s": {
+        "median": 0.09,
+        "min": 0.09,
+        "max": 0.09
+      },
+      "maxrss_kib": {
+        "median": 1544.0,
+        "min": 1520,
+        "max": 1544
+      }
+    }
+  },
+  {
+    "workload": "array_loop",
+    "tool": "buster-fast",
+    "accepted": true,
+    "input_sha256": "072d753f91528ab2c9e5dc60344bb8ae0dd86965243eb3d6d1e77041faf89e81",
+    "object_bytes": 3184,
+    "output_sha256": "89b486ea1c480714017e0ceca2274880e70dfb62009e239d696cf43bded277e8",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/array_loop-buster-fast.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/array_loop-buster-fast.o  :\nsection              size   addr\n.text                 580      0\n.rodata                 4      0\n.data                   0      0\n.bss                    0      0\n.tdata                  0      0\n.tbss                   0      0\n.init_array             0      0\n.fini_array             0      0\n.eh_frame              56      0\n.pdata                  0      0\n.xdata                  0      0\n.debug_info             0      0\n.debug_abbrev           0      0\n.debug_line             0      0\n.debug_str              0      0\n.debug_loc              0      0\n.debug_ranges           0      0\n.debug$S                0      0\n.debug$T                0      0\n.debug_addr             0      0\n.debug_str_offsets      0      0\n.debug_line_str         0      0\n.debug_rnglists         0      0\n.debug_loclists         0      0\nTotal                 640\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 580,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/array_loop-buster-fast.o",
+        "-o",
+        "gcc-comparison-evidence/array_loop-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/array_loop-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "123944448\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.022657940499996698,
+        "min": 0.01824226799999451,
+        "max": 0.03052707600002691
+      },
+      "cpu_s": {
+        "median": 0.01,
+        "min": 0.0,
+        "max": 0.02
+      },
+      "maxrss_kib": {
+        "median": 22338.0,
+        "min": 22136,
+        "max": 22588
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.22709896799999285,
+        "min": 0.2263590830000055,
+        "max": 0.23118690100000094
+      },
+      "cpu_s": {
+        "median": 0.22,
+        "min": 0.22,
+        "max": 0.22
+      },
+      "maxrss_kib": {
+        "median": 1544.0,
+        "min": 1540,
+        "max": 1544
+      }
+    }
+  },
+  {
+    "workload": "array_loop",
+    "tool": "gcc-O0",
+    "accepted": true,
+    "input_sha256": "072d753f91528ab2c9e5dc60344bb8ae0dd86965243eb3d6d1e77041faf89e81",
+    "object_bytes": 1832,
+    "output_sha256": "d716d38d5bc54a66390ddad0f5083c7ae9574a84356bda4570e454b21fbda1fa",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/array_loop-gcc-O0.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/array_loop-gcc-O0.o  :\nsection              size   addr\n.text                 307      0\n.data                   0      0\n.bss                    0      0\n.rodata                 4      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              56      0\nTotal                 438\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 307,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/array_loop-gcc-O0.o",
+        "-o",
+        "gcc-comparison-evidence/array_loop-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/array_loop-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "123944448\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.018082156999994936,
+        "min": 0.017627263999997922,
+        "max": 0.023312172999993663
+      },
+      "cpu_s": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.01
+      },
+      "maxrss_kib": {
+        "median": 24146.0,
+        "min": 24076,
+        "max": 24304
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.10341944300000705,
+        "min": 0.10301169699999946,
+        "max": 0.10925299400000199
+      },
+      "cpu_s": {
+        "median": 0.1,
+        "min": 0.1,
+        "max": 0.1
+      },
+      "maxrss_kib": {
+        "median": 1544.0,
+        "min": 1516,
+        "max": 1544
+      }
+    }
+  },
+  {
+    "workload": "array_loop",
+    "tool": "gcc-O2",
+    "accepted": true,
+    "input_sha256": "072d753f91528ab2c9e5dc60344bb8ae0dd86965243eb3d6d1e77041faf89e81",
+    "object_bytes": 2120,
+    "output_sha256": "7f3cc01745bf3ba1311f7bbdb721f0ee6c3a11e481e9452fe35e6178469ebadb",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/array_loop-gcc-O2.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/array_loop-gcc-O2.o  :\nsection              size   addr\n.text                   0      0\n.data                   0      0\n.bss                    0      0\n.rodata.str1.1          4      0\n.text.startup         359      0\n.rodata.cst16          16      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              64      0\nTotal                 514\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 359,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/array_loop-gcc-O2.o",
+        "-o",
+        "gcc-comparison-evidence/array_loop-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/array_loop-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "123944448\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.02720255699999541,
+        "min": 0.02662491399999567,
+        "max": 0.02788221000000135
+      },
+      "cpu_s": {
+        "median": 0.015,
+        "min": 0.01,
+        "max": 0.02
+      },
+      "maxrss_kib": {
+        "median": 28028.0,
+        "min": 27884,
+        "max": 28104
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.03779930599999659,
+        "min": 0.03762464999999793,
+        "max": 0.03818218000000684
+      },
+      "cpu_s": {
+        "median": 0.03,
+        "min": 0.03,
+        "max": 0.03
+      },
+      "maxrss_kib": {
+        "median": 1544.0,
+        "min": 1544,
+        "max": 1544
+      }
+    }
+  },
+  {
+    "workload": "many_functions",
+    "tool": "buster-fast",
+    "accepted": true,
+    "input_sha256": "10d012b7256274c0b6628959ac0c70aac76300a8ec13f159bb7f9d20f67ca751",
+    "object_bytes": 56832,
+    "output_sha256": "c1607b3e097d8b83e9bca5fb6e254b4ed2497795746298f324bd216516b02404",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/many_functions-buster-fast.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/many_functions-buster-fast.o  :\nsection               size   addr\n.text                26438      0\n.rodata                  4      0\n.data                    0      0\n.bss                     0      0\n.tdata                   0      0\n.tbss                    0      0\n.init_array              0      0\n.fini_array              0      0\n.eh_frame             8248      0\n.pdata                   0      0\n.xdata                   0      0\n.debug_info              0      0\n.debug_abbrev            0      0\n.debug_line              0      0\n.debug_str               0      0\n.debug_loc               0      0\n.debug_ranges            0      0\n.debug$S                 0      0\n.debug$T                 0      0\n.debug_addr              0      0\n.debug_str_offsets       0      0\n.debug_line_str          0      0\n.debug_rnglists          0      0\n.debug_loclists          0      0\nTotal                34690\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 26438,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/many_functions-buster-fast.o",
+        "-o",
+        "gcc-comparison-evidence/many_functions-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/many_functions-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "4047286272\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.028356127500003936,
+        "min": 0.023398542999984784,
+        "max": 0.0349316250000129
+      },
+      "cpu_s": {
+        "median": 0.01,
+        "min": 0.01,
+        "max": 0.02
+      },
+      "maxrss_kib": {
+        "median": 24384.0,
+        "min": 24312,
+        "max": 24640
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.08951319150000359,
+        "min": 0.0892627480000101,
+        "max": 0.09206333500000596
+      },
+      "cpu_s": {
+        "median": 0.08,
+        "min": 0.08,
+        "max": 0.09
+      },
+      "maxrss_kib": {
+        "median": 1576.0,
+        "min": 1572,
+        "max": 1640
+      }
+    }
+  },
+  {
+    "workload": "many_functions",
+    "tool": "gcc-O0",
+    "accepted": true,
+    "input_sha256": "10d012b7256274c0b6628959ac0c70aac76300a8ec13f159bb7f9d20f67ca751",
+    "object_bytes": 33112,
+    "output_sha256": "885ce5c78f49efb6b3abf1d18cd942e483b00193c5530126758c4e9e2ffbcef8",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/many_functions-gcc-O0.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/many_functions-gcc-O0.o  :\nsection               size   addr\n.text                10004      0\n.data                    0      0\n.bss                     0      0\n.rodata                  4      0\n.comment                39      0\n.note.GNU-stack          0      0\n.note.gnu.property      32      0\n.eh_frame             8248      0\nTotal                18327\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 10004,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/many_functions-gcc-O0.o",
+        "-o",
+        "gcc-comparison-evidence/many_functions-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/many_functions-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "4047286272\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.08995772299999771,
+        "min": 0.08939944599998739,
+        "max": 0.09093193399999677
+      },
+      "cpu_s": {
+        "median": 0.08,
+        "min": 0.07,
+        "max": 0.08
+      },
+      "maxrss_kib": {
+        "median": 31626.0,
+        "min": 31544,
+        "max": 31828
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.08519658099999106,
+        "min": 0.08439336200001435,
+        "max": 0.08546308800001157
+      },
+      "cpu_s": {
+        "median": 0.08,
+        "min": 0.08,
+        "max": 0.08
+      },
+      "maxrss_kib": {
+        "median": 1560.0,
+        "min": 1556,
+        "max": 1560
+      }
+    }
+  },
+  {
+    "workload": "many_functions",
+    "tool": "gcc-O2",
+    "accepted": true,
+    "input_sha256": "10d012b7256274c0b6628959ac0c70aac76300a8ec13f159bb7f9d20f67ca751",
+    "object_bytes": 32240,
+    "output_sha256": "d2d93ddda1027217cb61538eb07e90edd86d63a0b552674faa534daeedc1b51c",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/many_functions-gcc-O2.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/many_functions-gcc-O2.o  :\nsection               size   addr\n.text                 4093      0\n.data                    0      0\n.bss                     0      0\n.rodata.str1.1           4      0\n.text.startup         1846      0\n.comment                39      0\n.note.GNU-stack          0      0\n.note.gnu.property      32      0\n.eh_frame             5176      0\nTotal                11190\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 5939,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/many_functions-gcc-O2.o",
+        "-o",
+        "gcc-comparison-evidence/many_functions-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/many_functions-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "4047286272\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.25572332999999503,
+        "min": 0.2540900079999915,
+        "max": 0.2701533149999875
+      },
+      "cpu_s": {
+        "median": 0.24000000000000002,
+        "min": 0.24,
+        "max": 0.26
+      },
+      "maxrss_kib": {
+        "median": 37852.0,
+        "min": 37616,
+        "max": 37996
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.06276914049999505,
+        "min": 0.06257431599999563,
+        "max": 0.06292510200000834
+      },
+      "cpu_s": {
+        "median": 0.06,
+        "min": 0.05,
+        "max": 0.06
+      },
+      "maxrss_kib": {
+        "median": 1552.0,
+        "min": 1520,
+        "max": 1552
+      }
+    }
+  },
+  {
+    "workload": "scalar_float",
+    "tool": "buster-fast",
+    "accepted": true,
+    "input_sha256": "10f3be543c99eece23585273ebc2204bd79972174d4ae571018fef718bf500f6",
+    "object_bytes": 2896,
+    "output_sha256": "9bd444409be8f89e71e5ceda634325fb621777a2aadb0d75cb1a8d0b73818c7a",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/scalar_float-buster-fast.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/scalar_float-buster-fast.o  :\nsection              size   addr\n.text                 236      0\n.rodata                 7      0\n.data                   8      0\n.bss                    0      0\n.tdata                  0      0\n.tbss                   0      0\n.init_array             0      0\n.fini_array             0      0\n.eh_frame              56      0\n.pdata                  0      0\n.xdata                  0      0\n.debug_info             0      0\n.debug_abbrev           0      0\n.debug_line             0      0\n.debug_str              0      0\n.debug_loc              0      0\n.debug_ranges           0      0\n.debug$S                0      0\n.debug$T                0      0\n.debug_addr             0      0\n.debug_str_offsets      0      0\n.debug_line_str         0      0\n.debug_rnglists         0      0\n.debug_loclists         0      0\nTotal                 307\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 236,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/scalar_float-buster-fast.o",
+        "-o",
+        "gcc-comparison-evidence/scalar_float-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/scalar_float-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "0.99999999994448896\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.02312845549998599,
+        "min": 0.017959640999976045,
+        "max": 0.02523682599999688
+      },
+      "cpu_s": {
+        "median": 0.01,
+        "min": 0.0,
+        "max": 0.02
+      },
+      "maxrss_kib": {
+        "median": 22382.0,
+        "min": 22272,
+        "max": 22524
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.3141232404999954,
+        "min": 0.31395329799997285,
+        "max": 0.3177991390000159
+      },
+      "cpu_s": {
+        "median": 0.31,
+        "min": 0.31,
+        "max": 0.31
+      },
+      "maxrss_kib": {
+        "median": 1588.0,
+        "min": 1560,
+        "max": 1588
+      }
+    }
+  },
+  {
+    "workload": "scalar_float",
+    "tool": "gcc-O0",
+    "accepted": true,
+    "input_sha256": "10f3be543c99eece23585273ebc2204bd79972174d4ae571018fef718bf500f6",
+    "object_bytes": 1704,
+    "output_sha256": "daa153737480f8c7bf73e463ad06c804f80e3a534e25c41b29c2325cf76a07b8",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/scalar_float-gcc-O0.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/scalar_float-gcc-O0.o  :\nsection              size   addr\n.text                 112      0\n.data                   8      0\n.bss                    0      0\n.rodata                24      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              56      0\nTotal                 271\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 112,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/scalar_float-gcc-O0.o",
+        "-o",
+        "gcc-comparison-evidence/scalar_float-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/scalar_float-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "0.99999999994448896\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.017859960999999203,
+        "min": 0.017179126999991468,
+        "max": 0.022734917999997606
+      },
+      "cpu_s": {
+        "median": 0.01,
+        "min": 0.0,
+        "max": 0.01
+      },
+      "maxrss_kib": {
+        "median": 23588.0,
+        "min": 23500,
+        "max": 23768
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.23598503400000936,
+        "min": 0.23576829000000998,
+        "max": 0.2376641430000177
+      },
+      "cpu_s": {
+        "median": 0.23,
+        "min": 0.23,
+        "max": 0.23
+      },
+      "maxrss_kib": {
+        "median": 1588.0,
+        "min": 1564,
+        "max": 1588
+      }
+    }
+  },
+  {
+    "workload": "scalar_float",
+    "tool": "gcc-O2",
+    "accepted": true,
+    "input_sha256": "10f3be543c99eece23585273ebc2204bd79972174d4ae571018fef718bf500f6",
+    "object_bytes": 1888,
+    "output_sha256": "ee77779448ed94da57b95f06c186eb13e2507c82eb2d188ea665da138f218722",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/scalar_float-gcc-O2.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/scalar_float-gcc-O2.o  :\nsection              size   addr\n.text                   0      0\n.data                   8      0\n.bss                    0      0\n.rodata.str1.1          7      0\n.text.startup          83      0\n.rodata.cst8           16      0\n.comment               39      0\n.note.GNU-stack         0      0\n.note.gnu.property     32      0\n.eh_frame              48      0\nTotal                 233\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 83,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/scalar_float-gcc-O2.o",
+        "-o",
+        "gcc-comparison-evidence/scalar_float-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/scalar_float-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "0.99999999994448896\n",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.02158537999999055,
+        "min": 0.019755244000009498,
+        "max": 0.02681500899998923
+      },
+      "cpu_s": {
+        "median": 0.01,
+        "min": 0.01,
+        "max": 0.02
+      },
+      "maxrss_kib": {
+        "median": 25684.0,
+        "min": 25504,
+        "max": 25904
+      }
+    },
+    "runtime_valid": true,
+    "runtime": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.09594222900000204,
+        "min": 0.09573107099998879,
+        "max": 0.09639278499997772
+      },
+      "cpu_s": {
+        "median": 0.09,
+        "min": 0.09,
+        "max": 0.09
+      },
+      "maxrss_kib": {
+        "median": 1588.0,
+        "min": 1588,
+        "max": 1588
+      }
+    }
+  },
+  {
+    "workload": "basic_c_operations",
+    "tool": "buster-fast",
+    "accepted": true,
+    "input_sha256": "7f930ebda53ab297b4c98fa564d4d052f169e227f9c1f98bd2aa90a22b861111",
+    "object_bytes": 26912,
+    "output_sha256": "ef962e9fd2fab22d4d0b8923c57157a8618b1aa82afd653748ebfa18a1abdc4c",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/basic_c_operations-buster-fast.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/basic_c_operations-buster-fast.o  :\nsection                 size   addr\n.text                  17547      0\n.rodata                   70      0\n.data                     40      0\n.bss                 1048588      0\n.tdata                     0      0\n.tbss                      0      0\n.init_array                0      0\n.fini_array                0      0\n.eh_frame               1464      0\n.pdata                     0      0\n.xdata                     0      0\n.debug_info                0      0\n.debug_abbrev              0      0\n.debug_line                0      0\n.debug_str                 0      0\n.debug_loc                 0      0\n.debug_ranges              0      0\n.debug$S                   0      0\n.debug$T                   0      0\n.debug_addr                0      0\n.debug_str_offsets         0      0\n.debug_line_str            0      0\n.debug_rnglists            0      0\n.debug_loclists            0      0\nTotal                1067709\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 17547,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/basic_c_operations-buster-fast.o",
+        "-o",
+        "gcc-comparison-evidence/basic_c_operations-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/basic_c_operations-buster-fast"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.024752239999997983,
+        "min": 0.023640978000003088,
+        "max": 0.031144796000006636
+      },
+      "cpu_s": {
+        "median": 0.01,
+        "min": 0.01,
+        "max": 0.02
+      },
+      "maxrss_kib": {
+        "median": 24150.0,
+        "min": 23944,
+        "max": 24256
+      }
+    },
+    "runtime_valid": false
+  },
+  {
+    "workload": "basic_c_operations",
+    "tool": "gcc-O0",
+    "accepted": true,
+    "input_sha256": "7f930ebda53ab297b4c98fa564d4d052f169e227f9c1f98bd2aa90a22b861111",
+    "object_bytes": 14600,
+    "output_sha256": "f5bfc718a1dc87473d6ee2445d451e55c9327273d083435e23cd83b36fcf77e5",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/basic_c_operations-gcc-O0.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/basic_c_operations-gcc-O0.o  :\nsection                 size   addr\n.text                   7103      0\n.data                     48      0\n.bss                 1048616      0\n.rodata                   98      0\n.comment                  39      0\n.note.GNU-stack            0      0\n.note.gnu.property        32      0\n.eh_frame               1480      0\nTotal                1057416\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 7103,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/basic_c_operations-gcc-O0.o",
+        "-o",
+        "gcc-comparison-evidence/basic_c_operations-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/basic_c_operations-gcc-O0"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.050420733999999356,
+        "min": 0.04930757199997515,
+        "max": 0.05109668000000056
+      },
+      "cpu_s": {
+        "median": 0.04,
+        "min": 0.03,
+        "max": 0.04
+      },
+      "maxrss_kib": {
+        "median": 29404.0,
+        "min": 29296,
+        "max": 29572
+      }
+    },
+    "runtime_valid": false
+  },
+  {
+    "workload": "basic_c_operations",
+    "tool": "gcc-O2",
+    "accepted": true,
+    "input_sha256": "7f930ebda53ab297b4c98fa564d4d052f169e227f9c1f98bd2aa90a22b861111",
+    "object_bytes": 3424,
+    "output_sha256": "a19a3355d532147e9170d10946c0b1cbfd344a8a63f1ae5a2c53f3c4a2a71221",
+    "sections": {
+      "argv": [
+        "size",
+        "-A",
+        "gcc-comparison-evidence/basic_c_operations-gcc-O2.o"
+      ],
+      "exit": 0,
+      "stdout": "gcc-comparison-evidence/basic_c_operations-gcc-O2.o  :\nsection                 size   addr\n.text                    518      0\n.data                      0      0\n.bss                 1048612      0\n.text.startup            380      0\n.comment                  39      0\n.note.GNU-stack            0      0\n.note.gnu.property        32      0\n.eh_frame                176      0\nTotal                1049757\n\n\n",
+      "stderr": ""
+    },
+    "text_bytes": 898,
+    "link": {
+      "argv": [
+        "gcc",
+        "-no-pie",
+        "gcc-comparison-evidence/basic_c_operations-gcc-O2.o",
+        "-o",
+        "gcc-comparison-evidence/basic_c_operations-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "validation": {
+      "argv": [
+        "/home/runner/work/buster/buster/gcc-comparison-evidence/basic_c_operations-gcc-O2"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "correct": true,
+    "compile_valid": true,
+    "compile": {
+      "n": 12,
+      "wall_s": {
+        "median": 0.05652445850000731,
+        "min": 0.05586735200000703,
+        "max": 0.05755154399997764
+      },
+      "cpu_s": {
+        "median": 0.05,
+        "min": 0.04,
+        "max": 0.05
+      },
+      "maxrss_kib": {
+        "median": 30990.0,
+        "min": 30764,
+        "max": 31068
+      }
+    },
+    "runtime_valid": false
+  }
+]

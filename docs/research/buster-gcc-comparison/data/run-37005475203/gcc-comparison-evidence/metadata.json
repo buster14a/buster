@@ -1,0 +1,99 @@
+{
+  "diagnostic_only": true,
+  "compile_triplets": 12,
+  "runtime_triplets": 12,
+  "baseline": {
+    "argv": [
+      "git",
+      "rev-parse",
+      "HEAD",
+      "HEAD^{tree}"
+    ],
+    "exit": 0,
+    "stdout": "e19b531e03db62afd8f688ecd69d7f9f111283bf\nb59a1bd99c5a055650aaf59963443a5e83868862\n",
+    "stderr": ""
+  },
+  "gcc": {
+    "argv": [
+      "gcc",
+      "--version"
+    ],
+    "exit": 0,
+    "stdout": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+    "stderr": ""
+  },
+  "clang": {
+    "argv": [
+      "clang",
+      "--version"
+    ],
+    "exit": 0,
+    "stdout": "Ubuntu clang version 21.1.8 (6ubuntu1)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-21/bin\n",
+    "stderr": ""
+  },
+  "cpu": {
+    "argv": [
+      "lscpu"
+    ],
+    "exit": 0,
+    "stdout": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               AuthenticAMD\nModel name:                              AMD EPYC 7763 64-Core Processor\nCPU family:                              25\nModel:                                   1\nThread(s) per core:                      2\nCore(s) per socket:                      2\nSocket(s):                               1\nStepping:                                1\nBogoMIPS:                                4890.84\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves user_shstk clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload umip vaes vpclmulqdq rdpid fsrm\nVirtualization:                          AMD-V\nHypervisor vendor:                       Microsoft\nVirtualization type:                     full\nL1d cache:                               64 KiB (2 instances)\nL1i cache:                               64 KiB (2 instances)\nL2 cache:                                1 MiB (2 instances)\nL3 cache:                                32 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-3\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Vulnerable: Safe RET, no microcode\nVulnerability Spec store bypass:         Vulnerable\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Vulnerable: No microcode\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+    "stderr": ""
+  },
+  "kernel": {
+    "argv": [
+      "uname",
+      "-a"
+    ],
+    "exit": 0,
+    "stdout": "Linux runnervmb40mh 7.0.0-1012-azure #12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026 x86_64 GNU/Linux\n",
+    "stderr": ""
+  },
+  "compiler_sha256": "eb38e2d3bdf93e5eb1134c9f6965e07d0270a0821cfeb9e137261b8f566e6987",
+  "compiler_bytes": 18702768,
+  "gcc_sha256": "864711037b900acdb7a449cf48d912cefa935b527fb60c767ccb956779e66136",
+  "configs": {
+    "buster-fast": [
+      "./build/Release/ide",
+      "cc",
+      "-target",
+      "x86_64-unknown-linux",
+      "-march=baseline",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-std=gnu11",
+      "-fwrapv",
+      "-fno-strict-aliasing",
+      "-funsigned-char",
+      "-g0",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "gcc-O0": [
+      "gcc",
+      "-march=x86-64",
+      "-mtune=generic",
+      "-O0",
+      "-std=gnu11",
+      "-fwrapv",
+      "-fno-strict-aliasing",
+      "-funsigned-char",
+      "-g0",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "gcc-O2": [
+      "gcc",
+      "-march=x86-64",
+      "-mtune=generic",
+      "-O2",
+      "-std=gnu11",
+      "-fwrapv",
+      "-fno-strict-aliasing",
+      "-funsigned-char",
+      "-g0",
+      "-fno-pic",
+      "-fno-pie"
+    ]
+  },
+  "resource_contract": "GNU time accounts waited descendants; maxrss is maximum child peak, not simultaneous process-tree RSS. Wall is monotonic wrapper-to-completion including identical GNU time launch overhead."
+}
