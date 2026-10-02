@@ -262,6 +262,9 @@ markers and block-comment text, including escaped quotes. Diagnostics keep
 physical lines/columns after a separator; numeric labels resolve by statement
 order even when their definitions share one physical line. Scalar AArch64
 constant operands accept an optional `#` through the existing constant parser.
+`mov wN, constant` and `mov xN, constant` accept an unsigned sixteen-bit
+constant through the scalar `movz` form; register aliases keep their existing
+operand rules.
 Unsupported post-index memory operands are refused with their full spelling,
 so their writeback cannot silently disappear during comment handling.
 
@@ -301,6 +304,20 @@ names -- `.init` and `.fini` are neither `.text` nor absent -- and a
 hand-written section gets alignment 1, because `crti.o` and `crtn.o`
 contribute one and two bytes to `.init` and any padding between them would
 run as code.
+
+AArch64 units fold same-section, binding-invariant `b`, `bl`, `b.cond`,
+`cbz`/`cbnz`, and `tbz`/`tbnz` references using the shared control semantic
+fixup, including signed addends and numeric labels. Out-of-range or unaligned
+references are diagnosed at their physical source position. Undefined,
+cross-section, weak, and default-visible ELF global short branches are refused
+because the object model cannot retain their relocation families; `b`/`bl`
+retain the existing object relocations. This unit-local capability does not
+enable machine inline-asm private-label expansion. The registered driver
+fixture assembles pristine `tests/aarch64_atomic_update_pair_oracle.s` through
+`.s` inference and `-x assembler`, checks all 108 text bytes against independent
+literal words, and compares the same words with Clang cross-assembly when a
+configured or PATH Clang is available. An unavailable Clang observer is reported
+explicitly; its comparison is not a passed gate.
 
 A forward branch to a label always uses the near form: the instruction layer
 sizes a statement before the label is known and this assembler does not relax.

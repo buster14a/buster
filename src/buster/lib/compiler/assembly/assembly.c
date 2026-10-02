@@ -572,6 +572,7 @@ struct AssemblyBuilder
     u64 output_capacity;
     u64 output_count;
     bool private_inline_labels;
+    bool unit_control_relocations;
     // The metadata parser reports this transient semantic fact to the outer
     // source adapter when a feature-gated typed decorator candidate is the
     // authoritative form.  It prevents the handwritten INVALID_OPERANDS
@@ -5679,6 +5680,35 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
     return true;
 }
 
+// MOV's register alias retains its existing GPR path. A low unsigned
+// sixteen-bit constant is the MOVZ alias and uses the shared scalar form.
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_move_immediate_parse(AssemblyBuilder* builder, String8 operands_text,
+                                                               AssemblyInstruction* instruction, u32 line, u32 column)
+{
+    String8 operands[2] = {0};
+    u64 cursor = 0;
+    String8 trimmed = assembly_trim(operands_text);
+    bool valid = builder && instruction && trimmed.length && trimmed.pointer[trimmed.length - 1] != ',';
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(operands) && valid; index += 1)
+    {
+        valid = assembly_operand_split_next(operands_text, &cursor, operands + index) == ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+    }
+    AssemblyRegister destination = {0};
+    u64 immediate = 0;
+    valid = valid && cursor == operands_text.length && assembly_aarch64_gpr_register_parse(operands[0], &destination) &&
+            !destination.stack_pointer && assembly_aarch64_scalar_constant(builder, operands[1], &immediate) &&
+            immediate <= UINT16_MAX;
+    if (valid)
+    {
+        valid = assembly_aarch64_scalar_instruction_parse(builder, S8("movz"), operands_text, instruction, line, column);
+    }
+    if (valid)
+    {
+        instruction->encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER;
+    }
+    return valid;
+}
+
 /* Direct AdvSIMD spellings intentionally win mnemonic lookup so their vector
  * grammar can be selected without a second global dispatch table.  A handful
  * of those mnemonics are also present in the M1 scalar/GPR projections.  If
@@ -7783,6 +7813,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         .aarch64_direct_simd_row_index = info.aarch64_direct_simd_row_index,
     };
     bool system_register_handled = false;
+    bool move_immediate_handled = instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS &&
+        assembly_aarch64_move_immediate_parse(builder, operands, &instruction, line, column);
     if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_SYSTEM_REGISTER)
     {
         system_register_handled = true;
@@ -7820,7 +7852,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
     }
     if (!system_register_handled && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER)
     {
-        if (!assembly_aarch64_scalar_instruction_parse(builder, mnemonic, operands, &instruction, line, column))
+        if (!move_immediate_handled && !assembly_aarch64_scalar_instruction_parse(builder, mnemonic, operands, &instruction, line, column))
         {
             if (!builder->result.diagnostic_count || builder->result.diagnostics[builder->result.diagnostic_count - 1].line != line ||
                 builder->result.diagnostics[builder->result.diagnostic_count - 1].column != column)
@@ -12234,7 +12266,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                                               ? builder->result.symbols[expression.symbol].name
                                               : (String8){0};
                     bool private_label = builder->private_inline_labels && assembly_inline_private_label_name(symbol_name);
-                    if (private_label && buster_aarch64_control_semantic_row(instruction->aarch64_control_row_index, &row))
+                    if ((private_label || builder->unit_control_relocations) &&
+                        buster_aarch64_control_semantic_row(instruction->aarch64_control_row_index, &row))
                     {
                         if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) kind = ASSEMBLY_RELOCATION_AARCH64_CONDBR19;
                         else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) kind = ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19;
@@ -12402,6 +12435,7 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
         .arena = arena,
         .target = options.target,
         .private_inline_labels = options.private_inline_labels,
+        .unit_control_relocations = options.unit_control_relocations,
         // A small set of source aliases (currently WAIT-prefixed x87 FINIT
         // and FCLEX) expands into multiple metadata instructions.
         .instruction_capacity = line_count * 2,

@@ -1,7 +1,7 @@
 // The assembly translation unit: assembly_unit_encode at the bottom takes the
 // complete text of a `.s` file and returns sections, symbols, relocations, and
 // diagnostics. assembly.c's assembly_encode is the instruction layer beneath
-// it and is called once per instruction line; everything a whole file has that
+// it and is called once per instruction statement; everything a whole file has that
 // a single statement does not lives here.
 //
 // Three passes over an AssemblyUnitBuilder sized from the statement count:
@@ -9,7 +9,7 @@
 //                                         order, so `1f`/`1b` can name one
 //   assembly_unit_parse                   labels, directives, and one
 //                                         assembly_encode call per
-//                                         instruction line, each producing a
+//                                         instruction statement, each producing a
 //                                         piece of bytes in a section
 //   assembly_unit_materialize             pieces concatenated per section and
 //                                         binding-invariant same-section
@@ -25,12 +25,14 @@
 //   assembly_unit_directive_*              the directive vocabulary
 //   assembly_unit_instruction              the assembly_encode call
 //   assembly_unit_statement                target comments/separators and positions
+//   assembly_unit_aarch64_control_fixup     checked final-label control fixups
 //   assembly_unit_parse, assembly_unit_encode
 //
 // Anything the vocabulary does not cover is refused with a diagnostic naming
 // the directive and its line; nothing is silently dropped.
 
 #include <buster/lib/compiler/assembly/assembly_unit_internal.h>
+#include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
 
 #include <buster/lib/string.h>
 
@@ -92,6 +94,7 @@ struct AssemblyUnitBuilder
     // The source line each relocation came from, kept beside the public array
     // so a displacement that does not fit can name the line that wrote it.
     u32* relocation_lines;
+    u32* relocation_columns;
     AssemblyUnitInteger* integers;
     u32 integer_count;
     u32 integer_capacity;
@@ -726,6 +729,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_relocation_append(AssemblyUnitBuilder* bu
         return false;
     }
     builder->relocation_lines[builder->result.relocation_count] = builder->line;
+    builder->relocation_columns[builder->result.relocation_count] = builder->column;
     builder->result.relocations[builder->result.relocation_count++] = (AssemblyUnitRelocation){
         .addend = addend,
         .offset = offset,
@@ -1157,6 +1161,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                                                    (AssemblyEncodeOptions){
                                                        .target = builder->target,
                                                        .syntax = builder->syntax,
+                                                       .unit_control_relocations = true,
                                                    });
     if (encoded.diagnostic_count)
     {
@@ -1454,6 +1459,61 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_parse(AssemblyUnitBuilder* builder, Strin
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_unit_aarch64_control_relocation(AssemblyRelocationKind kind)
+{
+    return kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26 || kind == ASSEMBLY_RELOCATION_AARCH64_CALL26 ||
+           kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 || kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ||
+           kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+}
+
+// Decode the retained word through the shared semantic owner before applying
+// its checked displacement. Symbol values and signed addends remain separate.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_aarch64_control_fixup(AssemblyUnitBuilder* builder, AssemblyUnitRelocation relocation,
+                                                             AssemblyUnitSymbol symbol, String8* mnemonic)
+{
+    ByteSlice data = builder->result.sections[relocation.section].data;
+    bool valid = !(relocation.offset & 3) && relocation.offset <= data.length &&
+                 sizeof(u32) <= data.length - relocation.offset;
+    BusterAarch64ControlInstruction instruction = {0};
+    BusterAarch64ControlSemanticRecord row = {0};
+    u32 word = 0;
+    if (valid)
+    {
+        for (u32 byte = 0; byte < sizeof(word); byte += 1)
+        {
+            word |= (u32)data.pointer[relocation.offset + byte] << (byte * 8);
+        }
+        valid = buster_aarch64_control_semantic_decode(word, &instruction) &&
+                buster_aarch64_control_semantic_row(instruction.row, &row);
+    }
+    if (valid)
+    {
+        (void)buster_aarch64_control_semantic_string(row.mnemonic, mnemonic);
+        valid = (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_BRANCH26) ||
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CALL26 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_CALL26) ||
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) ||
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) ||
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14);
+    }
+    u32 patched = 0;
+    BusterAarch64ControlFixupResult fixup = {0};
+    if (valid)
+    {
+        valid = buster_aarch64_control_semantic_fixup(instruction.row, word,
+            (BusterAarch64ControlFixupRequest){.target = builder->target, .place_address = relocation.offset,
+                .target_address = symbol.value, .addend = relocation.addend, .symbol_defined = true}, &patched, &fixup) &&
+                fixup.resolved;
+    }
+    if (valid)
+    {
+        for (u32 byte = 0; byte < sizeof(patched); byte += 1)
+        {
+            data.pointer[relocation.offset + byte] = (u8)(patched >> (byte * 8));
+        }
+    }
+    return valid;
+}
+
 // Pieces become section bytes, and every relocation that names a symbol
 // defined in its own section with binding-invariant identity can be resolved
 // here. Weak definitions remain replaceable even when hidden; ELF globals
@@ -1509,12 +1569,41 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
                     : relocation.kind == ASSEMBLY_RELOCATION_AARCH64_PREL32 ? 4
                                                                       : 0;
         bool replaceable = symbol.weak || (elf && symbol.global && !symbol.hidden);
+        bool control = assembly_unit_aarch64_control_relocation(relocation.kind);
+        bool short_control = control && relocation.kind != ASSEMBLY_RELOCATION_AARCH64_BRANCH26 &&
+                             relocation.kind != ASSEMBLY_RELOCATION_AARCH64_CALL26;
+        if (control && symbol.defined && symbol.section == relocation.section && !replaceable)
+        {
+            String8 mnemonic = S8("control");
+            if (!assembly_unit_aarch64_control_fixup(builder, relocation, symbol, &mnemonic))
+            {
+                builder->line = builder->relocation_lines[index];
+                builder->column = builder->relocation_columns[index];
+                assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE,
+                    S8("AArch64 {S8} branch to '{S8}' is out of range or unaligned"), mnemonic, symbol.name);
+                return;
+            }
+            continue;
+        }
+        if (short_control)
+        {
+            String8 mnemonic = relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 ? S8("b.cond")
+                               : relocation.kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ? S8("cbz/cbnz")
+                                                                                           : S8("tbz/tbnz");
+            builder->line = builder->relocation_lines[index];
+            builder->column = builder->relocation_columns[index];
+            assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                S8("AArch64 {S8} branch to '{S8}' requires a binding-invariant target defined in the same section"),
+                mnemonic, symbol.name);
+            return;
+        }
         if (!width || !symbol.defined || symbol.section != relocation.section || replaceable)
         {
             // A PC-relative data field can follow an opcode-valued byte. Only
             // instruction encoding proves that this reference is a branch.
             relocation.plt = elf && (relocation.plt || (relocation.x86_branch && !symbol.hidden && (symbol.global || !symbol.defined)));
             builder->relocation_lines[kept] = builder->relocation_lines[index];
+            builder->relocation_columns[kept] = builder->relocation_columns[index];
             builder->result.relocations[kept++] = relocation;
             continue;
         }
@@ -1523,7 +1612,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
             (width == 4 && (value < INT32_MIN || value > INT32_MAX)))
         {
             builder->line = builder->relocation_lines[index];
-            builder->column = 1;
+            builder->column = builder->relocation_columns[index];
             assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, S8("branch to '{S8}' does not fit its displacement"),
                                             symbol.name);
             return;
@@ -1685,6 +1774,7 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     builder.result.relocations = arena_allocate(arena, AssemblyUnitRelocation, builder.relocation_capacity);
     builder.integers = arena_allocate(arena, AssemblyUnitInteger, builder.integer_capacity);
     builder.relocation_lines = arena_allocate(arena, u32, builder.relocation_capacity);
+    builder.relocation_columns = arena_allocate(arena, u32, builder.relocation_capacity);
     builder.pieces = arena_allocate(arena, AssemblyUnitPiece, builder.piece_capacity);
     builder.numeric_labels = arena_allocate(arena, AssemblyUnitNumericLabel, builder.numeric_label_capacity);
 
