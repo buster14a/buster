@@ -11415,8 +11415,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_index_signedness(Un
                 String8 script = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(script_parts), false);
                 UnitTestResult engine = compiler_driver_test_wasm_index_engine(
                     arguments, arena, first.bytes, script, (u32)options.pointer_size, S8("canonical"), COMPILER_DRIVER_WASM_INDEX_ENGINE_CHECK_COUNT);
-                result.passed += engine.passed;
-                result.failed += engine.failed;
+                result.test_count += engine.test_count;
+                result.succeeded_test_count += engine.succeeded_test_count;
             }
         }
         scratch_end(temporary);
@@ -11502,8 +11502,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_index_signedness(Un
                         String8 script = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(script_parts), false);
                         UnitTestResult engine = compiler_driver_test_wasm_index_engine(
                             arguments, arena, first.bytes, script, (u32)options.pointer_size, S8("c"), 10);
-                        result.passed += engine.passed;
-                        result.failed += engine.failed;
+                        result.test_count += engine.test_count;
+                        result.succeeded_test_count += engine.succeeded_test_count;
                     }
                 }
             }
