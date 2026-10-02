@@ -15846,8 +15846,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
         u32 depth = 1;
         while (close < tokens.token_count && depth)
         {
-            depth += c_token_is_punctuator(&tokens.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS);
-            depth -= c_token_is_punctuator(&tokens.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            CToken token = tokens.tokens[close];
+            if (token.kind == C_TOKEN_PUNCTUATOR)
+            {
+                if (token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS) depth += 1;
+                else if (token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS) depth -= 1;
+            }
             if (depth) close += 1;
         }
         if (BUSTER_REQUIRE(arguments, start < close && close < tokens.token_count))
