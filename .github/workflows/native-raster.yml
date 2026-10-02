@@ -9,7 +9,7 @@ on:
       - cmake/ImageBrowser.cmake
       - src/buster/apps/image_browser/**
       - src/buster/tests/image_browser*
-      - tests/image-browser/**
+      - src/buster/tests/image_browser/fixtures/**
       - src/buster/lib/rendering_raster.*
       - src/buster/lib/rendering/raster*
       - src/buster/lib/window*
@@ -25,7 +25,7 @@ on:
       - cmake/ImageBrowser.cmake
       - src/buster/apps/image_browser/**
       - src/buster/tests/image_browser*
-      - tests/image-browser/**
+      - src/buster/tests/image_browser/fixtures/**
       - src/buster/lib/rendering_raster.*
       - src/buster/lib/rendering/raster*
       - src/buster/lib/window/**
@@ -102,7 +102,7 @@ jobs:
           path: |
             build/${{ matrix.config }}/image_browser
             docs/projects/image-browser.md
-            tests/image-browser/*.ppm
+            src/buster/tests/image_browser/fixtures/*.ppm
             LICENSES/README.md
             LICENSES/xcb-xproto-LICENSE.txt
       - name: Production application graph without test instrumentation
