@@ -28803,6 +28803,131 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_abi(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_qualifiers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 member;
+        String8 parameter;
+        bool accepted;
+    } cases[] = {
+        {S8("const struct sa *"), S8("struct sa *"), true},
+        {S8("volatile struct sa *"), S8("struct sa *"), true},
+        {S8("const volatile struct sa *"), S8("const struct sa *"), true},
+        {S8("const volatile struct sa *"), S8("volatile struct sa *"), true},
+        {S8("const struct sa *"), S8("const struct sa *"), true},
+        {S8("struct sa *restrict *"), S8("struct sa **"), true},
+        {S8("const void *"), S8("struct sa *"), true},
+        {S8("const struct sa *"), S8("void *"), true},
+        {S8("struct sa *"), S8("const struct sa *"), false},
+        {S8("struct sa *"), S8("volatile struct sa *"), false},
+        {S8("const struct sa *"), S8("volatile struct sa *"), false},
+        {S8("struct sa **"), S8("struct sa *restrict *"), false},
+        {S8("const void *"), S8("volatile struct sa *"), false},
+        {S8("const struct other *"), S8("struct sa *"), false},
+        {S8("const struct sa **"), S8("struct sa **"), false},
+        {S8("struct sa *"), S8("const void *"), false},
+    };
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena,
+                S8("struct sa {{ int family; }}; struct other {{ int family; }};"
+                   "typedef union {{ {S8} member; }} pointer_union __attribute__((transparent_union));"
+                   "void take(pointer_union); void probe({S8} p) {{ take(p); }}\n"), cases[index].member, cases[index].parameter);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+            BUSTER_TEST_RAW(arguments, (analysis.diagnostic_count == 0) == cases[index].accepted, source);
+            for (u32 frontend = 0; frontend < 2; frontend += 1)
+            {
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("transparent-union-qualifiers.c"), tokens, syntax,
+                    target, (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+                bool accepted = lowered.program && lowered.diagnostic_count == 0;
+                BUSTER_TEST_RAW(arguments, accepted == cases[index].accepted, source);
+                if (accepted)
+                {
+                    BUSTER_TEST(arguments, lowered.program->module_count != 0 &&
+                        ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+                }
+                if (!cases[index].accepted)
+                {
+                    BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && !lowered.program);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_qualifiers_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 fixture = S8(
+        "struct sa { int family; };\n"
+        "typedef union { const struct sa *p; } cptr __attribute__((transparent_union));\n"
+        "typedef union { volatile struct sa *p; } vptr __attribute__((transparent_union));\n"
+        "typedef union { const volatile struct sa *p; } cvptr __attribute__((transparent_union));\n"
+        "typedef union { struct sa *restrict *p; } rptr __attribute__((transparent_union));\n"
+        "static const struct sa *read_const(cptr p) { return p.p; }\n"
+        "static volatile struct sa *read_volatile(vptr p) { return p.p; }\n"
+        "static const volatile struct sa *read_cv(cvptr p) { return p.p; }\n"
+        "static struct sa *restrict *read_restrict(rptr p) { return p.p; }\n"
+        "int main(void) { struct sa v = {7}; struct sa *p = &v; const struct sa *cp = p; volatile struct sa *vp = p;"
+        " struct sa **pp = &p; int calls = 0; int failed = 0;"
+        " failed |= read_const((calls++, p))->family != 7 || calls != 1;"
+        " failed |= read_const(cp) != p || read_const(0) != 0 || read_const((void *)0) != 0;"
+        " read_volatile(p)->family = 9; failed |= v.family != 9;"
+        " failed |= read_cv(cp)->family != 9 || read_cv(vp)->family != 9;"
+        " failed |= read_restrict(pp) != pp || *read_restrict(pp) != p; return failed; }\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("transparent-union-qualifiers"), S8(".c"));
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(fixture))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < 2; frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("transparent-union-qualifiers-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+                    frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_post_tag_declaration_specifiers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -31036,6 +31161,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 #endif
     BUSTER_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_abi);
+    BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_qualifiers);
+    BUSTER_TEST_FIXTURE(arguments, c_test_transparent_union_qualifiers_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
     BUSTER_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
     BUSTER_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);

@@ -23518,10 +23518,13 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
                 {
                     CTypeId a = from.element_type;
                     CTypeId b = result->types[field.value].element_type;
+                    // A transparent member accepts the same pointer assignment
+                    // as an ordinary parameter, including qualifier addition.
+                    // Keep pointee identity and every qualifier-loss check at
+                    // the shared assignment-conversion owner.
                     compatible |= a.value < result->type_count && b.value < result->type_count &&
-                                  (result->types[a.value].kind == C_TYPE_VOID || result->types[b.value].kind == C_TYPE_VOID ||
-                                   c_parse_types_compatible(machine->scratch_arena, result, preprocess, a, b)) &&
-                                  (!result->types[a.value].is_const || result->types[b.value].is_const);
+                                  !c_parse_assignment_conversion_message(machine, result, preprocess, scope, field, source,
+                                                                         start, end).length;
                 }
                 else if (!source_pointer && field_pointer)
                     compatible |= c_parse_range_is_null_pointer_constant(machine->scratch_arena, preprocess, result, scope, source, start, end);

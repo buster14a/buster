@@ -4,6 +4,22 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Transparent-union pointer arguments
+
+A pointer argument matches a GNU transparent-union member through the ordinary
+`c_parse_assignment_conversion_message` rule. Compare unqualified pointee
+identity, then require the destination pointee to retain the source's const,
+volatile and restrict qualifiers. Adding qualifiers is permitted;
+dropping them or adding a qualifier at a deeper pointer level is not. The same
+atomic, object/void-pointer and null-pointer policy applies as in an ordinary call.
+
+`c_test_transparent_union_qualifiers` checks accepted additions, unchanged
+qualified pointers, incompatible tags, nested-pointer mismatches and each
+qualifier-loss control through semantic-only validation and both canonical
+frontend forms on six target layouts. Its runtime companion checks member
+transport, reads/writes and exactly-once argument evaluation in all four native
+allocator modes and both frontend forms.
+
 - **A top-level `(` right after an identifier** is the parameter list of a
   function that identifier names in `T f(int)`, and a parenthesized declarator
   in `T (*p)[2]`, whose `T` is the last word of the declaration specifiers.
