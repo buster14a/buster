@@ -50,7 +50,7 @@ jobs:
           printf '%s\n' "$status" | tee lifetime-evidence/baseline.status
           test "$status" -ne 0
           test "$status" -ne 124
-          rg 'global table built while other threads run' lifetime-evidence/baseline.log
+          grep -F 'global table built while other threads run' lifetime-evidence/baseline.log
       - name: Candidate threaded registered driver suite
         shell: bash
         run: |
@@ -59,7 +59,7 @@ jobs:
           git diff --exit-code -- src/buster/lib/compiler/assembly/x86_64_metadata.c
           /tmp/lifetime-driver build --config Release -t ide
           timeout 600 build/Release/ide test --verbose=1 --ci=1 --module=compiler_driver_tests 2>&1 | tee lifetime-evidence/threaded.log
-          rg 'CACHE_PLAN_LIFETIME_V1 .*dispatches=72 observations=108 max_lanes=2 single_threaded=0 multi_lane_available=1 status=pass' lifetime-evidence/threaded.log
+          grep -E 'CACHE_PLAN_LIFETIME_V1 .*dispatches=72 observations=108 max_lanes=2 single_threaded=0 multi_lane_available=1 status=pass' lifetime-evidence/threaded.log
       - name: Candidate single threaded registered driver suite
         shell: bash
         run: |
@@ -67,7 +67,7 @@ jobs:
           /tmp/lifetime-driver generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON -DBUSTER_SINGLE_THREADED=ON
           /tmp/lifetime-driver build --config Release -t ide
           timeout 600 build/Release/ide test --verbose=1 --ci=1 --module=compiler_driver_tests 2>&1 | tee lifetime-evidence/single.log
-          rg 'CACHE_PLAN_LIFETIME_V1 .*dispatches=72 observations=108 max_lanes=1 single_threaded=1 multi_lane_available=0 status=pass' lifetime-evidence/single.log
+          grep -E 'CACHE_PLAN_LIFETIME_V1 .*dispatches=72 observations=108 max_lanes=1 single_threaded=1 multi_lane_available=0 status=pass' lifetime-evidence/single.log
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
