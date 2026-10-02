@@ -18,6 +18,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: native-investigation-${{ github.event_name }}-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   pinned-baseline:
     name: Pinned baseline self-host fixed point

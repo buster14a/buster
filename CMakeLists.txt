@@ -1125,6 +1125,7 @@ buster_register_module(compiler_wasm "${BUSTER_SOURCE_DIR}/compiler/wasm/wasm${C
 buster_register_module(compiler_gpu "${BUSTER_SOURCE_DIR}/compiler/gpu/gpu${COMMON_EXTENSION}")
 buster_register_module(compiler_llvm_bitcode "${BUSTER_SOURCE_DIR}/compiler/llvm/bitcode${COMMON_EXTENSION}")
 buster_register_module(compiler_ebpf "${BUSTER_SOURCE_DIR}/compiler/ebpf/ebpf${COMMON_EXTENSION}")
+buster_register_module(compiler_spirv "${BUSTER_SOURCE_DIR}/compiler/spirv/spirv${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
@@ -1198,6 +1199,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/jit/jit_test.c
     src/buster/tests/compiler/link/link_test.c
     src/buster/tests/compiler/gpu/gpu_test.c
+    src/buster/tests/compiler/spirv/spirv_test.c
     src/buster/tests/compiler/driver/driver_test.c
     src/buster/tests/compiler/driver/object_path_test.c
 )
@@ -1261,6 +1263,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/jit/jit_test.h
     src/buster/tests/compiler/link/link_test.h
     src/buster/tests/compiler/gpu/gpu_test.h
+    src/buster/tests/compiler/spirv/spirv_test.h
     src/buster/tests/compiler/driver/driver_test.h
     src/buster/tests/compiler/driver/object_path_test.h
 )
@@ -2173,6 +2176,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_gpu
     compiler_llvm_bitcode
     compiler_ebpf
+    compiler_spirv
     compiler_driver
     simd
     file
@@ -2185,6 +2189,8 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
 if (NOT BUSTER_INVESTIGATION_REVISION STREQUAL "")
     target_compile_definitions(ide PRIVATE BUSTER_INVESTIGATION_REVISION="${BUSTER_INVESTIGATION_REVISION}")
 endif()
+
+include(cmake/HotReloadDemo.cmake)
 
 if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
      CMAKE_SYSTEM_PROCESSOR MATCHES

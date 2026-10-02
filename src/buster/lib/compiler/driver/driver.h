@@ -8,6 +8,7 @@
 #include <buster/lib/compiler/wasm/wasm.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/compiler/ebpf/ebpf.h>
+#include <buster/lib/compiler/spirv/spirv.h>
 
 // A unity C translation unit retains preprocessing, semantic, typed IR, and
 // object/debug data through the driver call. The reservation is virtual and
@@ -41,6 +42,7 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_OBJECT,
     COMPILER_DRIVER_ERROR_LINK,
     COMPILER_DRIVER_ERROR_FILE_WRITE,
+    COMPILER_DRIVER_ERROR_SPIRV,
     COMPILER_DRIVER_ERROR_COUNT,
 } CompilerDriverError;
 
@@ -207,6 +209,7 @@ struct CompilerDriverInvocation
     // source identity. It does not enable or disable production fallback.
     bool record_codegen_fallbacks;
     bool c_dialect_explicit;
+    bool debug_info_explicit;
 };
 
 typedef struct CompilerDriverFallbackRecord CompilerDriverFallbackRecord;
@@ -241,6 +244,7 @@ struct CompilerDriverResult
     GpuArtifact gpu;
     LlvmBitcodeArtifact llvm_bitcode;
     EbpfArtifact ebpf;
+    SpirvArtifact spirv;
     ObjectFile object;
     // What serializing `object` cost, for -c; zero when no object was written.
     ObjectWriteStatistics object_write_statistics;
@@ -274,7 +278,7 @@ struct CompilerDriverResult
     bool has_gpu;
     bool has_llvm_bitcode;
     bool has_ebpf;
-    u8 reserved;
+    bool has_spirv;
 };
 
 // Prepare the target-independent frontend, ABI and opcode tables. Serial

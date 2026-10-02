@@ -72,6 +72,30 @@ paired capture-on/off timings. Its PR logs/artifacts are the execution evidence;
 this semantic explanation is also supported by the inspected encoder. Pending
 or failed runs do not establish a successful worked capture.
 
+The executed demonstration is [run 36990736192, job 110786090843](https://github.com/buster14a/buster/actions/runs/36990736192/job/110786090843),
+implementation head `2c71f72f95caf19bcb272aa9d3ba99e381fd7d18`, compiled PR merge
+`d9d92a898feedbe9568f6e18723c1ca0744b576a`. It passed 1,027 focused assertions.
+`cast_unsigned` occupies 85 bytes at section offset 16 and file offset 176.
+Its conversion is MIR row 1, function bytes `[17,79)`, file bytes `[193,255)`:
+
+```text
+MIR row=1 opcode=31 (MACHINE_X64_CVT_F64_TO_U64) function_bytes=[17,79) file_bytes=[193,255)
+canonical instruction=0 opcode=0 (numeric ID) selection_start_row=1
+  source anchor .../investigation.c:9:41
+canonical instruction=1 opcode=27 (CAST) selection_start_row=1
+  source anchor .../investigation.c:11:12
+```
+
+The parameter and CAST share the same row start; both remain visible. The
+CAST's expanded range length is one token byte, not the entire expression.
+The partial decoder displays the floating conversion portion as `.byte`; it
+does not establish individual native instruction boundaries there. The retained
+MIR opcode and exact byte interval answer the lowering question, while the
+encoder supplies its semantics. The smoke capture is 1,541 bytes; the timing
+tests' 1,636-byte captures differ because their paths/configuration differ.
+See [the diagnostic audit](performance-audits/2026-10-02T091939Z.md) for exact
+binary/input/artifact identities, raw timings and validation boundaries.
+
 ## What the mappings mean
 
 | Captured relation | Contract and limits |
@@ -99,7 +123,7 @@ history.
 ## Bounded schema and validation
 
 Schema 1 is explicit little-endian data, headed by `BSTRINV1`, a version and
-length-prefixed UTF-8 byte strings. The manifest holds function, revision,
+length-prefixed NUL-free byte strings. The manifest holds function, revision,
 configuration, input/artifact paths, section and target; three 64-byte hex
 SHA-256 identities follow. It records file/section offsets, diagnostic capture
 time, canonical function/code base, counts, allocator/target numeric fields and

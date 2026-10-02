@@ -83,7 +83,8 @@ BUSTER_GLOBAL_LOCAL bool investigation_hex_valid(String8 text, u32 length, bool 
 
 BUSTER_GLOBAL_LOCAL bool investigation_revision_equal(String8 first, String8 second)
 {
-    bool result = investigation_hex_valid(first, 40, false) && investigation_hex_valid(second, 40, false);
+    bool result = first.pointer && second.pointer && first.length == 40 && second.length == 40 &&
+                  investigation_hex_valid(first, 40, false) && investigation_hex_valid(second, 40, false);
     for (u64 index = 0; result && index < first.length; index += 1)
     {
         char8 left = first.pointer[index];
@@ -706,7 +707,7 @@ BUSTER_GLOBAL_LOCAL void investigation_report_row(InvestigationCapture const* ca
     if (interpret && (row.opcode == MACHINE_X64_CVT_F32_TO_U64 || row.opcode == MACHINE_X64_CVT_F64_TO_U64))
     {
         string_print(S8("  floating -> u64: signed64 conversion with compare/subtract/correction around 2^63; "
-                        "the extra comparison/branch alone does not establish redundant lowering. Defined source domain: 0 <= x < 2^64.\n"));
+                        "the extra comparison/branch alone does not establish redundant lowering. Nonnegative defined source domain: 0 <= x < 2^64.\n"));
     }
 }
 
