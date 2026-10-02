@@ -30699,7 +30699,7 @@ BUSTER_GLOBAL_LOCAL bool c_test_inline_linkage_spawn(Arena* arena, SliceString8 
 }
 #endif
 
-// Needed Windows header-inline bodies retain their shared external identity.
+// Diagnose Windows va_start destination types and include-order bridges in unused variadic bodies.
 typedef struct CTestWindowsVaStartCase CTestWindowsVaStartCase;
 struct CTestWindowsVaStartCase
 {
@@ -30780,7 +30780,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_semantics(UnitTestArg
                 {
                     String8 spelling = c_token_spelling(tokens.spelling_base, tokens.tokens[index]);
                     if ((string_equal(spelling, S8("__va_start")) || string_equal(spelling, S8("__builtin_va_start"))) &&
-                        c_token_is_punctuator(&tokens.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                        tokens.tokens[index + 1].kind == C_TOKEN_PUNCTUATOR &&
+                        tokens.tokens[index + 1].punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
                     {
                         builtin = spelling;
                         u32 depth = 0;
@@ -30788,13 +30789,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_semantics(UnitTestArg
                         for (u32 operand = index + 2; operand < end; operand += 1)
                         {
                             CToken* token = tokens.tokens + operand;
-                            if (c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && !depth)
+                            if (token->kind == C_TOKEN_PUNCTUATOR && token->punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && !depth)
                             {
                                 break;
                             }
-                            if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS)) depth += 1;
-                            else if (c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_PARENTHESIS)) depth -= 1;
-                            else if (!depth && c_token_is_punctuator(token, C_PUNCTUATOR_COMMA)) argument_count += 1;
+                            if (token->kind == C_TOKEN_PUNCTUATOR && token->punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS) depth += 1;
+                            else if (token->kind == C_TOKEN_PUNCTUATOR && token->punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS) depth -= 1;
+                            else if (!depth && token->kind == C_TOKEN_PUNCTUATOR && token->punctuator == C_PUNCTUATOR_COMMA) argument_count += 1;
                         }
                     }
                 }
@@ -30830,6 +30831,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_semantics(UnitTestArg
     return result;
 }
 
+// Needed Windows header-inline bodies retain their shared external identity.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_inline_bodies(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
