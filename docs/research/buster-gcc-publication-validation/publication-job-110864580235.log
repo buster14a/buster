@@ -1,0 +1,218 @@
+﻿2026-10-02T13:47:05.8167582Z Current runner version: '2.337.0'
+2026-10-02T13:47:05.8195747Z ##[group]Runner Image Provisioner
+2026-10-02T13:47:05.8196733Z Hosted Compute Agent
+2026-10-02T13:47:05.8197424Z Version: 20260901.588
+2026-10-02T13:47:05.8198257Z Commit: f88ec8081b781fac6c440065ac7ff9e710ce3d0b
+2026-10-02T13:47:05.8199119Z Build Date: 2026-09-01T19:56:44Z
+2026-10-02T13:47:05.8199952Z Worker ID: {379c7446-422f-4aeb-b084-4e656b5501ec}
+2026-10-02T13:47:05.8200872Z Azure Region: eastus
+2026-10-02T13:47:05.8201565Z ##[endgroup]
+2026-10-02T13:47:05.8203325Z ##[group]Operating System
+2026-10-02T13:47:05.8204242Z Ubuntu
+2026-10-02T13:47:05.8204991Z 24.04.5
+2026-10-02T13:47:05.8205628Z LTS
+2026-10-02T13:47:05.8206237Z ##[endgroup]
+2026-10-02T13:47:05.8207308Z ##[group]Runner Image
+2026-10-02T13:47:05.8208027Z Image: ubuntu-24.04
+2026-10-02T13:47:05.8208777Z Version: 20260927.320.1
+2026-10-02T13:47:05.8210625Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260927.320/images/ubuntu/Ubuntu2404-Readme.md
+2026-10-02T13:47:05.8212628Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260927.320
+2026-10-02T13:47:05.8213866Z ##[endgroup]
+2026-10-02T13:47:05.8215543Z ##[group]GITHUB_TOKEN Permissions
+2026-10-02T13:47:05.8217814Z Actions: read
+2026-10-02T13:47:05.8218628Z Contents: write
+2026-10-02T13:47:05.8219288Z Metadata: read
+2026-10-02T13:47:05.8220044Z ##[endgroup]
+2026-10-02T13:47:05.8222411Z Secret source: Actions
+2026-10-02T13:47:05.8223537Z Cache mode: write
+2026-10-02T13:47:05.8224817Z Prepare workflow directory
+2026-10-02T13:47:05.8590472Z Prepare all required actions
+2026-10-02T13:47:05.8646932Z Getting action download info
+2026-10-02T13:47:06.0975707Z Download action repository 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' (SHA:11bd71901bbe5b1630ceea73d27597364c9af683)
+2026-10-02T13:47:06.3307956Z Download action repository 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+2026-10-02T13:47:06.9370393Z Complete job name: publish
+2026-10-02T13:47:07.0080777Z ##[group]Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+2026-10-02T13:47:07.0081882Z with:
+2026-10-02T13:47:07.0082287Z   persist-credentials: false
+2026-10-02T13:47:07.0082837Z   repository: buster14a/buster
+2026-10-02T13:47:07.0088742Z   token: ***
+2026-10-02T13:47:07.0089148Z   ssh-strict: true
+2026-10-02T13:47:07.0089564Z   ssh-user: git
+2026-10-02T13:47:07.0089958Z   clean: true
+2026-10-02T13:47:07.0090374Z   sparse-checkout-cone-mode: true
+2026-10-02T13:47:07.0090929Z   fetch-depth: 1
+2026-10-02T13:47:07.0091337Z   fetch-tags: false
+2026-10-02T13:47:07.0091762Z   show-progress: true
+2026-10-02T13:47:07.0092199Z   lfs: false
+2026-10-02T13:47:07.0092606Z   submodules: false
+2026-10-02T13:47:07.0093060Z   set-safe-directory: true
+2026-10-02T13:47:07.0093712Z ##[endgroup]
+2026-10-02T13:47:07.0933852Z Syncing repository: buster14a/buster
+2026-10-02T13:47:07.0935819Z ##[group]Getting Git version info
+2026-10-02T13:47:07.0936662Z Working directory is '/home/runner/work/buster/buster'
+2026-10-02T13:47:07.0937821Z [command]/usr/bin/git version
+2026-10-02T13:47:07.1020841Z git version 2.55.0
+2026-10-02T13:47:07.1042806Z ##[endgroup]
+2026-10-02T13:47:07.1056737Z Temporarily overriding HOME='/home/runner/work/_temp/714626c1-3a44-4dba-8a73-6e65828a9718' before making global git config changes
+2026-10-02T13:47:07.1065838Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-02T13:47:07.1161651Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/buster/buster
+2026-10-02T13:47:07.1166903Z Deleting the contents of '/home/runner/work/buster/buster'
+2026-10-02T13:47:07.1172803Z ##[group]Initializing the repository
+2026-10-02T13:47:07.1176579Z [command]/usr/bin/git init /home/runner/work/buster/buster
+2026-10-02T13:47:07.1288002Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-10-02T13:47:07.1289888Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-10-02T13:47:07.1292042Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-10-02T13:47:07.1294494Z hint: call:
+2026-10-02T13:47:07.1295049Z hint:
+2026-10-02T13:47:07.1295848Z hint: 	git config --global init.defaultBranch <name>
+2026-10-02T13:47:07.1296912Z hint:
+2026-10-02T13:47:07.1297814Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-10-02T13:47:07.1299536Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-10-02T13:47:07.1300914Z hint:
+2026-10-02T13:47:07.1301482Z hint: 	git branch -m <name>
+2026-10-02T13:47:07.1302164Z hint:
+2026-10-02T13:47:07.1303242Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-10-02T13:47:07.1305254Z Initialized empty Git repository in /home/runner/work/buster/buster/.git/
+2026-10-02T13:47:07.1308369Z [command]/usr/bin/git remote add origin https://github.com/buster14a/buster
+2026-10-02T13:47:07.1465879Z ##[endgroup]
+2026-10-02T13:47:07.1467172Z ##[group]Disabling automatic garbage collection
+2026-10-02T13:47:07.1469516Z [command]/usr/bin/git config --local gc.auto 0
+2026-10-02T13:47:07.1572573Z ##[endgroup]
+2026-10-02T13:47:07.1573430Z ##[group]Setting up auth
+2026-10-02T13:47:07.1577041Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-02T13:47:07.1622359Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-02T13:47:07.2170458Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-02T13:47:07.2202460Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-02T13:47:07.2396881Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-10-02T13:47:07.2665172Z ##[endgroup]
+2026-10-02T13:47:07.2666627Z ##[group]Fetching the repository
+2026-10-02T13:47:07.2675891Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +e517d8e38ed208a8103cae934ad6dd5fb47bc0eb:refs/remotes/origin/codex/2274-publish-gcc-comparison
+2026-10-02T13:47:10.1016765Z From https://github.com/buster14a/buster
+2026-10-02T13:47:10.1017598Z  * [new ref]         e517d8e38ed208a8103cae934ad6dd5fb47bc0eb -> origin/codex/2274-publish-gcc-comparison
+2026-10-02T13:47:10.1020780Z ##[endgroup]
+2026-10-02T13:47:10.1021316Z ##[group]Determining the checkout info
+2026-10-02T13:47:10.1023067Z ##[endgroup]
+2026-10-02T13:47:10.1028133Z [command]/usr/bin/git sparse-checkout disable
+2026-10-02T13:47:10.1080096Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-10-02T13:47:10.1107136Z ##[group]Checking out the ref
+2026-10-02T13:47:10.1111135Z [command]/usr/bin/git checkout --progress --force -B codex/2274-publish-gcc-comparison refs/remotes/origin/codex/2274-publish-gcc-comparison
+2026-10-02T13:47:10.5204287Z Switched to a new branch 'codex/2274-publish-gcc-comparison'
+2026-10-02T13:47:10.5224981Z branch 'codex/2274-publish-gcc-comparison' set up to track 'origin/codex/2274-publish-gcc-comparison'.
+2026-10-02T13:47:10.5232804Z ##[endgroup]
+2026-10-02T13:47:10.5275417Z [command]/usr/bin/git log -1 --format=%H
+2026-10-02T13:47:10.5299750Z e517d8e38ed208a8103cae934ad6dd5fb47bc0eb
+2026-10-02T13:47:10.5308480Z ##[group]Removing auth
+2026-10-02T13:47:10.5311736Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-02T13:47:10.5339342Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-02T13:47:10.5531594Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-02T13:47:10.5556867Z http.https://github.com/.extraheader
+2026-10-02T13:47:10.5563096Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-10-02T13:47:10.5591816Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-02T13:47:10.5773620Z ##[endgroup]
+2026-10-02T13:47:10.5945039Z ##[group]Run python3 tools/research/publish-gcc-comparison.py
+2026-10-02T13:47:10.5945465Z [36;1mpython3 tools/research/publish-gcc-comparison.py[0m
+2026-10-02T13:47:10.6223813Z shell: /usr/bin/bash -e {0}
+2026-10-02T13:47:10.6224301Z env:
+2026-10-02T13:47:10.6226286Z   GITHUB_TOKEN: ***
+2026-10-02T13:47:10.6226479Z ##[endgroup]
+2026-10-02T13:48:27.9815177Z {
+2026-10-02T13:48:27.9815743Z   "publication_commit": "f039f13574ca536b0789e0521eb87b207f0e8f4e",
+2026-10-02T13:48:27.9816230Z   "payload_files": 123,
+2026-10-02T13:48:27.9816540Z   "git_files": 126,
+2026-10-02T13:48:27.9816793Z   "verification": {
+2026-10-02T13:48:27.9817039Z     "samples": 390,
+2026-10-02T13:48:27.9817275Z     "probes": 56,
+2026-10-02T13:48:27.9817515Z     "cells": 18,
+2026-10-02T13:48:27.9817770Z     "all_samples_successful": true,
+2026-10-02T13:48:27.9818124Z     "all_18_source_and_object_hashes_match": true,
+2026-10-02T13:48:27.9818533Z     "summary_values_independently_replayed": 270,
+2026-10-02T13:48:27.9818855Z     "paired_comparisons": 20,
+2026-10-02T13:48:27.9819077Z     "archives": [
+2026-10-02T13:48:27.9819232Z       {
+2026-10-02T13:48:27.9819400Z         "run_id": 37004946749,
+2026-10-02T13:48:27.9819593Z         "artifact_id": 11225512379,
+2026-10-02T13:48:27.9819791Z         "bytes": 442,
+2026-10-02T13:48:27.9820077Z         "sha256": "7b2576cfb9fae66d1fbfb7d6878a03855660c69458f5cfa5821ec9d96e24a8f0",
+2026-10-02T13:48:27.9820435Z         "file_name": "run-37004946749-setup-failure.zip",
+2026-10-02T13:48:27.9820760Z         "classification": "Failed before compiler build; no benchmark data.",
+2026-10-02T13:48:27.9821204Z         "archive_path": "docs/research/buster-gcc-comparison/evidence/run-37004946749-setup-failure.zip",
+2026-10-02T13:48:27.9821561Z         "crc_verified": true
+2026-10-02T13:48:27.9821750Z       },
+2026-10-02T13:48:27.9821894Z       {
+2026-10-02T13:48:27.9822043Z         "run_id": 37005042712,
+2026-10-02T13:48:27.9822231Z         "artifact_id": 11224892963,
+2026-10-02T13:48:27.9822427Z         "bytes": 451047,
+2026-10-02T13:48:27.9822606Z         "entries": 1257,
+2026-10-02T13:48:27.9822884Z         "sha256": "619d7c825ece0752362c9f62b56195da2e3641c29e007026c1226ee5ef4642e4",
+2026-10-02T13:48:27.9823248Z         "file_name": "run-37005042712-rejected-wall-timing.zip",
+2026-10-02T13:48:27.9823728Z         "classification": "Every elapsed-time inference rejected because timed waiting quantized results. Behavior probes retained.",
+2026-10-02T13:48:27.9824582Z         "archive_path": "docs/research/buster-gcc-comparison/evidence/run-37005042712-rejected-wall-timing.zip",
+2026-10-02T13:48:27.9825015Z         "crc_verified": true
+2026-10-02T13:48:27.9825201Z       },
+2026-10-02T13:48:27.9825350Z       {
+2026-10-02T13:48:27.9825502Z         "run_id": 37005475203,
+2026-10-02T13:48:27.9825695Z         "artifact_id": 11225068516,
+2026-10-02T13:48:27.9825899Z         "bytes": 451176,
+2026-10-02T13:48:27.9826075Z         "entries": 1257,
+2026-10-02T13:48:27.9826356Z         "sha256": "47c04b2c3f12e26c1346c4dbde0face10643dbc7a0256e364495a5686fec94ec",
+2026-10-02T13:48:27.9826711Z         "file_name": "run-37005475203-current-diagnostic.zip",
+2026-10-02T13:48:27.9827123Z         "classification": "Current bounded diagnostic measurements; no qualified performance acceptance.",
+2026-10-02T13:48:27.9827668Z         "archive_path": "docs/research/buster-gcc-comparison/evidence/run-37005475203-current-diagnostic.zip",
+2026-10-02T13:48:27.9828054Z         "crc_verified": true
+2026-10-02T13:48:27.9828239Z       }
+2026-10-02T13:48:27.9828768Z     ],
+2026-10-02T13:48:27.9828929Z     "report_deliveries": [
+2026-10-02T13:48:27.9829114Z       {
+2026-10-02T13:48:27.9829318Z         "path": "buster-vs-gcc-comparison.pdf",
+2026-10-02T13:48:27.9829553Z         "bytes": 160900,
+2026-10-02T13:48:27.9829835Z         "sha256": "064f0f8cf30ec5c2261e129bd7102f495dbf2fa537f2064ece10f4bd75ba7be6",
+2026-10-02T13:48:27.9830280Z         "workspace_sha256": "3ac207e77a13a63935ba6f378f4442aa3894f6db21141e70176be7b2f07af511",
+2026-10-02T13:48:27.9830804Z         "matches_workspace_bytes": false
+2026-10-02T13:48:27.9831014Z       },
+2026-10-02T13:48:27.9831159Z       {
+2026-10-02T13:48:27.9831334Z         "path": "buster-vs-gcc-report.html",
+2026-10-02T13:48:27.9831555Z         "bytes": 63909,
+2026-10-02T13:48:27.9831824Z         "sha256": "90b1346875cc01b9b2be5b9176de568b595d52a64451ebe22c75495321711341",
+2026-10-02T13:48:27.9832231Z         "workspace_sha256": "90b1346875cc01b9b2be5b9176de568b595d52a64451ebe22c75495321711341",
+2026-10-02T13:48:27.9832567Z         "matches_workspace_bytes": true
+2026-10-02T13:48:27.9832766Z       }
+2026-10-02T13:48:27.9832907Z     ],
+2026-10-02T13:48:27.9833241Z     "scope": "Artifact integrity and statistic replay only; no compiler build or generated-program execution."
+2026-10-02T13:48:27.9833595Z   }
+2026-10-02T13:48:27.9833739Z }
+2026-10-02T13:48:28.0050563Z ##[group]Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+2026-10-02T13:48:28.0050911Z with:
+2026-10-02T13:48:28.0051113Z   name: gcc-comparison-publication-37015300495
+2026-10-02T13:48:28.0051374Z   path: docs/research/buster-gcc-comparison
+2026-10-02T13:48:28.0051604Z   if-no-files-found: warn
+2026-10-02T13:48:28.0051797Z   retention-days: 30
+2026-10-02T13:48:28.0051976Z   compression-level: 6
+2026-10-02T13:48:28.0052154Z   overwrite: false
+2026-10-02T13:48:28.0052333Z   include-hidden-files: false
+2026-10-02T13:48:28.0052529Z ##[endgroup]
+2026-10-02T13:48:28.1325327Z (node:2143) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-10-02T13:48:28.1326035Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-10-02T13:48:28.1524854Z With the provided path, there will be 125 files uploaded
+2026-10-02T13:48:28.1544602Z Artifact name is valid!
+2026-10-02T13:48:28.1545087Z Root directory input is valid!
+2026-10-02T13:48:28.3678003Z Beginning upload of artifact content to blob storage
+2026-10-02T13:48:28.5045892Z (node:2143) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+2026-10-02T13:48:28.5823021Z Uploaded bytes 893791
+2026-10-02T13:48:28.5978603Z Finished uploading artifact content to blob storage!
+2026-10-02T13:48:28.5979554Z SHA256 digest of uploaded artifact zip is 0ac068daf0126fb0fc142b849458d9e85a87ea527e057f4622dd5b74d5dc061f
+2026-10-02T13:48:28.5981353Z Finalizing artifact upload
+2026-10-02T13:48:28.7995136Z Artifact gcc-comparison-publication-37015300495.zip successfully finalized. Artifact ID 11229242467
+2026-10-02T13:48:28.7996519Z Artifact gcc-comparison-publication-37015300495 has been successfully uploaded! Final size is 893791 bytes. Artifact ID is 11229242467
+2026-10-02T13:48:28.7997863Z Artifact download URL: https://github.com/buster14a/buster/actions/runs/37015300495/artifacts/11229242467
+2026-10-02T13:48:28.8175792Z Post job cleanup.
+2026-10-02T13:48:28.8854695Z [command]/usr/bin/git version
+2026-10-02T13:48:28.8879839Z git version 2.55.0
+2026-10-02T13:48:28.8910102Z Temporarily overriding HOME='/home/runner/work/_temp/abfa2dde-0711-4b2a-8e2f-ec7ca0b149fc' before making global git config changes
+2026-10-02T13:48:28.8911073Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-02T13:48:28.8913292Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/buster/buster
+2026-10-02T13:48:28.8947108Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-02T13:48:28.8975009Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-02T13:48:28.9179352Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-02T13:48:28.9226177Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-02T13:48:28.9607170Z Cleaning up orphan processes
+2026-10-02T13:48:28.9849051Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
