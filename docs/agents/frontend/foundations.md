@@ -997,7 +997,10 @@ combined executable retains all literal oracles in every native allocator mode
 at O0/O2. Hosted Linux x86-64 GCC and Clang also compile and execute exactly
 that same source in GNU17/GNU2x at O0/O2, including the whole-complex postfix
 precedence oracle. Compiler and process failures are assertions, never skips or
-probes that adjust expected values. This regression checkpoint adds no lowering
+probes that adjust expected values. A separate indexed compound-assignment
+reference control returns bits 0..4 for mismatched returned result, index-call
+count, stored real component, stored imaginary component and untouched neighbor;
+its expected exit remains zero. This regression checkpoint adds no lowering
 behavior; hosted results must establish the current failures before a production
 repair is published.
 
