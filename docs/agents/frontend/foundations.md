@@ -1267,3 +1267,8 @@ frontend forms. Supported desktop drivers execute independent result oracles in
 all four allocator modes and both forms with codegen verification. Negative
 controls retain floating/pointer/128-bit control refusals, duplicate cases and
 defaults, overlapping ranges and the existing first-nested-label refusal.
+
+The existing driver syntax/object diagnostic-equivalence corpus also accepts
+these standard unbraced bodies in C17/C23 and keeps invalid controlling types
+and duplicate labels rejected in both forms. Its former label-free switch
+refusal row now records the valid C behavior.
