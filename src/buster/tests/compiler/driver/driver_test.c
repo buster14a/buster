@@ -10542,8 +10542,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
     return result;
 }
 
-// Recompile each frontend form for byte stability, then use Node's own Wasm
-// validator and engine for positive calls and ABI-negative traps.
 enum
 {
     COMPILER_DRIVER_WASM_FUNCTION_ADDRESS_TOPOLOGY_COUNT = 4,
@@ -10789,9 +10787,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmFunctionAddressFixture compiler_driver_tes
     return fixture;
 }
 
-BUSTER_GLOBAL_LOCAL void compiler_driver_test_wasm_function_address_engine(
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_engine(
     UnitTestArguments* arguments, Arena* arena, ByteSlice bytes, String8 script, u32 pointer_bytes, u32 topology, u32 mode, u32 expected)
 {
+    UnitTestResult result = {0};
     String8 output = buster_test_temporary_path(arena, S8("buster-wasm-function-address"), S8(".wasm"));
     String8 script_path = buster_test_temporary_path(arena, S8("buster-wasm-function-address"), S8(".cjs"));
     bool written = file_write(output, bytes) && file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
@@ -10830,6 +10829,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_test_wasm_function_address_engine(
         BUSTER_TEST(arguments, os_file_delete(output));
         BUSTER_TEST(arguments, os_file_delete(script_path));
     }
+    return result;
 }
 
 // Baseline success is still executed: the engine witnesses index-zero/null
@@ -10919,7 +10919,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_addresses(
                                                    first.stats.import_count == (topology == 1 || topology == 2 ? 1u : 0u) &&
                                                    first.stats.defined_function_count == 3);
                             u32 expected = mode >= COMPILER_DRIVER_WASM_FUNCTION_ADDRESS_ESCAPE_COUNT ? fixture.expected_result : topology % 2;
-                            compiler_driver_test_wasm_function_address_engine(arguments, arena, first.bytes, script, options.pointer_size, topology, mode, expected);
+                            UnitTestResult engine = compiler_driver_test_wasm_function_address_engine(
+                                arguments, arena, first.bytes, script, options.pointer_size, topology, mode, expected);
+                            result.test_count += engine.test_count;
+                            result.succeeded_test_count += engine.succeeded_test_count;
                         }
                     }
                 }
@@ -11040,6 +11043,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_ou
     return result;
 }
 
+// Recompile each frontend form for byte stability, then use Node's own Wasm
+// validator and engine for positive calls and ABI-negative traps.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_function_tables(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
