@@ -215,11 +215,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_semantics_agreement(UnitTestAr
             {
                 for (u32 form = 0; form < 2; form += 1)
                 {
-                    for (u32 rejected = 0; rejected < 2; rejected += 1)
+                    for (u32 reject_case = 0; reject_case < 2; reject_case += 1)
                     {
                         TemporalArena case_temporary = arena_begin_temporal(arena);
                         CIntegerShadowQuery row = shadow_queries[query];
-                        String8 expected = rejected ? (route ? row.deferred_wrong : row.legacy_wrong) :
+                        String8 expected = reject_case ? (route ? row.deferred_wrong : row.legacy_wrong) :
                                                       (route ? row.deferred_value : row.legacy_value);
                         String8 source = string_format(arena,
                             S8("{S8} char string[{S8}]; (void)string; _Static_assert(({S8}) == ({S8}), \"shadowed object\"); return 0; {S8}"),
@@ -234,7 +234,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_semantics_agreement(UnitTestAr
                             CAnalysisResult semantic = c_analyze_semantics_only(arena, tokens, syntax);
                             CIRLowerResult lowered = c_analyze_with_options(arena, S8("shadowed-object-query.c"), tokens, syntax, target,
                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
-                            if (rejected)
+                            if (reject_case)
                             {
                                 bool semantic_assertion = false;
                                 bool lowered_assertion = false;
