@@ -29398,7 +29398,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(gnu_specifier_temporary);
         }
         // Both GNU spellings retain their control-flow effect under every
-        // fallthrough_allocator/fallthrough_frontend and each fallthrough_dialect from the original report.
+        // allocator/frontend and each dialect from the original report.
         String8 fallthrough_dialects[] = {S8("-std=c99"), S8("-std=gnu11"), S8("-std=c17")};
         for (u32 fallthrough_dialect = 0; fallthrough_dialect < BUSTER_ARRAY_LENGTH(fallthrough_dialects); fallthrough_dialect += 1)
         {
@@ -29416,7 +29416,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     CompilerDriverResult fallthrough_syntax = compiler_driver_execute_invocation(fallthrough_temporary.arena,
                         compiler_driver_parse_arguments(fallthrough_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fallthrough_syntax_command)));
                     BUSTER_TEST_RAW(arguments, fallthrough_syntax.error == COMPILER_DRIVER_ERROR_NONE, fallthrough_syntax.diagnostic);
-                    bool fallthrough_native = !string_equal(c_lz4_regression_allocators[fallthrough_allocator], S8("-fregister-fallthrough_allocator=none"));
+                    bool fallthrough_native = !string_equal(c_lz4_regression_allocators[fallthrough_allocator], S8("-fregister-allocator=none"));
                     String8 fallthrough_command[] = {
                         fallthrough_dialects[fallthrough_dialect], S8("-O0"), c_flat_initializer_frontends[fallthrough_frontend], c_lz4_regression_allocators[fallthrough_allocator],
                         S8("-fverify-codegen"), fallthrough_native ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
