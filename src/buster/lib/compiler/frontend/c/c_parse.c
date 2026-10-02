@@ -24183,6 +24183,21 @@ BUSTER_C_INTERNAL void c_parse_validate_named_call_arities(Arena* arena, CParseR
     }
 }
 
+BUSTER_C_INTERNAL bool c_parse_array_bound_is_variable(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                        CScopeId scope, CArrayBound bound)
+{
+    bool variable = bound.is_star;
+    if (bound.token_count && !bound.has_inferred_count && !variable)
+    {
+        u64 mark = machine->scratch_arena->position;
+        CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope,
+                                                      bound.token_start, bound.token_start + bound.token_count);
+        variable = !value.valid;
+        arena_set_position(machine->scratch_arena, mark);
+    }
+    return variable;
+}
+
 BUSTER_C_INTERNAL bool c_parse_local_type_is_variable_length(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                                CScopeId scope, CTypeId type_id)
 {
@@ -24192,16 +24207,7 @@ BUSTER_C_INTERNAL bool c_parse_local_type_is_variable_length(CTypeParseMachine* 
         CType type = result->types[type_id.value];
         if (type.array_bound < result->array_bound_count)
         {
-            CArrayBound bound = result->array_bounds[type.array_bound];
-            variable = bound.is_star;
-            if (bound.token_count && !bound.has_inferred_count && !variable)
-            {
-                u64 mark = machine->scratch_arena->position;
-                CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope,
-                                                              bound.token_start, bound.token_start + bound.token_count);
-                variable = !value.valid;
-                arena_set_position(machine->scratch_arena, mark);
-            }
+            variable = c_parse_array_bound_is_variable(machine, result, preprocess, scope, result->array_bounds[type.array_bound]);
         }
         type_id = type.element_type;
     }
@@ -25736,6 +25742,39 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
         }
     }
     BUSTER_UNUSED(arena);
+}
+
+// Members have no ordinary-identifier scope, so every array derivation must
+// be constant. Resolve a typedef's bound in the scope where that bound was
+// written; a later shadowing declaration cannot change its type.
+BUSTER_C_INTERNAL void c_parse_validate_member_types(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
+{
+    u32 member_count = result->member_count;
+    for (u32 index = 0; index < member_count; index += 1)
+    {
+        CMember member = result->members[index];
+        CTypeId type = member.type;
+        u32 remaining = result->type_count;
+        bool variable = false;
+        while (!variable && remaining && type.value < result->type_count)
+        {
+            CType value = result->types[type.value];
+            if (value.kind != C_TYPE_ARRAY && value.kind != C_TYPE_POINTER) break;
+            if (value.kind == C_TYPE_ARRAY && value.array_bound < result->array_bound_count)
+            {
+                CArrayBound bound = result->array_bounds[value.array_bound];
+                CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, bound.token_start);
+                variable = c_parse_array_bound_is_variable(machine, result, preprocess, scope, bound);
+            }
+            type = value.element_type;
+            remaining -= 1;
+        }
+        if (variable)
+        {
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member.location), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                               S8("a structure or union member may not have variably modified type"));
+        }
+    }
 }
 
 BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
@@ -27349,6 +27388,9 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
                                    C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, checked.message);
         }
     }
+    // Expression/type-name validation can append members after the initial
+    // declarations were bound; inspect the final member table before lowering.
+    c_parse_validate_member_types(machine, result, preprocess);
     result->expression_scalar_types = 0;
 }
 

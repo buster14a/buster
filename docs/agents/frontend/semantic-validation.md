@@ -45,6 +45,19 @@ separate array-only duration check still permits a static pointer to a VLA while
 rejecting a VLA object with static duration. Function prototype parameter types
 retain their existing rules; the VM walk stops at function types.
 
+Structure and union member validation walks every array/pointer derivation,
+including those inherited through typedefs, and rejects variably modified
+types at the member's original source site. Each bound is queried in its
+declaring scope using the existing typed constant predicate. The check runs
+after expression/type-name validation has finished appending members, so an
+aggregate written inside `sizeof` is covered without declaring an object.
+Flexible arrays, constant expression bounds and function-pointer prototype
+parameters keep their existing rules. `c_test_variable_member_types` checks
+rejected file/block/type-name/nested/typedef forms, exact member locations and
+valid neighbors through semantic-only analysis and both canonical frontend
+forms. This enforces C11/C17 6.7.6.2p2 and 6.7.2.1p9; see
+[WG14 N1570](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
+
 The bound check uses the semantic typed constant folder. NORMAL-mode sizeof
 type operands use the complete abstract-declarator reader, so parenthesized
 pointers to arrays and functions retain their pointer size. Its explicit task
