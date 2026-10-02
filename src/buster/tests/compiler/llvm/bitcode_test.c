@@ -1401,18 +1401,18 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_weak_symbol(String8 table, String8 na
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    enum { binding_count = 7 };
+    enum { definition_count = 4, binding_count = 7 };
     // LLVM 23.1.2 getEncodedLinkage: weak=16 (legacy 1 implies COMDAT),
     // extern_weak=7, internal=3, external=0; visibility is a separate operand.
     LlvmBitcodeTestBinding expected[binding_count] = {
         {.linkage = 16}, {.linkage = 0}, {.linkage = 3},
-        {.linkage = 7, .declaration = true}, {.linkage = 0, .declaration = true},
-        {.linkage = 16, .visibility = 1}, {.linkage = 7, .visibility = 1, .declaration = true},
+        {.linkage = 16, .visibility = 1}, {.linkage = 7, .declaration = true},
+        {.linkage = 0, .declaration = true}, {.linkage = 7, .visibility = 1, .declaration = true},
     };
-    String8 data_names[binding_count] = {S8("weak_data"), S8("strong_data"), S8("local_data"), S8("weak_import_data"),
-                                       S8("strong_import_data"), S8("hidden_weak_data"), S8("hidden_import_data")};
-    String8 function_names[binding_count] = {S8("weak_function"), S8("strong_function"), S8("local_function"), S8("weak_import_function"),
-                                           S8("strong_import_function"), S8("hidden_weak_function"), S8("hidden_import_function")};
+    String8 data_names[binding_count] = {S8("weak_data"), S8("strong_data"), S8("local_data"), S8("hidden_weak_data"),
+                                       S8("weak_import_data"), S8("strong_import_data"), S8("hidden_import_data")};
+    String8 function_names[binding_count] = {S8("weak_function"), S8("strong_function"), S8("local_function"), S8("hidden_weak_function"),
+                                           S8("weak_import_function"), S8("strong_import_function"), S8("hidden_import_function")};
     IrType types[] = {
         {.kind = IR_TYPE_VOID, .layout = {.resolved = true}},
         {.id = {.value = 1}, .kind = IR_TYPE_INTEGER, .layout = {.size = 4, .alignment = 4, .resolved = true},
@@ -1432,19 +1432,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
     IrValue value = {.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_VALUE};
     IrBlock block = {.first_instruction = {.value = 0}, .last_instruction = {.value = 1}, .terminated = true, .sealed = true};
     IrSymbol symbols[binding_count * 2] = {0};
-    IrGlobal globals[binding_count] = {0};
+    IrGlobal globals[definition_count] = {0};
     IrFunction functions[binding_count] = {0};
     for (u32 index = 0; index < binding_count; index += 1)
     {
         IrSymbol symbol = {.id = {.value = index}, .name = data_names[index], .link_name = data_names[index],
                            .type = {.value = 1}, .kind = IR_SYMBOL_DATA,
                            .linkage = index == 2 ? IR_LINKAGE_INTERNAL : expected[index].declaration ? IR_LINKAGE_IMPORT : IR_LINKAGE_EXTERNAL,
-                           .is_definition = !expected[index].declaration, .is_weak = index != 1 && index != 4,
-                           .is_hidden = index == 2 || index >= 5};
+                           .is_definition = !expected[index].declaration, .is_weak = index != 1 && index != 5,
+                           .is_hidden = index == 2 || index == 3 || index == 6};
         symbols[index] = symbol;
-        globals[index] = (IrGlobal){.symbol = {.value = index}, .type = {.value = 1}, .alignment = 4,
-                                   .initializer_kind = expected[index].declaration ? IR_GLOBAL_INITIALIZER_NONE : IR_GLOBAL_INITIALIZER_INTEGER,
-                                   .initializer_bits = 11};
+        if (!expected[index].declaration)
+        {
+            globals[index] = (IrGlobal){.symbol = {.value = index}, .type = {.value = 1}, .alignment = 4,
+                                       .initializer_kind = IR_GLOBAL_INITIALIZER_INTEGER, .initializer_bits = 11};
+        }
         symbol.id.value += binding_count;
         symbol.name = function_names[index];
         symbol.link_name = function_names[index];
@@ -1463,9 +1465,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
             functions[index].value_count = 1;
         }
     }
-    IrModule module = {.name = S8("weak_records"), .globals = globals, .global_count = binding_count,
-                       .functions = functions, .function_count = binding_count, .lowered_function_count = 4};
-    IrProgram program = {.arena = arguments->arena, .modules = &module, .module_count = 1, .lowered_function_count = 4,
+    // Canonical globals own storage definitions only. Imported data lives in
+    // the symbol table; the serializer discovers it after the four definitions.
+    IrModule module = {.name = S8("weak_records"), .globals = globals, .global_count = BUSTER_ARRAY_LENGTH(globals),
+                       .functions = functions, .function_count = binding_count, .lowered_function_count = definition_count};
+    IrProgram program = {.arena = arguments->arena, .modules = &module, .module_count = 1, .lowered_function_count = definition_count,
                          .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)},
                          .symbols = {.symbols = symbols, .count = BUSTER_ARRAY_LENGTH(symbols)}};
     program.data_layout.pointer.size = 8;
@@ -1479,6 +1483,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
         options.target_triple = targets[target];
         LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arguments->arena, &program, &module, 1, options);
         LlvmBitcodeArtifact repeated = llvm_bitcode_emit_with_options(arguments->arena, &program, &module, 1, options);
+        if (!llvm_bitcode_artifact_is_valid(first) || !llvm_bitcode_artifact_is_valid(repeated))
+        {
+            arguments->show(arguments, S8("LLVM weak records {S8}: first={S8} {S8} repeated={S8} {S8}\n"), targets[target],
+                            llvm_bitcode_error_code_name(first.error.code), first.error.message,
+                            llvm_bitcode_error_code_name(repeated.error.code), repeated.error.message);
+        }
         BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(first) && llvm_bitcode_artifact_is_valid(repeated));
         if (first.success && repeated.success)
         {
@@ -1531,8 +1541,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
                         {
                             ByteSlice bytes = completed.streams[STANDARD_STREAM_OUTPUT];
                             String8 table = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
-                            BUSTER_TEST(arguments, llvm_bitcode_test_weak_symbol(table, data_names[5], S8(" WEAK "), S8(" HIDDEN "), false));
-                            BUSTER_TEST(arguments, llvm_bitcode_test_weak_symbol(table, function_names[5], S8(" WEAK "), S8(" HIDDEN "), false));
+                            BUSTER_TEST(arguments, llvm_bitcode_test_weak_symbol(table, data_names[3], S8(" WEAK "), S8(" HIDDEN "), false));
+                            BUSTER_TEST(arguments, llvm_bitcode_test_weak_symbol(table, function_names[3], S8(" WEAK "), S8(" HIDDEN "), false));
                             BUSTER_TEST(arguments, llvm_bitcode_test_weak_symbol(table, data_names[1], S8(" GLOBAL "), S8(" DEFAULT "), false));
                             BUSTER_TEST(arguments, llvm_bitcode_test_weak_symbol(table, function_names[1], S8(" GLOBAL "), S8(" DEFAULT "), false));
                         }
