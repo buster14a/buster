@@ -26937,18 +26937,19 @@ BUSTER_C_INTERNAL void c_parse_validate_gnu_fallthrough(CParseResult* result, CP
                 {
                     CToken name = preprocess.tokens[item];
                     bool argument = c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+                    u32 argument_close = argument ? c_parse_matching_delimiter_indexed(result, preprocess, item + 1) : item;
                     if (name.kind == C_TOKEN_IDENTIFIER)
                     {
                         String8 spelling = c_token_spelling(preprocess.spelling_base, name);
                         if (string_equal(spelling, S8("fallthrough")) || string_equal(spelling, S8("__fallthrough__")))
                         {
                             if (fallthrough == UINT32_MAX) fallthrough = item;
-                            if (argument) c_parse_lowering_constraint_consider(diagnostic, S8("fallthrough attribute takes no arguments"), item, item);
+                            if (argument && argument_close != item + 2)
+                                c_parse_lowering_constraint_consider(diagnostic, S8("fallthrough attribute takes no arguments"), item, item);
                         }
                     }
                     if (argument)
                     {
-                        u32 argument_close = c_parse_matching_delimiter_indexed(result, preprocess, item + 1);
                         item = argument_close < close ? argument_close : close - 1;
                     }
                 }

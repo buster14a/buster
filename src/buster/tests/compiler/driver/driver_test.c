@@ -2622,6 +2622,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
         // GNU fallthrough is a null statement in pre-C23 dialects (#1411).
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((fallthrough())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c99")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((__fallthrough__())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c99")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((fallthrough())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=gnu11")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((__fallthrough__())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=gnu11")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((fallthrough())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((__fallthrough__())); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c17")},
         {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((fallthrough)); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c99")},
         {S8("int f(int x) { switch(x) { case 0: __attribute__((fallthrough)) x += 1; case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute requires a null statement"), S8("-std=c99")},
         {S8("int f(int x) { switch(x) { case 0: x += 1; __attribute__((__fallthrough__)); case 1: x += 2; } return x; }\n"), true, false, {0}, S8("-std=c99")},
@@ -29326,6 +29332,26 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             "    return result;\n"
             "}\n"
             "\n"
+            "static int fall_empty(int value)\n"
+            "{\n"
+            "    int result = 0;\n"
+            "    switch (value)\n"
+            "    {\n"
+            "    case 0:\n"
+            "        result += 1;\n"
+            "        __attribute__((fallthrough()));\n"
+            "    case 1:\n"
+            "        result += 2;\n"
+            "        __attribute__((__fallthrough__()));\n"
+            "    case 2:\n"
+            "        result += 4;\n"
+            "        break;\n"
+            "    default:\n"
+            "        break;\n"
+            "    }\n"
+            "    return result;\n"
+            "}\n"
+            "\n"
             "int main(void)\n"
             "{\n"
             "    __attribute__((unused)) unsigned long long unassigned;\n"
@@ -29354,7 +29380,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             "    {\n"
             "        return 3;\n"
             "    }\n"
-            "    if (fall(0) != 7 || fall(1) != 6 || fall(2) != 4 || fall(9) != 0)\n"
+            "    if (fall(0) != 7 || fall(1) != 6 || fall(2) != 4 || fall(9) != 0 ||\n"
+            "        fall_empty(0) != 7 || fall_empty(1) != 6 || fall_empty(2) != 4 || fall_empty(9) != 0)\n"
             "    {\n"
             "        return 4;\n"
             "    }\n"
