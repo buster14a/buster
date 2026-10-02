@@ -98,7 +98,9 @@
 // That index also records the names each requested library leaves undefined,
 // and every hosted executable writer exports its own definition of such a
 // name, as ld does, so a library can call back into the program that loads
-// it without -rdynamic (link_elf_symbol_referenced_by_library).
+// it without -rdynamic (link_elf_symbol_referenced_by_library). ELF executable
+// TLS exports reuse link_elf_thread_local_offset and the loaded section index;
+// their dynamic symbols carry STT_TLS offsets rather than image addresses.
 
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/link/link_internal.h>
@@ -136,6 +138,18 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_loaded_kinds[] = {
     OBJECT_SECTION_THREAD_LOCAL_ZERO,
     OBJECT_SECTION_UNWIND,
 };
+
+// The index link_elf_section_table_append gives a loaded section: its
+// position in link_elf_loaded_kinds, after the null header.
+BUSTER_GLOBAL_LOCAL u16 link_elf_loaded_section_index(u32 section)
+{
+    u16 result = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
+    {
+        result = link_elf_loaded_kinds[index] == (ObjectSectionKind)section ? (u16)(index + 1) : result;
+    }
+    return result;
+}
 
 #define BUSTER_LINK_ELF_SECTION_HEADER_SIZE 64
 #define BUSTER_LINK_ELF_SYMBOL_SIZE 24
@@ -5755,7 +5769,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_copy_relocations_write(LinkElfCopyPlan const* 
 // its own relocations against the same addresses.
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
                                                                                            NativeExecutableLinkOptions options, LinkElfIndex* exports,
-                                                                                           u64* layout_section_offsets)
+                                                                                           u64* layout_section_offsets, bool export_thread_local)
 {
     NativeExecutableLinkResult result = {0};
     enum
@@ -5961,9 +5975,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // dlopen(NULL)/dlsym can find the program's own definitions.  CPython's
     // ctypes.pythonapi is exactly that call, and every
     // `pythonapi.PyBytes_FromFormat` lookup died with "undefined symbol"
-    // while the flag was ignored.  Thread-local symbols are excluded: their
-    // st_value speaks TLS-offset, not address, and nothing dlsym-shaped asks
-    // for them.
+    // while the flag was ignored. Thread-local definitions are exported too:
+    // their STT_TLS value is a module-block offset, which a library's dynamic
+    // TLS relocations need even when the executable relaxes its own accesses.
+    // Android staging retains its prior export scope through export_thread_local.
     bool export_dynamic = false;
     for (u32 argument_index = 0; argument_index < options.linker_argument_count; argument_index += 1)
     {
@@ -5982,8 +5997,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         ObjectSymbol* export_symbol = object->symbols + symbol_index;
         if ((!export_symbol->global && !export_symbol->weak) || export_symbol->hidden || export_symbol->section >= OBJECT_SECTION_COUNT ||
             (!export_dynamic && !link_elf_symbol_referenced_by_library(exports, export_symbol->name)) ||
-            object_section_kind_is_debug((ObjectSectionKind)export_symbol->section) || export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA ||
-            export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO || !export_symbol->name.length ||
+            object_section_kind_is_debug((ObjectSectionKind)export_symbol->section) ||
+            (!export_thread_local && (export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO)) ||
+            !export_symbol->name.length ||
             (export_symbol->kind != OBJECT_SYMBOL_FUNCTION && export_symbol->kind != OBJECT_SYMBOL_DATA))
         {
             continue;
@@ -6134,12 +6150,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         link_write_u32(bytes, symbol_offset, (u32)(dynamic_name_cursor - dynamic_string_offset));
         memcpy(bytes + dynamic_name_cursor, export_symbol->name.pointer, export_symbol->name.length);
         dynamic_name_cursor += export_symbol->name.length + 1;
-        // Binding and type in st_info; SHN_ABS in st_shndx, the shape the
-        // copy-slot aliases above already use -- the loader reads only the
-        // value, and the value is the final image address.
-        bytes[symbol_offset + 4] = (u8)(((export_symbol->weak ? 2u : 1u) << 4) | (export_symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2u : 1u));
-        link_write_u16(bytes, symbol_offset + 6, 0xfff1);
-        link_write_u64(bytes, symbol_offset + 8, image_base + section_offsets[export_symbol->section] + export_symbol->value);
+        // Ordinary exports retain the absolute-address shape used by copy
+        // aliases. TLS definitions name their loaded section and module-block
+        // offset; an image address would address the wrong per-thread slot.
+        bool thread_local_symbol = export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+        u32 symbol_type = thread_local_symbol ? 6u : export_symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2u : 1u;
+        bytes[symbol_offset + 4] = (u8)(((export_symbol->weak ? 2u : 1u) << 4) | symbol_type);
+        link_write_u16(bytes, symbol_offset + 6, thread_local_symbol ? link_elf_loaded_section_index(export_symbol->section) : 0xfff1);
+        u64 symbol_value = thread_local_symbol ? link_elf_thread_local_offset(object, export_symbol)
+                                              : image_base + section_offsets[export_symbol->section] + export_symbol->value;
+        link_write_u64(bytes, symbol_offset + 8, symbol_value);
         link_write_u64(bytes, symbol_offset + 16, export_symbol->size);
         export_symbol_slot += 1;
     }
@@ -6810,18 +6830,6 @@ BUSTER_GLOBAL_LOCAL bool link_elf_symbol_is_thread_local(ObjectSymbol const* sym
     return symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
 }
 
-// The index link_elf_section_table_append gives a loaded section: its
-// position in link_elf_loaded_kinds, after the null header.
-BUSTER_GLOBAL_LOCAL u16 link_elf_loaded_section_index(u32 section)
-{
-    u16 result = 0;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
-    {
-        result = link_elf_loaded_kinds[index] == (ObjectSectionKind)section ? (u16)(index + 1) : result;
-    }
-    return result;
-}
-
 // Whether the psABI lets this GOT load become a direct LEA whose rel32 names
 // the symbol itself, asked of a copy of the site so the input is untouched:
 // the planning pass needs the answer before the image exists, and the other
@@ -6912,11 +6920,10 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_classify(LinkElfPicImage* image, bool expo
             bool is_thread_local = link_elf_symbol_is_thread_local(symbol);
             bool exportable = (symbol->global || symbol->weak) && !symbol->hidden && symbol->name.length && symbol->name.length < UINT32_MAX &&
                               (symbol->kind == OBJECT_SYMBOL_FUNCTION || symbol->kind == OBJECT_SYMBOL_DATA);
-            // An executable exports what --export-dynamic or a requested
-            // library's reference asks for, under the fixed-address writer's
-            // rule of no thread-local exports; a library exports those too.
-            bool exported = exportable && (image->shared || ((export_dynamic || link_elf_symbol_referenced_by_library(image->exports, symbol->name)) &&
-                                                             !is_thread_local));
+            // Executables export public definitions requested by a library or
+            // --export-dynamic, including TLS. The existing symbol emitter
+            // already gives TLS definitions their type and module-block offset.
+            bool exported = exportable && (image->shared || export_dynamic || link_elf_symbol_referenced_by_library(image->exports, symbol->name));
             symbol_class = (u8)((exported ? LINK_ELF_PIC_SYMBOL_EXPORTED : 0) |
                                 (exported && image->shared && !is_thread_local ? LINK_ELF_PIC_SYMBOL_PREEMPTIBLE : 0));
         }
@@ -8309,7 +8316,7 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_addre
 }
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarch64_dynamic(Arena* arena, ObjectFile* object,
-                                                                                            NativeExecutableLinkOptions options, LinkElfIndex* exports)
+                                                                                            NativeExecutableLinkOptions options, LinkElfIndex* exports, bool export_thread_local)
 {
     // argc, argv and envp off the stack, the initializers, `bl main`,
     // `bl exit` and a trap — link_aarch64_build_elf_entry_stub emits the
@@ -8405,7 +8412,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     // stripped copy, whose relocations no longer name sections the image does
     // not carry.
     u64 staged_section_offsets[OBJECT_SECTION_COUNT] = {0};
-    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports, staged_section_offsets);
+    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports, staged_section_offsets, export_thread_local);
     if (result.error != LINK_ERROR_NONE)
     {
         return result;
@@ -13928,12 +13935,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     }
     else if (object->target.cpu_arch == CPU_ARCH_X86_64)
     {
-        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports, 0)
+        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports, 0, false)
                             : link_native_executable_elf64_x86_64(arena, &staging_object, staging_options);
     }
     else if (object->target.cpu_arch == CPU_ARCH_AARCH64)
     {
-        result = has_import ? link_native_executable_elf64_aarch64_dynamic(arena, &staging_object, staging_options, exports)
+        result = has_import ? link_native_executable_elf64_aarch64_dynamic(arena, &staging_object, staging_options, exports, false)
                             : link_native_executable_elf64_aarch64(arena, &staging_object, staging_options);
     }
     else
@@ -14220,12 +14227,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
             }
             else if (object->target.cpu_arch == CPU_ARCH_X86_64)
             {
-                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options, exports, 0)
+                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options, exports, 0, true)
                                        : link_native_executable_elf64_x86_64(arena, object, options);
             }
             else
             {
-                result = dynamic_image ? link_native_executable_elf64_aarch64_dynamic(arena, object, options, exports)
+                result = dynamic_image ? link_native_executable_elf64_aarch64_dynamic(arena, object, options, exports, true)
                                        : link_native_executable_elf64_aarch64(arena, object, options);
             }
         }

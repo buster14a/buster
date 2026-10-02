@@ -20,6 +20,24 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   (GitHub #363); object parsing alone is not runtime-unwind evidence.
   Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
   saves, and keeps saved-register offsets separate from stack-allocation sizes.
+- **Executable TLS definitions participate in dynamic lookup.** Fixed-address
+  Linux x86-64/AArch64 executables and x86-64 PIEs export public `.tdata` and
+  `.tbss` definitions requested by a linked DSO, or all public TLS definitions
+  under `-rdynamic`. Their dynamic symbols carry `STT_TLS`, their loaded
+  section index and size, and an offset in the module's TLS block: initialized
+  data first, then zero-fill at its required alignment. A runtime image address
+  cannot serve as that offset. Fixed images reuse `link_elf_thread_local_offset`
+  and `link_elf_loaded_section_index`; the PIE emitter already uses those
+  identities. Hidden definitions remain private, undefined hidden references
+  fail, and TLS/non-TLS object identities retain their mismatch diagnostic.
+  `compiler_driver_tls_export_tests` uses a configured host-built DSO to read
+  and modify both initialized and zero-fill executable TLS. Source/object,
+  fixed/PIE, and demand/`-rdynamic` routes have host-linker/runtime controls
+  and independent raw ELF checks for type, binding, visibility, section index,
+  size, block-relative value, initialized bytes and `PT_TLS` bounds. An unused
+  public TLS symbol distinguishes demand export from `-rdynamic`; a hidden
+  definition stays absent in both modes. Linux AArch64 covers its supported
+  fixed-address routes; other image writers retain their existing TLS scope.
 - **Program-symbol identity crosses the object boundary.**
   `object_from_canonical_codegen_module` resolves a relocation's `IrSymbolId`
   through `entry_by_symbol`. Entries map to their own index; globals and
