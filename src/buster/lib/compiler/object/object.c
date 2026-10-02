@@ -1514,6 +1514,20 @@ BUSTER_GLOBAL_LOCAL void object_assembly_advance_index(ObjectAssemblyBuffer* buf
     }
 }
 
+// CFI uses this private zero-size function symbol as the default code base.
+// GNU ELF assemblers already own .text as a section symbol; its references
+// remain valid without a second definition or a function type/size override.
+BUSTER_GLOBAL_LOCAL bool object_assembly_is_aarch64_text_anchor(ObjectFile* object, Target target, u32 section, ObjectSymbol* symbol)
+{
+    bool result = target.cpu_arch == CPU_ARCH_AARCH64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64 &&
+                  section == OBJECT_SECTION_TEXT && section < object->section_count &&
+                  object->sections[section].kind == OBJECT_SECTION_TEXT && string_equal(object->sections[section].name, S8(".text")) &&
+                  symbol->section == section && symbol->kind == OBJECT_SYMBOL_FUNCTION && !symbol->global && !symbol->weak &&
+                  !symbol->hidden && !symbol->comdat && symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
+                  symbol->value == 0 && symbol->size == 0 && string_equal(symbol->name, S8(".text"));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section, u64 offset)
 {
     u32 end = buffer->index.sections[section].symbol_end;
@@ -1521,6 +1535,10 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffe
     {
         ObjectSymbol* symbol = object->symbols + buffer->index.symbols[index];
         if (symbol->value != offset) break;
+        if (object_assembly_is_aarch64_text_anchor(object, target, section, symbol))
+        {
+            continue;
+        }
         if (symbol->global)
         {
             object_assembly_append_string(buffer, S8("\t.globl "));
@@ -1548,6 +1566,10 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_sizes(ObjectAssemblyBuffer* buffer
     for (u32 index = range.symbol_begin; index < range.symbol_end; index += 1)
     {
         ObjectSymbol* symbol = object->symbols + buffer->index.original_symbols[index];
+        if (object_assembly_is_aarch64_text_anchor(object, target, section, symbol))
+        {
+            continue;
+        }
         object_assembly_append_string(buffer, S8("\t.size "));
         object_assembly_append_assembly_symbol(buffer, target, symbol->name);
         object_assembly_append_string(buffer, S8(", "));
@@ -3484,7 +3506,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_sp_register_width(Object
 {
     if ((index & 31) == 31)
     {
-        object_assembly_append_string(buffer, S8("sp"));
+        object_assembly_append_string(buffer, wide ? S8("sp") : S8("wsp"));
     }
     else
     {
@@ -3580,11 +3602,28 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_aarch64_target(ByteSlice data, u64 targ
     return target < data.length && (target & 3) == 0;
 }
 
+// The existing pair spelling carries GPR size and temporal addressing only.
+// Unpredictable register overlaps are also left raw: host assemblers refuse them.
+BUSTER_GLOBAL_LOCAL bool object_assembly_aarch64_pair_mnemonic(u32 word)
+{
+    u32 mode = (word >> 23) & 3;
+    u32 first = word & 31;
+    u32 second = (word >> 10) & 31;
+    u32 base = (word >> 5) & 31;
+    bool load = (word & UINT32_C(0x00400000)) != 0;
+    bool result = (word & UINT32_C(0x7e000000)) == UINT32_C(0x28000000) && mode != 0 &&
+                  (!load || first != second) &&
+                  (mode == 2 || base == 31 || (base != first && base != second));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section,
                                                                   ByteSlice data, u64 offset, u64 end)
 {
     BUSTER_UNUSED(object);
     BUSTER_UNUSED(target);
+    // Decode only a subset whose complete fields and register roles are
+    // preserved by the emitted spelling. Every other word stays raw.
     if (offset + 4 <= end)
     {
         u32 word = 0;
@@ -3614,7 +3653,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
         }
         if ((word & UINT32_C(0x7c000000)) == UINT32_C(0x14000000))
         {
-            s64 displacement = object_assembly_aarch64_sign_extend(word & UINT32_C(0x03ffffff), 26) << 2;
+            s64 displacement = object_assembly_aarch64_sign_extend(word & UINT32_C(0x03ffffff), 26) * 4;
             u64 target_offset = (u64)((s64)offset + displacement);
             if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
             {
@@ -3625,16 +3664,16 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x18000000))
+        if ((word & UINT32_C(0xff000000)) == UINT32_C(0x58000000))
         {
-            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) * 4;
             u64 literal_offset = (u64)((s64)offset + displacement);
             if (!object_assembly_aarch64_target(data, literal_offset) || !object_assembly_has_internal_label(buffer, section, literal_offset))
             {
                 return 0;
             }
             object_assembly_append_string(buffer, S8("\tldr "));
-            object_assembly_append_aarch64_register(buffer, word);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, true);
             object_assembly_append_string(buffer, S8(", "));
             object_assembly_append_internal_label(buffer, section, literal_offset);
             object_assembly_append_string(buffer, S8("\n"));
@@ -3642,7 +3681,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
         }
         if ((word & UINT32_C(0xff000010)) == UINT32_C(0x54000000))
         {
-            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) * 4;
             u64 target_offset = (u64)((s64)offset + displacement);
             if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
             {
@@ -3659,7 +3698,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
         {
             bool wide = (word & UINT32_C(0x80000000)) != 0;
             bool nonzero = (word & UINT32_C(0x01000000)) != 0;
-            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) * 4;
             u64 target_offset = (u64)((s64)offset + displacement);
             if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
             {
@@ -3676,7 +3715,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
         {
             bool nonzero = (word & UINT32_C(0x01000000)) != 0;
             u32 bit = ((word >> 31) & 1) * 32 + ((word >> 19) & 31);
-            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x3fff), 14) << 2;
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x3fff), 14) * 4;
             u64 target_offset = (u64)((s64)offset + displacement);
             if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
             {
@@ -3700,9 +3739,9 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
                                                                                                                                    : S8("\tror "));
             object_assembly_append_aarch64_zero_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
@@ -3711,22 +3750,23 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\tmul "));
             object_assembly_append_aarch64_zero_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x7fe00c00)) == UINT32_C(0x1a800400) && ((word >> 5) & 31) == 31 && ((word >> 16) & 31) == 31)
+        if ((word & UINT32_C(0x7fe00c00)) == UINT32_C(0x1a800400) && ((word >> 5) & 31) == 31 && ((word >> 16) & 31) == 31 &&
+            ((word >> 12) & 15) < 14)
         {
             object_assembly_append_string(buffer, S8("\tcset "));
-            object_assembly_append_aarch64_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
             object_assembly_append_string(buffer, S8(", "));
             object_assembly_append_string(buffer, object_assembly_aarch64_condition(((word >> 12) & 15) ^ 1));
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        u32 logical_operation = word & UINT32_C(0x7f200000);
+        u32 logical_operation = word & UINT32_C(0x7fe0fc00);
         if (logical_operation == UINT32_C(0x0a000000) || logical_operation == UINT32_C(0x2a000000) || logical_operation == UINT32_C(0x4a000000))
         {
             bool wide = (word & UINT32_C(0x80000000)) != 0;
@@ -3755,7 +3795,8 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x11000000))
+        if ((word & UINT32_C(0x1f800000)) == UINT32_C(0x11000000) &&
+            (!(word & UINT32_C(0x00400000)) || ((word >> 10) & 0xfff)))
         {
             bool wide = (word & UINT32_C(0x80000000)) != 0;
             bool subtract = (word & UINT32_C(0x40000000)) != 0;
@@ -3786,7 +3827,9 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x1f200000)) == UINT32_C(0x0b000000))
+        if ((word & UINT32_C(0x1fe00000)) == UINT32_C(0x0b000000) &&
+            ((word & UINT32_C(0x80000000)) || ((word >> 10) & 63) < 32) &&
+            ((word & UINT32_C(0x2000001f)) != UINT32_C(0x2000001f) || !(word & UINT32_C(0x0000fc00))))
         {
             bool wide = (word & UINT32_C(0x80000000)) != 0;
             bool subtract = (word & UINT32_C(0x40000000)) != 0;
@@ -3798,18 +3841,18 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             if (set_flags && destination == 31)
             {
                 object_assembly_append_string(buffer, subtract ? S8("\tcmp ") : S8("\tcmn "));
-                object_assembly_append_aarch64_register_width(buffer, source, wide);
+                object_assembly_append_aarch64_zero_register_width(buffer, source, wide);
                 object_assembly_append_string(buffer, S8(", "));
-                object_assembly_append_aarch64_register_width(buffer, second, wide);
+                object_assembly_append_aarch64_zero_register_width(buffer, second, wide);
             }
             else
             {
                 object_assembly_append_string(buffer, subtract ? set_flags ? S8("\tsubs ") : S8("\tsub ") : set_flags ? S8("\tadds ") : S8("\tadd "));
-                object_assembly_append_aarch64_register_width(buffer, destination, wide);
+                object_assembly_append_aarch64_zero_register_width(buffer, destination, wide);
                 object_assembly_append_string(buffer, S8(", "));
-                object_assembly_append_aarch64_register_width(buffer, source, wide);
+                object_assembly_append_aarch64_zero_register_width(buffer, source, wide);
                 object_assembly_append_string(buffer, S8(", "));
-                object_assembly_append_aarch64_register_width(buffer, second, wide);
+                object_assembly_append_aarch64_zero_register_width(buffer, second, wide);
                 if (shift)
                 {
                     object_assembly_append_string(buffer, S8(", lsl #"));
@@ -3819,8 +3862,9 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x7f800000)) == UINT32_C(0x52800000) || (word & UINT32_C(0x7f800000)) == UINT32_C(0x72800000) ||
-            (word & UINT32_C(0x7f800000)) == UINT32_C(0x12800000))
+        if (((word & UINT32_C(0x7f800000)) == UINT32_C(0x52800000) || (word & UINT32_C(0x7f800000)) == UINT32_C(0x72800000) ||
+             (word & UINT32_C(0x7f800000)) == UINT32_C(0x12800000)) &&
+            ((word & UINT32_C(0x80000000)) || !(word & UINT32_C(0x00400000))))
         {
             bool wide = (word & UINT32_C(0x80000000)) != 0;
             u32 operation = (word >> 29) & 3;
@@ -3830,7 +3874,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\t"));
             object_assembly_append_string(buffer, name);
             object_assembly_append_string(buffer, S8(" "));
-            object_assembly_append_aarch64_register_width(buffer, word, wide);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, wide);
             object_assembly_append_string(buffer, S8(", #0x"));
             object_assembly_append_u64_hex(buffer, immediate, 4);
             if (shift)
@@ -3841,7 +3885,7 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000))
+        if ((word & UINT32_C(0x3f800000)) == UINT32_C(0x39000000))
         {
             u32 size_bits = (word >> 30) & 3;
             u32 bytes = 1u << size_bits;
@@ -3863,16 +3907,16 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("]\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x3a000000)) == UINT32_C(0x28000000))
+        if (object_assembly_aarch64_pair_mnemonic(word))
         {
             bool load = (word & UINT32_C(0x00400000)) != 0;
             bool wide = (word & UINT32_C(0x80000000)) != 0;
             u32 mode = (word >> 23) & 3;
             s64 displacement = object_assembly_aarch64_sign_extend((word >> 15) & 0x7f, 7) * (wide ? 8 : 4);
             object_assembly_append_string(buffer, load ? S8("\tldp ") : S8("\tstp "));
-            object_assembly_append_aarch64_register_width(buffer, word, wide);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, wide);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 10, wide);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 10, wide);
             object_assembly_append_string(buffer, S8(", ["));
             object_assembly_append_aarch64_sp_register(buffer, word >> 5);
             if (mode == 1)
@@ -3896,19 +3940,19 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0x7f000000)) == UINT32_C(0x13000000))
+        if ((word & UINT32_C(0xfffffc00)) == UINT32_C(0x93407c00))
         {
             object_assembly_append_string(buffer, S8("\tsxtw "));
-            object_assembly_append_aarch64_register(buffer, word);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, true);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, word >> 5, false);
+            object_assembly_append_aarch64_zero_register_width(buffer, word >> 5, false);
             object_assembly_append_string(buffer, S8("\n"));
             return 4;
         }
-        if ((word & UINT32_C(0xffc00000)) == UINT32_C(0xd5000000))
+        if ((word & UINT32_C(0xffffffe0)) == UINT32_C(0xd53bd040))
         {
             object_assembly_append_string(buffer, S8("\tmrs "));
-            object_assembly_append_aarch64_register(buffer, word);
+            object_assembly_append_aarch64_zero_register_width(buffer, word, true);
             object_assembly_append_string(buffer, S8(", tpidr_el0\n"));
             return 4;
         }

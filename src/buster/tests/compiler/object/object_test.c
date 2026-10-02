@@ -1002,6 +1002,145 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_printer_fields(UnitTestAr
     return result;
 }
 
+// Separate controls pin WSP and assembler-refused pair neighbors without
+// changing the original 92-word causal corpus.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_printer_boundaries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct PrinterBoundary PrinterBoundary;
+    struct PrinterBoundary
+    {
+        u32 word;
+        String8 line;
+    };
+    PrinterBoundary cases[] = {
+        {UINT32_C(0x110003e3), S8("\tadd w3, wsp, #0x0\n")},
+        {UINT32_C(0x1100005f), S8("\tadd wsp, w2, #0x0\n")},
+        {UINT32_C(0x11400443), S8("\tadd w3, w2, #0x1000\n")},
+        {UINT32_C(0x91400443), S8("\tadd x3, x2, #0x1000\n")},
+        {UINT32_C(0x9a9f17ff), S8("\tcset xzr, eq\n")},
+        {UINT32_C(0xa9c11063), S8("\t.word 0xa9c11063\n")},
+        {UINT32_C(0xa9c10c43), S8("\t.word 0xa9c10c43\n")},
+        {UINT32_C(0xa8c11063), S8("\t.word 0xa8c11063\n")},
+        {UINT32_C(0xa9c17fe3), S8("\tldp x3, xzr, [sp, #0x10]!\n")},
+    };
+    Target targets[] = {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            u8 bytes[4];
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                bytes[byte] = (u8)(cases[row].word >> (8 * byte));
+            }
+            u8 original[4];
+            memcpy(original, bytes, sizeof(bytes));
+            ObjectSection section = {.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 4,
+                                     .data = {.pointer = bytes, .length = sizeof(bytes)}};
+            ObjectSymbol symbol = {.name = S8("boundary_word"), .section = 0, .size = sizeof(bytes),
+                                   .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+            ObjectFile object = {.target = targets[target], .sections = &section, .section_count = 1,
+                                 .symbols = &symbol, .symbol_count = 1};
+            String8 printed = object_print_assembly(arguments->arena, &object);
+            BUSTER_TEST_RAW(arguments, printed.length != 0 && object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(printed), cases[row].line),
+                string_format(arguments->arena, S8("AArch64 boundary target={u32} row={u32}:\n{S8}"), target, row, printed));
+            BUSTER_TEST(arguments, memcmp(bytes, original, sizeof(bytes)) == 0);
+            arena_set_position(arguments->arena, temporary.position);
+        }
+    }
+    return result;
+}
+
+// Only the private default code-base anchor loses its conflicting definition;
+// each other symbol or target retains the original type/label/size spelling.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_text_anchor(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_FREESTANDING},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_UEFI},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 variant = 0; variant < 13; variant += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            u8 text[] = {0x1f, 0x20, 0x03, 0xd5, 0xc0, 0x03, 0x5f, 0xd6};
+            u8 data[8] = {0};
+            ObjectSection sections[OBJECT_SECTION_COUNT + 1] = {0};
+            for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
+            {
+                sections[section].kind = (ObjectSectionKind)section;
+            }
+            sections[OBJECT_SECTION_TEXT] = (ObjectSection){.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 4,
+                .data = {.pointer = text, .length = sizeof(text)}};
+            sections[OBJECT_SECTION_READ_ONLY_DATA] = (ObjectSection){.name = S8(".rodata"), .kind = OBJECT_SECTION_READ_ONLY_DATA,
+                .alignment = 8, .data = {.pointer = data, .length = sizeof(data)}};
+            sections[OBJECT_SECTION_COUNT] = (ObjectSection){.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 4};
+            ObjectSymbol symbol = {.name = S8(".text"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION};
+            switch (variant)
+            {
+                case 1: symbol.global = true; break;
+                case 2: symbol.name = S8("ordinary_local"); break;
+                case 3: symbol.value = 4; break;
+                case 4: symbol.size = 8; break;
+                case 5: symbol.kind = OBJECT_SYMBOL_DATA; break;
+                case 6: symbol.weak = true; break;
+                case 7: symbol.hidden = true; break;
+                case 8: symbol.comdat = 1; break;
+                case 9: symbol.thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES; break;
+                case 10: sections[OBJECT_SECTION_TEXT].name = S8(".text.other"); break;
+                case 11:
+                {
+                    symbol.section = OBJECT_SECTION_COUNT;
+                    sections[OBJECT_SECTION_COUNT].data = (ByteSlice){.pointer = text, .length = sizeof(text)};
+                    break;
+                }
+                case 12: symbol.section = OBJECT_SECTION_UNDEFINED; break;
+                default: break;
+            }
+            ObjectSymbol original = symbol;
+            ObjectRelocation relocation = {.section = OBJECT_SECTION_READ_ONLY_DATA, .symbol = 0, .addend = 4,
+                                           .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            ObjectFile object = {.target = targets[target], .sections = sections, .section_count = BUSTER_ARRAY_LENGTH(sections),
+                                 .symbols = &symbol, .symbol_count = 1, .relocations = &relocation, .relocation_count = 1};
+            String8 printed = object_print_assembly(arguments->arena, &object);
+            ByteSlice bytes = BUSTER_SLICE_TO_BYTE_SLICE(printed);
+            bool suppressed = target < 3 && variant == 0;
+            bool apple = target == 5;
+            String8 spelling = apple ? S8("_.text") : S8(".text");
+            if (variant == 2)
+            {
+                spelling = apple ? S8("_ordinary_local") : S8("ordinary_local");
+            }
+            String8 label = string_format(arguments->arena, S8("{S8}:\n"), spelling);
+            BUSTER_TEST_RAW(arguments, printed.length != 0 && object_bytes_contain(bytes, label) == (!suppressed && variant != 12),
+                string_format(arguments->arena, S8("anchor target={u32} variant={u32}:\n{S8}"), target, variant, printed));
+            if (target != 3 && !apple)
+            {
+                String8 type = string_format(arguments->arena, S8("\t.type {S8}, "), spelling);
+                String8 size = string_format(arguments->arena, S8("\t.size {S8}, "), spelling);
+                BUSTER_TEST(arguments, object_bytes_contain(bytes, type) == (!suppressed && variant != 12));
+                BUSTER_TEST(arguments, object_bytes_contain(bytes, size) == (!suppressed && variant != 12));
+            }
+            String8 reference = string_format(arguments->arena, S8("\t.quad {S8}"), target == 6 ?
+                (variant == 2 ? S8("\"ordinary_local\"") : S8("\".text\"")) : spelling);
+            BUSTER_TEST(arguments, object_bytes_contain(bytes, reference));
+            BUSTER_TEST(arguments, memcmp(&symbol, &original, sizeof(symbol)) == 0);
+            arena_set_position(arguments->arena, temporary.position);
+        }
+    }
+    return result;
+}
+
 // Generated printer populations and exact-output oracles. The optional
 // BUSTER_OBJECT_ASSEMBLY_BENCH replay times only object_print_assembly,
 // including index construction and cleanup; ordinary tests never time-gate.
@@ -2541,6 +2680,12 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult aarch64_printer = object_test_aarch64_printer_fields(arguments);
     result.test_count += aarch64_printer.test_count;
     result.succeeded_test_count += aarch64_printer.succeeded_test_count;
+    UnitTestResult aarch64_boundaries = object_test_aarch64_printer_boundaries(arguments);
+    result.test_count += aarch64_boundaries.test_count;
+    result.succeeded_test_count += aarch64_boundaries.succeeded_test_count;
+    UnitTestResult aarch64_anchor = object_test_aarch64_text_anchor(arguments);
+    result.test_count += aarch64_anchor.test_count;
+    result.succeeded_test_count += aarch64_anchor.succeeded_test_count;
     UnitTestResult executable_sections = object_test_executable_sections(arguments);
     result.test_count += executable_sections.test_count;
     result.succeeded_test_count += executable_sections.succeeded_test_count;

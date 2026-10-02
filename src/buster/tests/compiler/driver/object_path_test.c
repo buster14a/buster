@@ -127,6 +127,165 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_aarch64_printer_text(ByteSlice ima
     return text;
 }
 
+// Match a bounded ELF string-table entry, including its terminator.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_elf_name(ByteSlice names, u32 offset, String8 expected)
+{
+    bool result = names.pointer && offset < names.length && expected.length < names.length - offset &&
+                  memcmp(names.pointer + offset, expected.pointer, expected.length) == 0 &&
+                  names.pointer[offset + expected.length] == 0;
+    return result;
+}
+
+// This fixed ABI oracle reads symbol and RELA records directly. It never
+// invokes the production object reader, writer or assembly symbol planner.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_anchor_metadata(ByteSlice image)
+{
+    bool valid = compiler_driver_aarch64_printer_text(image).length == 44;
+    u64 table = 0;
+    u16 count = 0;
+    u16 section_names = 0;
+    if (valid)
+    {
+        memcpy(&table, image.pointer + 40, 8);
+        memcpy(&count, image.pointer + 60, 2);
+        memcpy(&section_names, image.pointer + 62, 2);
+    }
+    ByteSlice names = {0};
+    if (valid)
+    {
+        u64 offset = 0;
+        u64 size = 0;
+        u64 header = table + (u64)section_names * 64;
+        memcpy(&offset, image.pointer + header + 24, 8);
+        memcpy(&size, image.pointer + header + 32, 8);
+        valid = offset <= image.length && size <= image.length - offset;
+        if (valid) names = (ByteSlice){.pointer = image.pointer + offset, .length = size};
+    }
+    u32 text_index = UINT32_MAX;
+    u32 data_index = UINT32_MAX;
+    u32 symbols_index = UINT32_MAX;
+    u32 symbol_names_index = UINT32_MAX;
+    u32 rela_symbols = UINT32_MAX;
+    u32 rela_owner = UINT32_MAX;
+    ByteSlice symbols = {0};
+    ByteSlice symbol_names = {0};
+    ByteSlice relas = {0};
+    for (u32 section = 1; valid && section < count; section += 1)
+    {
+        u64 header = table + (u64)section * 64;
+        u32 name = 0;
+        u32 type = 0;
+        u32 link = 0;
+        u32 info = 0;
+        u64 flags = 0;
+        u64 offset = 0;
+        u64 size = 0;
+        u64 entry_size = 0;
+        memcpy(&name, image.pointer + header, 4);
+        memcpy(&type, image.pointer + header + 4, 4);
+        memcpy(&flags, image.pointer + header + 8, 8);
+        memcpy(&offset, image.pointer + header + 24, 8);
+        memcpy(&size, image.pointer + header + 32, 8);
+        memcpy(&link, image.pointer + header + 40, 4);
+        memcpy(&info, image.pointer + header + 44, 4);
+        memcpy(&entry_size, image.pointer + header + 56, 8);
+        bool payload = offset <= image.length && size <= image.length - offset;
+        if (compiler_driver_aarch64_printer_elf_name(names, name, S8(".text")))
+        {
+            valid = text_index == UINT32_MAX && type == 1 && flags == 6 && size == 44 && payload;
+            text_index = section;
+        }
+        if (compiler_driver_aarch64_printer_elf_name(names, name, S8(".rodata")))
+        {
+            valid = valid && data_index == UINT32_MAX && type == 1 && flags == 2 && size == 16 && payload;
+            data_index = section;
+            for (u64 byte = 0; valid && byte < size; byte += 1)
+            {
+                valid = image.pointer[offset + byte] == 0;
+            }
+        }
+        if (type == 2)
+        {
+            valid = valid && symbols_index == UINT32_MAX && entry_size == 24 && size % 24 == 0 && payload && link < count;
+            symbols_index = section;
+            symbol_names_index = link;
+            if (valid) symbols = (ByteSlice){.pointer = image.pointer + offset, .length = size};
+        }
+        if (compiler_driver_aarch64_printer_elf_name(names, name, S8(".rela.rodata")))
+        {
+            valid = valid && !relas.pointer && type == 4 && entry_size == 24 && size == 48 && payload;
+            rela_symbols = link;
+            rela_owner = info;
+            if (valid) relas = (ByteSlice){.pointer = image.pointer + offset, .length = size};
+        }
+    }
+    valid = valid && text_index != UINT32_MAX && data_index != UINT32_MAX && symbols.pointer &&
+            symbol_names_index < count && relas.pointer && rela_symbols == symbols_index && rela_owner == data_index;
+    if (valid)
+    {
+        u64 header = table + (u64)symbol_names_index * 64;
+        u32 type = 0;
+        u64 offset = 0;
+        u64 size = 0;
+        memcpy(&type, image.pointer + header + 4, 4);
+        memcpy(&offset, image.pointer + header + 24, 8);
+        memcpy(&size, image.pointer + header + 32, 8);
+        valid = type == 3 && offset <= image.length && size <= image.length - offset;
+        if (valid) symbol_names = (ByteSlice){.pointer = image.pointer + offset, .length = size};
+    }
+    valid = valid && symbols.length / 24 <= UINT32_MAX;
+    u32 anchor = UINT32_MAX;
+    u32 function = UINT32_MAX;
+    u32 local_count = 0;
+    u32 owner_count = 0;
+    for (u32 symbol = 0; valid && symbol < symbols.length / 24; symbol += 1)
+    {
+        u8* record = symbols.pointer + (u64)symbol * 24;
+        u32 name = 0;
+        u16 section = 0;
+        u64 value = 0;
+        u64 size = 0;
+        memcpy(&name, record, 4);
+        memcpy(&section, record + 6, 2);
+        memcpy(&value, record + 8, 8);
+        memcpy(&size, record + 16, 8);
+        if (record[4] == 3 && section == text_index)
+        {
+            valid = anchor == UINT32_MAX && value == 0 && size == 0;
+            anchor = symbol;
+        }
+        if (compiler_driver_aarch64_printer_elf_name(symbol_names, name, S8("anchor_function")))
+        {
+            valid = valid && function == UINT32_MAX && record[4] == 0x12 && record[5] == 0 &&
+                    section == text_index && value == 0 && size == 44;
+            function = symbol;
+        }
+        if (compiler_driver_aarch64_printer_elf_name(symbol_names, name, S8("local_zero")))
+        {
+            valid = valid && record[4] == 2 && record[5] == 0 && section == text_index && value == 0 && size == 0;
+            local_count += 1;
+        }
+        if (compiler_driver_aarch64_printer_elf_name(symbol_names, name, S8("anchor_refs")))
+        {
+            valid = valid && record[4] == 0x11 && record[5] == 0 && section == data_index && value == 0 && size == 16;
+            owner_count += 1;
+        }
+    }
+    valid = valid && anchor != UINT32_MAX && function != UINT32_MAX && local_count == 1 && owner_count == 1;
+    for (u32 row = 0; valid && row < 2; row += 1)
+    {
+        u8* record = relas.pointer + row * 24;
+        u64 offset = 0;
+        u64 info = 0;
+        s64 addend = 0;
+        memcpy(&offset, record, 8);
+        memcpy(&info, record + 8, 8);
+        memcpy(&addend, record + 16, 8);
+        valid = offset == (u64)row * 8 && (u32)info == 257 && info >> 32 == (row ? function : anchor) && addend == 4;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_process(UnitTestArguments* arguments, Arena* arena, bool* admission, SliceString8 command)
 {
     bool success = false;
@@ -310,6 +469,119 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
         BUSTER_TEST(arguments, os_file_delete(printed_path));
         BUSTER_TEST(arguments, os_file_delete(reference_path));
         BUSTER_TEST(arguments, os_file_delete(reassembled_path));
+
+        // Original assembly establishes the section-base and public-function
+        // relocation contract independently before the printer is observed.
+        TemporalArena anchor_temporary = arena_begin_temporal(arena);
+        String8 anchor_original = buster_test_temporary_path(arena, S8("a64-anchor-original"), S8(".s"));
+        String8 anchor_printed = buster_test_temporary_path(arena, S8("a64-anchor-printed"), S8(".s"));
+        String8 anchor_reference = buster_test_temporary_path(arena, S8("a64-anchor-reference"), S8(".o"));
+        String8 anchor_observed = buster_test_temporary_path(arena, S8("a64-anchor-observed"), S8(".o"));
+        String8 anchor_source = S8(
+            ".text\n.p2align 2\n.globl anchor_function\n.type anchor_function,@function\nanchor_function:\n"
+            ".type local_zero,@function\nlocal_zero:\n"
+            ".word 0xd503201f\n.word 0xd65f03c0\n"
+            ".word 0x110003e3\n.word 0x1100005f\n.word 0x11400443\n.word 0x91400443\n.word 0x9a9f17ff\n"
+            ".word 0xa9c11063\n.word 0xa9c10c43\n.word 0xa8c11063\n.word 0xa9c17fe3\n"
+            ".size anchor_function,44\n.size local_zero,0\n"
+            ".section .rodata,\"a\",@progbits\n.p2align 3\n.globl anchor_refs\n.type anchor_refs,@object\nanchor_refs:\n"
+            ".quad .text+4\n.quad anchor_function+4\n.size anchor_refs,16\n");
+        u32 anchor_words[] = {UINT32_C(0xd503201f), UINT32_C(0xd65f03c0),
+            UINT32_C(0x110003e3), UINT32_C(0x1100005f), UINT32_C(0x11400443), UINT32_C(0x91400443), UINT32_C(0x9a9f17ff),
+            UINT32_C(0xa9c11063), UINT32_C(0xa9c10c43), UINT32_C(0xa8c11063), UINT32_C(0xa9c17fe3)};
+        u8 anchor_bytes[44];
+        for (u32 word = 0; word < BUSTER_ARRAY_LENGTH(anchor_words); word += 1)
+        {
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                anchor_bytes[word * 4 + byte] = (u8)(anchor_words[word] >> (8 * byte));
+            }
+        }
+        bool anchor_written = file_write(anchor_original, BUSTER_SLICE_TO_BYTE_SLICE(anchor_source));
+        BUSTER_TEST(arguments, anchor_written);
+        if (anchor_written)
+        {
+            FileReadResult readback = file_read_checked(arena, anchor_original, (FileReadOptions){0});
+            bool original_source = readback.status == OS_FILE_READ_OK && readback.error.v == 0 &&
+                                   string_equal(BYTE_SLICE_TO_STRING(8, readback.bytes), anchor_source);
+            BUSTER_TEST(arguments, original_source);
+            if (original_source)
+            {
+                bool reference_built = compiler_driver_aarch64_printer_assemble(arguments, arena, &admission,
+                    compiler, compiler_argument, clang, anchor_original, anchor_reference);
+                BUSTER_TEST(arguments, reference_built);
+                if (reference_built)
+                {
+                    ByteSlice reference_image = file_read(arena, anchor_reference, (FileReadOptions){0});
+                    ByteSlice reference_text = compiler_driver_aarch64_printer_text(reference_image);
+                    bool original_text = reference_text.pointer && reference_text.length == sizeof(anchor_bytes) &&
+                                         memcmp(reference_text.pointer, anchor_bytes, sizeof(anchor_bytes)) == 0;
+                    bool original_metadata = compiler_driver_aarch64_printer_anchor_metadata(reference_image);
+                    BUSTER_TEST(arguments, original_text);
+                    BUSTER_TEST(arguments, original_metadata);
+                    if (original_text && original_metadata)
+                    {
+                        ObjectSection anchor_sections[OBJECT_SECTION_COUNT] = {0};
+                        for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
+                        {
+                            anchor_sections[section].kind = (ObjectSectionKind)section;
+                        }
+                        u8 anchor_data[16] = {0};
+                        anchor_sections[OBJECT_SECTION_TEXT] = (ObjectSection){.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 4,
+                            .data = {.pointer = anchor_bytes, .length = sizeof(anchor_bytes)}};
+                        anchor_sections[OBJECT_SECTION_READ_ONLY_DATA] = (ObjectSection){.name = S8(".rodata"), .kind = OBJECT_SECTION_READ_ONLY_DATA,
+                            .alignment = 8, .data = {.pointer = anchor_data, .length = sizeof(anchor_data)}};
+                        ObjectSymbol anchor_symbols[] = {
+                            {.name = S8(".text"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+                            {.name = S8("anchor_function"), .section = OBJECT_SECTION_TEXT, .size = 44, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                            {.name = S8("local_zero"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+                            {.name = S8("anchor_refs"), .section = OBJECT_SECTION_READ_ONLY_DATA, .size = 16, .kind = OBJECT_SYMBOL_DATA, .global = true},
+                        };
+                        ObjectRelocation anchor_relocations[] = {
+                            {.section = OBJECT_SECTION_READ_ONLY_DATA, .symbol = 0, .offset = 0, .addend = 4, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                            {.section = OBJECT_SECTION_READ_ONLY_DATA, .symbol = 1, .offset = 8, .addend = 4, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                        };
+                        ObjectFile anchor_object = {.target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                            .sections = anchor_sections, .section_count = BUSTER_ARRAY_LENGTH(anchor_sections),
+                            .symbols = anchor_symbols, .symbol_count = BUSTER_ARRAY_LENGTH(anchor_symbols),
+                            .relocations = anchor_relocations, .relocation_count = BUSTER_ARRAY_LENGTH(anchor_relocations)};
+                        String8 assembly = object_print_assembly(arena, &anchor_object);
+                        bool printed_written = assembly.length != 0 && file_write(anchor_printed, BUSTER_SLICE_TO_BYTE_SLICE(assembly));
+                        BUSTER_TEST(arguments, printed_written);
+                        if (printed_written)
+                        {
+                            FileReadResult printed_readback = file_read_checked(arena, anchor_printed, (FileReadOptions){0});
+                            bool original_printed = printed_readback.status == OS_FILE_READ_OK && printed_readback.error.v == 0 &&
+                                                    string_equal(BYTE_SLICE_TO_STRING(8, printed_readback.bytes), assembly);
+                            BUSTER_TEST(arguments, original_printed);
+                            if (original_printed)
+                            {
+                                bool observed_built = compiler_driver_aarch64_printer_assemble(arguments, arena, &admission,
+                                    compiler, compiler_argument, clang, anchor_printed, anchor_observed);
+                                BUSTER_TEST(arguments, observed_built);
+                                if (observed_built)
+                                {
+                                    ByteSlice observed_image = file_read(arena, anchor_observed, (FileReadOptions){0});
+                                    ByteSlice observed_text = compiler_driver_aarch64_printer_text(observed_image);
+                                    bool exact_text = observed_text.pointer && observed_text.length == sizeof(anchor_bytes) &&
+                                                      memcmp(observed_text.pointer, anchor_bytes, sizeof(anchor_bytes)) == 0;
+                                    bool exact_metadata = compiler_driver_aarch64_printer_anchor_metadata(observed_image);
+                                    BUSTER_TEST(arguments, exact_text);
+                                    BUSTER_TEST(arguments, exact_metadata);
+                                    arguments->show(arguments, S8("AARCH64_PRINTER_ANCHOR bytes={u64} text={u32} metadata={u32}\n"),
+                                        observed_text.length, (u32)exact_text, (u32)exact_metadata);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(anchor_original));
+        BUSTER_TEST(arguments, os_file_delete(anchor_printed));
+        BUSTER_TEST(arguments, os_file_delete(anchor_reference));
+        BUSTER_TEST(arguments, os_file_delete(anchor_observed));
+        arena_set_position(arena, anchor_temporary.position);
 
         String8 source_path = buster_test_temporary_path(arena, S8("a64-printer-corpus"), S8(".c"));
         String8 source = S8(
