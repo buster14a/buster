@@ -1,0 +1,76 @@
+name: Cache lifetime correctness probe
+on:
+  push:
+    branches: [codex/1302-cached-plan-lane-lifetime-probe]
+permissions:
+  contents: read
+jobs:
+  lifetime:
+    if: ${{ github.repository == 'buster14a/buster' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      BUSTER_TEST_JOBS: '2'
+      BUSTER_TEST_TABLE_AUDITS: '0'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Baseline guard must fail the registered regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lifetime-evidence
+          git rev-parse HEAD | tee lifetime-evidence/transport-sha.txt
+          clang --version | tee lifetime-evidence/clang.txt
+          cp src/buster/lib/compiler/assembly/x86_64_metadata.c lifetime-evidence/candidate-metadata.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/buster/lib/compiler/assembly/x86_64_metadata.c')
+          s = p.read_text()
+          a = s.index('bool buster_x86_metadata_exact_plan_prepare(')
+          b = s.index('\n}\n', a) + 3
+          part = s[a:b]
+          old = '    // A prepared identity is immutable even while the persistent gang lives.\n    // Only a miss can build or publish state and requires serial prewarm.\n    BUSTER_CHECK_SERIAL_INITIALIZATION();\n'
+          assert part.count(old) == 1
+          part = part.replace(old, '')
+          marker = '    u16 slot_plus_one = buster_x86_metadata_exact_plan_slots[key.form_id];\n'
+          assert part.count(marker) == 1
+          part = part.replace(marker, '    BUSTER_CHECK_SERIAL_INITIALIZATION();\n' + marker)
+          p.write_text(s[:a] + part + s[b:])
+          PY
+          git diff -- src/buster/lib/compiler/assembly/x86_64_metadata.c > lifetime-evidence/baseline-guard.diff
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o /tmp/lifetime-driver
+          /tmp/lifetime-driver generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON -DBUSTER_SINGLE_THREADED=OFF
+          /tmp/lifetime-driver build --config Release -t ide
+          set +e
+          timeout 600 build/Release/ide test --verbose=1 --ci=1 --module=compiler_driver_tests > lifetime-evidence/baseline.log 2>&1
+          status=$?
+          set -e
+          printf '%s\n' "$status" | tee lifetime-evidence/baseline.status
+          test "$status" -ne 0
+          test "$status" -ne 124
+          rg 'global table built while other threads run' lifetime-evidence/baseline.log
+      - name: Candidate threaded registered driver suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp lifetime-evidence/candidate-metadata.c src/buster/lib/compiler/assembly/x86_64_metadata.c
+          git diff --exit-code -- src/buster/lib/compiler/assembly/x86_64_metadata.c
+          /tmp/lifetime-driver build --config Release -t ide
+          timeout 600 build/Release/ide test --verbose=1 --ci=1 --module=compiler_driver_tests 2>&1 | tee lifetime-evidence/threaded.log
+          rg 'CACHE_PLAN_LIFETIME_V1 .*dispatches=72 observations=108 max_lanes=2 single_threaded=0 multi_lane_available=1 status=pass' lifetime-evidence/threaded.log
+      - name: Candidate single threaded registered driver suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/lifetime-driver generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=ON -DBUSTER_SINGLE_THREADED=ON
+          /tmp/lifetime-driver build --config Release -t ide
+          timeout 600 build/Release/ide test --verbose=1 --ci=1 --module=compiler_driver_tests 2>&1 | tee lifetime-evidence/single.log
+          rg 'CACHE_PLAN_LIFETIME_V1 .*dispatches=72 observations=108 max_lanes=1 single_threaded=1 multi_lane_available=0 status=pass' lifetime-evidence/single.log
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: cache-lifetime-correctness
+          path: lifetime-evidence
+          retention-days: 7
