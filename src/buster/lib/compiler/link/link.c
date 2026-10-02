@@ -6541,8 +6541,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             }
             u64 initialized_size =
                 align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
-            u64 thread_local_size = align_forward(initialized_size + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size,
-                                                  object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment);
+            // Local-exec offsets use the same PT_TLS alignment as the loader,
+            // including a zero-fill section with a stricter requirement.
+            u64 thread_local_size = align_forward(initialized_size + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size, thread_local_alignment);
             u64 symbol_offset = symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
             // Local-exec patches a field the addend belongs to, and so does a
             // DTPOFF32 once its local-dynamic sequence reads the thread

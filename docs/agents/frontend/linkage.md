@@ -29,9 +29,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   cannot serve as that offset. Fixed images reuse `link_elf_thread_local_offset`
   and the packed loaded-section map shared with the section table. The TLS
   block starts at the maximum `.tdata`/`.tbss` alignment so that each section's
-  address agrees with its block-relative symbol offsets. The PIE emitter uses
-  the same map, including copy-created `.bss` and omitted empty
-  sections. Hidden definitions remain private, undefined hidden references
+  address agrees with its block-relative symbol offsets. Local-exec relocations
+  round the whole block to that same alignment before computing TP offsets.
+  The PIE emitter uses the same map, including copy-created `.bss` and omitted
+  empty sections. Hidden definitions remain private, undefined hidden references
   fail, and TLS/non-TLS object identities retain their mismatch diagnostic.
   `compiler_driver_tls_export_tests` uses a configured host-built DSO to read
   and modify both initialized and zero-fill executable TLS. Source/object,
