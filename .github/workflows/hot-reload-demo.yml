@@ -1,0 +1,58 @@
+name: Hot reload demonstration
+on:
+  pull_request:
+    paths:
+      - tools/hot_replace_probe/**
+      - cmake/HotReloadDemo.cmake
+      - CMakeLists.txt
+      - src/buster/lib/compiler/jit/**
+      - src/buster/lib/compiler/object/**
+      - src/buster/lib/compiler/driver/**
+      - .github/workflows/hot-reload-demo.yml
+  push:
+    branches: [main]
+    paths:
+      - tools/hot_replace_probe/**
+      - cmake/HotReloadDemo.cmake
+      - CMakeLists.txt
+      - src/buster/lib/compiler/jit/**
+      - src/buster/lib/compiler/object/**
+      - src/buster/lib/compiler/driver/**
+      - .github/workflows/hot-reload-demo.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: hot-reload-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  lifecycle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - config: Release
+            unity: "ON"
+            sanitize: --no-sanitize
+          - config: Debug
+            unity: "OFF"
+            sanitize: --sanitize
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Hosted bootstrap
+        run: |
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/hot-reload-driver"
+      - name: Configure
+        run: |
+          "$RUNNER_TEMP/hot-reload-driver" generate --ci --cc clang --config ${{ matrix.config }} ${{ matrix.sanitize }} --no-fuzz --no-lto --no-include-tests --linker DEFAULT -- -DBUSTER_HOT_RELOAD_DEMO=ON -DBUSTER_UNITY_BUILD=${{ matrix.unity }}
+      - name: Lifecycle and real Buster compilation
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+        run: |
+          "$RUNNER_TEMP/hot-reload-driver" build --config ${{ matrix.config }} -t test_hot_reload
