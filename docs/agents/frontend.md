@@ -129,9 +129,9 @@ unsigned macro and literal constructor; Darwin's `__INT64_C` uses `LL` while
 evaluate float/double at their declared precision, so `__FLT_EVAL_METHOD__`
 is zero, including when a resource header uses it in an ordinary C expression.
 
-Buster has no inliner at any accepted optimization level. The prelude keeps
-`__OPTIMIZE__` and `__OPTIMIZE_SIZE__` undefined and defines
-`__NO_INLINE__` as one, preventing optimized header paths from assuming inline
+The current prelude keeps `__OPTIMIZE__` and `__OPTIMIZE_SIZE__` undefined
+and defines `__NO_INLINE__` as one, following Buster's existing optimization
+macro policy and preventing optimized header paths from assuming inline
 support. `__VERSION__` expands to the existing `__clang_version__` compatibility
 string, `"18.0.0 (buster)"`; this does not establish an implemented driver version
 query. The remaining driver-query work belongs to #1418.
