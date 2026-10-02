@@ -1,0 +1,259 @@
+{
+  "identity": {
+    "schema": "BUSTER_MSVC_DIAGNOSTIC_V1",
+    "buster_source": "d4ca72fb4e97ae0a410b0d03258b00495fa45e13",
+    "buster_binary_sha256": "c3c70a94d52b713913b688325ff55b1b0b6c968b71a97c9edcc92533b42f2703",
+    "platform": "Windows-2025Server-10.0.26100-SP0",
+    "cpu": "AMD64 Family 25 Model 1 Stepping 1, AuthenticAMD",
+    "logical_cpus": 4,
+    "image_version": "20260925.250.1",
+    "image_os": "win25-vs2026",
+    "runner_name": "GitHub Actions 1000201245",
+    "cl_path": "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\cl.EXE",
+    "cl_sha256": "b0a1818ebae6da7f18230a84e76ce839212584ac4c2ab55b97a0d5268085da57",
+    "workflow_sha": "791462a112aa0a8410d9e650ad32a91dd0211015",
+    "qualified_performance_acceptance": false,
+    "memory_and_cpu_accounting": "not measured: no complete child-tree accounting",
+    "license_buster": "First-party license grant missing/unresolved; LICENSES/README.md",
+    "license_msvc": "Proprietary Microsoft Visual Studio/Build Tools terms"
+  },
+  "compile": [
+    {
+      "workload": "kernels",
+      "variant": "buster-fast",
+      "source_bytes": 1004,
+      "median_ms": 26.6343,
+      "min_ms": 25.3307,
+      "max_ms": 27.2852,
+      "text_section_bytes": 941,
+      "object_bytes": 2479
+    },
+    {
+      "workload": "kernels",
+      "variant": "buster-quality",
+      "source_bytes": 1004,
+      "median_ms": 27.0636,
+      "min_ms": 25.5604,
+      "max_ms": 27.4883,
+      "text_section_bytes": 909,
+      "object_bytes": 2447
+    },
+    {
+      "workload": "kernels",
+      "variant": "msvc-Od",
+      "source_bytes": 1004,
+      "median_ms": 38.0627,
+      "min_ms": 36.6241,
+      "max_ms": 41.7795,
+      "text_section_bytes": 476,
+      "object_bytes": 1869
+    },
+    {
+      "workload": "kernels",
+      "variant": "msvc-O2",
+      "source_bytes": 1004,
+      "median_ms": 49.8926,
+      "min_ms": 47.1658,
+      "max_ms": 53.5788,
+      "text_section_bytes": 1084,
+      "object_bytes": 6189
+    },
+    {
+      "workload": "tiny",
+      "variant": "buster-fast",
+      "source_bytes": 56,
+      "median_ms": 25.7702,
+      "min_ms": 25.2937,
+      "max_ms": 35.8053,
+      "text_section_bytes": 36,
+      "object_bytes": 1281
+    },
+    {
+      "workload": "tiny",
+      "variant": "buster-quality",
+      "source_bytes": 56,
+      "median_ms": 26.3076,
+      "min_ms": 25.2616,
+      "max_ms": 30.622,
+      "text_section_bytes": 36,
+      "object_bytes": 1281
+    },
+    {
+      "workload": "tiny",
+      "variant": "msvc-Od",
+      "source_bytes": 56,
+      "median_ms": 37.1368,
+      "min_ms": 36.7091,
+      "max_ms": 38.4473,
+      "text_section_bytes": 21,
+      "object_bytes": 618
+    },
+    {
+      "workload": "tiny",
+      "variant": "msvc-O2",
+      "source_bytes": 56,
+      "median_ms": 39.6188,
+      "min_ms": 37.5086,
+      "max_ms": 40.9165,
+      "text_section_bytes": 4,
+      "object_bytes": 601
+    },
+    {
+      "workload": "functions256",
+      "variant": "buster-fast",
+      "source_bytes": 37586,
+      "median_ms": 35.1864,
+      "min_ms": 34.522,
+      "max_ms": 36.6049,
+      "text_section_bytes": 57155,
+      "object_bytes": 75741
+    },
+    {
+      "workload": "functions256",
+      "variant": "buster-quality",
+      "source_bytes": 37586,
+      "median_ms": 37.5831,
+      "min_ms": 36.753,
+      "max_ms": 38.4564,
+      "text_section_bytes": 53057,
+      "object_bytes": 71645
+    },
+    {
+      "workload": "functions256",
+      "variant": "msvc-Od",
+      "source_bytes": 37586,
+      "median_ms": 50.7108,
+      "min_ms": 50.3621,
+      "max_ms": 53.4001,
+      "text_section_bytes": 24569,
+      "object_bytes": 62736
+    },
+    {
+      "workload": "functions256",
+      "variant": "msvc-O2",
+      "source_bytes": 37586,
+      "median_ms": 235.0598,
+      "min_ms": 225.8621,
+      "max_ms": 239.2364,
+      "text_section_bytes": 16690,
+      "object_bytes": 75510
+    }
+  ],
+  "runtime": [
+    {
+      "kind": "sum_scale",
+      "variant": "buster-fast",
+      "median_ms": 94.7765,
+      "min_ms": 94.6897,
+      "max_ms": 94.8757
+    },
+    {
+      "kind": "sum_scale",
+      "variant": "buster-quality",
+      "median_ms": 84.4057,
+      "min_ms": 84.1266,
+      "max_ms": 87.404
+    },
+    {
+      "kind": "sum_scale",
+      "variant": "msvc-Od",
+      "median_ms": 43.0231,
+      "min_ms": 42.9773,
+      "max_ms": 46.5687
+    },
+    {
+      "kind": "sum_scale",
+      "variant": "msvc-O2",
+      "median_ms": 20.856,
+      "min_ms": 20.8093,
+      "max_ms": 21.0345
+    },
+    {
+      "kind": "divide7",
+      "variant": "buster-fast",
+      "median_ms": 84.4451,
+      "min_ms": 84.3976,
+      "max_ms": 85.0615
+    },
+    {
+      "kind": "divide7",
+      "variant": "buster-quality",
+      "median_ms": 74.3848,
+      "min_ms": 73.6872,
+      "max_ms": 75.27
+    },
+    {
+      "kind": "divide7",
+      "variant": "msvc-Od",
+      "median_ms": 63.1234,
+      "min_ms": 62.8267,
+      "max_ms": 63.3133
+    },
+    {
+      "kind": "divide7",
+      "variant": "msvc-O2",
+      "median_ms": 9.0976,
+      "min_ms": 9.0277,
+      "max_ms": 9.1948
+    },
+    {
+      "kind": "dot",
+      "variant": "buster-fast",
+      "median_ms": 86.1006,
+      "min_ms": 85.9409,
+      "max_ms": 88.0622
+    },
+    {
+      "kind": "dot",
+      "variant": "buster-quality",
+      "median_ms": 95.5875,
+      "min_ms": 95.327,
+      "max_ms": 101.1724
+    },
+    {
+      "kind": "dot",
+      "variant": "msvc-Od",
+      "median_ms": 54.26,
+      "min_ms": 54.1281,
+      "max_ms": 54.4709
+    },
+    {
+      "kind": "dot",
+      "variant": "msvc-O2",
+      "median_ms": 3.0085,
+      "min_ms": 2.8869,
+      "max_ms": 3.1454
+    },
+    {
+      "kind": "calls",
+      "variant": "buster-fast",
+      "median_ms": 158.2596,
+      "min_ms": 158.0013,
+      "max_ms": 158.98
+    },
+    {
+      "kind": "calls",
+      "variant": "buster-quality",
+      "median_ms": 158.3203,
+      "min_ms": 158.0265,
+      "max_ms": 163.9881
+    },
+    {
+      "kind": "calls",
+      "variant": "msvc-Od",
+      "median_ms": 73.8314,
+      "min_ms": 73.7533,
+      "max_ms": 74.3692
+    },
+    {
+      "kind": "calls",
+      "variant": "msvc-O2",
+      "median_ms": 4.2106,
+      "min_ms": 4.201,
+      "max_ms": 4.2231
+    }
+  ],
+  "negative_control": "rejected with observed value mismatch",
+  "buster_O0_O3_text_identical": true,
+  "validation": "8 small-value checks before each runtime observation, cross-variant checksum equality, stable per-variant text hashes"
+}

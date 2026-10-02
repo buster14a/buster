@@ -1,0 +1,340 @@
+
+work/evidence/kernels-msvc-O2-7.obj:	file format coff-x86-64
+
+Disassembly of section .text$mn:
+
+0000000000000000 <calls>:
+       0:      	movq	%rbx, 0x10(%rsp)
+       5:      	movq	%rsi, 0x18(%rsp)
+       a:      	pushq	%rdi
+       b:      	xorl	%r11d, %r11d
+       e:      	movd	%r9d, %xmm3
+      13:      	pshufd	$0x0, %xmm3, %xmm3      # xmm3 = xmm3[0,0,0,0]
+      18:      	movl	%r9d, %edi
+      1b:      	movl	%r8d, %esi
+      1e:      	movq	%rcx, %rbx
+      21:      	testl	%r8d, %r8d
+      24:      	je	0x14b <calls+0x14b>
+      2a:      	xorl	%eax, %eax
+      2c:      	cmpl	$0x8, %r8d
+      30:      	jb	0xce <calls+0xce>
+      36:      	cmpl	$0x2, (%rip)            # 0x3d <calls+0x3d>
+		0000000000000038:  IMAGE_REL_AMD64_REL32_1	__isa_available
+      3d:      	jl	0xce <calls+0xce>
+      43:      	movdqa	(%rip), %xmm5           # 0x4b <calls+0x4b>
+		0000000000000047:  IMAGE_REL_AMD64_REL32	__xmm@00000021000000210000002100000021
+      4b:      	andl	$-0x8, %r8d
+      4f:      	xorps	%xmm4, %xmm4
+      52:      	xorps	%xmm2, %xmm2
+      55:      	nopw	(%rax,%rax)
+      60:      	movdqu	(%rbx,%rax,4), %xmm0
+      65:      	leal	0x4(%rax), %ecx
+      68:      	addl	$0x8, %eax
+      6b:      	paddd	%xmm3, %xmm0
+      6f:      	movdqa	%xmm0, %xmm1
+      73:      	psrld	$0x7, %xmm0
+      78:      	pmulld	%xmm5, %xmm1
+      7d:      	xorps	%xmm0, %xmm1
+      80:      	paddd	%xmm1, %xmm4
+      84:      	movdqu	(%rbx,%rcx,4), %xmm1
+      89:      	paddd	%xmm3, %xmm1
+      8d:      	movdqa	%xmm1, %xmm0
+      91:      	psrld	$0x7, %xmm1
+      96:      	pmulld	%xmm5, %xmm0
+      9b:      	xorps	%xmm1, %xmm0
+      9e:      	paddd	%xmm0, %xmm2
+      a2:      	cmpl	%r8d, %eax
+      a5:      	jb	0x60 <calls+0x60>
+      a7:      	paddd	%xmm4, %xmm2
+      ab:      	movdqa	%xmm2, %xmm0
+      af:      	psrldq	$0x8, %xmm0             # xmm0 = xmm0[8,9,10,11,12,13,14,15],zero,zero,zero,zero,zero,zero,zero,zero
+      b4:      	paddd	%xmm0, %xmm2
+      b8:      	movdqa	%xmm2, %xmm0
+      bc:      	psrldq	$0x4, %xmm0             # xmm0 = xmm0[4,5,6,7,8,9,10,11,12,13,14,15],zero,zero,zero,zero
+      c1:      	paddd	%xmm0, %xmm2
+      c5:      	movd	%xmm2, %r11d
+      ca:      	cmpl	%esi, %eax
+      cc:      	jae	0x14b <calls+0x14b>
+      ce:      	movl	%esi, %ecx
+      d0:      	xorl	%r9d, %r9d
+      d3:      	subl	%eax, %ecx
+      d5:      	xorl	%r10d, %r10d
+      d8:      	cmpl	$0x2, %ecx
+      db:      	jb	0x128 <calls+0x128>
+      dd:      	movq	%rbp, 0x10(%rsp)
+      e2:      	leal	-0x1(%rsi), %ebp
+      e5:      	nopw	(%rax,%rax)
+      f0:      	movl	(%rbx,%rax,4), %r8d
+      f4:      	addl	%edi, %r8d
+      f7:      	imull	$0x21, %r8d, %ecx
+      fb:      	shrl	$0x7, %r8d
+      ff:      	xorl	%r8d, %ecx
+     102:      	addl	%ecx, %r9d
+     105:      	leal	0x1(%rax), %ecx
+     108:      	addl	$0x2, %eax
+     10b:      	movl	(%rbx,%rcx,4), %edx
+     10e:      	addl	%edi, %edx
+     110:      	imull	$0x21, %edx, %ecx
+     113:      	shrl	$0x7, %edx
+     116:      	xorl	%edx, %ecx
+     118:      	addl	%ecx, %r10d
+     11b:      	cmpl	%ebp, %eax
+     11d:      	jb	0xf0 <calls+0xf0>
+     11f:      	movq	0x10(%rsp), %rbp
+     124:      	cmpl	%esi, %eax
+     126:      	jae	0x138 <calls+0x138>
+     128:      	movl	(%rbx,%rax,4), %ecx
+     12b:      	addl	%edi, %ecx
+     12d:      	imull	$0x21, %ecx, %edx
+     130:      	shrl	$0x7, %ecx
+     133:      	xorl	%ecx, %edx
+     135:      	addl	%edx, %r11d
+     138:      	leal	(%r10,%r9), %eax
+     13c:      	addl	%r11d, %eax
+     13f:      	movq	0x18(%rsp), %rbx
+     144:      	movq	0x20(%rsp), %rsi
+     149:      	popq	%rdi
+     14a:      	retq
+     14b:      	movq	0x18(%rsp), %rbx
+     150:      	movl	%r11d, %eax
+     153:      	movq	0x20(%rsp), %rsi
+     158:      	popq	%rdi
+     159:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <divide7>:
+       0:      	pushq	%rbx
+       2:      	pushq	%rbp
+       3:      	pushq	%rsi
+       4:      	pushq	%rdi
+       5:      	subq	$0x18, %rsp
+       9:      	xorl	%ebx, %ebx
+       b:      	movd	%r9d, %xmm4
+      10:      	pshufd	$0x0, %xmm4, %xmm4      # xmm4 = xmm4[0,0,0,0]
+      15:      	movl	%r9d, %esi
+      18:      	movl	%r8d, %ebp
+      1b:      	movq	%rcx, %rdi
+      1e:      	testl	%r8d, %r8d
+      21:      	je	0x195 <divide7+0x195>
+      27:      	xorl	%r10d, %r10d
+      2a:      	cmpl	$0x8, %r8d
+      2e:      	jb	0x107 <divide7+0x107>
+      34:      	movl	%r8d, %edx
+      37:      	movaps	%xmm6, (%rsp)
+      3b:      	movdqa	(%rip), %xmm6           # 0x43 <divide7+0x43>
+		000000000000003f:  IMAGE_REL_AMD64_REL32	__xmm@24924925249249252492492524924925
+      43:      	andl	$-0x8, %edx
+      46:      	xorps	%xmm5, %xmm5
+      49:      	xorps	%xmm3, %xmm3
+      4c:      	nopl	(%rax)
+      50:      	movdqu	(%rcx,%r10,4), %xmm2
+      56:      	leal	0x4(%r10), %eax
+      5a:      	addl	$0x8, %r10d
+      5e:      	paddd	%xmm4, %xmm2
+      62:      	movdqa	%xmm2, %xmm1
+      66:      	movdqa	%xmm2, %xmm0
+      6a:      	punpckldq	%xmm2, %xmm1    # xmm1 = xmm1[0],xmm2[0],xmm1[1],xmm2[1]
+      6e:      	punpckhdq	%xmm2, %xmm0    # xmm0 = xmm0[2],xmm2[2],xmm0[3],xmm2[3]
+      72:      	pmuludq	%xmm6, %xmm1
+      76:      	pmuludq	%xmm6, %xmm0
+      7a:      	shufps	$0xdd, %xmm0, %xmm1     # xmm1 = xmm1[1,3],xmm0[1,3]
+      7e:      	psubd	%xmm1, %xmm2
+      82:      	psrld	$0x1, %xmm2
+      87:      	paddd	%xmm1, %xmm2
+      8b:      	psrld	$0x2, %xmm2
+      90:      	paddd	%xmm2, %xmm5
+      94:      	movdqu	(%rcx,%rax,4), %xmm2
+      99:      	paddd	%xmm4, %xmm2
+      9d:      	movdqa	%xmm2, %xmm1
+      a1:      	movdqa	%xmm2, %xmm0
+      a5:      	punpckldq	%xmm2, %xmm1    # xmm1 = xmm1[0],xmm2[0],xmm1[1],xmm2[1]
+      a9:      	punpckhdq	%xmm2, %xmm0    # xmm0 = xmm0[2],xmm2[2],xmm0[3],xmm2[3]
+      ad:      	pmuludq	%xmm6, %xmm1
+      b1:      	pmuludq	%xmm6, %xmm0
+      b5:      	shufps	$0xdd, %xmm0, %xmm1     # xmm1 = xmm1[1,3],xmm0[1,3]
+      b9:      	psubd	%xmm1, %xmm2
+      bd:      	psrld	$0x1, %xmm2
+      c2:      	paddd	%xmm1, %xmm2
+      c6:      	psrld	$0x2, %xmm2
+      cb:      	paddd	%xmm2, %xmm3
+      cf:      	cmpl	%edx, %r10d
+      d2:      	jb	0x50 <divide7+0x50>
+      d8:      	movaps	(%rsp), %xmm6
+      dc:      	paddd	%xmm5, %xmm3
+      e0:      	movdqa	%xmm3, %xmm0
+      e4:      	psrldq	$0x8, %xmm0             # xmm0 = xmm0[8,9,10,11,12,13,14,15],zero,zero,zero,zero,zero,zero,zero,zero
+      e9:      	paddd	%xmm0, %xmm3
+      ed:      	movdqa	%xmm3, %xmm0
+      f1:      	psrldq	$0x4, %xmm0             # xmm0 = xmm0[4,5,6,7,8,9,10,11,12,13,14,15],zero,zero,zero,zero
+      f6:      	paddd	%xmm0, %xmm3
+      fa:      	movd	%xmm3, %ebx
+      fe:      	cmpl	%ebp, %r10d
+     101:      	jae	0x195 <divide7+0x195>
+     107:      	movl	%ebp, %eax
+     109:      	xorl	%r9d, %r9d
+     10c:      	subl	%r10d, %eax
+     10f:      	xorl	%r11d, %r11d
+     112:      	cmpl	$0x2, %eax
+     115:      	jb	0x16e <divide7+0x16e>
+     117:      	movq	%r14, 0x40(%rsp)
+     11c:      	leal	-0x1(%r8), %r14d
+     120:      	movl	(%rdi,%r10,4), %r8d
+     124:      	movl	$0x24924925, %eax       # imm = 0x24924925
+     129:      	addl	%esi, %r8d
+     12c:      	mull	%r8d
+     12f:      	leal	0x1(%r10), %eax
+     133:      	addl	$0x2, %r10d
+     137:      	subl	%edx, %r8d
+     13a:      	shrl	%r8d
+     13d:      	addl	%edx, %r8d
+     140:      	movl	(%rdi,%rax,4), %ecx
+     143:      	movl	$0x24924925, %eax       # imm = 0x24924925
+     148:      	addl	%esi, %ecx
+     14a:      	shrl	$0x2, %r8d
+     14e:      	mull	%ecx
+     150:      	addl	%r8d, %r9d
+     153:      	subl	%edx, %ecx
+     155:      	shrl	%ecx
+     157:      	addl	%edx, %ecx
+     159:      	shrl	$0x2, %ecx
+     15c:      	addl	%ecx, %r11d
+     15f:      	cmpl	%r14d, %r10d
+     162:      	jb	0x120 <divide7+0x120>
+     164:      	movq	0x40(%rsp), %r14
+     169:      	cmpl	%ebp, %r10d
+     16c:      	jae	0x186 <divide7+0x186>
+     16e:      	movl	(%rdi,%r10,4), %ecx
+     172:      	movl	$0x24924925, %eax       # imm = 0x24924925
+     177:      	addl	%esi, %ecx
+     179:      	mull	%ecx
+     17b:      	subl	%edx, %ecx
+     17d:      	shrl	%ecx
+     17f:      	addl	%edx, %ecx
+     181:      	shrl	$0x2, %ecx
+     184:      	addl	%ecx, %ebx
+     186:      	leal	(%r11,%r9), %eax
+     18a:      	addl	%ebx, %eax
+     18c:      	addq	$0x18, %rsp
+     190:      	popq	%rdi
+     191:      	popq	%rsi
+     192:      	popq	%rbp
+     193:      	popq	%rbx
+     194:      	retq
+     195:      	movl	%ebx, %eax
+     197:      	addq	$0x18, %rsp
+     19b:      	popq	%rdi
+     19c:      	popq	%rsi
+     19d:      	popq	%rbp
+     19e:      	popq	%rbx
+     19f:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <dot>:
+       0:      	movq	%rbx, 0x10(%rsp)
+       5:      	pushq	%rdi
+       6:      	movl	%r9d, %ebx
+       9:      	movl	%r8d, %edi
+       c:      	movq	%rdx, %r10
+       f:      	movq	%rcx, %r11
+      12:      	testl	%r8d, %r8d
+      15:      	je	0x105 <dot+0x105>
+      1b:      	xorl	%eax, %eax
+      1d:      	cmpl	$0x8, %r8d
+      21:      	jb	0xa6 <dot+0xa6>
+      27:      	cmpl	$0x2, (%rip)            # 0x2e <dot+0x2e>
+		0000000000000029:  IMAGE_REL_AMD64_REL32_1	__isa_available
+      2e:      	jl	0xa6 <dot+0xa6>
+      30:      	andl	$-0x8, %r8d
+      34:      	xorps	%xmm3, %xmm3
+      37:      	xorps	%xmm2, %xmm2
+      3a:      	nopw	(%rax,%rax)
+      40:      	movdqu	(%rdx,%rax,4), %xmm0
+      45:      	leal	0x4(%rax), %ecx
+      48:      	movdqu	(%r11,%rax,4), %xmm1
+      4e:      	addl	$0x8, %eax
+      51:      	pmulld	%xmm0, %xmm1
+      56:      	paddd	%xmm1, %xmm3
+      5a:      	movdqu	(%r11,%rcx,4), %xmm1
+      60:      	movdqu	(%rdx,%rcx,4), %xmm0
+      65:      	pmulld	%xmm0, %xmm1
+      6a:      	paddd	%xmm1, %xmm2
+      6e:      	cmpl	%r8d, %eax
+      71:      	jb	0x40 <dot+0x40>
+      73:      	paddd	%xmm3, %xmm2
+      77:      	movdqa	%xmm2, %xmm0
+      7b:      	psrldq	$0x8, %xmm0             # xmm0 = xmm0[8,9,10,11,12,13,14,15],zero,zero,zero,zero,zero,zero,zero,zero
+      80:      	paddd	%xmm0, %xmm2
+      84:      	movdqa	%xmm2, %xmm0
+      88:      	psrldq	$0x4, %xmm0             # xmm0 = xmm0[4,5,6,7,8,9,10,11,12,13,14,15],zero,zero,zero,zero
+      8d:      	paddd	%xmm0, %xmm2
+      91:      	movd	%xmm2, %ecx
+      95:      	addl	%ebx, %ecx
+      97:      	movl	%ecx, %ebx
+      99:      	cmpl	%edi, %eax
+      9b:      	jb	0xa6 <dot+0xa6>
+      9d:      	movl	%ecx, %eax
+      9f:      	movq	0x18(%rsp), %rbx
+      a4:      	popq	%rdi
+      a5:      	retq
+      a6:      	movl	%edi, %ecx
+      a8:      	xorl	%r8d, %r8d
+      ab:      	subl	%eax, %ecx
+      ad:      	xorl	%r9d, %r9d
+      b0:      	cmpl	$0x2, %ecx
+      b3:      	jb	0xed <dot+0xed>
+      b5:      	movq	%rsi, 0x10(%rsp)
+      ba:      	leal	-0x1(%rdi), %esi
+      bd:      	nopl	(%rax)
+      c0:      	movl	(%r10,%rax,4), %edx
+      c4:      	leal	0x1(%rax), %ecx
+      c7:      	imull	(%r11,%rax,4), %edx
+      cc:      	addl	$0x2, %eax
+      cf:      	addl	%edx, %r8d
+      d2:      	movl	%ecx, %edx
+      d4:      	movl	(%r10,%rcx,4), %ecx
+      d8:      	imull	(%r11,%rdx,4), %ecx
+      dd:      	addl	%ecx, %r9d
+      e0:      	cmpl	%esi, %eax
+      e2:      	jb	0xc0 <dot+0xc0>
+      e4:      	movq	0x10(%rsp), %rsi
+      e9:      	cmpl	%edi, %eax
+      eb:      	jae	0xf8 <dot+0xf8>
+      ed:      	movl	(%r11,%rax,4), %edx
+      f1:      	imull	(%r10,%rax,4), %edx
+      f6:      	addl	%edx, %ebx
+      f8:      	leal	(%r9,%r8), %eax
+      fc:      	addl	%ebx, %eax
+      fe:      	movq	0x18(%rsp), %rbx
+     103:      	popq	%rdi
+     104:      	retq
+     105:      	movl	%ebx, %eax
+     107:      	movq	0x18(%rsp), %rbx
+     10c:      	popq	%rdi
+     10d:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <helper>:
+       0:      	imull	$0x21, %ecx, %eax
+       3:      	shrl	$0x7, %ecx
+       6:      	xorl	%ecx, %eax
+       8:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <sum_scale>:
+       0:      	xorl	%edx, %edx
+       2:      	movl	%r9d, %eax
+       5:      	testl	%r8d, %r8d
+       8:      	je	0x2a <sum_scale+0x2a>
+       a:      	nopw	(%rax,%rax)
+      10:      	movl	(%rcx,%rdx,4), %r10d
+      14:      	incl	%edx
+      16:      	leal	(%rax,%r10), %r9d
+      1a:      	leal	0x7(,%r10,2), %eax
+      22:      	addl	%r9d, %eax
+      25:      	cmpl	%r8d, %edx
+      28:      	jb	0x10 <sum_scale+0x10>
+      2a:      	retq

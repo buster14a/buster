@@ -1,0 +1,3819 @@
+[
+  {
+    "sequence": 0,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/Bv",
+      "/c",
+      "/TC",
+      "/std:c17",
+      "/J",
+      "/Od",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\identity.obj"
+    ],
+    "wall_ns": 1084476700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0000.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 1,
+    "argv": [
+      "clang",
+      "--version"
+    ],
+    "wall_ns": 15359800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0001.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 2,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-fast-0.obj"
+    ],
+    "wall_ns": 33909100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0002.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 3,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-quality-0.obj"
+    ],
+    "wall_ns": 25902500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0003.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 4,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-Od-0.obj"
+    ],
+    "wall_ns": 59347300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0004.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 5,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-O2-0.obj"
+    ],
+    "wall_ns": 197424500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0005.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 6,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-O2-1.obj"
+    ],
+    "wall_ns": 49064100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0006.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 7,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-Od-1.obj"
+    ],
+    "wall_ns": 38062700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0007.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 8,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-quality-1.obj"
+    ],
+    "wall_ns": 27063600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0008.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 9,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-fast-1.obj"
+    ],
+    "wall_ns": 27196000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0009.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 10,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-fast-2.obj"
+    ],
+    "wall_ns": 27285200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0010.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 11,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-quality-2.obj"
+    ],
+    "wall_ns": 27488300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0011.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 12,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-Od-2.obj"
+    ],
+    "wall_ns": 38651300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0012.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 13,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-O2-2.obj"
+    ],
+    "wall_ns": 49892600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0013.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 14,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-O2-3.obj"
+    ],
+    "wall_ns": 49303600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0014.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 15,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-Od-3.obj"
+    ],
+    "wall_ns": 41779500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0015.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 16,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-quality-3.obj"
+    ],
+    "wall_ns": 27426800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0016.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 17,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-fast-3.obj"
+    ],
+    "wall_ns": 26634300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0017.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 18,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-fast-4.obj"
+    ],
+    "wall_ns": 26740000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0018.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 19,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-quality-4.obj"
+    ],
+    "wall_ns": 27162300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0019.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 20,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-Od-4.obj"
+    ],
+    "wall_ns": 38209800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0020.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 21,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-O2-4.obj"
+    ],
+    "wall_ns": 50198900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0021.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 22,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-O2-5.obj"
+    ],
+    "wall_ns": 51297900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0022.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 23,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-Od-5.obj"
+    ],
+    "wall_ns": 36624100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0023.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 24,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-quality-5.obj"
+    ],
+    "wall_ns": 26280300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0024.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 25,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-fast-5.obj"
+    ],
+    "wall_ns": 25386500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0025.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 26,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-fast-6.obj"
+    ],
+    "wall_ns": 25330700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0026.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 27,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-quality-6.obj"
+    ],
+    "wall_ns": 25560400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0027.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 28,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-Od-6.obj"
+    ],
+    "wall_ns": 37125900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0028.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 29,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-O2-6.obj"
+    ],
+    "wall_ns": 47165800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0029.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 30,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-O2-7.obj"
+    ],
+    "wall_ns": 53578800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0030.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 31,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-Od-7.obj"
+    ],
+    "wall_ns": 37495300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0031.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 32,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-quality-7.obj"
+    ],
+    "wall_ns": 26484700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0032.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 33,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-fast-7.obj"
+    ],
+    "wall_ns": 26212200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0033.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 34,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-fast-0.obj"
+    ],
+    "wall_ns": 25518800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0034.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 35,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-quality-0.obj"
+    ],
+    "wall_ns": 24960400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0035.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 36,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-Od-0.obj"
+    ],
+    "wall_ns": 36278600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0036.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 37,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-O2-0.obj"
+    ],
+    "wall_ns": 37292400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0037.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 38,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-O2-1.obj"
+    ],
+    "wall_ns": 37569200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0038.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 39,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-Od-1.obj"
+    ],
+    "wall_ns": 36980100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0039.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 40,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-quality-1.obj"
+    ],
+    "wall_ns": 26326800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0040.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 41,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-fast-1.obj"
+    ],
+    "wall_ns": 25679100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0041.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 42,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-fast-2.obj"
+    ],
+    "wall_ns": 25770200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0042.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 43,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-quality-2.obj"
+    ],
+    "wall_ns": 25266100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0043.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 44,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-Od-2.obj"
+    ],
+    "wall_ns": 36709100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0044.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 45,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-O2-2.obj"
+    ],
+    "wall_ns": 38289600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0045.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 46,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-O2-3.obj"
+    ],
+    "wall_ns": 40916500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0046.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 47,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-Od-3.obj"
+    ],
+    "wall_ns": 38447300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0047.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 48,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-quality-3.obj"
+    ],
+    "wall_ns": 26243500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0048.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 49,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-fast-3.obj"
+    ],
+    "wall_ns": 27695800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0049.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 50,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-fast-4.obj"
+    ],
+    "wall_ns": 32507600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0050.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 51,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-quality-4.obj"
+    ],
+    "wall_ns": 26536200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0051.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 52,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-Od-4.obj"
+    ],
+    "wall_ns": 37372100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0052.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 53,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-O2-4.obj"
+    ],
+    "wall_ns": 39618800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0053.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 54,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-O2-5.obj"
+    ],
+    "wall_ns": 37508600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0054.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 55,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-Od-5.obj"
+    ],
+    "wall_ns": 37136800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0055.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 56,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-quality-5.obj"
+    ],
+    "wall_ns": 30622000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0056.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 57,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-fast-5.obj"
+    ],
+    "wall_ns": 35805300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0057.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 58,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-fast-6.obj"
+    ],
+    "wall_ns": 25293700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0058.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 59,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-quality-6.obj"
+    ],
+    "wall_ns": 25261600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0059.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 60,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-Od-6.obj"
+    ],
+    "wall_ns": 37554600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0060.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 61,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-O2-6.obj"
+    ],
+    "wall_ns": 40157100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0061.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 62,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-O2-7.obj"
+    ],
+    "wall_ns": 40380200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0062.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 63,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\tiny-msvc-Od-7.obj"
+    ],
+    "wall_ns": 36757600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0063.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 64,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-quality-7.obj"
+    ],
+    "wall_ns": 26307600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0064.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 65,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\tiny-buster-fast-7.obj"
+    ],
+    "wall_ns": 25699000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0065.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 66,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-fast-0.obj"
+    ],
+    "wall_ns": 36306500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0066.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 67,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-quality-0.obj"
+    ],
+    "wall_ns": 37952200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0067.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 68,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-Od-0.obj"
+    ],
+    "wall_ns": 51059900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0068.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 69,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-O2-0.obj"
+    ],
+    "wall_ns": 228477000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0069.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 70,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-O2-1.obj"
+    ],
+    "wall_ns": 235094700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0070.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 71,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-Od-1.obj"
+    ],
+    "wall_ns": 52709800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0071.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 72,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-quality-1.obj"
+    ],
+    "wall_ns": 36753000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0072.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 73,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-fast-1.obj"
+    ],
+    "wall_ns": 34522000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0073.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 74,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-fast-2.obj"
+    ],
+    "wall_ns": 34803000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0074.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 75,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-quality-2.obj"
+    ],
+    "wall_ns": 37786700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0075.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 76,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-Od-2.obj"
+    ],
+    "wall_ns": 50710800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0076.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 77,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-O2-2.obj"
+    ],
+    "wall_ns": 237319200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0077.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 78,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-O2-3.obj"
+    ],
+    "wall_ns": 225862100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0078.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 79,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-Od-3.obj"
+    ],
+    "wall_ns": 50362100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0079.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 80,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-quality-3.obj"
+    ],
+    "wall_ns": 36902300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0080.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 81,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-fast-3.obj"
+    ],
+    "wall_ns": 36604900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0081.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 82,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-fast-4.obj"
+    ],
+    "wall_ns": 36160500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0082.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 83,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-quality-4.obj"
+    ],
+    "wall_ns": 37217800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0083.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 84,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-Od-4.obj"
+    ],
+    "wall_ns": 50368900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0084.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 85,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-O2-4.obj"
+    ],
+    "wall_ns": 226901200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0085.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 86,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-O2-5.obj"
+    ],
+    "wall_ns": 239236400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0086.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 87,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-Od-5.obj"
+    ],
+    "wall_ns": 51422600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0087.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 88,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-quality-5.obj"
+    ],
+    "wall_ns": 37583100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0088.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 89,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-fast-5.obj"
+    ],
+    "wall_ns": 35186400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0089.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 90,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-fast-6.obj"
+    ],
+    "wall_ns": 35704300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0090.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 91,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-quality-6.obj"
+    ],
+    "wall_ns": 38296700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0091.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 92,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-Od-6.obj"
+    ],
+    "wall_ns": 53400100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0092.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 93,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-O2-6.obj"
+    ],
+    "wall_ns": 235059800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0093.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 94,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/O2",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-O2-7.obj"
+    ],
+    "wall_ns": 227515300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0094.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 95,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/Zc:preprocessor",
+      "/J",
+      "/Od",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\functions256-msvc-Od-7.obj"
+    ],
+    "wall_ns": 50693300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0095.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 96,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-quality-7.obj"
+    ],
+    "wall_ns": 38456400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0096.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 97,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O2",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\functions256-buster-fast-7.obj"
+    ],
+    "wall_ns": 34874900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0097.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 98,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O0",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-O0.obj"
+    ],
+    "wall_ns": 25169600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0098.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 99,
+    "argv": [
+      "D:\\a\\buster\\buster\\source\\build\\Release\\ide.exe",
+      "cc",
+      "-target",
+      "x86_64-pc-windows-msvc",
+      "-march=baseline",
+      "-std=c17",
+      "-funsigned-char",
+      "-O3",
+      "-g0",
+      "-c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "-o",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-O3.obj"
+    ],
+    "wall_ns": 25903500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0099.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 100,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/O2",
+      "/J",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\caller.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\caller.obj"
+    ],
+    "wall_ns": 1237157900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0100.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 101,
+    "argv": [
+      "cl",
+      "/nologo",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\caller.obj",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-fast-7.obj",
+      "/FeD:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe"
+    ],
+    "wall_ns": 103832900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0101.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 102,
+    "argv": [
+      "cl",
+      "/nologo",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\caller.obj",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-buster-quality-7.obj",
+      "/FeD:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe"
+    ],
+    "wall_ns": 78436100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0102.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 103,
+    "argv": [
+      "cl",
+      "/nologo",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\caller.obj",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-Od-7.obj",
+      "/FeD:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe"
+    ],
+    "wall_ns": 78246200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0103.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 104,
+    "argv": [
+      "cl",
+      "/nologo",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\caller.obj",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels-msvc-O2-7.obj",
+      "/FeD:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe"
+    ],
+    "wall_ns": 80113200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0104.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 105,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 104575100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0105.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 106,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 96826800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0106.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 107,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 53344800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0107.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 108,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 30252300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0108.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 109,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 26389700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0109.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 110,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 48929700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0110.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 111,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 90548700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0111.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 112,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 101366000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0112.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 113,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 101260500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0113.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 114,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 92710700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0114.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 115,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 52455600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0115.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 116,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 26860000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0116.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 117,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 26806900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0117.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 118,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 48449700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0118.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 119,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 89835900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0119.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 120,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 100698800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0120.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 121,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 100892600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0121.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 122,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 93229900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0122.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 123,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 48819400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0123.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 124,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 26487500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0124.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 125,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 26597700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0125.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 126,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 48915500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0126.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 127,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 90661500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0127.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 128,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "0",
+      "32768"
+    ],
+    "wall_ns": 100838100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0128.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 129,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 91740900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0129.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 130,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 89851600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0130.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 131,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 68420200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0131.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 132,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 14338400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0132.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 133,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 15048600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0133.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 134,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 68349200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0134.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 135,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 79395100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0135.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 136,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 90061300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0136.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 137,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 90993100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0137.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 138,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 80731000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0138.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 139,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 69367600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0139.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 140,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 14725000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0140.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 141,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 14477200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0141.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 142,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 68914500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0142.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 143,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 81395900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0143.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 144,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 90396400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0144.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 145,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 90554800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0145.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 146,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 80468500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0146.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 147,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 68977600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0147.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 148,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 14435500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0148.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 149,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 14709400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0149.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 150,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 68696000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0150.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 151,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 80031200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0151.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 152,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "1",
+      "32768"
+    ],
+    "wall_ns": 90414300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0152.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 153,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 92189100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0153.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 154,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 101974200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0154.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 155,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 60380800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0155.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 156,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 8649200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0156.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 157,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 8377800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0157.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 158,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 60104000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0158.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 159,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 101520600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0159.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 160,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 92185300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0160.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 161,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 92081700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0161.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 162,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 101906700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0162.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 163,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 60244900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0163.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 164,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 8629700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0164.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 165,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 8047200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0165.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 166,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 59695100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0166.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 167,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 101286600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0167.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 168,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 91921300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0168.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 169,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 92101700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0169.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 170,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 107601500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0170.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 171,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 60320000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0171.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 172,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 8490600,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0172.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 173,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 8304900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0173.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 174,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 60229000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0174.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 175,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 101714900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0175.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 176,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "2",
+      "32768"
+    ],
+    "wall_ns": 96754100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0176.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 177,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 165655400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0177.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 178,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 164278400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0178.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 179,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 79999300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0179.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 180,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 9921200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0180.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 181,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 9731700,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0181.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 182,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 80150300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0182.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 183,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 164157000,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0183.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 184,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 164969200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0184.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 185,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 164237100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0185.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 186,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 164309500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0186.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 187,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 80476200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0187.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 188,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 10399500,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0188.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 189,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 10005300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0189.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 190,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 79723100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0190.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 191,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 164502300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0191.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 192,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 164643900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0192.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 193,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 165195300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0193.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 194,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 164594300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0194.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 195,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 79703100,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0195.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 196,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 9759800,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0196.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 197,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-O2.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 9316400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0197.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 198,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\msvc-Od.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 79587400,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0198.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 199,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-quality.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 170712900,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0199.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 200,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\buster-fast.exe",
+      "3",
+      "32768"
+    ],
+    "wall_ns": 164270200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0200.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 201,
+    "argv": [
+      "cl",
+      "/nologo",
+      "/TC",
+      "/std:c17",
+      "/J",
+      "/O2",
+      "/DNEGATIVE_CONTROL=1",
+      "/c",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\kernels.c",
+      "/FoD:\\a\\_temp\\msvc-comparison-evidence\\negative.obj"
+    ],
+    "wall_ns": 49088300,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0201.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 202,
+    "argv": [
+      "cl",
+      "/nologo",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\caller.obj",
+      "D:\\a\\_temp\\msvc-comparison-evidence\\negative.obj",
+      "/FeD:\\a\\_temp\\msvc-comparison-evidence\\negative.exe"
+    ],
+    "wall_ns": 79781200,
+    "exit_code": 0,
+    "timeout": false,
+    "log": "process-0202.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  },
+  {
+    "sequence": 203,
+    "argv": [
+      "D:\\a\\_temp\\msvc-comparison-evidence\\negative.exe",
+      "0",
+      "1"
+    ],
+    "wall_ns": 9494400,
+    "exit_code": 3,
+    "timeout": false,
+    "log": "process-0203.log",
+    "cpu_seconds": null,
+    "peak_process_tree_rss_bytes": null
+  }
+]

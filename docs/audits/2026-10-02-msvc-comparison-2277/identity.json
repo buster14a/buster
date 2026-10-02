@@ -1,0 +1,18 @@
+{
+  "schema": "BUSTER_MSVC_DIAGNOSTIC_V1",
+  "buster_source": "d4ca72fb4e97ae0a410b0d03258b00495fa45e13",
+  "buster_binary_sha256": "c3c70a94d52b713913b688325ff55b1b0b6c968b71a97c9edcc92533b42f2703",
+  "platform": "Windows-2025Server-10.0.26100-SP0",
+  "cpu": "AMD64 Family 25 Model 1 Stepping 1, AuthenticAMD",
+  "logical_cpus": 4,
+  "image_version": "20260925.250.1",
+  "image_os": "win25-vs2026",
+  "runner_name": "GitHub Actions 1000201245",
+  "cl_path": "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\cl.EXE",
+  "cl_sha256": "b0a1818ebae6da7f18230a84e76ce839212584ac4c2ab55b97a0d5268085da57",
+  "workflow_sha": "791462a112aa0a8410d9e650ad32a91dd0211015",
+  "qualified_performance_acceptance": false,
+  "memory_and_cpu_accounting": "not measured: no complete child-tree accounting",
+  "license_buster": "First-party license grant missing/unresolved; LICENSES/README.md",
+  "license_msvc": "Proprietary Microsoft Visual Studio/Build Tools terms"
+}

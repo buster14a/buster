@@ -1,0 +1,300 @@
+
+work/evidence/kernels-buster-fast-7.obj:	file format coff-x86-64
+
+Disassembly of section .text:
+
+0000000000000000 <helper>:
+       0:      	pushq	%rbp
+       1:      	movq	%rsp, %rbp
+       4:      	subq	$0x10, %rsp
+       8:      	testb	$0x0, (%rsp)
+       c:      	movl	%ecx, %eax
+       e:      	movl	$0x21, %edx
+      13:      	movq	%rax, -0x10(%rbp)
+      17:      	imull	%edx, %eax
+      1a:      	movl	$0x7, %r8d
+      20:      	movq	-0x10(%rbp), %r9
+      24:      	movq	%rax, -0x10(%rbp)
+      28:      	movq	%r9, %rax
+      2b:      	movq	%r8, %rcx
+      2e:      	shrl	%cl, %eax
+      30:      	movq	%rax, -0x8(%rbp)
+      34:      	movq	-0x10(%rbp), %rax
+      38:      	movq	-0x8(%rbp), %rdx
+      3c:      	xorl	%edx, %eax
+      3e:      	movq	%rax, -0x10(%rbp)
+      42:      	addq	$0x10, %rsp
+      46:      	popq	%rbp
+      47:      	retq
+      48:      	nop
+      49:      	nop
+      4a:      	nop
+      4b:      	nop
+      4c:      	nop
+      4d:      	nop
+      4e:      	nop
+      4f:      	nop
+
+0000000000000050 <sum_scale>:
+      50:      	pushq	%rbp
+      51:      	movq	%rsp, %rbp
+      54:      	subq	$0x50, %rsp
+      58:      	testb	$0x0, (%rsp)
+      5c:      	movl	%r8d, %eax
+      5f:      	movl	%r9d, %r10d
+      62:      	xorl	%r11d, %r11d
+      65:      	movq	%r11, -0x40(%rbp)
+      69:      	movq	%r10, -0x48(%rbp)
+      6d:      	movq	%rax, -0x38(%rbp)
+      71:      	movq	%rcx, -0x18(%rbp)
+      75:      	movq	%r10, -0x20(%rbp)
+      79:      	movq	-0x40(%rbp), %rax
+      7d:      	movq	%rax, -0x8(%rbp)
+      81:      	movq	-0x48(%rbp), %rax
+      85:      	movq	%rax, -0x10(%rbp)
+      89:      	movq	-0x8(%rbp), %rax
+      8d:      	movq	-0x38(%rbp), %rcx
+      91:      	cmpl	%ecx, %eax
+      93:      	jae	0x11a <sum_scale+0xca>
+      99:      	movq	-0x18(%rbp), %rcx
+      9d:      	movq	%rcx, %rdx
+      a0:      	movq	%rax, %r8
+      a3:      	imulq	$0x4, %r8, %r9
+      a7:      	movq	%rdx, %rax
+      aa:      	movq	%rdx, -0x20(%rbp)
+      ae:      	movq	%r9, %rdx
+      b1:      	addq	%rdx, %rax
+      b4:      	movl	(%rax), %r8d
+      b7:      	movl	$0x3, %r9d
+      bd:      	movq	%r8, %rax
+      c0:      	movq	%r9, %rdx
+      c3:      	imull	%edx, %eax
+      c6:      	movl	$0x7, %r8d
+      cc:      	movq	%rax, -0x28(%rbp)
+      d0:      	movq	%r8, %rdx
+      d3:      	addl	%edx, %eax
+      d5:      	movq	%rax, -0x30(%rbp)
+      d9:      	movq	-0x10(%rbp), %rax
+      dd:      	movq	-0x30(%rbp), %rdx
+      e1:      	addl	%edx, %eax
+      e3:      	movl	$0x1, %ecx
+      e8:      	movq	%rax, -0x20(%rbp)
+      ec:      	movq	-0x8(%rbp), %rax
+      f0:      	movq	%rcx, %rdx
+      f3:      	addl	%edx, %eax
+      f5:      	movq	%rax, -0x40(%rbp)
+      f9:      	movq	%rax, -0x28(%rbp)
+      fd:      	movq	-0x20(%rbp), %rax
+     101:      	movq	%rax, -0x48(%rbp)
+     105:      	movq	-0x40(%rbp), %rax
+     109:      	movq	%rax, -0x8(%rbp)
+     10d:      	movq	-0x48(%rbp), %rax
+     111:      	movq	%rax, -0x10(%rbp)
+     115:      	jmp	0x89 <sum_scale+0x39>
+     11a:      	movq	-0x10(%rbp), %rax
+     11e:      	addq	$0x50, %rsp
+     122:      	popq	%rbp
+     123:      	retq
+     124:      	nop
+     125:      	nop
+     126:      	nop
+     127:      	nop
+     128:      	nop
+     129:      	nop
+     12a:      	nop
+     12b:      	nop
+     12c:      	nop
+     12d:      	nop
+     12e:      	nop
+     12f:      	nop
+
+0000000000000130 <divide7>:
+     130:      	pushq	%rbp
+     131:      	movq	%rsp, %rbp
+     134:      	subq	$0x50, %rsp
+     138:      	testb	$0x0, (%rsp)
+     13c:      	movl	%r8d, %eax
+     13f:      	movl	%r9d, %r10d
+     142:      	xorl	%r11d, %r11d
+     145:      	xorl	%edx, %edx
+     147:      	movq	%rdx, -0x48(%rbp)
+     14b:      	movq	%r11, -0x50(%rbp)
+     14f:      	movq	%rax, -0x38(%rbp)
+     153:      	movq	%rcx, -0x18(%rbp)
+     157:      	movq	%r10, -0x40(%rbp)
+     15b:      	movq	-0x48(%rbp), %rax
+     15f:      	movq	%rax, -0x8(%rbp)
+     163:      	movq	-0x50(%rbp), %rax
+     167:      	movq	%rax, -0x10(%rbp)
+     16b:      	movq	-0x8(%rbp), %rax
+     16f:      	movq	-0x38(%rbp), %rcx
+     173:      	cmpl	%ecx, %eax
+     175:      	jae	0x1f4 <divide7+0xc4>
+     17b:      	movq	-0x18(%rbp), %rcx
+     17f:      	movq	%rcx, %rdx
+     182:      	movq	%rax, %r8
+     185:      	imulq	$0x4, %r8, %r9
+     189:      	movq	%rdx, %rax
+     18c:      	movq	%rdx, -0x20(%rbp)
+     190:      	movq	%r9, %rdx
+     193:      	addq	%rdx, %rax
+     196:      	movl	(%rax), %r8d
+     199:      	movq	%r8, %rax
+     19c:      	movq	-0x40(%rbp), %rdx
+     1a0:      	addl	%edx, %eax
+     1a2:      	movl	$0x7, %r8d
+     1a8:      	movq	%r8, %rcx
+     1ab:      	xorl	%edx, %edx
+     1ad:      	divl	%ecx
+     1af:      	movq	%rax, -0x28(%rbp)
+     1b3:      	movq	-0x10(%rbp), %rax
+     1b7:      	movq	-0x28(%rbp), %rdx
+     1bb:      	addl	%edx, %eax
+     1bd:      	movl	$0x1, %ecx
+     1c2:      	movq	%rax, -0x20(%rbp)
+     1c6:      	movq	-0x8(%rbp), %rax
+     1ca:      	movq	%rcx, %rdx
+     1cd:      	addl	%edx, %eax
+     1cf:      	movq	%rax, -0x48(%rbp)
+     1d3:      	movq	%rax, -0x30(%rbp)
+     1d7:      	movq	-0x20(%rbp), %rax
+     1db:      	movq	%rax, -0x50(%rbp)
+     1df:      	movq	-0x48(%rbp), %rax
+     1e3:      	movq	%rax, -0x8(%rbp)
+     1e7:      	movq	-0x50(%rbp), %rax
+     1eb:      	movq	%rax, -0x10(%rbp)
+     1ef:      	jmp	0x16b <divide7+0x3b>
+     1f4:      	movq	-0x10(%rbp), %rax
+     1f8:      	addq	$0x50, %rsp
+     1fc:      	popq	%rbp
+     1fd:      	retq
+     1fe:      	nop
+     1ff:      	nop
+
+0000000000000200 <dot>:
+     200:      	pushq	%rbp
+     201:      	movq	%rsp, %rbp
+     204:      	subq	$0x50, %rsp
+     208:      	testb	$0x0, (%rsp)
+     20c:      	movl	%r8d, %eax
+     20f:      	movl	%r9d, %r10d
+     212:      	xorl	%r11d, %r11d
+     215:      	movq	%r11, -0x48(%rbp)
+     219:      	movq	%r10, -0x50(%rbp)
+     21d:      	movq	%rax, -0x40(%rbp)
+     221:      	movq	%rcx, -0x18(%rbp)
+     225:      	movq	%rdx, -0x20(%rbp)
+     229:      	movq	%r10, -0x28(%rbp)
+     22d:      	movq	-0x48(%rbp), %rax
+     231:      	movq	%rax, -0x8(%rbp)
+     235:      	movq	-0x50(%rbp), %rax
+     239:      	movq	%rax, -0x10(%rbp)
+     23d:      	movq	-0x8(%rbp), %rax
+     241:      	movq	-0x40(%rbp), %rcx
+     245:      	cmpl	%ecx, %eax
+     247:      	jae	0x2d3 <dot+0xd3>
+     24d:      	movq	-0x18(%rbp), %rcx
+     251:      	movq	%rcx, %rdx
+     254:      	movq	%rax, %r8
+     257:      	imulq	$0x4, %r8, %r9
+     25b:      	movq	%rdx, %rax
+     25e:      	movq	%rdx, -0x28(%rbp)
+     262:      	movq	%r9, %rdx
+     265:      	addq	%rdx, %rax
+     268:      	movl	(%rax), %r8d
+     26b:      	movq	-0x20(%rbp), %r9
+     26f:      	movq	%r9, %r10
+     272:      	movq	-0x8(%rbp), %r11
+     276:      	movq	%r11, %rax
+     279:      	imulq	$0x4, %rax, %rdx
+     27d:      	movq	%r10, %rax
+     280:      	addq	%rdx, %rax
+     283:      	movl	(%rax), %r10d
+     286:      	movq	%r8, %rax
+     289:      	movq	%r10, %rdx
+     28c:      	imull	%edx, %eax
+     28f:      	movq	%rax, -0x30(%rbp)
+     293:      	movq	-0x10(%rbp), %rax
+     297:      	movq	-0x30(%rbp), %rdx
+     29b:      	addl	%edx, %eax
+     29d:      	movl	$0x1, %ecx
+     2a2:      	movq	%rax, -0x28(%rbp)
+     2a6:      	movq	%r11, %rax
+     2a9:      	movq	%rcx, %rdx
+     2ac:      	addl	%edx, %eax
+     2ae:      	movq	%rax, -0x48(%rbp)
+     2b2:      	movq	%rax, -0x38(%rbp)
+     2b6:      	movq	-0x28(%rbp), %rax
+     2ba:      	movq	%rax, -0x50(%rbp)
+     2be:      	movq	-0x48(%rbp), %rax
+     2c2:      	movq	%rax, -0x8(%rbp)
+     2c6:      	movq	-0x50(%rbp), %rax
+     2ca:      	movq	%rax, -0x10(%rbp)
+     2ce:      	jmp	0x23d <dot+0x3d>
+     2d3:      	movq	-0x10(%rbp), %rax
+     2d7:      	addq	$0x50, %rsp
+     2db:      	popq	%rbp
+     2dc:      	retq
+     2dd:      	nop
+     2de:      	nop
+     2df:      	nop
+
+00000000000002e0 <calls>:
+     2e0:      	pushq	%rbp
+     2e1:      	movq	%rsp, %rbp
+     2e4:      	subq	$0x70, %rsp
+     2e8:      	testb	$0x0, (%rsp)
+     2ec:      	movl	%r8d, %eax
+     2ef:      	movl	%r9d, %r10d
+     2f2:      	xorl	%r11d, %r11d
+     2f5:      	xorl	%edx, %edx
+     2f7:      	movq	%rdx, -0x48(%rbp)
+     2fb:      	movq	%r11, -0x50(%rbp)
+     2ff:      	movq	%rax, -0x38(%rbp)
+     303:      	movq	%rcx, -0x18(%rbp)
+     307:      	movq	%r10, -0x40(%rbp)
+     30b:      	movq	-0x48(%rbp), %rax
+     30f:      	movq	%rax, -0x8(%rbp)
+     313:      	movq	-0x50(%rbp), %rax
+     317:      	movq	%rax, -0x10(%rbp)
+     31b:      	movq	-0x8(%rbp), %rax
+     31f:      	movq	-0x38(%rbp), %rcx
+     323:      	cmpl	%ecx, %eax
+     325:      	jae	0x3a3 <calls+0xc3>
+     32b:      	movq	-0x18(%rbp), %rcx
+     32f:      	movq	%rcx, %rdx
+     332:      	movq	%rax, %r8
+     335:      	imulq	$0x4, %r8, %r9
+     339:      	movq	%rdx, %rax
+     33c:      	movq	%rdx, -0x20(%rbp)
+     340:      	movq	%r9, %rdx
+     343:      	addq	%rdx, %rax
+     346:      	movl	(%rax), %r8d
+     349:      	movq	%r8, %rax
+     34c:      	movq	-0x40(%rbp), %rdx
+     350:      	addl	%edx, %eax
+     352:      	movq	%rax, %rcx
+     355:      	movq	%rcx, -0x28(%rbp)
+     359:      	callq	0x35e <calls+0x7e>
+     35e:      	movq	%rax, -0x30(%rbp)
+     362:      	movq	-0x10(%rbp), %rax
+     366:      	movq	-0x30(%rbp), %rdx
+     36a:      	addl	%edx, %eax
+     36c:      	movl	$0x1, %ecx
+     371:      	movq	%rax, -0x20(%rbp)
+     375:      	movq	-0x8(%rbp), %rax
+     379:      	movq	%rcx, %rdx
+     37c:      	addl	%edx, %eax
+     37e:      	movq	%rax, -0x48(%rbp)
+     382:      	movq	%rax, -0x28(%rbp)
+     386:      	movq	-0x20(%rbp), %rax
+     38a:      	movq	%rax, -0x50(%rbp)
+     38e:      	movq	-0x48(%rbp), %rax
+     392:      	movq	%rax, -0x8(%rbp)
+     396:      	movq	-0x50(%rbp), %rax
+     39a:      	movq	%rax, -0x10(%rbp)
+     39e:      	jmp	0x31b <calls+0x3b>
+     3a3:      	movq	-0x10(%rbp), %rax
+     3a7:      	addq	$0x70, %rsp
+     3ab:      	popq	%rbp
+     3ac:      	retq
