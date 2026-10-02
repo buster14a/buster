@@ -213,6 +213,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_admit(Arena* arena, ObjectArchi
     {
         Target actual = archive->objects[member].target;
         ObjectFile object = object_read(arena, archive->member_bytes[member], archive->target);
+        if (object.requires_executable_stack) object.executable_stack_source = archive->member_names[member];
         if (object.error == OBJECT_ERROR_NONE)
         {
             archive->objects[member] = object;

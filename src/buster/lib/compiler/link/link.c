@@ -2516,6 +2516,11 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     {
         ObjectFile* object = objects + object_index;
         u64* offsets = section_offsets + section_slots[object_index];
+        if (object->requires_executable_stack && !result.object.requires_executable_stack)
+        {
+            result.object.requires_executable_stack = true;
+            result.object.executable_stack_source = link_string_copy(arena, object->executable_stack_source);
+        }
         for (u32 module_index = 0; module_index < object->debug_module_count; module_index += 1)
         {
             ObjectDebugModule source = object->debug_modules[module_index];
@@ -14181,6 +14186,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
     else if (!link_validate_linker_arguments(object->target, options, true, &result.symbol))
     {
         result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+    }
+    else if (object->requires_executable_stack)
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        result.symbol = string_format(arena, S8("{S8}: executable-stack request (.note.GNU-stack) is unsupported"),
+                                      object->executable_stack_source.length ? object->executable_stack_source : S8("input object"));
     }
     else if ((object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
              !link_elf_index_initialize(temporary, options, exports))

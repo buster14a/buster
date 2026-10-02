@@ -5047,9 +5047,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_failed_publication(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_stack_contract(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        Target target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX};
+        ObjectFile objects[] = {
+            link_test_object_make(arguments->arena, target, (ByteSlice){0}, 0, 0, 0, 0),
+            link_test_object_make(arguments->arena, target, (ByteSlice){0}, 0, 0, 0, 0),
+        };
+        objects[1].requires_executable_stack = true;
+        objects[1].executable_stack_source = S8("exec-stack.o");
+        LinkObjectResult merged = link_objects(arguments->arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
+        BUSTER_TEST(arguments, merged.error == LINK_ERROR_NONE && merged.object.requires_executable_stack);
+        BUSTER_STRING_TEST(arguments, merged.object.executable_stack_source, S8("exec-stack.o"));
+        for (u32 kind = 0; kind < NATIVE_IMAGE_COUNT; kind += 1)
+        {
+            NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &merged.object, (NativeExecutableLinkOptions){.image_kind = (NativeImageKind)kind});
+            BUSTER_TEST(arguments, linked.error == LINK_ERROR_UNSUPPORTED_FEATURE && !linked.executable.pointer && !linked.executable.length);
+            BUSTER_TEST(arguments, string_starts_with_sequence(linked.symbol, S8("exec-stack.o: executable-stack request")));
+        }
+        BUSTER_TEST(arguments, objects[1].requires_executable_stack && !objects[0].requires_executable_stack);
+    }
+    return result;
+}
+
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, link_test_elf_stack_contract);
     UnitTestResult tls_membership = link_test_tls_membership(arguments);
     result.succeeded_test_count += tls_membership.succeeded_test_count;
     result.test_count += tls_membership.test_count;

@@ -10,6 +10,30 @@ writer.
 
 ## ELF64: plan every range, then store each byte once
 
+Every ELF64 object carries one empty, nonallocated `SHT_PROGBITS`
+`.note.GNU-stack`. Its `SHF_EXECINSTR` bit is clear for C code and ordinary
+assembly. An explicit assembly `.section .note.GNU-stack,"x",@progbits`
+sets that bit; `""` leaves all flags clear. The assembler treats this as
+metadata, accepts no payload in it, and repeated declarations retain any
+executable request. `-S` prints the same declaration. The generated note is
+an extra fixed header and a 16-byte name, without a payload or allocated
+section in `ObjectFile`.
+
+The ELF reader records an input note's executable bit before skipping
+nonallocated sections. `ObjectFile.requires_executable_stack` survives
+merges and selected archive members. Native image and in-memory linking
+refuse an explicit request: executable stacks are unsupported, and the
+driver diagnostic names the requesting object or archive member. No image
+is published for that input. A missing note is accepted as nonexecuting,
+matching LLD's policy; Buster does not infer GNU ld's target-dependent
+executable default. Existing Buster ELF images retain their stack policy
+(RW on dynamic images; no stack header on the static writers).
+
+The convention and ELF section flags follow the primary
+[GNU ld options contract](https://sourceware.org/binutils/docs/ld/Options.html)
+and [GNU as section contract](https://sourceware.org/binutils/docs/as/Section.html).
+No external implementation code is reused.
+
 `object_write_elf64` runs in two phases over the object after the priority
 split (`object_split_initializer_priorities`). The split appends one section
 per constructor/destructor priority group and records where each grouped
@@ -63,12 +87,15 @@ Mach-O never borrow. `compiler_driver_test_object_borrowed_payloads` compares
 the published file, the slices and `object_write`'s image, and holds the
 ledger identities below.
 
-The bytes are identical to the writer this replaced. Test builds keep that
-writer as `object_test_write_elf64_reference`, a differential oracle; the
-registered `object_test_elf_planned_writer` compares both on seeded and
-adversarial objects. Retire the oracle when an intended ELF output change
-lands (for example [#1288](https://github.com/buster14a/buster/issues/1288)'s
-empty-section removal), replacing byte comparison with a read-back comparison.
+Test builds keep the preceding writer unchanged as
+`object_test_write_elf64_reference`, a differential oracle. The registered
+`object_test_elf_planned_writer` compares seeded and adversarial objects after
+removing only the new GNU-stack declaration from a copy of the planned
+image. All earlier fields and payloads remain byte-compared. Raw note checks,
+reader mutation controls and the configured host-linker boundary fixture
+validate the new declaration independently. A later format change such as
+[#1288](https://github.com/buster14a/buster/issues/1288)'s empty-section removal
+must reconsider this normalization or retire the oracle.
 
 ## The work ledger: `ObjectWriteStatistics`
 

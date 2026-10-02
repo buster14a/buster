@@ -76,6 +76,9 @@ struct AssemblyUnitResult
     u32 symbol_count;
     u32 relocation_count;
     u32 diagnostic_count;
+    // .note.GNU-stack is an empty nonallocated declaration rather than one
+    // of the byte-bearing sections. Repeated declarations retain any X bit.
+    bool requires_executable_stack;
 };
 
 // Assembles one source buffer. A non-zero diagnostic_count means the unit was

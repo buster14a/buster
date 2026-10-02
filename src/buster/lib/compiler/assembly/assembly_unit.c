@@ -93,6 +93,7 @@ struct AssemblyUnitBuilder
     u32 symbol_capacity;
     u32 relocation_capacity;
     u32 current_section;
+    bool current_stack_note;
     u32 line;
     u32 column;
 };
@@ -232,6 +233,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, Assem
 
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_section_select(AssemblyUnitBuilder* builder, String8 name, AssemblyUnitSectionKind kind)
 {
+    builder->current_stack_note = false;
     for (u32 index = 0; index < builder->result.section_count; index += 1)
     {
         if (string_equal(builder->result.sections[index].name, name))
@@ -261,11 +263,15 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_section_select(AssemblyUnitBuilder* builde
 // carries directives produces no sections at all.
 BUSTER_GLOBAL_LOCAL bool assembly_unit_section_current(AssemblyUnitBuilder* builder)
 {
-    if (builder->current_section == UINT32_MAX)
+    if (builder->current_stack_note)
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, S8(".note.GNU-stack must be empty"));
+    }
+    else if (builder->current_section == UINT32_MAX)
     {
         builder->current_section = assembly_unit_section_select(builder, S8(".text"), ASSEMBLY_UNIT_SECTION_TEXT);
     }
-    return builder->current_section != UINT32_MAX;
+    return !builder->current_stack_note && builder->current_section != UINT32_MAX;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_append(AssemblyUnitBuilder* builder, u8* bytes, u64 length)
@@ -522,41 +528,65 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
 {
     String8 parts[4] = {0};
     u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
-    if (part_count == UINT32_MAX || !part_count || !parts[0].length)
-    {
-        return false;
-    }
+    bool result = part_count != UINT32_MAX && part_count && parts[0].length;
     String8 name = assembly_unit_unquote(assembly_unit_word(parts[0], 0));
-    AssemblyUnitSectionKind kind = ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
-    bool classified = false;
-    if (part_count > 1 && parts[1].length >= 2 && parts[1].pointer[0] == '"')
+    if (result && string_equal(name, S8(".note.GNU-stack")))
     {
-        String8 flags = string_slice(parts[1], 1, parts[1].length - 1);
-        bool writable = false;
+        bool valid = part_count <= 3;
         bool executable = false;
-        for (u64 index = 0; index < flags.length; index += 1)
+        if (valid && part_count > 1)
         {
-            writable = writable || flags.pointer[index] == 'w';
-            executable = executable || flags.pointer[index] == 'x';
+            valid = parts[1].length >= 2 && parts[1].pointer[0] == '"' && parts[1].pointer[parts[1].length - 1] == '"';
+            for (u64 index = 1; valid && index + 1 < parts[1].length; index += 1)
+            {
+                valid = parts[1].pointer[index] == 'x';
+                executable = executable || valid;
+            }
         }
-        bool no_bits = part_count > 2 && string_ends_with_sequence(parts[2], S8("nobits"));
-        kind = executable    ? ASSEMBLY_UNIT_SECTION_TEXT
-               : no_bits     ? ASSEMBLY_UNIT_SECTION_ZERO
-               : writable    ? ASSEMBLY_UNIT_SECTION_DATA
-                             : ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
-        classified = true;
+        if (valid && part_count > 2)
+        {
+            valid = string_equal(parts[2], S8("@progbits")) || string_equal(parts[2], S8("%progbits"));
+        }
+        if (valid)
+        {
+            builder->result.requires_executable_stack = builder->result.requires_executable_stack || executable;
+            builder->current_stack_note = true;
+        }
+        result = valid;
     }
-    if (!classified && !assembly_unit_section_kind_for_name(name, &kind))
+    else if (result)
     {
-        return false;
+        AssemblyUnitSectionKind kind = ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
+        bool classified = false;
+        if (part_count > 1 && parts[1].length >= 2 && parts[1].pointer[0] == '"')
+        {
+            String8 flags = string_slice(parts[1], 1, parts[1].length - 1);
+            bool writable = false;
+            bool executable = false;
+            for (u64 index = 0; index < flags.length; index += 1)
+            {
+                writable = writable || flags.pointer[index] == 'w';
+                executable = executable || flags.pointer[index] == 'x';
+            }
+            bool no_bits = part_count > 2 && string_ends_with_sequence(parts[2], S8("nobits"));
+            kind = executable    ? ASSEMBLY_UNIT_SECTION_TEXT
+                   : no_bits     ? ASSEMBLY_UNIT_SECTION_ZERO
+                   : writable    ? ASSEMBLY_UNIT_SECTION_DATA
+                                 : ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
+            classified = true;
+        }
+        if (!classified && !assembly_unit_section_kind_for_name(name, &kind))
+        {
+            result = false;
+        }
+        if (result)
+        {
+            u32 section = assembly_unit_section_select(builder, name, kind);
+            result = section != UINT32_MAX;
+            if (result) builder->current_section = section;
+        }
     }
-    u32 section = assembly_unit_section_select(builder, name, kind);
-    if (section == UINT32_MAX)
-    {
-        return false;
-    }
-    builder->current_section = section;
-    return true;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_symbol(AssemblyUnitBuilder* builder, String8 directive, String8 operands)

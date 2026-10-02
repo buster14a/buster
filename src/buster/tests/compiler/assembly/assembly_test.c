@@ -2799,9 +2799,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_suffix_aliases(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_stack_note(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}, {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    String8 sources[] = {
+        S8(".section .note.GNU-stack,\"\",@progbits\n.text\n"),
+        S8(".section .note.GNU-stack,\"x\",@progbits\n.text\n"),
+        S8(".section .note.GNU-stack,\"x\",%progbits\n.section .note.GNU-stack,\"\",%progbits\n.text\n"),
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, sources[index], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, !unit.diagnostic_count && unit.requires_executable_stack == (index != 0));
+            BUSTER_TEST(arguments, unit.section_count == 1 && string_equal(unit.sections[0].name, S8(".text")));
+        }
+        String8 rejected[] = {
+            S8(".section .note.GNU-stack,\"a\",@progbits\n"),
+            S8(".section .note.GNU-stack,\"\",@nobits\n"),
+            S8(".section .note.GNU-stack,\"\",@progbits\n.byte 1\n"),
+            S8(".section .note.GNU-stack,\"x\",@progbits\nret\n"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, rejected[index], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count != 0);
+        }
+    }
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_stack_note);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
