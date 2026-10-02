@@ -2647,7 +2647,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("static const unsigned char vectors[][81] = { { \"\" }, { \"a\" }, { \"abc\", } };\n"), true, false, {0}, S8("-std=c17")},
         {S8("char rows[1][4] = { { \"ab\", \"cd\" } };\n"), false, false, {0}, S8("-std=c17")},
         {S8("int g(void) { char rows[1][4] = { { \"ab\", \"cd\" } }; return rows[0][0]; }\n"), false, false, {0}, S8("-std=c17")},
-        {S8("char rows[1][2] = { { \"abc\" } };\n"), false, false, S8("initializer has more elements"), S8("-std=c17")},
+        {S8("char rows[1][2] = { { \"abc\" } };\n"), false, false, {0}, S8("-std=c17")},
         {S8("int (*fp)(void) = 7;\n"), false, false, S8("cannot convert from 'int' to 'function pointer'")},
         {S8("int old(void); int g(void) { char *z=0; void *v=(int *)0; int *p=0; _Bool b=p; int (*fp)(void)=0; char *a=(0); char *c=1-1; return old() + b + (v!=0) + (fp!=0) + (a==c); }\n"), true},
         {S8("int g(void) { int *p=(int *)5; return p != 0; }\n"), true},

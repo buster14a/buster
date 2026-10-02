@@ -5038,8 +5038,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL String8 c_test_braced_string_runtime_source =
-    S8("struct BracedName { char name[8]; int number; };\n"
+BUSTER_GLOBAL_LOCAL String8 const c_test_braced_string_runtime_source =
+    S8_INITIALIZER("struct BracedName { char name[8]; int number; };\n"
        "struct BracedConst { const unsigned char msg[4]; int number; };\n"
        "struct BracedName braced_name = { { \"a\" \"bc\", }, 7 };\n"
        "static const struct BracedConst braced_const[] = { { { \"ab\" }, 2 } };\n"
