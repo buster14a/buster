@@ -545,8 +545,12 @@ without facts for identical bitcode and diagnostics.
   values by destination slot. Later designators replace the final value;
   their expressions still evaluate once in source order. A union constructor
   retains only its last selected member, while a second positional union item
-  remains an excess initializer. `c_test_initializer_overrides` exercises
-  automatic objects and compound literals, positional continuation, zero-filled
+  remains an excess initializer.
+  Pure volatile member values are captured at their unqualified rvalue type;
+  the shared capture owner retains qualified subobject stores. The fixture
+  enters production semantic analysis and checks volatile storage in both forms.
+  `c_test_initializer_overrides` exercises automatic objects and compound
+  literals, positional continuation, zero-filled
   omitted slots, more overrides than slots, ordered side effects, both frontend
   forms and all native allocators. GCC and Clang check the side-effect-free
   values; C leaves evaluation of overridden expressions unspecified.

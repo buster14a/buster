@@ -6404,11 +6404,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_overrides(UnitTestArgument
                 Target target = targets[target_index];
                 CPreprocessResult tokens = c_preprocess(temporary.arena, source,
                     (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
-                CParseResult parse = c_parse(temporary.arena, tokens);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
                 BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
-                if (!parse.diagnostic_count)
+                if (!syntax.diagnostic_count)
                 {
-                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("initializer-overrides.c"), tokens, parse, target,
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("initializer-overrides.c"), tokens, syntax, target,
                         (CIRLowerOptions){.disable_direct_ssa = form != 0});
                     if (row)
                     {
@@ -6418,6 +6418,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_overrides(UnitTestArgument
                     {
                         BUSTER_TEST(arguments, lowered.canonical_ir_certified);
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                        u32 volatile_stores = 0;
+                        IrModule* module = lowered.program->modules;
+                        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                        {
+                            IrFunction* function = module->functions + function_index;
+                            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                            {
+                                IrInstruction* instruction = function->instructions + instruction_index;
+                                volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                            }
+                        }
+                        BUSTER_TEST(arguments, volatile_stores != 0);
                     }
                 }
                 else
