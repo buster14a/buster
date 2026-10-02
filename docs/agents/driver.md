@@ -364,6 +364,15 @@ command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
 header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
 output rejects `-emit-llvm`, native link inputs, and `-S`.
 
+Wasm32 also refuses runtime function addresses, including stored/returned
+references and aliases; direct calls remain supported. The existing instruction
+emitter checks pointer-valued FUNCTION materialization and function-typed
+operand escapes outside a direct CALL callee. This prevents a zero function
+index from masquerading as null without adding a use-graph pass or allocation.
+Refusal produces a Wasm driver error with empty artifact aliases before output
+publication; existing destination bytes remain intact. Memory64 behavior and
+its nonzero function handles are unchanged.
+
 Static archive extraction uses `compiler_driver_archive_extract` in the
 private `driver/archive.c` implementation. Its invocation-owned name table
 records selected definitions and strong/weak undefined references once per
