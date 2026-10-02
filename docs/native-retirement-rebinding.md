@@ -284,6 +284,28 @@ pins; all 559 inputs, 411 subjects, and 78,912 row identities remain fixed.
 
 ### Solo-maintainer authorization
 
+For #1835, the trusted-reader bootstrap admits the exact successor support
+declaration digest
+`6d975980cc6df4945334fc2846dac8e03a1480a6c65e516db37be8adbccf1106` alongside
+the #1808 predecessor. Only `tests/bootstrap_wrapper_test.py` changes: its
+dependency-only row becomes 19,588 bytes with SHA-256
+`e03036ea0a44e47f62bb743abaa7c5e381c6f76df3dfc75ba349da1a15506862`.
+All 559 inputs, 411 subjects, roles, compilation obligations and 78,912 row
+identities stay fixed. The bootstrap leaves the reviewed ledger and frozen
+module intact; after it lands, a separate policy transition removes duplicate
+workflow assertions, repairs the immutable-driver graph assertion, updates
+this row and the blocked benchmark-service profile pins. It changes no
+benchmark thresholds or production wrapper behavior.
+
+The same bootstrap admits the exact #1836 successor digest
+`5834270ef2b01798b25547751fd91631295a84ccb23116bf1502d8bae0c0b115`.
+It is the #1835 declaration with only the historical bridge path changed from
+`tests/github_runner_bridge_test.py` to
+`tests/retired/github_runner_bridge_test.py.txt`. The bridge bytes, role and
+obligation remain intact, and the census inventory keeps the same cardinality.
+That path move is a later policy transition; this reader bootstrap leaves both
+the bridge and the reviewed ledger at their existing paths.
+
 `authorization_mode: solo-maintainer` is explicit owner authorization of one
 bootstrap or policy transition. It is recorded separately from independent
 review; `maintainer_approvals` remains empty. The CLI default remains `independent-review`. The workflow default `configured`
