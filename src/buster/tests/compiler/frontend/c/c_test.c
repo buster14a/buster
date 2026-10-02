@@ -483,8 +483,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
     String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    u64 process_timeout = 30000000;
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
     {
+        FileReadResult readback = file_read_checked(arguments->arena, source, (FileReadOptions){0});
+        BUSTER_TEST(arguments, readback.status == OS_FILE_READ_OK && readback.error.v == 0);
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, readback.bytes), source_text);
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
         {
             for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -506,15 +510,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
                     {
                         String8 run[] = {output};
                         ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                            (ProcessSpawnOptions){.use_process_environment = true});
+                            (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
                         if (BUSTER_REQUIRE(arguments, child.handle != 0))
                         {
-                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
-                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, process_timeout);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
+                                !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
+                                !execution.process_group_ownership_lost,
                                 string_format(temporary.arena, S8("enum sizeof runtime {S8} {S8} {S8}: status={u32} timeout={u32}"),
                                     dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                         }
                     }
+                    BUSTER_TEST(arguments, os_file_delete(output));
                     scratch_end(temporary);
                 }
             }
@@ -522,6 +529,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
 #if BUSTER_LINUX
         String8 references[] = {S8("gcc"), S8("clang")};
         String8 optimizations[] = {S8("-O0"), S8("-O2")};
+        u64 diagnostic_limit = BUSTER_KB(64);
         for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
         {
             for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
@@ -537,24 +545,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
                                              S8("-nostdinc"), S8("-o"), output, source};
                         ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
                             (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                                  .use_process_environment = true, .search_path = true});
+                                                  .use_process_environment = true, .new_process_group = true, .search_path = true,
+                                                  .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = diagnostic_limit,
+                                                                                  [STANDARD_STREAM_ERROR] = diagnostic_limit},
+                                                                     .total = diagnostic_limit * 2},
+                                                  .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
                         if (BUSTER_REQUIRE(arguments, build.handle != 0))
                         {
-                            ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, 30000000);
+                            ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, process_timeout);
                             String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
-                            BUSTER_TEST_RAW(arguments, !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS,
+                            bool built = !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS &&
+                                !compilation.capture_failed && !compilation.output_truncated && !compilation.capture_limit_exceeded &&
+                                !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
+                                !compilation.process_group_ownership_lost;
+                            BUSTER_TEST_RAW(arguments, built,
                                 string_format(temporary.arena, S8("enum sizeof oracle {S8} {S8} {S8}: status={u32} timeout={u32}\n{S8}"),
                                     compiler, dialects[dialect], optimizations[optimization], compilation.platform_status,
                                     (u32)compilation.timed_out, string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
-                            if (!compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS)
+                            if (built)
                             {
                                 String8 run[] = {output};
                                 ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                    (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
                                 if (BUSTER_REQUIRE(arguments, child.handle != 0))
                                 {
-                                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
-                                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, process_timeout);
+                                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
+                                        !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
+                                        !execution.process_group_ownership_lost,
                                         string_format(temporary.arena, S8("enum sizeof oracle run {S8} {S8} {S8}: status={u32} timeout={u32}"),
                                             compiler, dialects[dialect], optimizations[optimization],
                                             execution.platform_status, (u32)execution.timed_out));
@@ -562,12 +580,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
                             }
                         }
                     }
+                    BUSTER_TEST(arguments, os_file_delete(output));
                     scratch_end(temporary);
                 }
             }
         }
 #endif
     }
+    BUSTER_TEST(arguments, os_file_delete(source));
 #else
     BUSTER_UNUSED(arguments);
 #endif
