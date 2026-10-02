@@ -8,6 +8,7 @@ import signal
 from pathlib import Path
 import statistics
 import subprocess
+import threading
 import time
 
 ROOT = Path('gcc-comparison-evidence')
@@ -52,12 +53,20 @@ def measured(cmd, key, artifact=None, expected_digest=None):
     with out.open('w') as fo, err.open('w') as fe:
         p = subprocess.Popen(['/usr/bin/time', '-f', '%U,%S,%M', '-o', str(stamp), '--'] + cmd,
                              stdout=fo, stderr=fe, start_new_session=True)
-        try:
-            p.wait(timeout=120)
-        except subprocess.TimeoutExpired:
+        def terminate_group():
+            nonlocal timed_out
             timed_out = True
-            os.killpg(p.pid, signal.SIGKILL)
-            p.wait()
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        # wait(timeout=...) polls at exponentially spaced sleeps on POSIX,
+        # quantizing small durations. A separate watchdog preserves blocking wait.
+        watchdog = threading.Timer(120, terminate_group)
+        watchdog.start()
+        p.wait()
+        watchdog.cancel()
+        watchdog.join()
     elapsed = time.perf_counter() - start
     fields = stamp.read_text().strip().splitlines()[-1].split(',') if stamp.exists() and not timed_out else ['0','0','0']
     row = {'key': key, 'argv': cmd, 'exit': p.returncode, 'timed_out': timed_out, 'wall_s': elapsed,
@@ -74,26 +83,26 @@ def measured(cmd, key, artifact=None, expected_digest=None):
 
 prefix = 'extern int printf(const char *, ...);\n'
 sources = {'tiny': ('int main(void) { return 0; }\n', None)}
-mix = 'unsigned int x=1; for (unsigned int i=0;i<5000000u;i++) { x^=x<<13; x^=x>>17; x^=x<<5; }'
+mix = 'unsigned int x=1; for (unsigned int i=0;i<50000000u;i++) { x^=x<<13; x^=x>>17; x^=x<<5; }'
 x = 1
-for _ in range(5000000):
+for _ in range(50000000):
     x ^= (x << 13) & 0xffffffff
     x ^= x >> 17
     x ^= (x << 5) & 0xffffffff
 sources['integer_mix'] = (prefix + 'int main(void) {' + mix + 'printf("%u\\n",x); return 0;}\n', str(x) + '\n')
 array = list(range(1024))
-for r in range(10000):
+for r in range(100000):
     array = [((a + r) * 1664525 + 1013904223) & 0xffffffff for a in array]
 expected = sum(array) & 0xffffffff
-sources['array_loop'] = (prefix + 'int main(void) { unsigned int a[1024]; for(unsigned int i=0;i<1024;i++)a[i]=i; for(unsigned int r=0;r<10000;r++)for(unsigned int i=0;i<1024;i++)a[i]=(a[i]+r)*1664525u+1013904223u; unsigned int s=0;for(unsigned int i=0;i<1024;i++)s+=a[i];printf("%u\\n",s);return 0;}\n', str(expected)+'\n')
+sources['array_loop'] = (prefix + 'int main(void) { unsigned int a[1024]; for(unsigned int i=0;i<1024;i++)a[i]=i; for(unsigned int r=0;r<100000;r++)for(unsigned int i=0;i<1024;i++)a[i]=(a[i]+r)*1664525u+1013904223u; unsigned int s=0;for(unsigned int i=0;i<1024;i++)s+=a[i];printf("%u\\n",s);return 0;}\n', str(expected)+'\n')
 funcs = ''.join('static __attribute__((noinline)) unsigned int f%d(unsigned int x){return x*%du+%du;}\n' % (i, 2*i+1, i) for i in range(256))
 calls = ''.join('s+=f%d(r);' % i for i in range(256))
-total = (sum(2*i+1 for i in range(256))*sum(range(10000)) + sum(range(256))*10000) & 0xffffffff
-sources['many_functions'] = (prefix + funcs + 'int main(void){unsigned int s=0;for(unsigned int r=0;r<10000;r++){' + calls + '}printf("%u\\n",s);return 0;}\n', str(total)+'\n')
+total = (sum(2*i+1 for i in range(256))*sum(range(100000)) + sum(range(256))*100000) & 0xffffffff
+sources['many_functions'] = (prefix + funcs + 'int main(void){unsigned int s=0;for(unsigned int r=0;r<100000;r++){' + calls + '}printf("%u\\n",s);return 0;}\n', str(total)+'\n')
 fp = 0.25
-for _ in range(5000000):
+for _ in range(50000000):
     fp = fp * 0.999999 + 0.000001
-sources['scalar_float'] = (prefix + 'volatile double seed=0.25; int main(void){double x=seed;for(unsigned int i=0;i<5000000;i++)x=x*0.999999+0.000001;printf("%.17g\\n",x);return 0;}\n', format(fp, '.17g')+'\n')
+sources['scalar_float'] = (prefix + 'volatile double seed=0.25; int main(void){double x=seed;for(unsigned int i=0;i<50000000;i++)x=x*0.999999+0.000001;printf("%.17g\\n",x);return 0;}\n', format(fp, '.17g')+'\n')
 sources['basic_c_operations'] = (Path('tests/basic_c_operations.c').read_text(), '')
 
 for round_id in range(12):
