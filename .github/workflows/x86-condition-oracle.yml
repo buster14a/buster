@@ -56,7 +56,9 @@ jobs:
               rows = [line for line in relocations.splitlines() if 'buster_condition_oracle_external' in line]
               assert len(rows) == 2, (name,rows)
               assert [int(row.split()[0],16) for row in rows] == [267,273], (name,rows)
-              assert all('R_X86_64_PC32' in row and row.rstrip().endswith('- 4') for row in rows), (name,rows)
+              # GNU and LLVM intentionally select PLT32 for an unresolved external branch;
+          # this is assembler/link policy, separate from the signed rel32 field.
+          assert all('R_X86_64_PLT32' in row and row.rstrip().endswith('- 4') for row in rows), (name,rows)
           # Independently assemble a semantic neighbor. A common wrong alias
           # mapping must disagree with the unchanged original byte inventory.
           source = pathlib.Path('docs/x86-64-condition-oracle.s').read_text()
