@@ -11659,6 +11659,134 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unused_wide_vector_signatures(UnitTest
 }
 
 
+// Stores through aggregate brace elision subscripts must update the original object.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_expression_brace_elision(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef union Vec2 { struct { short x,y; }; short e[2]; } Vec2;\ntypedef union Range { struct { Vec2 min,max; }; Vec2 e[2]; } Range;\ntypedef struct Pair { Vec2 min,max; } Pair;\ntypedef union NamedRange { Pair endpoints; Vec2 e[2]; } NamedRange;\ntypedef struct NamedWrapper { Pair endpoints; int marker; } NamedWrapper;\ntypedef struct AnonymousWrapper { struct { Vec2 min,max; }; int marker; } AnonymousWrapper;\nstatic Range rng_2s16(Vec2 min,Vec2 max) { Range r={min,max}; return r; }\nstatic int min_calls,max_calls;\nstatic Vec2 make_min(void) { min_calls+=1; Vec2 result={{-77,88}}; return result; }\nstatic Vec2 make_max(void) { max_calls+=1; Vec2 result={{99,-111}}; return result; }\nstatic int check(const Range *r,int a,int b,int c,int d)\n{ return r->min.x!=a || r->min.y!=b || r->max.x!=c || r->max.y!=d; }\nint main(void)\n{\n    Vec2 min={{-30000,12345}},max={{23456,-22222}};\n    Range r=rng_2s16(min,max);\n    Range inferred[]={min,max,max,min};\n    Range explicit_braces={{min,max}};\n    Range literal_values={(Vec2){{-15,16}},(Vec2){{17,-18}}};\n    const Vec2 const_min=min;\n    volatile Vec2 volatile_max=max;\n    Range qualified={const_min,volatile_max};\n    NamedRange named={min,max};\n    NamedWrapper wrapped={min,max,81};\n    Pair endpoints={min,max};\n    NamedWrapper whole={endpoints,83};\n    NamedWrapper scalar={1,2,3,4,84};\n    AnonymousWrapper anonymous={min,max,82};\n    Range returned={make_min(),make_max()};\n    int error=0;\n    min.x=1; min.y=2; max.x=3; max.y=4;\n    volatile_max.x=5; volatile_max.y=6;\n    error|=(check(&r,-30000,12345,23456,-22222) ||\n            sizeof(inferred)!=2*sizeof(Range) || check(inferred,-30000,12345,23456,-22222) ||\n            check(inferred+1,23456,-22222,-30000,12345))?1:0;\n    error|=check(&explicit_braces,-30000,12345,23456,-22222)?2:0;\n    error|=check(&literal_values,-15,16,17,-18)?4:0;\n    error|=check(&qualified,-30000,12345,23456,-22222)?8:0;\n    error|=(named.endpoints.min.x!=-30000 || named.endpoints.min.y!=12345 ||\n            named.endpoints.max.x!=23456 || named.endpoints.max.y!=-22222)?16:0;\n    error|=(wrapped.endpoints.min.x!=-30000 || wrapped.endpoints.min.y!=12345 ||\n            wrapped.endpoints.max.x!=23456 || wrapped.endpoints.max.y!=-22222 || wrapped.marker!=81 ||\n            whole.endpoints.min.x!=-30000 || whole.endpoints.min.y!=12345 ||\n            whole.endpoints.max.x!=23456 || whole.endpoints.max.y!=-22222 || whole.marker!=83 ||\n            scalar.endpoints.min.x!=1 || scalar.endpoints.min.y!=2 ||\n            scalar.endpoints.max.x!=3 || scalar.endpoints.max.y!=4 || scalar.marker!=84)?32:0;\n    error|=(anonymous.min.x!=-30000 || anonymous.min.y!=12345 ||\n            anonymous.max.x!=23456 || anonymous.max.y!=-22222 || anonymous.marker!=82)?64:0;\n    error|=(check(&returned,-77,88,99,-111) || min_calls!=1 || max_calls!=1)?128:0;\n    return error;\n}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("aggregate-brace-elision.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("aggregate brace elision target={u32} form={u32}: first diagnostic {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("main")) != 0);
+            }
+            scratch_end(temporary);
+        }
+    }
+    typedef struct CAggregateBraceCase CAggregateBraceCase;
+    struct CAggregateBraceCase
+    {
+        String8 valid_source;
+        String8 invalid_source;
+        String8 purpose;
+    };
+    CAggregateBraceCase cases[] = {
+        {S8("typedef union Vec2 { struct { short x,y; }; short e[2]; } Vec2; typedef union Other { struct { short x,y; }; short e[2]; } Other; typedef union Range { struct { Vec2 min,max; }; Vec2 e[2]; } Range; int bad(void) { Vec2 wrong={{1,2}}; Vec2 right={{3,4}}; Range value={wrong,right}; return value.min.x; }"), S8("typedef union Vec2 { struct { short x,y; }; short e[2]; } Vec2; typedef union Other { struct { short x,y; }; short e[2]; } Other; typedef union Range { struct { Vec2 min,max; }; Vec2 e[2]; } Range; int bad(void) { Other wrong={{1,2}}; Vec2 right={{3,4}}; Range value={wrong,right}; return value.min.x; }"), S8("Equal layout does not permit copying a distinct union tag into Vec2.")},
+        {S8("struct First { short x,y; }; struct Other { short x,y; }; struct Pair { struct First min,max; }; int bad(void) { struct First wrong={1,2}; struct First right={3,4}; struct Pair value={wrong,right}; return value.min.x; }"), S8("struct First { short x,y; }; struct Other { short x,y; }; struct Pair { struct First min,max; }; int bad(void) { struct Other wrong={1,2}; struct First right={3,4}; struct Pair value={wrong,right}; return value.min.x; }"), S8("Equal layout does not permit copying a distinct struct tag through brace elision.")},
+        {S8("typedef union Vec2 { struct { short x,y; }; short e[2]; } Vec2; typedef union Other { struct { short x,y; }; short e[2]; } Other; typedef union Range { struct { Vec2 min,max; }; Vec2 e[2]; } Range; int bad(void) { const Vec2 wrong={{1,2}}; Vec2 right={{3,4}}; Range value={{wrong,right}}; return value.min.x; }"), S8("typedef union Vec2 { struct { short x,y; }; short e[2]; } Vec2; typedef union Other { struct { short x,y; }; short e[2]; } Other; typedef union Range { struct { Vec2 min,max; }; Vec2 e[2]; } Range; int bad(void) { const Other wrong={{1,2}}; Vec2 right={{3,4}}; Range value={{wrong,right}}; return value.min.x; }"), S8("Explicit nested braces still require compatible union identity.")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            Target target = targets[target_index];
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 valid = 0; valid < 2; valid += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 case_source = valid ? cases[case_index].valid_source : cases[case_index].invalid_source;
+                    CPreprocessResult preprocess = c_preprocess(temporary.arena, case_source,
+                        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("aggregate-brace-identity.c"), preprocess, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].purpose);
+                    if (valid)
+                    {
+                        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0 && lowered.canonical_ir_certified,
+                            string_format(temporary.arena, S8("aggregate compatible case={u32} target={u32} form={u32}: {S8}"),
+                                case_index, target_index, form, lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+                        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified &&
+                            (!lowered.program || lowered.program->rejected_function_count != 0), cases[case_index].purpose);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=none")};
+    String8 path = buster_test_temporary_path(arguments->arena, S8("aggregate-brace-elision"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("aggregate-brace-elision-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+#if BUSTER_CPU_ARCH_X86_64
+                    S8("-mattr=+sse2,+cx16"),
+#endif
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                // NONE is the explicitly selected canonical reference path.
+                // Machine modes must compile every function without fallback.
+                invocation.reject_machine_fallback = mode < 2;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("aggregate brace elision mode={S8} form={u32}: {S8}"), modes[mode], form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena,
+                                S8("aggregate brace elision mode={S8} form={u32}: status={u32} timed_out={u32}; exit bits range/inference=1 explicit=2 compound=4 qualifiers=8 union=16 named/scalar=32 anonymous=64 effects=128"),
+                                modes[mode], form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
+
 // #665: query the real preprocessor with an independent exact-name census.
 // Do not infer support from a prefix or advertise native atomic IR to the
 // Wasm64/eBPF backends, which explicitly reject it.
@@ -32195,6 +32323,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_builtin_infinity);
     BUSTER_TEST_FIXTURE(arguments, c_test_unused_wide_vector_signatures);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_vector_lane_stores);
+    BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_expression_brace_elision);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);

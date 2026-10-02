@@ -8460,7 +8460,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
 // API so brace-elision can ask whether a non-braced expression already has an
 // aggregate type before descending into its first member.
 BUSTER_C_INTERNAL bool c_ir_initializer_type_is_aggregate(IrType* type);
-BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end);
+BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end,
+                                                                       IrTypeId* type_out);
+BUSTER_C_INTERNAL bool c_ir_initializer_aggregate_types_compatible(CIntegerIrBuilder* builder, IrTypeId value_type, IrTypeId object_type);
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_nullptr(CIntegerIrBuilder* builder, CToken token)
 {
@@ -26375,30 +26377,22 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             // brace elision must not descend into its first character.
             bool string_initializer = child && child->kind == IR_TYPE_ARRAY &&
                                       c_ir_tokens_are_string_literals(builder->preprocess, value_start, index);
-            // C's brace-elision permits a scalar initializer to reach the
-            // first scalar subobject of a nested aggregate (`.ptr = 3` when
-            // ptr is a struct whose first member is an integer).  The old
-            // lowering attempted an aggregate-to-scalar cast instead.  Only
-            // descend when the value expression itself is not aggregate-valued
-            // so assigning an existing struct/array still stores it whole.
+            // Brace elision reaches the first subobject that can consume
+            // this expression whole. An aggregate expression may still need
+            // to descend through a different enclosing record.
             CScopeId initializer_scope = C_SCOPE_ID_INVALID;
             if (builder->declaration_index < builder->parse.declaration_count)
             {
                 initializer_scope = builder->parse.declarations[builder->declaration_index].scope;
             }
-            bool value_is_aggregate = c_ir_initializer_value_is_aggregate_expression(builder, initializer_scope, value_start, index);
-            // Type prediction intentionally stays conservative for a
-            // parenthesized compound literal.  Recognize `(T){...}` here so
-            // it is stored as one aggregate rather than brace-elided into its
-            // first scalar member.
-            if (!value_is_aggregate && value_start + 2 < index &&
-                c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                u32 type_close = c_ir_matching_delimiter_cached(builder, value_start, index, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                value_is_aggregate = type_close + 1 < index &&
-                                     c_token_is_punctuator(&builder->preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE);
-            }
-            while (child && c_ir_initializer_type_is_aggregate(child) && !value_is_aggregate && !string_initializer &&
+            IrTypeId value_type = IR_TYPE_ID_INVALID;
+            bool value_is_aggregate = c_ir_initializer_value_is_aggregate_expression(builder, initializer_scope, value_start, index, &value_type);
+            // Either prediction can grow the type table.
+            type = ir_type_from_id(&builder->program->types, task.type);
+            child = ir_type_from_id(&builder->program->types, child_type);
+            bool whole_value = value_is_aggregate && child &&
+                               (child->kind == IR_TYPE_ARRAY || c_ir_initializer_aggregate_types_compatible(builder, value_type, child_type));
+            while (child && c_ir_initializer_type_is_aggregate(child) && !whole_value && !string_initializer &&
                    !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
             {
                 if (frame->as.nested_compound_literal.state->cursor_count >= frame->as.nested_compound_literal.state->cursor_capacity)
@@ -26443,6 +26437,8 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     break;
                 }
                 child = ir_type_from_id(&builder->program->types, child_type);
+                whole_value = value_is_aggregate && child &&
+                              (child->kind == IR_TYPE_ARRAY || c_ir_initializer_aggregate_types_compatible(builder, value_type, child_type));
             }
             if (child_place.value == IR_ID_UNDERLYING_INVALID)
             {
@@ -43699,8 +43695,10 @@ BUSTER_C_INTERNAL bool c_ir_initializer_type_is_aggregate(IrType* type)
     return type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
 }
 
-BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end,
+                                                                       IrTypeId* type_out)
 {
+    IrTypeId expression_type = IR_TYPE_ID_INVALID;
     if (end == start + 1 && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
     {
         if (scope.value < builder->parse.scope_count)
@@ -43716,23 +43714,71 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
                 IrTypeId mapped = c_type.value < builder->parse.type_count ? builder->c_type_ir_map[c_type.value] : IR_TYPE_ID_INVALID;
                 if (c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, mapped)))
                 {
-                    return true;
+                    expression_type = mapped;
                 }
             }
         }
-        CEntityId entity = c_ir_identifier_entity(builder, start);
-        if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+        if (expression_type.value == IR_ID_UNDERLYING_INVALID)
         {
-            CTypeId c_type = builder->parse.entities[entity.value].type;
-            IrTypeId mapped = c_type.value < builder->parse.type_count ? builder->c_type_ir_map[c_type.value] : IR_TYPE_ID_INVALID;
-            if (c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, mapped)))
+            CEntityId entity = c_ir_identifier_entity(builder, start);
+            if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
             {
-                return true;
+                CTypeId c_type = builder->parse.entities[entity.value].type;
+                IrTypeId mapped = c_type.value < builder->parse.type_count ? builder->c_type_ir_map[c_type.value] : IR_TYPE_ID_INVALID;
+                if (c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, mapped)))
+                {
+                    expression_type = mapped;
+                }
             }
         }
     }
-    IrTypeId expression_type = c_ir_predict_expression_type(builder, start, end);
-    return c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, expression_type));
+    if (expression_type.value == IR_ID_UNDERLYING_INVALID)
+    {
+        expression_type = c_ir_predict_expression_type(builder, start, end);
+    }
+    bool result = c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, expression_type));
+    // A conservative compound-literal prediction must retain its actual
+    // type in both runtime lowering and incomplete-array inference.
+    if (!result && start + 2 < end &&
+        c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 type_close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (type_close < end && type_close + 1 < end &&
+            c_token_is_punctuator(&builder->preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+            c_ir_matching_delimiter_cached(builder, type_close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1)
+        {
+            expression_type = c_ir_group_type_name(builder, start, type_close);
+            result = c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, expression_type));
+        }
+    }
+    if (type_out)
+    {
+        *type_out = result ? expression_type : IR_TYPE_ID_INVALID;
+    }
+    return result;
+}
+
+// Whole-record capture uses type identity, including the existing qualified
+// views. Equal layout alone does not make two distinct records compatible.
+// Vectors keep the same conversion rule as c_ir_emit_cast.
+BUSTER_C_INTERNAL bool c_ir_initializer_aggregate_types_compatible(CIntegerIrBuilder* builder, IrTypeId value_type, IrTypeId object_type)
+{
+    IrType* value = ir_type_from_id(&builder->program->types, value_type);
+    IrType* object = ir_type_from_id(&builder->program->types, object_type);
+    bool result = value && object && (value_type.value == object_type.value ||
+                  ir_types_differ_only_in_volatile(&builder->program->types, value_type, object_type) ||
+                  c_ir_atomic_aggregate_pair(builder, value_type, object_type).value != IR_ID_UNDERLYING_INVALID);
+    if (!result && value && object && value->kind == IR_TYPE_VECTOR && object->kind == IR_TYPE_VECTOR &&
+        value->layout.resolved && object->layout.resolved && value->layout.size == object->layout.size &&
+        value->element_count == object->element_count)
+    {
+        IrType* value_element = ir_type_from_id(&builder->program->types, value->element_type);
+        IrType* object_element = ir_type_from_id(&builder->program->types, object->element_type);
+        result = value_element && object_element && value_element->kind == object_element->kind &&
+                 value_element->bit_width == object_element->bit_width && value_element->is_signed == object_element->is_signed &&
+                 (value_element->kind != IR_TYPE_FLOAT || value_element->float_format == object_element->float_format);
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL u64 c_ir_constant_initializer_slot_count(CIntegerIrBuilder* builder, IrType* type);
@@ -44248,8 +44294,11 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
             };
             continue;
         }
+        IrTypeId expression_type = IR_TYPE_ID_INVALID;
+        bool array_initializer = value_type->kind == IR_TYPE_ARRAY;
         if (aggregate && !c_ir_tokens_are_string_literals(builder->preprocess, designator.value_start, value_end) &&
-            !c_ir_initializer_value_is_aggregate_expression(builder, scope, designator.value_start, value_end))
+            !(c_ir_initializer_value_is_aggregate_expression(builder, scope, designator.value_start, value_end, &expression_type) &&
+              (array_initializer || c_ir_initializer_aggregate_types_compatible(builder, expression_type, designator.value_type))))
         {
             if (frame_count + designator.continuation_count >= capacity)
             {

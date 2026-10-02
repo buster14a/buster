@@ -279,3 +279,9 @@ plain parenthesized groups. Standalone vector reads still produce copied values.
 The registered runtime fixture checks local arrays, globals, member arrays,
 pointer bases, evaluation counts, neighboring guards and captured values across
 allocator and frontend memory modes.
+
+Brace elision descends through enclosing records until an aggregate expression
+matches a complete subobject. Record identity and existing qualified views
+determine whole-object copies. Runtime initialization and incomplete-array
+inference share the same type predicate and retain cursor advancement, string
+initializers and scalar elision.
