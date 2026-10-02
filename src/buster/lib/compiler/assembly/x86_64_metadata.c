@@ -11802,7 +11802,6 @@ bool buster_x86_metadata_operand(u32 form_id, u32 operand_index, BusterX86Metada
 bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key, BusterX86MetadataExactPlan* result)
 {
     if (!result || !buster_x86_metadata_prewarmed || !key.stable_hash || key.form_id >= BUSTER_X86_GENERATED_FORM_COUNT) return false;
-    BUSTER_CHECK_SERIAL_INITIALIZATION();
     u16 slot_plus_one = buster_x86_metadata_exact_plan_slots[key.form_id];
     if (slot_plus_one)
     {
@@ -11822,6 +11821,9 @@ bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key, Buster
         *result = existing->identity;
         return true;
     }
+    // A prepared identity is immutable even while the persistent gang lives.
+    // Only a miss can build or publish state and requires serial prewarm.
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     if (buster_x86_metadata_exact_plan_count >= BUSTER_X86_METADATA_EXACT_PLAN_CAPACITY) return false;
     BusterX86MetadataForm form = {0};
     if (!buster_x86_metadata_lookup_form_key(key, &form) || form.operand_count > BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY)
