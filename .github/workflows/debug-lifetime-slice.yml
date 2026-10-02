@@ -1,9 +1,27 @@
 name: DWARF lifetime slice
 
-# Isolated issue-1375 diagnostics. Never selects a physical performance host.
+# Independent correctness coverage and isolated issue-1375 cost diagnostics.
+# Never selects a physical performance host.
 on:
   push:
-    branches: [codex/1375-dwarf-reused-home-validity]
+    branches:
+      - main
+      - codex/1375-dwarf-reused-home-validity
+    paths:
+      - src/buster/lib/compiler/codegen/codegen.c
+      - src/buster/lib/compiler/machine/**
+      - src/buster/lib/compiler/debug/**
+      - src/buster/lib/compiler/dwarf/**
+      - tools/debug_info_lifetime_oracle.py
+      - .github/workflows/debug-lifetime-slice.yml
+  pull_request:
+    paths:
+      - src/buster/lib/compiler/codegen/codegen.c
+      - src/buster/lib/compiler/machine/**
+      - src/buster/lib/compiler/debug/**
+      - src/buster/lib/compiler/dwarf/**
+      - tools/debug_info_lifetime_oracle.py
+      - .github/workflows/debug-lifetime-slice.yml
 
 permissions:
   contents: read
@@ -18,11 +36,13 @@ jobs:
     timeout-minutes: 60
     env:
       BUSTER_TEST_JOBS: 2
+      SLICE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install independent debugger
         shell: bash
         run: |
@@ -33,7 +53,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/debug-evidence" "$RUNNER_TEMP/debug-compilers"
-          git worktree add --detach "$RUNNER_TEMP/debug-build" 6fc08ec475694aeb3b1062c1d390483a69668508
+          source_ref="$SLICE_HEAD"
+          if test "$GITHUB_REF" = refs/heads/codex/1375-dwarf-reused-home-validity; then
+            source_ref=6fc08ec475694aeb3b1062c1d390483a69668508
+          fi
+          git worktree add --detach "$RUNNER_TEMP/debug-build" "$source_ref"
           cp tools/debug_info_lifetime_oracle.py "$RUNNER_TEMP/debug-evidence/oracle.py"
           {
             git rev-parse HEAD
@@ -46,6 +70,7 @@ jobs:
           } > "$RUNNER_TEMP/debug-evidence/identity.txt"
           cp /usr/share/doc/gdb/copyright "$RUNNER_TEMP/debug-evidence/gdb-copyright.txt"
       - name: Trusted baseline build at the matched path
+        if: ${{ github.ref == 'refs/heads/codex/1375-dwarf-reused-home-validity' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -61,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/debug-build"
-          git checkout --detach "$GITHUB_SHA"
+          git checkout --detach "$SLICE_HEAD"
           clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/slice-driver"
           "$RUNNER_TEMP/slice-driver" generate --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
           "$RUNNER_TEMP/slice-driver" build --config Release -t ide
@@ -73,23 +98,29 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/debug-build"
-          python3 "$RUNNER_TEMP/debug-evidence/oracle.py" --ide "$RUNNER_TEMP/debug-compilers/candidate-ide" --baseline-ide "$RUNNER_TEMP/debug-compilers/baseline-ide" --expect-baseline-defect --print-summary --trials 3 --output "$RUNNER_TEMP/debug-evidence/lifetime"
+          args=(--ide "$RUNNER_TEMP/debug-compilers/candidate-ide" --print-summary --output "$RUNNER_TEMP/debug-evidence/lifetime")
+          if test "$GITHUB_REF" = refs/heads/codex/1375-dwarf-reused-home-validity; then
+            args+=(--baseline-ide "$RUNNER_TEMP/debug-compilers/baseline-ide" --expect-baseline-defect --trials 3)
+          else
+            args+=(--skip-costs)
+          fi
+          python3 "$RUNNER_TEMP/debug-evidence/oracle.py" "${args[@]}"
       - name: Candidate focused and full test suite
-        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && github.ref == 'refs/heads/codex/1375-dwarf-reused-home-validity' }}
         shell: bash
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/debug-build"
           "$RUNNER_TEMP/slice-driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/debug-evidence/candidate-tests.txt"
       - name: Candidate self-host fixed point
-        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && github.ref == 'refs/heads/codex/1375-dwarf-reused-home-validity' }}
         shell: bash
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/debug-build"
           "$RUNNER_TEMP/slice-driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/debug-evidence/candidate-self-host.txt"
       - name: Candidate mode matrix and source-size gate
-        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && github.ref == 'refs/heads/codex/1375-dwarf-reused-home-validity' }}
         shell: bash
         run: |
           set -euo pipefail

@@ -10520,10 +10520,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
         u32 subject_end = index->subject_offsets[payload + 1u];
         bool shared_home = home_group != UINT32_MAX && index->homes.shared[home_group];
         // Once no machine operand or memory edit names this value again, a
-        // shared home has no retained-value guarantee. Stop replaying unrelated
-        // suffix events and publish an explicit unavailable change point.
-        u32 replay_end = shared_home ? (subject_cursor < subject_end ? index->subject_rows[subject_end - 1u] + 1u : 0u)
-                                     : function->instruction_count;
+        // shared home has no retained-value guarantee. Expire that frame copy;
+        // stop unrelated suffix replay once no certified register can remain.
+        u32 home_end = shared_home ? (subject_cursor < subject_end ? index->subject_rows[subject_end - 1u] + 1u : 0u)
+                                   : function->instruction_count;
         CodegenMachineDebugReference state = {.physical_register = -1};
         u32 physical_bucket = UINT32_MAX;
         u32 physical_cursor = 0;
@@ -10532,8 +10532,24 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
         u32 row = 0;
         codegen_machine_debug_selection_push(entries, entry_count, capacity, codegen_machine_debug_sample(&state, 0, frame_offset, has_home),
                                              function->instruction_count);
-        while (row < replay_end)
+        while (row < function->instruction_count)
         {
+            if (shared_home && row >= home_end)
+            {
+                state.frame_valid = false;
+                codegen_machine_debug_selection_push(entries, entry_count, capacity,
+                                                     codegen_machine_debug_sample(&state, row, frame_offset, has_home),
+                                                     function->instruction_count);
+                // A certified register may outlive the final operand. Keep its
+                // clobber tracking and any immediate rematerializations; only
+                // an unavailable value with no recovery event ends replay.
+                bool remat_pending = remat_group != UINT32_MAX &&
+                                     codegen_machine_debug_group_next(&index->remats, remat_group, &remat_cursor, row) != UINT32_MAX;
+                if (state.physical_register < 0 && !remat_pending)
+                {
+                    break;
+                }
+            }
             while (subject_cursor < subject_end && index->subject_rows[subject_cursor] < row)
             {
                 subject_cursor += 1u;
@@ -10559,7 +10575,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                                             ? index->physical_rows[unmapped_cursor]
                                             : UINT32_MAX);
             }
-            next = BUSTER_MIN(next, replay_end);
+            next = BUSTER_MIN(next, row < home_end ? home_end : function->instruction_count);
             // A block start clears any held register; a shared home also loses
             // its path-specific validity. An own spill can publish it again.
             // An unshared home changes nothing else. The first block changes
@@ -10594,9 +10610,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
             }
             {
                 next = BUSTER_MIN(next, block_row);
-                if (next >= replay_end)
+                if (next >= function->instruction_count)
                 {
-                    row = replay_end;
+                    row = function->instruction_count;
                 }
                 else
                 {
@@ -10699,10 +10715,6 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                 }
             }
         }
-        codegen_machine_debug_selection_push(entries, entry_count, capacity,
-                                             (CodegenMachineDebugSelection){.row = replay_end, .physical_register = -1,
-                                                                              .kind = CODEGEN_MACHINE_DEBUG_SELECTION_NONE},
-                                             function->instruction_count);
     }
     return result;
 }
@@ -11087,7 +11099,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
     // of consuming the production home hash or subject-event index.
     bool shared_home = false;
     u32 first_spill_subject = UINT32_MAX;
-    u32 replay_end = 0;
+    u32 home_end = 0;
     for (u32 edit_index = 0; edit_index < placement->edit_count; edit_index += 1)
     {
         MachineEdit const* edit = placement->edits + edit_index;
@@ -11106,7 +11118,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
         if ((edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME) &&
             edit->subject == payload)
         {
-            replay_end = BUSTER_MAX(replay_end, machine_point_instruction(edit->point) + 1u);
+            home_end = BUSTER_MAX(home_end, machine_point_instruction(edit->point) + 1u);
         }
     }
     for (u32 row = 0; row < function->instruction_count; row += 1)
@@ -11120,16 +11132,20 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
             if (role != MACHINE_OPERAND_ROLE_NONE && machine_ref_kind(operand_reference) == MACHINE_REF_VIRTUAL_REGISTER &&
                 machine_ref_payload(operand_reference) == payload)
             {
-                replay_end = BUSTER_MAX(replay_end, row + 1u);
+                home_end = BUSTER_MAX(home_end, row + 1u);
             }
         }
     }
-    replay_end = shared_home ? BUSTER_MIN(replay_end, function->instruction_count) : function->instruction_count;
+    home_end = shared_home ? BUSTER_MIN(home_end, function->instruction_count) : function->instruction_count;
     CodegenMachineDebugReference state = {.physical_register = -1};
     u32 edit_cursor = 0;
     u32 block_cursor = 0;
     for (u32 row = 0; row < function->instruction_count; row += 1)
     {
+        if (shared_home && row >= home_end)
+        {
+            state.frame_valid = false;
+        }
         if (block_cursor < function->block_count && function->blocks[block_cursor].first_instruction == row)
         {
             if (block_cursor)
@@ -11224,10 +11240,6 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
                 rows[row] = (DebugLocationPiece){.kind = DEBUG_LOCATION_REGISTER, .reg = reg};
                 available[row] = true;
             }
-        }
-        if (row >= replay_end)
-        {
-            available[row] = false;
         }
     }
     return edit_cursor == placement->edit_count;

@@ -443,9 +443,10 @@ breakpoint resolution and stopped queries. Baseline failure aborts earlier, so
 aggregate debugger/query durations contain unequal work. Compare matching live
 queries. `.text` hashes must match across debug modes and compiler revisions.
 
-The branch-scoped `debug-lifetime-slice.yml` runs matched serial builds and this
-oracle on GitHub-hosted Ubuntu; no qualified performance hardware is selected.
-Its timings are diagnostics. Qualified performance acceptance remains pending.
+`debug-lifetime-slice.yml` retains the executed oracle on relevant PRs and main
+changes on GitHub-hosted Ubuntu. The issue branch additionally runs matched
+serial builds and cost diagnostics; no qualified performance hardware is
+selected. Qualified performance acceptance remains pending.
 The existing static-type oracle is format/consumer coverage without inferior
 execution and does not replace these checks. Selector stack-slot aliases,
 sibling lexical blocks and optimized constant reconstruction are outside this

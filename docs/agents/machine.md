@@ -85,6 +85,8 @@ fixture as well as compiling both architectures.
   Its validity ends at a nonentry block boundary unless an own spill certifies
   it again, and after the value's final operand or memory edit. This bounds
   suffix replay and prevents a loop back edge exposing a later owner's bytes.
+  Certified registers retain their clobber tracking after the final operand;
+  replay stops only when neither a register nor a recovery event can remain.
   An unshared home may retain a dead value. The independent dense test model
   scans the full function; explicit reused-home tests cover both x86-64 and
   AArch64. Executed Linux x86-64 DWARF/GDB coverage is documented in
