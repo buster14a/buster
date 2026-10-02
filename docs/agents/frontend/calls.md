@@ -263,7 +263,14 @@ native driver. Attribute heads designate attributes; calls inside argument
 expressions still require their declared arity. Distinct cleanup callbacks,
 their retained entity identities and one callback per scope exit are checked
 independently, alongside wrong-arity calls, incompatible callbacks and local
-shadowing. The regression keeps explicit returns to isolate this constraint
+shadowing. The named-call candidate walk distinguishes specifier names while
+retaining candidates inside argument expressions. Eight local frames cover
+ordinary nested payloads; deeper nesting spills into a private arena bounded
+by existing attribute positions and destroyed without pooling before returning.
+Repeated shared
+queries retain no role buffers in their model or message arenas, even when
+those owners occupy both scratch arenas. No broad pass or persistent role table
+is added. The regression keeps explicit returns to isolate this constraint
 from non-void falloff (#1357).
 
 All parameter-list paths share the void and ellipsis constraints. The void
