@@ -13874,7 +13874,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integers(
           {S8("x")}, {3}, {0}, 8, 1, true },
         { S8("const"), S8("const U P=(U)&x+1;"), {S8("x")}, {1}, {0}, 8, 1, false },
         { S8("pointer-control"), S8("int *P=arr+2;"), {S8("arr")}, {8}, {0}, 8, 1, false },
-        { S8("numeric-control"), S8("U P=0x1122334455667788ULL;"), {0}, {0}, {0}, 8, 0, false },
+        { S8("numeric-control"), S8("U P=0x1122334455667788ULL;"), {{0}}, {0}, {0}, 8, 0, false },
         { S8("lp64-long"), S8("long P=(long)&x+3;"), {S8("x")}, {3}, {0}, 8, 1, false },
         { S8("integer-to-pointer"), S8("U P=(U)((int*)((U)&arr+4)+2);"), {S8("arr")}, {12}, {0}, 8, 1, false },
         { S8("unary-plus"), S8("U P=+(U)&x+2;"), {S8("x")}, {2}, {0}, 8, 1, false },
