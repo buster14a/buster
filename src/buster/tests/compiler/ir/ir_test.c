@@ -1017,6 +1017,27 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         }
     }
 
+    // A GNU empty record is a real value with no SysV transport pieces. It
+    // consumes neither a register nor a stack slot for arguments or results.
+    // Keep this distinct from a nonempty all-NO_CLASS record, whose frontend
+    // support remains deliberately gated.
+    {
+        IrProgram fixture = ir_program_initialize(arguments->arena, 0, 2, 0, 0);
+        IrTypeId empty = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_STRUCT,
+            .layout = {.size = 0, .alignment = 1, .resolved = true}});
+        IrField* field = arena_allocate(arguments->arena, IrField, 1);
+        *field = (IrField){.type = empty};
+        IrTypeId wrapper = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_STRUCT, .fields = field, .field_count = 1,
+            .layout = {.size = 0, .alignment = 1, .resolved = true}});
+        for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+        {
+            IrAbiValue abi = ir_type_abi_value(&fixture, empty, IR_ABI_CONVENTION_SYSTEMV_X86_64, (IrAbiUse)use);
+            IrAbiValue wrapped = ir_type_abi_value(&fixture, wrapper, IR_ABI_CONVENTION_SYSTEMV_X86_64, (IrAbiUse)use);
+            BUSTER_TEST(arguments, !abi.indirect && !abi.memory && abi.part_count == 0);
+            BUSTER_TEST(arguments, !wrapped.indirect && !wrapped.memory && wrapped.part_count == 0);
+        }
+    }
+
     // A large unrelated type table must not turn a two-field ABI query into
     // a type-table-sized scratch request. Use fresh scratch arenas so an old
     // high-water mark cannot conceal an allocation regression. The ABI-context

@@ -184,6 +184,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   containing only ignored fields has zero transport parts and currently hits
   the frontend's unsupported zero-part signature gate; the LLVM negative
   fixture pins that earlier refusal and absence of a produced artifact.
+- A GNU zero-size struct or union is the distinct supported zero-part SysV
+  case. It consumes no argument register, stack slot, variadic cursor space or
+  hidden result pointer. Reading one constructs its zero-operand aggregate
+  value and writing one is a zero-byte operation after the lvalue and value
+  have been evaluated. Nonempty all-NO_CLASS records retain the refusal above.
 - The generic JIT loads already-produced host-native objects and resolves
   explicit bindings. It is not a second source-language compiler and must stay
   independent of frontend semantic structures.

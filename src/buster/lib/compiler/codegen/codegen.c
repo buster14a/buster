@@ -4452,9 +4452,11 @@ BUSTER_GLOBAL_LOCAL u32 codegen_canonical_va_list_component_count(IrProgram* pro
 bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count)
 {
     IrType* type = ir_type_from_id(&program->types, type_id);
-    if (type && type->kind == IR_TYPE_INTEGER && type->layout.resolved && type->bit_width > 64 && type->bit_width <= 128 && type->layout.size <= 16)
+    bool empty_aggregate = type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && type->layout.resolved && !type->layout.size;
+    if (empty_aggregate ||
+        (type && type->kind == IR_TYPE_INTEGER && type->layout.resolved && type->bit_width > 64 && type->bit_width <= 128 && type->layout.size <= 16))
     {
-        *part_count = (u32)((type->layout.size + 7) / 8);
+        *part_count = empty_aggregate ? 0 : (u32)((type->layout.size + 7) / 8);
         return true;
     }
     if (type && type->kind == IR_TYPE_VA_LIST && type->layout.resolved && type->layout.size > 8 && type->layout.size <= 32 && !(type->layout.size & 7))
@@ -16830,6 +16832,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool aggregate = codegen_canonical_integer_aggregate_parts(program, instruction->canonical_type, &integer_parts);
                         bool floating = value_type && value_type->kind == IR_TYPE_FLOAT;
                         CodegenCanonicalAbiValue aggregate_abi = codegen_canonical_aggregate_abi(program, instruction->canonical_type, result.abi, false, true);
+                        if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && aggregate && value_type && !value_type->layout.size)
+                        {
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value
+                                                       ? IR_ID_UNDERLYING_INVALID
+                                                       : instruction_id.value + 1;
+                            continue;
+                        }
                         if (!value_type || !value_type->layout.size || value_type->layout.size > 16 ||
                             (!aggregate && !floating && value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_BOOLEAN &&
                              value_type->kind != IR_TYPE_POINTER))
@@ -18183,6 +18192,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                                 instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
+                                continue;
+                            }
+                            if (aggregate_return && !return_parts)
+                            {
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value
+                                                           ? IR_ID_UNDERLYING_INVALID
+                                                           : instruction_id.value + 1;
                                 continue;
                             }
                             c_x64_store_result(&emitter, result_displacement);
@@ -20812,7 +20828,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                             }
-                            else
+                            else if (!aggregate_return || return_parts)
                             {
                                 c_x64_load(&emitter, 0x85, return_value);
                             }
