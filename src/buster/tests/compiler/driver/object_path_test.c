@@ -112,7 +112,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_tls_export_field(ByteSlice bytes, u64 o
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_tls_export_symbol(ByteSlice bytes, String8 name, bool present, bool initialized, u32 initial_value)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_tls_export_symbol(ByteSlice bytes, String8 name, bool present, bool initialized, u32 initial_value, u32 binding)
 {
     u64 section_table = 0;
     u64 section_stride = 0;
@@ -129,6 +129,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_tls_export_symbol(ByteSlice bytes, Stri
     u64 tls_address = 0;
     u64 tls_file_size = 0;
     u64 tls_memory_size = 0;
+    u64 tls_alignment = 0;
     u32 tls_count = 0;
     for (u64 index = 0; result && index < program_count; index += 1)
     {
@@ -140,7 +141,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_tls_export_symbol(ByteSlice bytes, Stri
             tls_count += 1;
             result = compiler_driver_tls_export_field(bytes, header + 16, 8, &tls_address) &&
                      compiler_driver_tls_export_field(bytes, header + 32, 8, &tls_file_size) &&
-                     compiler_driver_tls_export_field(bytes, header + 40, 8, &tls_memory_size) && tls_file_size <= tls_memory_size;
+                     compiler_driver_tls_export_field(bytes, header + 40, 8, &tls_memory_size) && tls_file_size <= tls_memory_size &&
+                     compiler_driver_tls_export_field(bytes, header + 48, 8, &tls_alignment) && tls_alignment &&
+                     !(tls_alignment & (tls_alignment - 1)) && tls_address % tls_alignment == 0;
         }
     }
     result = result && tls_count == 1;
@@ -186,7 +189,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_tls_export_symbol(ByteSlice bytes, Stri
                     u64 output_section = 0;
                     u64 value = 0;
                     u64 symbol_size = 0;
-                    result = present && bytes.pointer[symbol + 4] == 0x16 && (bytes.pointer[symbol + 5] & 3) == 0 &&
+                    result = present && bytes.pointer[symbol + 4] == ((binding << 4) | 6) && (bytes.pointer[symbol + 5] & 3) == 0 &&
                              compiler_driver_tls_export_field(bytes, symbol + 6, 2, &output_section) && output_section != 0 && output_section < section_count &&
                              compiler_driver_tls_export_field(bytes, symbol + 8, 8, &value) &&
                              compiler_driver_tls_export_field(bytes, symbol + 16, 8, &symbol_size) && symbol_size == 4 &&
@@ -199,11 +202,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_tls_export_symbol(ByteSlice bytes, Stri
                         u64 address = 0;
                         u64 section_offset = 0;
                         u64 section_size = 0;
+                        u64 section_alignment = 0;
                         result = compiler_driver_tls_export_field(bytes, section + 4, 4, &section_type) && section_type == (initialized ? 1u : 8u) &&
                                  compiler_driver_tls_export_field(bytes, section + 8, 8, &flags) && (flags & 0x403) == 0x403 &&
                                  compiler_driver_tls_export_field(bytes, section + 16, 8, &address) && address >= tls_address &&
                                  compiler_driver_tls_export_field(bytes, section + 24, 8, &section_offset) &&
-                                 compiler_driver_tls_export_field(bytes, section + 32, 8, &section_size) && value >= address - tls_address;
+                                 compiler_driver_tls_export_field(bytes, section + 32, 8, &section_size) && value >= address - tls_address &&
+                                 compiler_driver_tls_export_field(bytes, section + 48, 8, &section_alignment) && section_alignment &&
+                                 !(section_alignment & (section_alignment - 1)) && section_alignment <= tls_alignment && address % section_alignment == 0;
                         if (result)
                         {
                             u64 relative = value - (address - tls_address);
@@ -228,9 +234,194 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_tls_export_symbol(ByteSlice bytes, Stri
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_tls_export_single_layout(ByteSlice bytes, bool initialized, u64 alignment)
+{
+    u64 programs = 0;
+    u64 program_count = 0;
+    u64 program_stride = 0;
+    u64 sections = 0;
+    u64 section_count = 0;
+    u64 section_stride = 0;
+    bool result = bytes.pointer && bytes.length >= 64 && memcmp(bytes.pointer, "\177ELF\2\1", 6) == 0 &&
+                  compiler_driver_tls_export_field(bytes, 32, 8, &programs) && compiler_driver_tls_export_field(bytes, 54, 2, &program_stride) &&
+                  compiler_driver_tls_export_field(bytes, 56, 2, &program_count) && program_stride == 56 && programs <= bytes.length &&
+                  program_count <= (bytes.length - programs) / program_stride &&
+                  compiler_driver_tls_export_field(bytes, 40, 8, &sections) && compiler_driver_tls_export_field(bytes, 58, 2, &section_stride) &&
+                  compiler_driver_tls_export_field(bytes, 60, 2, &section_count) && section_stride == 64 && sections <= bytes.length &&
+                  section_count <= (bytes.length - sections) / section_stride;
+    u64 tls_address = 0;
+    u64 tls_offset = 0;
+    u64 tls_file_size = 0;
+    u32 tls_count = 0;
+    for (u64 index = 0; result && index < program_count; index += 1)
+    {
+        u64 header = programs + index * program_stride;
+        u64 type = 0;
+        result = compiler_driver_tls_export_field(bytes, header, 4, &type);
+        if (result && type == 7)
+        {
+            u64 memory_size = 0;
+            u64 declared_alignment = 0;
+            tls_count += 1;
+            result = compiler_driver_tls_export_field(bytes, header + 8, 8, &tls_offset) &&
+                     compiler_driver_tls_export_field(bytes, header + 16, 8, &tls_address) &&
+                     compiler_driver_tls_export_field(bytes, header + 32, 8, &tls_file_size) &&
+                     compiler_driver_tls_export_field(bytes, header + 40, 8, &memory_size) &&
+                     compiler_driver_tls_export_field(bytes, header + 48, 8, &declared_alignment) &&
+                     declared_alignment == alignment && tls_address % alignment == 0 &&
+                     tls_file_size == (initialized ? 4u : 0u) &&
+                     (initialized ? memory_size >= 4 && memory_size <= alignment : memory_size == 4) &&
+                     tls_offset <= bytes.length && tls_file_size <= bytes.length - tls_offset;
+        }
+    }
+    result = result && tls_count == 1;
+    bool template_loaded = !initialized;
+    for (u64 index = 0; result && index < program_count; index += 1)
+    {
+        u64 header = programs + index * program_stride;
+        u64 type = 0;
+        result = compiler_driver_tls_export_field(bytes, header, 4, &type);
+        if (result && type == 1)
+        {
+            u64 address = 0;
+            u64 offset = 0;
+            u64 file_size = 0;
+            u64 memory_size = 0;
+            u64 load_alignment = 0;
+            result = compiler_driver_tls_export_field(bytes, header + 8, 8, &offset) &&
+                     compiler_driver_tls_export_field(bytes, header + 16, 8, &address) &&
+                     compiler_driver_tls_export_field(bytes, header + 32, 8, &file_size) &&
+                     compiler_driver_tls_export_field(bytes, header + 40, 8, &memory_size) &&
+                     compiler_driver_tls_export_field(bytes, header + 48, 8, &load_alignment) &&
+                     file_size <= memory_size && offset <= bytes.length && file_size <= bytes.length - offset &&
+                     load_alignment && !(load_alignment & (load_alignment - 1)) && address % load_alignment == offset % load_alignment;
+            if (result && initialized && tls_address >= address && tls_offset >= offset)
+            {
+                u64 relative_address = tls_address - address;
+                u64 relative_offset = tls_offset - offset;
+                template_loaded |= relative_address == relative_offset && relative_offset <= file_size &&
+                                   tls_file_size <= file_size - relative_offset && relative_address <= memory_size &&
+                                   tls_file_size <= memory_size - relative_address;
+            }
+        }
+    }
+    u32 tls_sections = 0;
+    for (u64 index = 0; result && index < section_count; index += 1)
+    {
+        u64 header = sections + index * section_stride;
+        u64 flags = 0;
+        result = compiler_driver_tls_export_field(bytes, header + 8, 8, &flags);
+        if (result && (flags & 0x400))
+        {
+            u64 type = 0;
+            u64 address = 0;
+            u64 offset = 0;
+            u64 size = 0;
+            u64 declared_alignment = 0;
+            tls_sections += 1;
+            result = (flags & 3) == 3 && compiler_driver_tls_export_field(bytes, header + 4, 4, &type) && type == (initialized ? 1u : 8u) &&
+                     compiler_driver_tls_export_field(bytes, header + 16, 8, &address) && address == tls_address &&
+                     compiler_driver_tls_export_field(bytes, header + 24, 8, &offset) && offset == tls_offset &&
+                     compiler_driver_tls_export_field(bytes, header + 32, 8, &size) && size == 4 &&
+                     compiler_driver_tls_export_field(bytes, header + 48, 8, &declared_alignment) && declared_alignment == alignment &&
+                     address % declared_alignment == 0;
+        }
+    }
+    result = result && template_loaded && tls_sections == 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_tls_export_single_classes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 family = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(family, S8("GNU")) || string_equal(family, S8("Clang"));
+    if (BUSTER_REQUIRE(arguments, supported))
+    {
+        String8 root = buster_test_temporary_path(arena, S8("buster-single-class-tls"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        if (BUSTER_REQUIRE(arguments, created.error.v == 0))
+        {
+            String8 library_source = string_format_z(arena, S8("{S8}/library.c"), root);
+            String8 library = string_format_z(arena, S8("{S8}/libsingle-tls.so"), root);
+            String8 library_option = string_format_z(arena, S8("-L{S8}"), root);
+            String8 library_program = S8("extern _Thread_local int single_tls;\n"
+                "int check_single(int *p, int expected) { if (p != &single_tls || single_tls != expected) return 1; single_tls += 1; return 0; }\n");
+            bool prepared = file_write(library_source, BUSTER_SLICE_TO_BYTE_SLICE(library_program));
+            String8 build_library[] = {S8("-O2"), S8("-fPIC"), S8("-shared"), library_source, S8("-Wl,-soname,libsingle-tls.so"), S8("-o"), library};
+            prepared = prepared && compiler_driver_tls_export_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_library));
+            BUSTER_TEST(arguments, prepared);
+            struct
+            {
+                u32 alignment;
+                bool initialized;
+                bool weak;
+            } rows[] = {{32, true, false}, {32, false, false}, {8388608, false, false},
+                        {8388608, true, false}, {32, true, true}, {32, false, true}};
+            for (u32 row = 0; prepared && row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+            {
+                TemporalArena temporary = arena_begin_temporal(arena);
+                String8 source = string_format_z(arena, S8("{S8}/single-{u32}.c"), root, row);
+                String8 object = string_format_z(arena, S8("{S8}/single-{u32}.o"), root, row);
+                u32 initial_value = rows[row].initialized ? 42 : 0;
+                String8 program = string_format(arena,
+                    S8("_Thread_local int single_tls __attribute__((aligned({u32}){S8})) {S8};\n"
+                       "int check_single(int *, int);\n"
+                       "int main(void) { int failed = check_single(&single_tls, {u32}); return failed || single_tls != {u32}; }\n"),
+                    rows[row].alignment, rows[row].weak ? S8(", weak") : S8(""), rows[row].initialized ? S8("= 42") : S8(""),
+                    initial_value, initial_value + 1);
+                bool produced = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program));
+                String8 build[] = {S8("-O2"), S8("-fno-pie"), S8("-c"), source, S8("-o"), object};
+                produced = produced && compiler_driver_tls_export_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(build));
+                BUSTER_TEST(arguments, produced);
+                for (u32 export_all = 0; produced && export_all < 2; export_all += 1)
+                {
+                    String8 oracle = string_format_z(arena, S8("{S8}/host-{u32}-{u32}"), root, row, export_all);
+                    String8 host_command[8] = {S8("-no-pie"), object, library_option, S8("-l:libsingle-tls.so"), S8("-o"), oracle};
+                    u32 host_count = 6;
+                    if (export_all) host_command[host_count++] = S8("-rdynamic");
+                    bool host_linked = compiler_driver_tls_export_host(arguments, (SliceString8){host_command, host_count});
+                    BUSTER_TEST(arguments, host_linked);
+                    if (host_linked)
+                    {
+                        ByteSlice bytes = file_read(arena, oracle, (FileReadOptions){0});
+                        BUSTER_TEST(arguments, compiler_driver_tls_export_single_layout(bytes, rows[row].initialized, rows[row].alignment));
+                        BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("single_tls"), true, rows[row].initialized, initial_value, rows[row].weak ? 2 : 1));
+                        BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, oracle, root));
+                    }
+                    for (u32 imported = 0; imported < 2; imported += 1)
+                    {
+                        String8 output = string_format_z(arena, S8("{S8}/buster-{u32}-{u32}-{u32}"), root, row, export_all, imported);
+                        String8 command[8] = {S8("-g0"), S8("-no-pie"), imported ? object : source, library_option, S8("-l:libsingle-tls.so"), S8("-o"), output};
+                        u32 count = 7;
+                        if (export_all) command[count++] = S8("-rdynamic");
+                        CompilerDriverResult linked = compiler_driver_execute_invocation(arena,
+                            compiler_driver_parse_arguments(arena, (SliceString8){command, count}));
+                        BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE,
+                            string_format(arena, S8("single TLS row {u32}, all {u32}, object {u32}: {S8}"), row, export_all, imported, linked.diagnostic));
+                        if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                            BUSTER_TEST(arguments, compiler_driver_tls_export_single_layout(bytes, rows[row].initialized, rows[row].alignment));
+                            BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("single_tls"), true, rows[row].initialized, initial_value, rows[row].weak ? 2 : 1));
+                            BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, output, root));
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+            BUSTER_TEST(arguments, os_directory_delete(root));
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_tls_export_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_tls_export_single_classes);
     Arena* arena = arguments->arena;
     String8 family = S8(BUSTER_HOST_C_COMPILER_ID);
     bool supported = string_equal(family, S8("GNU")) || string_equal(family, S8("Clang"));
@@ -284,10 +475,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_tls_export_tests(UnitTestArgu
                     ByteSlice bytes = file_read(arena, oracle, (FileReadOptions){0});
                     u64 image_type = 0;
                     BUSTER_TEST(arguments, compiler_driver_tls_export_field(bytes, 16, 2, &image_type) && image_type == (pie ? 3u : 2u));
-                    BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("shared_tdata"), true, true, 42));
-                    BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("shared_tbss"), true, false, 0));
-                    BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("spare_tls"), export_all != 0, true, 7));
-                    BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("private_tls"), false, true, 9));
+                    BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("shared_tdata"), true, true, 42, 1));
+                    BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("shared_tbss"), true, false, 0, 1));
+                    BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("spare_tls"), export_all != 0, true, 7, 1));
+                    BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("private_tls"), false, true, 9, 1));
                 }
                 for (u32 imported = 0; imported < 2; imported += 1)
                 {
@@ -308,10 +499,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_tls_export_tests(UnitTestArgu
                         ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
                         u64 image_type = 0;
                         BUSTER_TEST(arguments, compiler_driver_tls_export_field(bytes, 16, 2, &image_type) && image_type == (pie ? 3u : 2u));
-                        BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("shared_tdata"), true, true, 42));
-                        BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("shared_tbss"), true, false, 0));
-                        BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("spare_tls"), export_all != 0, true, 7));
-                        BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("private_tls"), false, true, 9));
+                        BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("shared_tdata"), true, true, 42, 1));
+                        BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("shared_tbss"), true, false, 0, 1));
+                        BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("spare_tls"), export_all != 0, true, 7, 1));
+                        BUSTER_TEST(arguments, compiler_driver_tls_export_symbol(bytes, S8("private_tls"), false, true, 9, 1));
                         BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, output, root));
                     }
                 }
