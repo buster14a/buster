@@ -45,18 +45,26 @@ jobs:
           "$RUNNER_TEMP/raddebugger-driver" source_size --write-baseline
       - name: Configure compiler
         run: |
-          "$RUNNER_TEMP/raddebugger-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --no-include-tests --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/raddebugger-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
       - name: Build trusted compiler
+        id: compiler
         run: |
           "$RUNNER_TEMP/raddebugger-driver" build --config Release -t ide
-      - name: Baseline self-host fixed point
+      - name: Compiler tests
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/raddebugger-driver" build --config Release -t test_all 2>&1 | tee build/raddebugger-tests.log
+      - name: Candidate self-host fixed point
+        if: always() && steps.compiler.outcome == 'success'
         run: |
           set -o pipefail
           "$RUNNER_TEMP/raddebugger-driver" test_self_host --config Release 2>&1 | tee build/raddebugger-self-host.log
       - name: Pristine input negative controls
+        if: always() && steps.compiler.outcome == 'success'
         run: |
           "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --self-test
       - name: Compile pristine RAD Debugger and independent reference
+        if: always() && steps.compiler.outcome == 'success'
         run: |
           set -o pipefail
           "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --config Release "$GITHUB_WORKSPACE/external/raddebugger" 2>&1 | tee build/raddebugger-harness.log

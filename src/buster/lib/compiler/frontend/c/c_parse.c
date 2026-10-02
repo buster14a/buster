@@ -105,6 +105,7 @@
 //                                                 kept as the differential gate
 //   c_parse_typed_constant                       target-typed scalar constant evaluation
 //   c_parse_type_integer_constant               isolated type-embedded constant queries
+//   c_parse_validate_integer_transform_calls    builtin signatures in every expression context
 //   c_parse_validate_lowering_constraints        source validation before canonical IR
 //   c_parse_ast, c_analyze_semantics, c_parse     model-building stage entry points
 //   c_analyze_semantics_only                     complete validation without canonical IR
@@ -5007,6 +5008,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
             {
                 String8 name = c_token_spelling(preprocess.spelling_base, first);
                 CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
+                if (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM)
+                {
+                    CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(preprocess.target, name);
+                    return c_parse_expression_scalar_type(result, transform.type);
+                }
                 if (builtin == C_SYMBOL_BUILTIN_MATH || builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET ||
                     c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID)
                 {
@@ -7103,6 +7109,7 @@ struct CParseConstant
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_parse_constant_truth(CParseConstant value);
+BUSTER_C_INTERNAL u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_INTERNAL void c_parse_defer_static_assert(CPreprocessResult preprocess, CParseResult* result, CDeclaration declaration, CScopeId scope)
 {
     if (!result || result->deferred_static_assert_count >= result->deferred_static_assert_capacity)
@@ -22584,6 +22591,32 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     continue;
                 }
             }
+            if (first.kind == C_TOKEN_IDENTIFIER && c_symbol_builtin_from_spelling(c_token_spelling(preprocess.spelling_base, first)) ==
+                C_SYMBOL_BUILTIN_INTEGER_TRANSFORM)
+            {
+                CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(preprocess.target,
+                    c_token_spelling(preprocess.spelling_base, first));
+                u32 close = begin + 1 < limit && c_token_is_punctuator(&preprocess.tokens[begin + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
+                    ? c_parse_matching_delimiter_indexed(result, preprocess, begin + 1) : UINT32_MAX;
+                u32 first_end = close + 1 == limit ? c_parse_constraint_expression_end(result, preprocess, begin + 2, close) : begin + 2;
+                bool valid = close + 1 == limit && begin + 2 < first_end &&
+                    (transform.argument_count == 1 ? first_end == close : first_end < close && first_end + 1 < close &&
+                     c_parse_constraint_expression_end(result, preprocess, first_end + 1, close) == close);
+                if (valid)
+                {
+                    task->state = 8;
+                    task->split = first_end + 1;
+                    task->colon = close;
+                    task->cast_type = c_parse_expression_scalar_type(result, transform.type);
+                    tasks[count++] = (CParseConstantTask){.start = begin + 2, .end = first_end, .cast_type = C_TYPE_ID_INVALID};
+                }
+                else
+                {
+                    last = (CParseConstant){.type = C_TYPE_ID_INVALID};
+                    count -= 1;
+                }
+                continue;
+            }
             if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, first), S8("__builtin_offsetof")))
             {
                 last = c_parse_constant_offsetof(machine, arena, preprocess, result, scope, begin, limit);
@@ -22646,6 +22679,32 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             else if (task->state == 3)
             {
                 last = c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
+            }
+            else if (task->state == 8 || task->state == 9)
+            {
+                CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(preprocess.target,
+                    c_token_spelling(preprocess.spelling_base, preprocess.tokens[task->start]));
+                CTypeKind kind = c_parse_expression_value_kind(result, last.type);
+                // CParseConstant holds one scalar component. A complex value
+                // cannot be folded as its literal magnitude or real part here.
+                last.valid &= c_parse_expression_real_kind(kind);
+                last = c_parse_constant_convert(result, preprocess.target, last, task->cast_type, machine->constant_evaluation_mode);
+                if (task->state == 8 && transform.argument_count == 2)
+                {
+                    task->left = last;
+                    task->state = 9;
+                    tasks[count++] = (CParseConstantTask){.start = task->split, .end = task->colon, .cast_type = C_TYPE_ID_INVALID};
+                    continue;
+                }
+                u64 value = task->state == 9 ? task->left.integer : last.integer;
+                u64 shift = task->state == 9 ? last.integer : 0;
+                if (task->state == 9)
+                {
+                    last.valid &= task->left.valid;
+                    last.faulted |= task->left.faulted;
+                }
+                last.integer = c_integer_transform_bits(transform, value, shift);
+                last.integer_high = 0;
             }
             else if (task->state == 4)
             {
@@ -24632,7 +24691,8 @@ BUSTER_C_INTERNAL u32 c_parse_static_initializer_call(CTypeParseMachine* machine
                             ? c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, comma + 1, limit) : (CParseConstant){0};
                         constant = comma < close && limit == close && real.valid && imaginary.valid && (real.is_float || imaginary.is_float);
                     }
-                    else if (close < frame->end && c_ir_math_builtin_link_name(name).length)
+                    else if (close < frame->end && (c_ir_math_builtin_link_name(name).length ||
+                             c_symbol_builtin_from_spelling(name) == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM))
                     {
                         CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, cursor, close + 1);
                         constant = value.valid;
@@ -25783,6 +25843,76 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
     }
 }
 
+// Result typing also serves unevaluated expressions and file-scope constant
+// queries. Check transform calls independently of function-body emission so
+// sizeof, generic controllers, and declarator expressions obey the signature.
+BUSTER_C_INTERNAL void c_parse_validate_integer_transform_calls(CTypeParseMachine* machine, CParseResult* result,
+                                                                 CPreprocessResult preprocess)
+{
+    u64 mark = machine->scratch_arena->position;
+    u32 end = (u32)preprocess.token_count;
+    CParseCandidates calls = c_parse_call_candidates(preprocess);
+    for (u32 index = c_parse_candidates_next(&calls, 0, end); index + 1 < end;
+         index = c_parse_candidates_next(&calls, index + 1, end))
+    {
+        CToken token = preprocess.tokens[index];
+        bool member = index && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
+                                c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
+        String8 name = c_token_spelling(preprocess.spelling_base, token);
+        if (member || token.kind != C_TOKEN_IDENTIFIER || c_symbol_builtin_from_spelling(name) != C_SYMBOL_BUILTIN_INTEGER_TRANSFORM ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
+        CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, index);
+        CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+        bool declaration_name = entity.value < result->entity_count && result->entities[entity.value].declaration_token_plus_one == index + 1;
+        if (entity.value < result->entity_count && result->declarations_by_entity_offsets)
+        {
+            u32 begin = result->declarations_by_entity_offsets[entity.value];
+            u32 limit = result->declarations_by_entity_offsets[entity.value + 1];
+            for (u32 position = begin; position < limit && !declaration_name; position += 1)
+            {
+                CDeclaration const* declaration = result->declarations + result->declarations_by_entity[position];
+                declaration_name = declaration->syntax_declaration && declaration->syntax_declaration->function_name_token == index;
+            }
+        }
+        u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index + 1);
+        if (declaration_name || close >= end) continue;
+        CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(preprocess.target, name);
+        u32 starts[2] = {0};
+        u32 ends[2] = {0};
+        u32 count = 0;
+        for (u32 argument = index + 2; argument < close;)
+        {
+            u32 limit = c_parse_constraint_expression_end(result, preprocess, argument, close);
+            if (count < BUSTER_ARRAY_LENGTH(starts))
+            {
+                starts[count] = argument;
+                ends[count] = limit;
+            }
+            count += 1;
+            argument = limit + 1;
+        }
+        String8 message = count != transform.argument_count
+            ? c_semantic_call_arity_message(result->arena, name, transform.argument_count, false, count) : (String8){0};
+        u32 location = close;
+        for (u32 argument = 0; argument < count && !message.length; argument += 1)
+        {
+            CTypeId type = C_TYPE_ID_INVALID;
+            bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
+                starts[argument], ends[argument], &type);
+            CTypeKind kind = c_parse_expression_value_kind(result, type);
+            if (!typed || (!c_parse_expression_real_kind(kind) && !c_type_kind_is_complex(kind)))
+            {
+                message = string_format(result->arena, S8("argument {u32} of {S8} requires an arithmetic scalar"), argument + 1, name);
+                location = starts[argument];
+            }
+        }
+        if (message.length)
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[location]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+    }
+    arena_set_position(machine->scratch_arena, mark);
+    return;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                        CDeclaration const* declaration, u8 const* skipped, CParseLoweringConstraintDiagnostic* diagnostic)
 {
@@ -25826,6 +25956,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             }
         }
         CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
+        if (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM) continue;
         if (builtin == C_SYMBOL_BUILTIN_NONE || close >= end)
         {
             if (builtin == C_SYMBOL_BUILTIN_NONE && string_starts_with_sequence(name, S8("__builtin_")) &&
@@ -27209,6 +27340,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_INVALID_ALIGNMENT, message);
         }
     }
+    c_parse_validate_integer_transform_calls(machine, result, preprocess);
     c_parse_validate_bit_field_widths(machine, arena, result, preprocess);
     c_parse_validate_deferred_assertions(machine, arena, result, preprocess);
     c_parse_validate_alias_targets(arena, result, preprocess);

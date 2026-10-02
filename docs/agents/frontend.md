@@ -74,7 +74,7 @@ repeated spaces, line splicing, identifier collisions, aliases, wrapper
 prescan, expanded operands and include-next search origins.
 
 `c_conditional_builtin_supported` answers `__has_builtin` for implemented
-operations, not every recognized identifier. Its complex and atomic branches
+operations, not every recognized identifier. Its complex, atomic and integer-transform branches
 reuse the exact `c_symbol_builtin_from_spelling` classification: adding a new
 spelling there requires checking its real lowering and its query regression.
 Never admit an arbitrary `__atomic_` or `__c11_atomic_` suffix by prefix.
@@ -86,10 +86,39 @@ lowering. A positive runtime builtin query does not assert that the builtin
 can be folded in every constant initializer; the complex global-initializer
 work is tracked separately in #675.
 
+`__builtin_bswap16/32/64` and `__builtin_rotateleft8/16/32/64` /
+`__builtin_rotateright8/16/32/64` use fixed unsigned parameter and result
+types. The 64-bit C rank follows `__UINT64_TYPE__` (`unsigned long` on LP64,
+`unsigned long long` on LLP64); narrow results undergo ordinary C promotions
+only when a surrounding operator requires them. Arithmetic scalar arguments
+convert to those types, and rotate counts reduce modulo the named width,
+including negative integer counts after their unsigned conversion.
+
+`c_semantic_integer_transform_builtin` shares the exact signatures among
+semantic type queries, arity/type validation and lowering.
+`c_integer_transform_bits` supplies bounded constant folding to the parser's
+explicit task stack and lowering's suspended constant-query stack. Runtime
+lowering evaluates each argument once and expands through canonical shifts,
+ANDs and ORs. Both rotation shift counts are masked; zero never produces a
+shift by the type width. This introduces no backend operation or library call.
+
+The capability query advertises these eleven names on x86-64/AArch64 only.
+The semantic call pass checks their arity and arithmetic operands throughout
+the translation unit, including file-scope and unevaluated expressions;
+result-type prediction alone does not certify a valid call.
+The registered `c_test_integer_transform_builtins` covers semantic-only
+diagnostics, constant contexts, result type/rank and canonical validation
+across six native target layouts and both frontend forms. Its embedded
+executable checks use independent bit/byte-loop oracles, all four allocators,
+modulo/negative counts, arithmetic conversions and single evaluation; they
+run on supported desktop hosts. Wasm/eBPF capability promises await their own
+backend execution witnesses. No tracked external fixture or retirement
+support identity is added by this builtin extension.
+
 `c_test_has_builtin` covers exact positive/negative spellings through real
 preprocessing and parsing on eight targets, plus fence IR on both frontend SSA
 paths. `compiler_driver_test_has_builtin_targets` checks non-native output;
-`tests/basic_c_has_builtin.c` exercises every new positive operation under
+`tests/basic_c_has_builtin.c` exercises its tracked builtin census under
 strict verification and all native allocator modes. New tracked fixtures also
 need an explicit, reviewed identity in `docs/native-retirement-support-v1.tsv`;
 do not bypass its unreviewed-input rejection to make a query test pass.

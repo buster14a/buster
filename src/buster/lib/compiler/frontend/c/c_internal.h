@@ -673,6 +673,7 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
     C_SYMBOL_BUILTIN_FIND_FIRST_SET,
     C_SYMBOL_BUILTIN_POPULATION_COUNT,
+    C_SYMBOL_BUILTIN_INTEGER_TRANSFORM,
     C_SYMBOL_BUILTIN_SIMD,
     C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT,
     C_SYMBOL_BUILTIN_FRAME_ADDRESS,
@@ -682,6 +683,26 @@ typedef enum CSymbolBuiltin
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling);
+
+typedef enum CIntegerTransformOperation
+{
+    C_INTEGER_TRANSFORM_NONE,
+    C_INTEGER_TRANSFORM_BYTE_SWAP,
+    C_INTEGER_TRANSFORM_ROTATE_LEFT,
+    C_INTEGER_TRANSFORM_ROTATE_RIGHT,
+} CIntegerTransformOperation;
+
+typedef struct CIntegerTransformBuiltin CIntegerTransformBuiltin;
+struct CIntegerTransformBuiltin
+{
+    CTypeKind type;
+    u8 width;
+    u8 argument_count;
+    u8 operation;
+};
+
+BUSTER_C_EXTERN CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, String8 name);
+BUSTER_C_EXTERN u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 count);
 
 struct CSymbolTable
 {

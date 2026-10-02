@@ -10641,6 +10641,267 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_case(UnitTestArguments* ar
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 const c_test_integer_transform_source = S8_INITIALIZER(
+    "#if !__has_builtin(__builtin_bswap16) || !__has_builtin(__builtin_bswap32) || !__has_builtin(__builtin_bswap64)\n"
+    "#error byte swap support\n"
+    "#endif\n"
+    "#if !__has_builtin(__builtin_rotateleft8) || !__has_builtin(__builtin_rotateleft16) || !__has_builtin(__builtin_rotateleft32) || !__has_builtin(__builtin_rotateleft64)\n"
+    "#error rotate left support\n"
+    "#endif\n"
+    "#if !__has_builtin(__builtin_rotateright8) || !__has_builtin(__builtin_rotateright16) || !__has_builtin(__builtin_rotateright32) || !__has_builtin(__builtin_rotateright64)\n"
+    "#error rotate right support\n"
+    "#endif\n"
+    "typedef __UINT64_TYPE__ U64;\n"
+    "_Static_assert(sizeof(__builtin_rotateleft8(0,0)) == 1, \"u8 size\");\n"
+    "_Static_assert(sizeof(__builtin_bswap16(0)) == 2, \"u16 size\");\n"
+    "_Static_assert(sizeof(__builtin_bswap32(0)) == 4, \"u32 size\");\n"
+    "_Static_assert(sizeof(__builtin_bswap64(0)) == 8, \"u64 size\");\n"
+    "_Static_assert(_Generic(__builtin_rotateleft8(0,0), unsigned char: 1, default: 0), \"u8 rank\");\n"
+    "_Static_assert(_Generic(__builtin_bswap16(0), unsigned short: 1, default: 0), \"u16 rank\");\n"
+    "_Static_assert(_Generic(__builtin_rotateright32(0,0), unsigned int: 1, default: 0), \"u32 rank\");\n"
+    "_Static_assert(_Generic(__builtin_bswap64(0), U64: 1, default: 0), \"u64 rank\");\n"
+    "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_rotateleft64(0,0)), U64), \"rotate u64 rank\");\n"
+    "typedef __typeof__(__builtin_rotateleft16(1,1)) TransformU16;\n"
+    "_Static_assert(__builtin_types_compatible_p(TransformU16,unsigned short), \"typeof u16 rank\");\n"
+    "_Static_assert(_Generic(0, int: 1, default: __builtin_bswap16(1)), \"unselected valid call\");\n"
+    "_Static_assert(__builtin_bswap16(0x123456u) == 0x5634u, \"truncate before swap\");\n"
+    "_Static_assert(__builtin_bswap32(0x12345678u) == 0x78563412u, \"swap32\");\n"
+    "_Static_assert(__builtin_bswap64(0x1122334455667788ull) == 0x8877665544332211ull, \"swap64\");\n"
+    "_Static_assert(__builtin_bswap16(-1) == 0xffffu, \"negative value\");\n"
+    "_Static_assert(__builtin_rotateleft8(0x86u,11) == 0x34u, \"modulo8\");\n"
+    "_Static_assert(__builtin_rotateright8(0x86u,3) == 0xd0u, \"right8\");\n"
+    "_Static_assert(__builtin_rotateleft16(0x8001u,16) == 0x8001u, \"zero modulo16\");\n"
+    "_Static_assert(__builtin_rotateleft32(0x12345678u,-1) == 0x091a2b3cu, \"negative left count\");\n"
+    "_Static_assert(__builtin_rotateright32(0x12345678u,-1) == 0x2468acf0u, \"negative right count\");\n"
+    "_Static_assert(__builtin_rotateleft64(0x8000000000000001ull,1) == 3, \"rotate64\");\n"
+    "_Static_assert(__builtin_rotateleft64(0x8000000000000001ull,-1) == 0xc000000000000000ull, \"negative64\");\n"
+    "_Static_assert(__builtin_rotateleft8(0x180u,1) + 256 == 257, \"narrow promotion\");\n"
+    "_Static_assert(__builtin_bswap16(0xffffu) + 1 == 65536, \"u16 promotion\");\n"
+    "_Static_assert(__builtin_bswap16(__builtin_bswap16(0x1234u)) == 0x1234u, \"nested query\");\n"
+    "enum { TRANSFORM_BOUND = __builtin_bswap16(0x0100u) };\n"
+    "static int transform_array[TRANSFORM_BOUND];\n"
+    "static unsigned swapped_static = __builtin_bswap32(0x12345678u);\n"
+    "static U64 rotated_static = __builtin_rotateleft64(0x8000000000000001ull,1);\n"
+    "static struct TransformConstants { unsigned short small; U64 large; } transformed_record = { __builtin_bswap16(0x1234), __builtin_rotateright64(1,1) };\n"
+    "static unsigned transformed_array[2] = { __builtin_bswap32(0x12345678u), __builtin_rotateleft16(0x8001u,1) };\n"
+    "static volatile unsigned runtime_input = 0x12345678u;\n"
+    "enum TransformInput { TRANSFORM_VALUE = 0x12345678u, TRANSFORM_COUNT = 4 };\n"
+    "static volatile enum TransformInput enum_value = TRANSFORM_VALUE, enum_count = TRANSFORM_COUNT;\n"
+    "static int value_calls, count_calls;\n"
+    "static unsigned next_value(void) { value_calls += 1; return 0x12345678u; }\n"
+    "static unsigned next_count(void) { count_calls += 1; return 4; }\n"
+    "U64 transform_unsigned(unsigned long long value, unsigned long long count)\n"
+    "{\n"
+    "    return __builtin_bswap16(value) + __builtin_bswap32(value) + __builtin_bswap64(value) +\n"
+    "        __builtin_rotateleft8(value,count) + __builtin_rotateleft16(value,count) +\n"
+    "        __builtin_rotateleft32(value,count) + __builtin_rotateleft64(value,count) +\n"
+    "        __builtin_rotateright8(value,count) + __builtin_rotateright16(value,count) +\n"
+    "        __builtin_rotateright32(value,count) + __builtin_rotateright64(value,count);\n"
+    "}\n"
+    "static U64 reference_rotate(U64 value, unsigned width, int count, int right)\n"
+    "{\n"
+    "    U64 result = 0;\n"
+    "    unsigned amount = (unsigned)count & (width - 1);\n"
+    "    for (unsigned bit = 0; bit < width; bit += 1)\n"
+    "    {\n"
+    "        unsigned destination = right ? (bit + width - amount) % width : (bit + amount) % width;\n"
+    "        result |= ((value >> bit) & 1) << destination;\n"
+    "    }\n"
+    "    return result;\n"
+    "}\n"
+    "static U64 reference_swap(U64 value, unsigned width)\n"
+    "{\n"
+    "    U64 result = 0;\n"
+    "    for (unsigned byte = 0; byte < width / 8; byte += 1)\n"
+    "        result |= ((value >> (byte * 8)) & 255) << (width - 8 - byte * 8);\n"
+    "    return result;\n"
+    "}\n"
+    "static U64 selected_rotate(U64 value, unsigned width, int count, int right)\n"
+    "{\n"
+    "    U64 result;\n"
+    "    if (width == 8) result = right ? __builtin_rotateright8(value,count) : __builtin_rotateleft8(value,count);\n"
+    "    else if (width == 16) result = right ? __builtin_rotateright16(value,count) : __builtin_rotateleft16(value,count);\n"
+    "    else if (width == 32) result = right ? __builtin_rotateright32(value,count) : __builtin_rotateleft32(value,count);\n"
+    "    else result = right ? __builtin_rotateright64(value,count) : __builtin_rotateleft64(value,count);\n"
+    "    return result;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    int valid = swapped_static == 0x78563412u && rotated_static == 3 && sizeof(transform_array) == sizeof(int);\n"
+    "    valid &= transformed_record.small == 0x3412 && transformed_record.large == 0x8000000000000000ull;\n"
+    "    valid &= transformed_array[0] == 0x78563412u && transformed_array[1] == 3;\n"
+    "    U64 values[] = {0, 1, ~((U64)0), 0x8000000000000001ull, 0x1122334455667788ull};\n"
+    "    for (unsigned sample = 0; sample < sizeof(values) / sizeof(values[0]); sample += 1)\n"
+    "    {\n"
+    "        volatile U64 value = values[sample];\n"
+    "        valid &= __builtin_bswap16(value) == reference_swap(value,16);\n"
+    "        valid &= __builtin_bswap32(value) == reference_swap(value,32);\n"
+    "        valid &= __builtin_bswap64(value) == reference_swap(value,64);\n"
+    "        for (unsigned width = 8; width <= 64; width *= 2)\n"
+    "            for (int count = -(int)width - 1; count <= (int)width * 2 + 1; count += 1)\n"
+    "                for (int right = 0; right < 2; right += 1)\n"
+    "                    valid &= selected_rotate(value,width,count,right) == reference_rotate(value,width,count,right);\n"
+    "    }\n"
+    "    valid &= __builtin_rotateleft32(runtime_input,0x100000004ull) == 0x23456781u;\n"
+    "    valid &= __builtin_bswap32(enum_value) == 0x78563412u;\n"
+    "    valid &= __builtin_rotateleft32(enum_value,enum_count) == 0x23456781u;\n"
+    "    valid &= __builtin_rotateleft8(128.75,1.75) == 1;\n"
+    "    valid &= __builtin_bswap16(4660.75) == 0x3412;\n"
+    "    valid &= __builtin_bswap16(__builtin_complex(4660.75,7.0)) == 0x3412;\n"
+    "    valid &= __builtin_rotateleft32(next_value(),next_count()) == 0x23456781u;\n"
+    "    valid &= value_calls == 1 && count_calls == 1;\n"
+    "    valid &= __builtin_bswap32(next_value()) == 0x78563412u;\n"
+    "    valid &= value_calls == 2 && count_calls == 1;\n"
+    "    valid &= sizeof(__builtin_rotateleft32(next_value(),next_count())) == 4;\n"
+    "    valid &= _Generic(__builtin_rotateleft32(next_value(),next_count()), unsigned int: 1, default: 0);\n"
+    "    valid &= (0 && __builtin_rotateleft32(next_value(),next_count())) == 0;\n"
+    "    valid &= (1 ? 0 : __builtin_bswap32(next_value())) == 0;\n"
+    "    valid &= __builtin_constant_p(__builtin_rotateleft32(3,4)) == 1;\n"
+    "    valid &= __builtin_constant_p(__builtin_bswap32(runtime_input)) == 0;\n"
+    "    valid &= value_calls == 2 && count_calls == 1;\n"
+    "    return valid ? 0 : 1;\n"
+    "}\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_transform_builtins(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, c_test_integer_transform_source,
+                (CPreprocessOptions){.target = target});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("integer-transform.c"), preprocess, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* function = c_test_find_ir_function(module, S8("transform_unsigned"));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                        bool widths[4] = {false};
+                        for (u32 index = 0; index < function->instruction_count; index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + index;
+                            if (instruction->opcode == IR_OPCODE_BINARY && (instruction->binary_operation == IR_BINARY_SHIFT_LEFT ||
+                                instruction->binary_operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT))
+                            {
+                                IrType* type = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
+                                if (BUSTER_REQUIRE(arguments, type && type->kind == IR_TYPE_INTEGER && !type->is_signed))
+                                {
+                                    widths[0] |= type->bit_width == 8;
+                                    widths[1] |= type->bit_width == 16;
+                                    widths[2] |= type->bit_width == 32;
+                                    widths[3] |= type->bit_width == 64;
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, widths[0] && widths[1] && widths[2] && widths[3]);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    typedef struct CIntegerTransformNegativeCase CIntegerTransformNegativeCase;
+    struct CIntegerTransformNegativeCase
+    {
+        String8 source;
+        String8 message;
+    };
+    CIntegerTransformNegativeCase invalid[] = {
+        {S8("int f(void) { return __builtin_bswap16(); }"), S8("too few arguments in the call to '__builtin_bswap16'")},
+        {S8("int f(void) { return __builtin_bswap32(1,2); }"), S8("too many arguments in the call to '__builtin_bswap32'")},
+        {S8("int f(void) { return __builtin_rotateleft8(1); }"), S8("too few arguments in the call to '__builtin_rotateleft8'")},
+        {S8("int f(void) { return __builtin_rotateright64(1,2,3); }"), S8("too many arguments in the call to '__builtin_rotateright64'")},
+        {S8("int f(void) { return __builtin_bswap64((int*)0); }"), S8("argument 1 of __builtin_bswap64 requires an arithmetic scalar")},
+        {S8("int f(void) { return __builtin_rotateleft16((int*)0,1); }"), S8("argument 1 of __builtin_rotateleft16 requires an arithmetic scalar")},
+        {S8("int f(void) { return __builtin_rotateleft16(1,(int*)0); }"), S8("argument 2 of __builtin_rotateleft16 requires an arithmetic scalar")},
+        {S8("int f(void) { return __builtin_rotateright32((struct Bad {int x;}){0},1); }"), S8("argument 1 of __builtin_rotateright32 requires an arithmetic scalar")},
+        {S8("int f(void) { return __builtin_bswap16((union Bad {int x;}){0}); }"), S8("argument 1 of __builtin_bswap16 requires an arithmetic scalar")},
+        {S8("int f(void) { int x[1]; return __builtin_bswap32(x); }"), S8("argument 1 of __builtin_bswap32 requires an arithmetic scalar")},
+        {S8("int g(void); int f(void) { return __builtin_bswap32(g); }"), S8("argument 1 of __builtin_bswap32 requires an arithmetic scalar")},
+        {S8("int f(void) { return __builtin_rotateleft64(1,(void)0); }"), S8("argument 2 of __builtin_rotateleft64 requires an arithmetic scalar")},
+        {S8("typedef int V __attribute__((vector_size(16))); int f(V x) { return __builtin_bswap32(x); }"), S8("argument 1 of __builtin_bswap32 requires an arithmetic scalar")},
+        {S8("_Static_assert(sizeof(__builtin_bswap16()) == 2, \"bad\");"), S8("too few arguments in the call to '__builtin_bswap16'")},
+        {S8("static unsigned x = sizeof(__builtin_rotateleft32((int*)0,1));"), S8("argument 1 of __builtin_rotateleft32 requires an arithmetic scalar")},
+        {S8("_Static_assert(_Generic(__builtin_rotateleft8(1), unsigned char: 1, default: 0), \"bad\");"), S8("too few arguments in the call to '__builtin_rotateleft8'")},
+        {S8("typedef __typeof__(__builtin_bswap32((int*)0)) Bad;"), S8("argument 1 of __builtin_bswap32 requires an arithmetic scalar")},
+        {S8("static int x[sizeof(__builtin_rotateleft16(1,(int*)0))];"), S8("argument 2 of __builtin_rotateleft16 requires an arithmetic scalar")},
+        {S8("enum E { X = sizeof(__builtin_bswap64((void)0)) };"), S8("argument 1 of __builtin_bswap64 requires an arithmetic scalar")},
+        {S8("struct S { unsigned x : sizeof(__builtin_rotateright8(1)); };"), S8("too few arguments in the call to '__builtin_rotateright8'")},
+        {S8("_Alignas(sizeof(__builtin_bswap16())) int x;"), S8("too few arguments in the call to '__builtin_bswap16'")},
+        {S8("_Static_assert(_Generic(0, int: 1, default: __builtin_bswap16()), \"bad\");"), S8("too few arguments in the call to '__builtin_bswap16'")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index].source, (CPreprocessOptions){.target = targets[0]});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, invalid[index].source);
+        bool message_found = false;
+        for (u32 diagnostic = 0; diagnostic < parse.diagnostic_count; diagnostic += 1)
+            message_found |= parse.diagnostics[diagnostic].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                string_first_sequence(parse.diagnostics[diagnostic].message, invalid[index].message) != BUSTER_STRING_NO_MATCH;
+        BUSTER_TEST_RAW(arguments, message_found, string_format(temporary.arena, S8("{S8}: expected {S8}; first diagnostic {S8}"),
+            invalid[index].source, invalid[index].message, parse.diagnostic_count ? parse.diagnostics[0].message : S8("none")));
+        scratch_end(temporary);
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = buster_test_temporary_path(arguments->arena, S8("integer-transform-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_integer_transform_source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+            S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("integer-transform-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // #665: query the real preprocessor with an independent exact-name census.
 // Do not infer support from a prefix or advertise native atomic IR to the
 // Wasm64/eBPF backends, which explicitly reject it.
@@ -10712,6 +10973,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_popcount"), all_targets},
         {S8("__builtin_popcountl"), all_targets},
         {S8("__builtin_popcountll"), all_targets},
+        {S8("__builtin_bswap16"), native_targets},
+        {S8("__builtin_bswap32"), native_targets},
+        {S8("__builtin_bswap64"), native_targets},
+        {S8("__builtin_rotateleft8"), native_targets},
+        {S8("__builtin_rotateleft16"), native_targets},
+        {S8("__builtin_rotateleft32"), native_targets},
+        {S8("__builtin_rotateleft64"), native_targets},
+        {S8("__builtin_rotateright8"), native_targets},
+        {S8("__builtin_rotateright16"), native_targets},
+        {S8("__builtin_rotateright32"), native_targets},
+        {S8("__builtin_rotateright64"), native_targets},
+        {S8("__builtin_bswap8"), 0},
+        {S8("__builtin_bswap128"), 0},
+        {S8("__builtin_bswapg"), 0},
+        {S8("__builtin_rotateleft128"), 0},
+        {S8("__builtin_rotateright0"), 0},
+        {S8("__builtin_rotateleft32_extra"), 0},
         {S8("__is_target_arch"), all_targets},
         {S8("not_a_builtin"), 0},
         {S8("__atomic_"), 0},
@@ -31009,6 +31287,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
     BUSTER_TEST_FIXTURE(arguments, c_test_has_builtin);
+    BUSTER_TEST_FIXTURE(arguments, c_test_integer_transform_builtins);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     BUSTER_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);
