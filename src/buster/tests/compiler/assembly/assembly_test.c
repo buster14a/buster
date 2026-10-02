@@ -2894,7 +2894,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArgumen
         String8 quoted_expected = S8("#;/*keep*/ //%%\"#;/*q*/\007");
         AssemblyUnitResult quoted = assembly_unit_encode(arguments->arena, quoted_source, (AssemblyEncodeOptions){.target = target});
         BUSTER_TEST(arguments, !quoted.diagnostic_count && quoted.section_count == 1 &&
-            assembly_test_bytes_equal(quoted.sections[0].data, (u8 const*)quoted_expected.pointer, quoted_expected.length));
+            assembly_test_bytes_equal(quoted.sections[0].data, (u8 const*)quoted_expected.pointer, (u32)quoted_expected.length));
     }
     Target x86_targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
@@ -2932,7 +2932,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArgumen
             (AssemblyEncodeOptions){.target = target});
         String8 quoted_expected = S8("#;/*keep*/ //%%");
         BUSTER_TEST(arguments, !quoted.diagnostic_count && quoted.section_count == 1 &&
-            assembly_test_bytes_equal(quoted.sections[0].data, (u8 const*)quoted_expected.pointer, quoted_expected.length));
+            assembly_test_bytes_equal(quoted.sections[0].data, (u8 const*)quoted_expected.pointer, (u32)quoted_expected.length));
         String8 escaped_sources[] = {
             S8(".data\n.ascii \"\\\\\", \"x\"\n"),
             S8(".data\n.ascii \"\\\\\\\"\", \"x\"\n"),
@@ -2943,7 +2943,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArgumen
             AssemblyUnitResult escaped = assembly_unit_encode(arguments->arena, escaped_sources[index],
                 (AssemblyEncodeOptions){.target = target});
             BUSTER_TEST(arguments, !escaped.diagnostic_count && escaped.section_count == 1 &&
-                assembly_test_bytes_equal(escaped.sections[0].data, (u8 const*)escaped_expected[index].pointer, escaped_expected[index].length));
+                assembly_test_bytes_equal(escaped.sections[0].data, (u8 const*)escaped_expected[index].pointer, (u32)escaped_expected[index].length));
         }
     }
     return result;
