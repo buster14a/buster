@@ -1132,6 +1132,19 @@ so following implicit members stay invalid until an explicit reset. The declared
 base and the original ICE's magnitude/type are never widened or narrowed to make
 an invalid value fit. GNU17's fixed-base extension and GNU23 use this same rule.
 
+Conversions to a fixed enum use its resolved underlying scalar type. For a
+Bool underlying type, both the parse constant evaluator and canonical lowering
+apply the whole-value truth test, including nonzero fractional values and a
+nonzero high integer limb; they do not truncate the value to a bit (#1252).
+This follows [N3096](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3096.pdf)
+6.7.2.2p15 and footnote 155. `c_test_enum_bool_conversion` fixes the expected
+values independently of conflicting older compiler implementations. It checks
+C23/GNU23 enumerator facts, array bounds, static initializers, typedef/qualified
+casts and volatile runtime operands across six native target layouts, both
+frontend forms and every native allocator on supported desktops. Fixed-base
+initializer representability and implicit-successor diagnostics retain their
+separate declaration constraints.
+
 Pending lookup respects lexical scope and declaration order, including a nearer
 ordinary identifier shadowing an outer enumerator. Published names use ordinary
 lookup; only the current incomplete list can shadow them before publication.

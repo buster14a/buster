@@ -21909,7 +21909,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
     }
     else if (integer)
     {
-        if (result->types[destination.value].kind == C_TYPE_BOOL)
+        // Fixed-underlying enums use the resolved scalar's conversion,
+        // including Bool's whole-value truth test rather than bit masking.
+        if (scalar.kind == IR_TYPE_BOOLEAN)
         {
             value.integer = c_parse_constant_truth(value);
             value.integer_high = 0;
