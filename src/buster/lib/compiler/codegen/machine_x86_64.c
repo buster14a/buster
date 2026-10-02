@@ -889,6 +889,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         return false;
     }
     IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
+    if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type->layout.size == 0 &&
+        (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && !abi.indirect && !abi.memory && !abi.part_count)
+    {
+        *shape = (MachineX64ValueShape){.aggregate = true};
+        return true;
+    }
     if (use == IR_ABI_USE_RESULT && convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && !abi.memory && !abi.indirect &&
         ((abi.part_count == 2 && type->layout.size == 16 && abi.parts[0].abi_class == IR_ABI_CLASS_X87 &&
           abi.parts[1].abi_class == IR_ABI_CLASS_X87_UP) || ir_abi_value_is_complex_x87_result(program, type_id, convention)))
