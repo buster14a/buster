@@ -52,7 +52,10 @@ with a backend diagnostic; they never select an external compiler fallback.
 
 The complete repository example is
 [`src/buster/tests/compiler/spirv/fixtures/direct_transform.c`](../src/buster/tests/compiler/spirv/fixtures/direct_transform.c). The fixture stays beside its backend component tests, outside the frozen
-native-retirement `tests/` input inventory. Its CPU
+native-retirement `tests/` input inventory. Android APK and iOS bundle asset
+graphs stage this fixture at the same repository-relative path and track its
+contents and inventory, so edits or removals repackage the runtime data.
+Its CPU
 oracle is written independently in the registered compute tests rather than
 obtained by running the kernel source through another shader compiler.
 
