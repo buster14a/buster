@@ -1,0 +1,46 @@
+{
+  "schema": "buster-ci-build-classification-publication-v1",
+  "measurement_source": "e424b387fcb51b00c1d19e87e2d369ae8a212792",
+  "archive_parent_commit": "1db6dfa892bd08945a1cccaa9473530c05a19762",
+  "source_raw_archives_verified": 27,
+  "desktop_archives": 26,
+  "build_trees": 44,
+  "logical_configuration_rows": 46,
+  "offline_classifier_tests_passed": 12,
+  "delivered_and_published_zip_outputs_identical": 8,
+  "build_total_us": {
+    "36991068435": 3893006979,
+    "36996168725": 2367750329
+  },
+  "all_groupings_reconcile": true,
+  "native_phase_journal_full_replay": "not run by this classifier",
+  "buster_tests": "not run",
+  "performance_acceptance": "not claimed",
+  "files": {
+    "README.md": {
+      "git_blob_sha1": "5db9f9b3ff9c488b2cda5438e1dd6b136f8d8e84",
+      "sha256": "5aa7cb5008b2bcb4558d6d6e4b1ac0c9a54b0951b99bacfd5b4aba5ed8ded50f",
+      "bytes": 14525
+    },
+    "classify_builds.py": {
+      "git_blob_sha1": "1a87cf59583454493ad3d0dd4aa34749f577ec78",
+      "sha256": "132924550f1e30ee3480c36f4bd0c68bf6f84e824e541789ad8d1e12b5457d70",
+      "bytes": 13469
+    },
+    "classify_builds_test.py": {
+      "git_blob_sha1": "f0ba596cbe926ea54c508cf8a3f5d35ba5802f59",
+      "sha256": "320ca60a33c02b17e24eb7f5174dd53d64e70ea0a7cbd755cc127b61582d06b3",
+      "bytes": 5797
+    },
+    "derived/builds.csv": {
+      "git_blob_sha1": "73a4682658fd0374cef1d7ed66fb508fca3a9c8a",
+      "sha256": "7633c710965a25d0f88fc25d5d8f8002c747927829d8ac469f34b1662d60298f",
+      "bytes": 4941
+    },
+    "derived/build_by_dimension.csv": {
+      "git_blob_sha1": "7b1db84ca85155cae59e23611280619f93a792d2",
+      "sha256": "46ac58482a7c2dcf258bf595891a55e64b78383e205dcadf5aaeac5f6aa11780",
+      "bytes": 4218
+    }
+  }
+}

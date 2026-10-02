@@ -1,0 +1,45 @@
+sample,run_id,os,architecture,compiler,configuration,sanitizer,fuzz_support,unity,build_elapsed_us,build_seconds,shard,tree_id,artifact_id
+A3 combined,36991068435,linux,aarch64,Clang,Release,on,off,off,185752233,185.752233,checks,tree1,11220536143
+A3 combined,36991068435,linux,aarch64,Clang,Debug,on,on,off,116334189,116.334189,checks,tree0,11220536143
+A3 combined,36991068435,linux,aarch64,GCC,Debug,off,off,off,105868270,105.86827,checks,tree2,11220536143
+A3 combined,36991068435,linux,aarch64,Zig cc,Debug,off,off,off,98931653,98.931653,checks,tree3,11220536143
+C4 split,36996168725,linux,aarch64,Zig cc,Debug,off,off,off,31784671,31.784671,portability,tree1,11221631557
+C4 split,36996168725,linux,aarch64,GCC,Debug,off,off,off,29451565,29.451565,portability,tree0,11221631557
+A3 combined,36991068435,linux,aarch64,Clang,Release,off,on,on,174072120,174.07212,release,tree0,11219863013
+C4 split,36996168725,linux,aarch64,Clang,Release,off,on,on,172061187,172.061187,release,tree0,11221454900
+C4 split,36996168725,linux,aarch64,Clang,Debug,on,on,off,43290750,43.29075,sanitized-debug,tree0,11221604683
+C4 split,36996168725,linux,aarch64,Clang,Release,on,off,off,74211553,74.211553,sanitized-release,tree0,11221349528
+A3 combined,36991068435,linux,x86_64,Clang,Release,on,off,off,271779595,271.779595,checks,tree1,11220525894
+A3 combined,36991068435,linux,x86_64,Clang,Debug,on,on,off,104110695,104.110695,checks,tree0,11220525894
+A3 combined,36991068435,linux,x86_64,GCC,Debug,off,off,off,159239231,159.239231,checks,tree2,11220525894
+A3 combined,36991068435,linux,x86_64,Zig cc,Debug,off,off,off,148426000,148.426,checks,tree3,11220525894
+C4 split,36996168725,linux,x86_64,Zig cc,Debug,off,off,off,42256120,42.25612,portability,tree1,11221905927
+C4 split,36996168725,linux,x86_64,GCC,Debug,off,off,off,38831083,38.831083,portability,tree0,11221905927
+A3 combined,36991068435,linux,x86_64,Clang,Release,off,on,on,100841231,100.841231,release,tree0,11219763396
+C4 split,36996168725,linux,x86_64,Clang,Release,off,on,on,124682231,124.682231,release,tree0,11222316504
+C4 split,36996168725,linux,x86_64,Clang,Debug,on,on,off,38619004,38.619004,sanitized-debug,tree0,11222655693
+C4 split,36996168725,linux,x86_64,Clang,Release,on,off,off,122271646,122.271646,sanitized-release,tree0,11222156061
+A3 combined,36991068435,macos,aarch64,Apple Clang,Debug+Release (shared),on,off,off,303391235,303.391235,checks,tree0,11220411223
+A3 combined,36991068435,macos,aarch64,GCC,Debug,off,off,off,216790876,216.790876,checks,tree1,11220411223
+A3 combined,36991068435,macos,aarch64,Zig cc,Debug,off,off,off,152627156,152.627156,checks,tree2,11220411223
+C4 split,36996168725,macos,aarch64,Apple Clang,Debug+Release (shared),on,off,off,308614230,308.61423,checks,tree0,11222700913
+C4 split,36996168725,macos,aarch64,GCC,Debug,off,off,off,211057389,211.057389,checks,tree1,11222700913
+C4 split,36996168725,macos,aarch64,Zig cc,Debug,off,off,off,143661338,143.661338,checks,tree2,11222700913
+A3 combined,36991068435,macos,aarch64,Apple Clang,Release,off,off,on,108825564,108.825564,release,tree0,11219723692
+C4 split,36996168725,macos,aarch64,Apple Clang,Release,off,off,on,70172172,70.172172,release,tree0,11222187067
+A3 combined,36991068435,windows,aarch64,MSVC,Debug,off,off,off,18170709,18.170709,checks,tree0,11219777291
+C4 split,36996168725,windows,aarch64,MSVC,Debug,off,off,off,19136511,19.136511,checks,tree0,11221418935
+A3 combined,36991068435,windows,aarch64,Clang,Release,off,off,on,96978133,96.978133,release,tree0,11220765495
+C4 split,36996168725,windows,aarch64,Clang,Release,off,off,on,98600856,98.600856,release,tree0,11222690825
+A3 combined,36991068435,windows,x86_64,Clang,Release,on,off,off,468756453,468.756453,checks,tree2,11221155025
+A3 combined,36991068435,windows,x86_64,Clang,Debug,on,on,off,140294954,140.294954,checks,tree1,11221155025
+A3 combined,36991068435,windows,x86_64,Zig cc,Debug,off,off,off,441881778,441.881778,checks,tree4,11221155025
+A3 combined,36991068435,windows,x86_64,GCC,Debug,off,off,off,251757216,251.757216,checks,tree3,11221155025
+A3 combined,36991068435,windows,x86_64,MSVC,Debug,off,off,off,87160411,87.160411,checks,tree0,11221155025
+C4 split,36996168725,windows,x86_64,Zig cc,Debug,off,off,off,249374852,249.374852,portability,tree2,11222072051
+C4 split,36996168725,windows,x86_64,GCC,Debug,off,off,off,133854647,133.854647,portability,tree1,11222072051
+C4 split,36996168725,windows,x86_64,MSVC,Debug,off,off,off,30601014,30.601014,portability,tree0,11222072051
+A3 combined,36991068435,windows,x86_64,Clang,Release,off,on,on,141017277,141.017277,release,tree0,11220081429
+C4 split,36996168725,windows,x86_64,Clang,Release,off,on,on,142759450,142.75945,release,tree0,11221664191
+C4 split,36996168725,windows,x86_64,Clang,Debug,on,on,off,58807432,58.807432,sanitized-debug,tree0,11222651454
+C4 split,36996168725,windows,x86_64,Clang,Release,on,off,off,183650628,183.650628,sanitized-release,tree0,11221414878
