@@ -12,4 +12,3 @@ Reproduce using Python 3 (standard library only):
 These commands only read ZIP/log/JSON files and write derived reports. They do not build the repository or execute tests. Run without Python -O because the analysis helper uses assertions for source/receipt checks.
 
 This is a diagnostic report, not a substitute for Buster's independent qualification validators. Logged launches are not complete OS process counts. Module durations overlap. Unknown phase CPU and RSS are not inferred from wall duration, arena counters, or unrelated child records.
-
