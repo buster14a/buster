@@ -266,16 +266,19 @@ therefore disappear from compatibility; inner bounds and pointee qualifiers
 remain. The current compatibility walk still omits these two rules, so this
 regression-only checkpoint intentionally fails on the unchanged producer.
 
-`c_test_function_parameter_compatibility` uses 54 fixed source cases over
+`c_test_function_parameter_compatibility` uses 56 fixed source cases over
 C17/GNU17/C23/GNU23, six desktop target layouts and both frontend forms
-(2,592 configurations). It preserves the existing C23 empty-list rule and
+(2,688 configurations). It preserves the existing C23 empty-list rule and
 checks semantic-only diagnostics, diagnostic parity, failed program
 nonpublication and independent canonical validation of accepted sources.
 The cases include original float/char/short/Bool promotion conflicts, both
 declaration orders, promoted scalar/enum/pointer controls, typedefs and
 definitions, fixed/VLA/static array bounds, function parameters and nested
 qualifier/inner-bound refusals. GNU type-compatibility queries retain fixed
-answers independent of the compatibility implementation.
+answers independent of the compatibility implementation. Two further fixed
+negative declarations pair an incompatible nested callback or inner array
+bound with an otherwise compatible aggregate sibling. They require a failed
+comparison to remain failed through the existing pair-stack walk.
 
 `c_test_function_parameter_compatibility_runtime` keeps a literal 1,299-byte
 source with fixed results for promoted scalars and adjusted array/callback

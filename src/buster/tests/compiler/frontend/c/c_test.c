@@ -16051,6 +16051,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitT
         {S8("array compatibility query"), S8("typedef void A(int [2]); typedef void B(int [3]);\n_Static_assert(__builtin_types_compatible_p(A, B), \"adjusted arrays\");\n"), true, true},
         {S8("promotion compatibility query"), S8("typedef int A(); typedef int B(float);\n_Static_assert(!__builtin_types_compatible_p(A, B), \"float promotion\");\n"), true, true},
         {S8("int compatibility dialect query"), S8("typedef int A(); typedef int B(int);\n#if __STDC_VERSION__ < 202311L\n_Static_assert(__builtin_types_compatible_p(A, B), \"legacy promoted int\");\n#else\n_Static_assert(!__builtin_types_compatible_p(A, B), \"C23 zero parameters\");\n#endif\n"), true, true},
+        {S8("nested callback with aggregate sibling"), S8("struct S { int x; };\nint f(struct S, int (*)());\nint f(struct S, int (*)(float));\n"), false, false},
+        {S8("inner array bound with aggregate sibling"), S8("struct S { int x; };\nvoid f(struct S, int a[2][3]);\nvoid f(struct S, int a[2][4]);\n"), false, false},
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
                                      C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
