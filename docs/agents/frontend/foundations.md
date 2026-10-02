@@ -233,6 +233,12 @@ without facts for identical bitcode and diagnostics.
   probe on names sharing the whole key, and `c_test_pasted_keyword_body_walk`
   both the carried ids and the fallback on the same stream with ids cleared.
 
+  Specifier-word queries share `c_parse_word_bits_token`. Its symbol lookup
+  stays first; without a usable symbol table/id, only identifier and INVALID
+  hand-built tokens reach the spelling ladder. Other token kinds answer zero
+  without reading spelling bytes. Keep the INVALID fallback and each caller's
+  GNU/C23 mask: token eligibility does not change dialect admission.
+
 - `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
   without scanning unrelated undo records. A live undo record implies a valid
   current binding: bind installs the new entity, and unwind removes its record

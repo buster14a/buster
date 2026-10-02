@@ -21946,6 +21946,169 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pasted_keyword_body_walk(UnitTestArgum
     return result;
 }
 
+// Specifier queries preserve their spelling fallback for identifiers and
+// unclassified hand-built rows. Other kinds need no spelling storage, even
+// when a synthetic row's bytes would spell a keyword. Fixed expectations
+// check each spelling family and dialect independently of the production
+// word-bits table; copied token rows exercise both metadata and fallback.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_word_class_token_kinds(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, S8(""), (CPreprocessOptions){0});
+    u32 const type_name = C_TEST_WORD_CLASS_TYPE | C_TEST_WORD_CLASS_TYPE_NAME_START;
+    typedef struct CTestWordCase CTestWordCase;
+    struct CTestWordCase
+    {
+        String8 spelling;
+        u32 classes;
+        u32 gnu_classes;
+        u32 c23_classes;
+    };
+    CTestWordCase const cases[] = {
+        {S8("int"), type_name, 0, 0},
+        {S8("void"), type_name, 0, 0},
+        {S8("char"), type_name, 0, 0},
+        {S8("long"), type_name, 0, 0},
+        {S8("enum"), type_name, 0, 0},
+        {S8("_Bool"), type_name, 0, 0},
+        {S8("short"), type_name, 0, 0},
+        {S8("float"), type_name, 0, 0},
+        {S8("union"), type_name, 0, 0},
+        {S8("signed"), type_name, 0, 0},
+        {S8("double"), type_name, 0, 0},
+        {S8("struct"), type_name, 0, 0},
+        {S8("__bf16"), type_name, 0, 0},
+        {S8("_Alignas"), type_name, 0, 0},
+        {S8("unsigned"), type_name, 0, 0},
+        {S8("__signed"), type_name, 0, 0},
+        {S8("__int128"), type_name, 0, 0},
+        {S8("__typeof"), type_name, 0, 0},
+        {S8("_Complex"), type_name, 0, 0},
+        {S8("_Float16"), type_name, 0, 0},
+        {S8("__complex"), type_name, 0, 0},
+        {S8("__typeof__"), type_name, 0, 0},
+        {S8("__signed__"), type_name, 0, 0},
+        {S8("_Imaginary"), type_name, 0, 0},
+        {S8("__complex__"), type_name, 0, 0},
+        {S8("__builtin_va_list"), type_name, 0, 0},
+        {S8("auto"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("extern"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("inline"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("__inline"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("__inline__"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("_Noreturn"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("register"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("static"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("typedef"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("_Thread_local"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("__thread"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("__extension__"), type_name | C_TEST_WORD_CLASS_ATOMIC_PREFIX, 0, 0},
+        {S8("const"), type_name | C_TEST_WORD_CLASS_QUALIFIER | C_TEST_WORD_CLASS_ATOMIC_PREFIX | C_TEST_WORD_CLASS_CONST, 0, 0},
+        {S8("__const"), type_name | C_TEST_WORD_CLASS_QUALIFIER | C_TEST_WORD_CLASS_ATOMIC_PREFIX | C_TEST_WORD_CLASS_CONST, 0, 0},
+        {S8("__const__"), type_name | C_TEST_WORD_CLASS_QUALIFIER | C_TEST_WORD_CLASS_ATOMIC_PREFIX | C_TEST_WORD_CLASS_CONST, 0, 0},
+        {S8("volatile"), type_name | C_TEST_WORD_CLASS_QUALIFIER | C_TEST_WORD_CLASS_ATOMIC_PREFIX | C_TEST_WORD_CLASS_VOLATILE, 0, 0},
+        {S8("__volatile"), type_name | C_TEST_WORD_CLASS_QUALIFIER | C_TEST_WORD_CLASS_ATOMIC_PREFIX | C_TEST_WORD_CLASS_VOLATILE, 0, 0},
+        {S8("__volatile__"), type_name | C_TEST_WORD_CLASS_QUALIFIER | C_TEST_WORD_CLASS_ATOMIC_PREFIX | C_TEST_WORD_CLASS_VOLATILE, 0, 0},
+        {S8("restrict"), type_name | C_TEST_WORD_CLASS_QUALIFIER | C_TEST_WORD_CLASS_ATOMIC_PREFIX | C_TEST_WORD_CLASS_RESTRICT, 0, 0},
+        {S8("__restrict"), type_name | C_TEST_WORD_CLASS_QUALIFIER | C_TEST_WORD_CLASS_ATOMIC_PREFIX | C_TEST_WORD_CLASS_RESTRICT, 0, 0},
+        {S8("__restrict__"), type_name | C_TEST_WORD_CLASS_QUALIFIER | C_TEST_WORD_CLASS_ATOMIC_PREFIX | C_TEST_WORD_CLASS_RESTRICT, 0, 0},
+        {S8("_Atomic"), type_name | C_TEST_WORD_CLASS_QUALIFIER | C_TEST_WORD_CLASS_ATOMIC_PREFIX | C_TEST_WORD_CLASS_ATOMIC, 0, 0},
+        {S8("__attribute__"), C_TEST_WORD_CLASS_TYPE_NAME_START, 0, 0},
+        {S8("__attribute"), C_TEST_WORD_CLASS_TYPE_NAME_START, 0, 0},
+        {S8("__declspec"), C_TEST_WORD_CLASS_TYPE_NAME_START, 0, 0},
+        {S8("asm"), C_TEST_WORD_CLASS_TYPE_NAME_START, 0, 0},
+        {S8("__asm"), C_TEST_WORD_CLASS_TYPE_NAME_START, 0, 0},
+        {S8("__asm__"), C_TEST_WORD_CLASS_TYPE_NAME_START, 0, 0},
+        {S8("__auto_type"), C_TEST_WORD_CLASS_AUTO_TYPE | C_TEST_WORD_CLASS_TYPE_NAME_START, C_TEST_WORD_CLASS_TYPE, 0},
+        {S8("typeof"), C_TEST_WORD_CLASS_TYPE_NAME_START, C_TEST_WORD_CLASS_TYPE, C_TEST_WORD_CLASS_TYPE},
+        {S8("constexpr"), C_TEST_WORD_CLASS_TYPE_NAME_START, 0, C_TEST_WORD_CLASS_TYPE | C_TEST_WORD_CLASS_ATOMIC_PREFIX},
+        {S8("typeof_unqual"), C_TEST_WORD_CLASS_TYPE_NAME_START, 0, C_TEST_WORD_CLASS_TYPE},
+        {S8("integer"), 0, 0, 0},
+        {S8("Const"), 0, 0, 0},
+        {S8("types"), 0, 0, 0},
+    };
+    CPreprocessDialect const dialects[] = {
+        C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU99, C_PREPROCESS_DIALECT_GNU11, C_PREPROCESS_DIALECT_GNU23,
+        C_PREPROCESS_DIALECT_C99, C_PREPROCESS_DIALECT_C11, C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_C23,
+        C_PREPROCESS_DIALECT_GNU89,
+    };
+    if (BUSTER_REQUIRE(arguments, preprocess.symbols != 0))
+    {
+        for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+        {
+            preprocess.dialect = dialects[dialect_index];
+            bool gnu = preprocess.dialect == C_PREPROCESS_DIALECT_GNU17 || preprocess.dialect == C_PREPROCESS_DIALECT_GNU99 ||
+                       preprocess.dialect == C_PREPROCESS_DIALECT_GNU11 || preprocess.dialect == C_PREPROCESS_DIALECT_GNU23 ||
+                       preprocess.dialect == C_PREPROCESS_DIALECT_GNU89;
+            bool c23 = preprocess.dialect == C_PREPROCESS_DIALECT_C23 || preprocess.dialect == C_PREPROCESS_DIALECT_GNU23;
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+            {
+                CTestWordCase expected = cases[index];
+                u32 classes = expected.classes | (gnu ? expected.gnu_classes : 0) | (c23 ? expected.c23_classes : 0) |
+                              C_TEST_WORD_CLASS_QUALIFIERS_AGREE;
+                CPreprocessResult spelling = preprocess;
+                spelling.spelling_base = expected.spelling.pointer;
+                CToken token = {.length = (u16)expected.spelling.length, .kind = C_TOKEN_IDENTIFIER};
+                for (u32 kind = 0; kind < C_TOKEN_KIND_COUNT; kind += 1)
+                {
+                    token.kind = (u8)kind;
+                    u32 wanted = kind == C_TOKEN_IDENTIFIER || kind == C_TOKEN_INVALID ? classes : C_TEST_WORD_CLASS_QUALIFIERS_AGREE;
+                    BUSTER_TEST(arguments, c_test_parse_word_classes(spelling, token) == wanted);
+                }
+                // A carried id remains authoritative for every kind. No
+                // spelling exists on this path, including non-predefined ids.
+                token.symbol = c_test_symbol_intern(preprocess.symbols, expected.spelling);
+                BUSTER_TEST(arguments, token.symbol != 0);
+                CPreprocessResult no_spelling = preprocess;
+                no_spelling.spelling_base = 0;
+                token.offset = UINT32_MAX;
+                token.length = C_TOKEN_LENGTH_OVERSIZED;
+                for (u32 kind = 0; kind < C_TOKEN_KIND_COUNT; kind += 1)
+                {
+                    token.kind = (u8)kind;
+                    BUSTER_TEST(arguments, c_test_parse_word_classes(no_spelling, token) == classes);
+                }
+                // An id without its table must still use the spelling.
+                spelling.symbols = 0;
+                token.offset = 0;
+                token.length = (u16)expected.spelling.length;
+                token.kind = C_TOKEN_IDENTIFIER;
+                BUSTER_TEST(arguments, c_test_parse_word_classes(spelling, token) == classes);
+                token.kind = C_TOKEN_INVALID;
+                BUSTER_TEST(arguments, c_test_parse_word_classes(spelling, token) == classes);
+            }
+        }
+    }
+    // EOF, punctuation, numbers, literals, newline and pragma markers never
+    // need a spelling on the fallback path. An absent table may accompany
+    // an id; that must not make a known non-word kind read absent bytes.
+    CPreprocessResult no_spelling = preprocess;
+    no_spelling.spelling_base = 0;
+    CToken beyond_predefined = {.offset = UINT32_MAX, .symbol = UINT32_MAX, .length = C_TOKEN_LENGTH_OVERSIZED, .kind = C_TOKEN_IDENTIFIER};
+    BUSTER_TEST(arguments, c_test_parse_word_classes(no_spelling, beyond_predefined) == C_TEST_WORD_CLASS_QUALIFIERS_AGREE);
+    for (u32 kind = C_TOKEN_END_OF_FILE; kind < C_TOKEN_KIND_COUNT; kind += 1)
+    {
+        if (kind != C_TOKEN_IDENTIFIER)
+        {
+            CToken token = {.offset = UINT32_MAX, .length = C_TOKEN_LENGTH_OVERSIZED, .kind = (u8)kind};
+            BUSTER_TEST(arguments, c_test_parse_word_classes(no_spelling, token) == C_TEST_WORD_CLASS_QUALIFIERS_AGREE);
+            CPreprocessResult absent = {.dialect = C_PREPROCESS_DIALECT_C23};
+            token.symbol = 1;
+            BUSTER_TEST(arguments, c_test_parse_word_classes(absent, token) == C_TEST_WORD_CLASS_QUALIFIERS_AGREE);
+        }
+    }
+    CLexResult lexed = c_lex(temporary.arena, S8("(17 \"text\" 'x'\n)"));
+    BUSTER_TEST(arguments, lexed.diagnostic_count == 0);
+    CPreprocessResult real = {.spelling_base = lexed.spelling_base};
+    for (u32 index = 0; index < lexed.token_count; index += 1)
+    {
+        BUSTER_TEST(arguments, c_test_parse_word_classes(real, lexed.tokens[index]) == C_TEST_WORD_CLASS_QUALIFIERS_AGREE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // An identifier's identity is established once, by the preprocessor's intern
 // pass (or where a paste forms it), and every later phase keys on the id the
 // token, entity or member carries. A well-formed unit whose every name was
@@ -31455,6 +31618,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
     BUSTER_TEST_FIXTURE(arguments, c_test_identifier_identity_once);
+    BUSTER_TEST_FIXTURE(arguments, c_test_word_class_token_kinds);
     BUSTER_TEST_FIXTURE(arguments, c_test_symbol_find_collisions);
     BUSTER_TEST_FIXTURE(arguments, c_test_trigraph_translation);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_size_limit);
