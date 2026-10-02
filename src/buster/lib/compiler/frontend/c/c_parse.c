@@ -19057,18 +19057,18 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             if (previous->alignment_count || declarator_alignment_count)
             {
                 u32 previous_alignment;
-                u32 requested_alignment;
                 bool previously_requested;
                 String8 message = c_parse_validate_alignment_range_core(machine, result, preprocess, previous->scope, previous->type,
                     previous->alignment_start, previous->alignment_count, &previous_alignment, &previously_requested);
                 if (!message.length)
                 {
+                    u32 requested_alignment;
                     message = c_parse_validate_alignment_range_core(machine, result, preprocess, scope, type,
                         declarator_alignment_start, declarator_alignment_count, &requested_alignment, &requested);
-                }
-                if (!message.length && previously_requested && requested && previous_alignment != requested_alignment)
-                {
-                    message = S8("redeclaration has a different alignment requirement");
+                    if (!message.length && previously_requested && requested && previous_alignment != requested_alignment)
+                    {
+                        message = S8("redeclaration has a different alignment requirement");
+                    }
                 }
                 if (message.length)
                 {
