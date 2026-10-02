@@ -30152,6 +30152,188 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy_runtime(UnitTes
     return result;
 }
 
+// Compare parser constants, initializer bytes and runtime offsets against
+// addresses of real subobjects, including members promoted at two depths.
+BUSTER_GLOBAL_LOCAL String8 const c_test_offsetof_members_source = S8_INITIALIZER(
+    "struct Index { int a; int b; };\n"
+    "struct S { char lead; union { long long b; struct { int tag; int values[3]; struct { char c; int d; }; }; }; struct { char e; int f; }; struct { int rows[2][2]; } named; };\n"
+    "enum { E_B = __builtin_offsetof(struct S, b), E_D = __builtin_offsetof(struct S, d), E_V = __builtin_offsetof(struct S, values[2]), E_F = __builtin_offsetof(struct S, f), E_LEAD = __builtin_offsetof(struct S, lead), E_Q = __builtin_offsetof(struct S, values[__builtin_offsetof(struct Index, b) / sizeof(int)]), E_N = __builtin_offsetof(struct S, named.rows[1][1]) };\n"
+    "_Static_assert(E_B == 8 && E_D == 28 && E_V == 20 && E_F == 36 && E_LEAD == 0 && E_Q == 16 && E_N == 52, \"promoted layout\");\n"
+    "static unsigned long long offset_b = __builtin_offsetof(struct S, b);\n"
+    "static unsigned long long offset_d = __builtin_offsetof(struct S, d);\n"
+    "static unsigned long long offset_v = __builtin_offsetof(struct S, values[2]);\n"
+    "static unsigned long long offset_f = __builtin_offsetof(struct S, f);\n"
+    "static unsigned long long offset_lead = __builtin_offsetof(struct S, lead);\n"
+    "static unsigned long long offset_q = __builtin_offsetof(struct S, values[__builtin_offsetof(struct Index, b) / sizeof(int)]);\n"
+    "static unsigned long long offset_n = __builtin_offsetof(struct S, named.rows[1][1]);\n"
+    "static unsigned long long offset_bytes[7] = { __builtin_offsetof(struct S, b), __builtin_offsetof(struct S, d), __builtin_offsetof(struct S, values[2]), __builtin_offsetof(struct S, f), __builtin_offsetof(struct S, lead), __builtin_offsetof(struct S, values[__builtin_offsetof(struct Index, b) / sizeof(int)]), __builtin_offsetof(struct S, named.rows[1][1]) };\n"
+    "int main(void) { struct S s;\n"
+    " unsigned long long b = __builtin_offsetof(struct S, b), d = __builtin_offsetof(struct S, d);\n"
+    " unsigned long long v = __builtin_offsetof(struct S, values[2]), f = __builtin_offsetof(struct S, f), lead = __builtin_offsetof(struct S, lead);\n"
+    " unsigned long long q = __builtin_offsetof(struct S, values[__builtin_offsetof(struct Index, b) / sizeof(int)]), n = __builtin_offsetof(struct S, named.rows[1][1]);\n"
+    " if (b != (unsigned long long)((char *)&s.b - (char *)&s) || b != E_B || b != offset_b || b != offset_bytes[0]) return 1;\n"
+    " if (d != (unsigned long long)((char *)&s.d - (char *)&s) || d != E_D || d != offset_d || d != offset_bytes[1]) return 2;\n"
+    " if (v != (unsigned long long)((char *)&s.values[2] - (char *)&s) || v != E_V || v != offset_v || v != offset_bytes[2]) return 3;\n"
+    " if (f != (unsigned long long)((char *)&s.f - (char *)&s) || f != E_F || f != offset_f || f != offset_bytes[3]) return 4;\n"
+    " if (lead != (unsigned long long)((char *)&s.lead - (char *)&s) || lead != E_LEAD || lead != offset_lead || lead != offset_bytes[4]) return 5;\n"
+    " if (q != (unsigned long long)((char *)&s.values[1] - (char *)&s) || q != E_Q || q != offset_q || q != offset_bytes[5]) return 6;\n"
+    " if (n != (unsigned long long)((char *)&s.named.rows[1][1] - (char *)&s) || n != E_N || n != offset_n || n != offset_bytes[6]) return 7;\n"
+    " return 0; }\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 triples[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"),
+                        S8("x86_64-pc-windows-msvc"), S8("aarch64-pc-windows-msvc"),
+                        S8("x86_64-apple-darwin"), S8("aarch64-apple-darwin")};
+    String8 names[] = {S8("offset_b"), S8("offset_d"), S8("offset_v"), S8("offset_f"), S8("offset_lead"), S8("offset_q"), S8("offset_n")};
+    u64 expected[] = {8, 28, 20, 36, 0, 16, 52};
+    String8 invalid[] = {
+        S8("struct B { int x; unsigned b:3; }; enum { E = __builtin_offsetof(struct B, b) };"),
+        S8("struct B { int x; unsigned b:3; }; _Static_assert(__builtin_offsetof(struct B, b) == 4, \"bit-field\");"),
+        S8("struct B { int x; unsigned b:3; }; static unsigned long long value = __builtin_offsetof(struct B, b);"),
+        S8("struct B { int x; unsigned b:3; }; unsigned long long f(void) { return __builtin_offsetof(struct B, b); }"),
+        S8("struct B { int x; union { struct { unsigned b:3; }; }; }; enum { E = __builtin_offsetof(struct B, b) };"),
+        S8("struct B { int x; union { struct { unsigned b:3; }; }; }; _Static_assert(__builtin_offsetof(struct B, b) == 4, \"bit-field\");"),
+        S8("struct B { int x; union { struct { unsigned b:3; }; }; }; static unsigned long long value = __builtin_offsetof(struct B, b);"),
+        S8("struct B { int x; union { struct { unsigned b:3; }; }; }; unsigned long long f(void) { return __builtin_offsetof(struct B, b); }"),
+        S8("struct B { int x; union { int b; }; }; static unsigned long long value = __builtin_offsetof(struct B, absent);"),
+        S8("struct B { int x; union { int b; }; }; unsigned long long f(void) { return __builtin_offsetof(struct B, absent); }"),
+        S8("struct B { int x; int a[1]; }; static unsigned long long value = __builtin_offsetof(struct B, a[4611686018427387904ULL]);"),
+        S8("struct B { int x; int a[1]; }; unsigned long long f(void) { return __builtin_offsetof(struct B, a[4611686018427387904ULL]); }"),
+        S8("struct B { char x; char a[1]; }; static unsigned long long value = __builtin_offsetof(struct B, a[18446744073709551615ULL]);"),
+        S8("struct B { char x; char a[1]; }; unsigned long long f(void) { return __builtin_offsetof(struct B, a[18446744073709551615ULL]); }"),
+        S8("struct B { int b; }; static unsigned long long value = __builtin_offsetof(struct B, .b);"),
+        S8("struct B { int b; }; unsigned long long f(void) { return __builtin_offsetof(struct B, .b); }"),
+        S8("struct B { int b; }; static unsigned long long value = __builtin_offsetof(struct B, b.);"),
+        S8("struct B { int b; }; unsigned long long f(void) { return __builtin_offsetof(struct B, b.); }"),
+        S8("struct B { struct { int b; } named; }; static unsigned long long value = __builtin_offsetof(struct B, named b);"),
+        S8("struct B { struct { int b; } named; }; unsigned long long f(void) { return __builtin_offsetof(struct B, named b); }"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(triples); target_index += 1)
+    {
+        TargetParseResult target = target_parse_triple(triples[target_index]);
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessOptions options = {.target = target.target, .data_layout = target_data_layout(target.target),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17};
+                CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_offsetof_members_source, options);
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parsed.diagnostic_count == 0);
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("offsetof-members.c"), tokens, parsed, target.target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count && lowered.canonical_ir_certified))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(names); row += 1)
+                    {
+                        IrGlobal* global = c_test_find_ir_global(module, lowered.program, names[row]);
+                        if (BUSTER_REQUIRE(arguments, global != 0))
+                        {
+                            IrType* type = ir_type_from_id(&lowered.program->types, global->type);
+                            BUSTER_TEST(arguments, type && type->kind == IR_TYPE_INTEGER && type->bit_width == 64 && !type->is_signed);
+                            BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER ||
+                                (!expected[row] && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO));
+                            BUSTER_TEST(arguments, global->initializer_bits == expected[row] && !global->initializer_is_negative);
+                        }
+                    }
+                    IrGlobal* bytes = c_test_find_ir_global(module, lowered.program, S8("offset_bytes"));
+                    if (BUSTER_REQUIRE(arguments, bytes && bytes->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES &&
+                        bytes->bytes.length == BUSTER_ARRAY_LENGTH(expected) * 8 && bytes->bytes.pointer))
+                    {
+                        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(expected); row += 1)
+                        {
+                            BUSTER_TEST(arguments, bytes->bytes.pointer[row * 8] == expected[row]);
+                            for (u32 byte = 1; byte < 8; byte += 1)
+                            {
+                                BUSTER_TEST(arguments, bytes->bytes.pointer[row * 8 + byte] == 0);
+                            }
+                        }
+                    }
+                }
+                scratch_end(temporary);
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid); row += 1)
+                {
+                    temporary = scratch_begin(&arguments->arena, 1);
+                    tokens = c_preprocess(temporary.arena, invalid[row], options);
+                    parsed = c_parse(temporary.arena, tokens);
+                    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                    lowered = (CIRLowerResult){0};
+                    if (!parsed.diagnostic_count)
+                    {
+                        lowered = c_lower_to_ir_with_options(temporary.arena, S8("offsetof-refusal.c"), tokens, parsed, target.target,
+                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    }
+                    u64 error_count = 0;
+                    for (u64 diagnostic = 0; diagnostic < parsed.diagnostic_count; diagnostic += 1)
+                    {
+                        error_count += parsed.diagnostics[diagnostic].severity == C_DIAGNOSTIC_ERROR;
+                    }
+                    for (u64 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    {
+                        error_count += lowered.diagnostics[diagnostic].severity == C_DIAGNOSTIC_ERROR;
+                    }
+                    BUSTER_TEST_RAW(arguments, error_count != 0,
+                        string_format(temporary.arena, S8("offsetof refusal {S8} dialect={u32} form={u32}: {S8}"),
+                            triples[target_index], dialect, form, invalid[row]));
+                    BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("offsetof-members"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_offsetof_members_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("offsetof-members-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("offsetof runtime mode={u32} form={u32}: status={u32} timed_out={u32}"),
+                                mode, form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // A place is not a scalar value, and an unknown read is not known false.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArguments* arguments)
 {
@@ -31444,6 +31626,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
     BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_address_assignment_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
+    BUSTER_TEST_FIXTURE(arguments, c_test_offsetof_members);
+    BUSTER_TEST_FIXTURE(arguments, c_test_offsetof_members_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_casted_dereference_update);
     BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_function_declarations);
     BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_address_place_assignment);
