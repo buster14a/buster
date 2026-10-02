@@ -1,0 +1,158 @@
+[
+  {
+    "filename": "desktop-linux-aarch64-checks-36991068435-1.zip",
+    "sha256": "b3274844ec427e4dfc769e30c7177d97230d86fcf7b7b4edd5ad7c4ccb515a93",
+    "bytes": 377821,
+    "lane": "36991068435:linux-aarch64-checks"
+  },
+  {
+    "filename": "desktop-linux-aarch64-portability-36996168725-1.zip",
+    "sha256": "b4c544df15c843fba4d4786c6278147fbb95ebf0a44c19c4a1453fc172b45800",
+    "bytes": 52255,
+    "lane": "36996168725:linux-aarch64-portability"
+  },
+  {
+    "filename": "desktop-linux-aarch64-release-36991068435-1.zip",
+    "sha256": "b9ae5d1992f0bb8e7da17328f2d00b0de58ee2db84ae93ac4e29b709fe3b93ae",
+    "bytes": 222725,
+    "lane": "36991068435:linux-aarch64-release"
+  },
+  {
+    "filename": "desktop-linux-aarch64-release-36996168725-1.zip",
+    "sha256": "7ef48a877c53252169484621441b0eb468af8a66aa19fbffe4314a512131d160",
+    "bytes": 223201,
+    "lane": "36996168725:linux-aarch64-release"
+  },
+  {
+    "filename": "desktop-linux-aarch64-sanitized-debug-36996168725-1.zip",
+    "sha256": "ac700f942ac38c0fbecdf53efc08791c9689dd1919a03d127ed76a3c8181a119",
+    "bytes": 185205,
+    "lane": "36996168725:linux-aarch64-sanitized-debug"
+  },
+  {
+    "filename": "desktop-linux-aarch64-sanitized-release-36996168725-1.zip",
+    "sha256": "effa3d4cbcad58498c53b9a1c3449c7a58108e946cb6cd349a0836bc28bc4c35",
+    "bytes": 184655,
+    "lane": "36996168725:linux-aarch64-sanitized-release"
+  },
+  {
+    "filename": "desktop-linux-x86_64-checks-36991068435-1.zip",
+    "sha256": "22ca3728694afab06b8684f308ebfac7ee0ef3181f28ec69aa4ea11dde794c78",
+    "bytes": 472301,
+    "lane": "36991068435:linux-x86_64-checks"
+  },
+  {
+    "filename": "desktop-linux-x86_64-portability-36996168725-1.zip",
+    "sha256": "6feced5b5d9fbc561d517d2c4c82eeae74113765dc07d7cc1cf889a395931972",
+    "bytes": 52401,
+    "lane": "36996168725:linux-x86_64-portability"
+  },
+  {
+    "filename": "desktop-linux-x86_64-release-36991068435-1.zip",
+    "sha256": "aecb9d2b6cf37accc6057f326b2f417f75689c062ceae78499444b713a477bb7",
+    "bytes": 322042,
+    "lane": "36991068435:linux-x86_64-release"
+  },
+  {
+    "filename": "desktop-linux-x86_64-release-36996168725-1.zip",
+    "sha256": "7c1bd5a1ed7699830647e1ee305f85d6731e518bc8cf9eeb9fd2abd69e2b06db",
+    "bytes": 322421,
+    "lane": "36996168725:linux-x86_64-release"
+  },
+  {
+    "filename": "desktop-linux-x86_64-sanitized-debug-36996168725-1.zip",
+    "sha256": "8f1863c56b0f2eea4940e4bfab489cb8826e1ed19975e5fc650db0297e5f750b",
+    "bytes": 232665,
+    "lane": "36996168725:linux-x86_64-sanitized-debug"
+  },
+  {
+    "filename": "desktop-linux-x86_64-sanitized-release-36996168725-1.zip",
+    "sha256": "3ad95a3768db5b66c62d1ed9575779a25b3950d22069f4f00092cf0ce44158f8",
+    "bytes": 232412,
+    "lane": "36996168725:linux-x86_64-sanitized-release"
+  },
+  {
+    "filename": "desktop-macos-aarch64-checks-36991068435-1.zip",
+    "sha256": "3c8ec9a37b86757d1e8bb62d05f7233ffbe752ebf46934eba04dbb58a53fa807",
+    "bytes": 355762,
+    "lane": "36991068435:macos-aarch64-checks"
+  },
+  {
+    "filename": "desktop-macos-aarch64-checks-36996168725-1.zip",
+    "sha256": "eb6c5acb25ca88d07d02f7656c68e61c02705d9d9e795c0c81390fba4f6b0e53",
+    "bytes": 355497,
+    "lane": "36996168725:macos-aarch64-checks"
+  },
+  {
+    "filename": "desktop-macos-aarch64-release-36991068435-1.zip",
+    "sha256": "5405222fc269f8eaf2b50cd116e9cac1d10f11ec017a2651f15a2d01cdb925ff",
+    "bytes": 256096,
+    "lane": "36991068435:macos-aarch64-release"
+  },
+  {
+    "filename": "desktop-macos-aarch64-release-36996168725-1.zip",
+    "sha256": "46548229794ba5d03c06df2b76a0637c7b5d6128461cc854f10b6a03f0849597",
+    "bytes": 253783,
+    "lane": "36996168725:macos-aarch64-release"
+  },
+  {
+    "filename": "desktop-windows-aarch64-checks-36991068435-1.zip",
+    "sha256": "7f660d4369e3e8afe60939bd07f671ca3bcc81430282b0cfe9f93c35bd8b4680",
+    "bytes": 42753,
+    "lane": "36991068435:windows-aarch64-checks"
+  },
+  {
+    "filename": "desktop-windows-aarch64-checks-36996168725-1.zip",
+    "sha256": "e662a8da7bf6f6cc60be1b0fd2d788edbe0b701851b94bb3a1cc6b279ac80baa",
+    "bytes": 42755,
+    "lane": "36996168725:windows-aarch64-checks"
+  },
+  {
+    "filename": "desktop-windows-aarch64-release-36991068435-1.zip",
+    "sha256": "16049cf07ce3bed1f2b63154bce916fbf284e8e742c184a88a1c8394f5b54bc9",
+    "bytes": 201081,
+    "lane": "36991068435:windows-aarch64-release"
+  },
+  {
+    "filename": "desktop-windows-aarch64-release-36996168725-1.zip",
+    "sha256": "3d773c08749548e28332931efc779f20effa93e0597d1634ec017be901c7be1a",
+    "bytes": 200964,
+    "lane": "36996168725:windows-aarch64-release"
+  },
+  {
+    "filename": "desktop-windows-x86_64-checks-36991068435-1.zip",
+    "sha256": "53a0cac7adb34afb457b6844235e4148f0636bb9ee13621ccdc1ca998022dae3",
+    "bytes": 399773,
+    "lane": "36991068435:windows-x86_64-checks"
+  },
+  {
+    "filename": "desktop-windows-x86_64-portability-36996168725-1.zip",
+    "sha256": "5a633c9abffb88b38c2842441c7746b5ddd42445e3c3ac4be7c8135befba8846",
+    "bytes": 120400,
+    "lane": "36996168725:windows-x86_64-portability"
+  },
+  {
+    "filename": "desktop-windows-x86_64-release-36991068435-1.zip",
+    "sha256": "b5d2a60060f2e004f64d1b990980c741091b598f5497758aa2e123c90d9b7eff",
+    "bytes": 212503,
+    "lane": "36991068435:windows-x86_64-release"
+  },
+  {
+    "filename": "desktop-windows-x86_64-release-36996168725-1.zip",
+    "sha256": "ca23350995c12fe3d6f49e1c73a08ec23aac18b62a5c6ed721215b9b0bdcc3ec",
+    "bytes": 212241,
+    "lane": "36996168725:windows-x86_64-release"
+  },
+  {
+    "filename": "desktop-windows-x86_64-sanitized-debug-36996168725-1.zip",
+    "sha256": "64202b4dab44783072df464f1702737a01236f0bd4f30dbc784abd0d6170f712",
+    "bytes": 162779,
+    "lane": "36996168725:windows-x86_64-sanitized-debug"
+  },
+  {
+    "filename": "desktop-windows-x86_64-sanitized-release-36996168725-1.zip",
+    "sha256": "2b2640e7dfcc4621fbd14ec3cbf3f259906e783c02162510a98fa763a01be4ad",
+    "bytes": 163074,
+    "lane": "36996168725:windows-x86_64-sanitized-release"
+  }
+]

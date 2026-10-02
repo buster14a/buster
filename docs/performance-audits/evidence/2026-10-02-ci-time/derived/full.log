@@ -1,0 +1,10 @@
+ANALYZE_SHARD shard=1 units=14 elapsed_us=54906063 peak_child_rss_bytes=256053248 status=pass
+ANALYZE_SHARD shard=0 units=31 elapsed_us=116586568 peak_child_rss_bytes=574726144 status=pass
+ANALYZE_SHARD shard=3 units=18 elapsed_us=142283891 peak_child_rss_bytes=271945728 status=pass
+ANALYZE_SHARD shard=4 units=9 elapsed_us=24172954 peak_child_rss_bytes=208777216 status=pass
+ANALYZE_SHARD shard=2 units=19 elapsed_us=285604356 peak_child_rss_bytes=305221632 status=pass
+ANALYZE_SHARD shard=5 units=21 elapsed_us=75124770 peak_child_rss_bytes=417910784 status=pass
+ANALYZE_SHARD shard=6 units=12 elapsed_us=106178260 peak_child_rss_bytes=379973632 status=pass
+ANALYZE_SHARD shard=7 units=14 elapsed_us=109604293 peak_child_rss_bytes=407879680 status=pass
+ANALYZE_AGGREGATE eligible=138 checked=138 excluded_config_or_language=138 failures=0 shards=8 peak_child_rss_bytes=574726144 status=pass
+ANALYZE_RUN elapsed_us=468247562 peak_pending_workers=2 jobs=2 samples=18615 peak_live_processes=5 sampled_peak_tree_rss_bytes=771153920 results=/home/runner/work/_temp/buster-analyzer/full status=pass

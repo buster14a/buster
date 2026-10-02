@@ -1,0 +1,98 @@
+[
+  {
+    "run_id": "36991068435",
+    "phase": "configure",
+    "seconds": 72.214429,
+    "minutes": 1.2035738166666665,
+    "percent_all_six_phases": 0.8183855725544592,
+    "percent_primary_three": 0.8709006051377239
+  },
+  {
+    "run_id": "36991068435",
+    "phase": "build",
+    "seconds": 3893.0069790000002,
+    "minutes": 64.88344965,
+    "percent_all_six_phases": 44.118340193030136,
+    "percent_primary_three": 46.94937259445038
+  },
+  {
+    "run_id": "36991068435",
+    "phase": "test",
+    "seconds": 4326.704051,
+    "minutes": 72.11173418333333,
+    "percent_all_six_phases": 49.033305685368404,
+    "percent_primary_three": 52.179726800411885
+  },
+  {
+    "run_id": "36991068435",
+    "phase": "post_test",
+    "seconds": 262.563117,
+    "minutes": 4.37605195,
+    "percent_all_six_phases": 2.9755530828572843,
+    "percent_primary_three": ""
+  },
+  {
+    "run_id": "36991068435",
+    "phase": "self_host",
+    "seconds": 267.478684,
+    "minutes": 4.457978066666667,
+    "percent_all_six_phases": 3.0312598047608086,
+    "percent_primary_three": ""
+  },
+  {
+    "run_id": "36991068435",
+    "phase": "evidence",
+    "seconds": 2.043258,
+    "minutes": 0.034054299999999996,
+    "percent_all_six_phases": 0.02315566142891581,
+    "percent_primary_three": ""
+  },
+  {
+    "run_id": "36996168725",
+    "phase": "configure",
+    "seconds": 59.887771,
+    "minutes": 0.9981295166666667,
+    "percent_all_six_phases": 0.8583475506612065,
+    "percent_primary_three": 0.9274858010356416
+  },
+  {
+    "run_id": "36996168725",
+    "phase": "build",
+    "seconds": 2367.750329,
+    "minutes": 39.46250548333333,
+    "percent_all_six_phases": 33.93602168753978,
+    "percent_primary_three": 36.669503203666885
+  },
+  {
+    "run_id": "36996168725",
+    "phase": "test",
+    "seconds": 4029.3632829999997,
+    "minutes": 67.15605471666666,
+    "percent_all_six_phases": 57.7512578433959,
+    "percent_primary_three": 62.40301099529747
+  },
+  {
+    "run_id": "36996168725",
+    "phase": "post_test",
+    "seconds": 254.204593,
+    "minutes": 4.2367432166666665,
+    "percent_all_six_phases": 3.6434131062980937,
+    "percent_primary_three": ""
+  },
+  {
+    "run_id": "36996168725",
+    "phase": "self_host",
+    "seconds": 263.619801,
+    "minutes": 4.39366335,
+    "percent_all_six_phases": 3.7783575296890692,
+    "percent_primary_three": ""
+  },
+  {
+    "run_id": "36996168725",
+    "phase": "evidence",
+    "seconds": 2.2746939999999998,
+    "minutes": 0.03791156666666666,
+    "percent_all_six_phases": 0.032602282415950035,
+    "percent_primary_three": ""
+  }
+]

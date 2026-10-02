@@ -1,0 +1,14 @@
+{
+  "schema": "buster-ci-time-publication-v1",
+  "source_revision": "e424b387fcb51b00c1d19e87e2d369ae8a212792",
+  "original_bundle_sha256": "422a4cebdd04c3d27d80cb7a23c144b3ade681017caafe7023ba74c334a9d5b0",
+  "original_members_verified": 50,
+  "original_raw_artifacts": 27,
+  "published_members": 53,
+  "published_bundle_sha256": "c5a3078a691750a37569dbce3b04d895895f432da4c7585c33e108ab51305889",
+  "published_bundle_bytes": 5854551,
+  "archive_commit_parent": "04fb9a050550eca88c735d183a66eed790117198",
+  "publication_run_id": "37005935404",
+  "compiler_tests_or_benchmarks_run": false,
+  "qualification_accepted": false
+}

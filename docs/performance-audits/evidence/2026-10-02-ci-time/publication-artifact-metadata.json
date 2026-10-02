@@ -1,0 +1,542 @@
+[
+  {
+    "id": 11222316504,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMjMxNjUwNA==",
+    "name": "desktop-linux-x86_64-release-36996168725-1",
+    "size_in_bytes": 322421,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222316504",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222316504/zip",
+    "expired": false,
+    "digest": "sha256:7c1bd5a1ed7699830647e1ee305f85d6731e518bc8cf9eeb9fd2abd69e2b06db",
+    "created_at": "2026-10-02T10:45:24Z",
+    "updated_at": "2026-10-02T10:45:24Z",
+    "expires_at": "2026-10-09T10:45:22Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11222655693,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMjY1NTY5Mw==",
+    "name": "desktop-linux-x86_64-sanitized-debug-36996168725-1",
+    "size_in_bytes": 232665,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222655693",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222655693/zip",
+    "expired": false,
+    "digest": "sha256:8f1863c56b0f2eea4940e4bfab489cb8826e1ed19975e5fc650db0297e5f750b",
+    "created_at": "2026-10-02T10:47:30Z",
+    "updated_at": "2026-10-02T10:47:30Z",
+    "expires_at": "2026-10-09T10:47:29Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11222156061,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMjE1NjA2MQ==",
+    "name": "desktop-linux-x86_64-sanitized-release-36996168725-1",
+    "size_in_bytes": 232412,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222156061",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222156061/zip",
+    "expired": false,
+    "digest": "sha256:3ad95a3768db5b66c62d1ed9575779a25b3950d22069f4f00092cf0ce44158f8",
+    "created_at": "2026-10-02T10:39:23Z",
+    "updated_at": "2026-10-02T10:39:23Z",
+    "expires_at": "2026-10-09T10:39:22Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11221905927,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMTkwNTkyNw==",
+    "name": "desktop-linux-x86_64-portability-36996168725-1",
+    "size_in_bytes": 52401,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221905927",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221905927/zip",
+    "expired": false,
+    "digest": "sha256:6feced5b5d9fbc561d517d2c4c82eeae74113765dc07d7cc1cf889a395931972",
+    "created_at": "2026-10-02T10:36:31Z",
+    "updated_at": "2026-10-02T10:36:31Z",
+    "expires_at": "2026-10-09T10:36:31Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11221454900,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMTQ1NDkwMA==",
+    "name": "desktop-linux-aarch64-release-36996168725-1",
+    "size_in_bytes": 223201,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221454900",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221454900/zip",
+    "expired": false,
+    "digest": "sha256:7ef48a877c53252169484621441b0eb468af8a66aa19fbffe4314a512131d160",
+    "created_at": "2026-10-02T10:43:32Z",
+    "updated_at": "2026-10-02T10:43:32Z",
+    "expires_at": "2026-10-09T10:43:31Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11221604683,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMTYwNDY4Mw==",
+    "name": "desktop-linux-aarch64-sanitized-debug-36996168725-1",
+    "size_in_bytes": 185205,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221604683",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221604683/zip",
+    "expired": false,
+    "digest": "sha256:ac700f942ac38c0fbecdf53efc08791c9689dd1919a03d127ed76a3c8181a119",
+    "created_at": "2026-10-02T10:47:37Z",
+    "updated_at": "2026-10-02T10:47:37Z",
+    "expires_at": "2026-10-09T10:47:36Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11221349528,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMTM0OTUyOA==",
+    "name": "desktop-linux-aarch64-sanitized-release-36996168725-1",
+    "size_in_bytes": 184655,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221349528",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221349528/zip",
+    "expired": false,
+    "digest": "sha256:effa3d4cbcad58498c53b9a1c3449c7a58108e946cb6cd349a0836bc28bc4c35",
+    "created_at": "2026-10-02T10:39:19Z",
+    "updated_at": "2026-10-02T10:39:19Z",
+    "expires_at": "2026-10-09T10:39:18Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11221631557,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMTYzMTU1Nw==",
+    "name": "desktop-linux-aarch64-portability-36996168725-1",
+    "size_in_bytes": 52255,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221631557",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221631557/zip",
+    "expired": false,
+    "digest": "sha256:b4c544df15c843fba4d4786c6278147fbb95ebf0a44c19c4a1453fc172b45800",
+    "created_at": "2026-10-02T10:36:19Z",
+    "updated_at": "2026-10-02T10:36:19Z",
+    "expires_at": "2026-10-09T10:36:18Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11222700913,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMjcwMDkxMw==",
+    "name": "desktop-macos-aarch64-checks-36996168725-1",
+    "size_in_bytes": 355497,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222700913",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222700913/zip",
+    "expired": false,
+    "digest": "sha256:eb6c5acb25ca88d07d02f7656c68e61c02705d9d9e795c0c81390fba4f6b0e53",
+    "created_at": "2026-10-02T10:49:57Z",
+    "updated_at": "2026-10-02T10:49:57Z",
+    "expires_at": "2026-10-09T10:49:56Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11222187067,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMjE4NzA2Nw==",
+    "name": "desktop-macos-aarch64-release-36996168725-1",
+    "size_in_bytes": 253783,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222187067",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222187067/zip",
+    "expired": false,
+    "digest": "sha256:46548229794ba5d03c06df2b76a0637c7b5d6128461cc854f10b6a03f0849597",
+    "created_at": "2026-10-02T10:40:45Z",
+    "updated_at": "2026-10-02T10:40:45Z",
+    "expires_at": "2026-10-09T10:40:44Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11222651454,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMjY1MTQ1NA==",
+    "name": "desktop-windows-x86_64-sanitized-debug-36996168725-1",
+    "size_in_bytes": 162779,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222651454",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222651454/zip",
+    "expired": false,
+    "digest": "sha256:64202b4dab44783072df464f1702737a01236f0bd4f30dbc784abd0d6170f712",
+    "created_at": "2026-10-02T10:51:14Z",
+    "updated_at": "2026-10-02T10:51:14Z",
+    "expires_at": "2026-10-09T10:51:12Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11221414878,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMTQxNDg3OA==",
+    "name": "desktop-windows-x86_64-sanitized-release-36996168725-1",
+    "size_in_bytes": 163074,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221414878",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221414878/zip",
+    "expired": false,
+    "digest": "sha256:2b2640e7dfcc4621fbd14ec3cbf3f259906e783c02162510a98fa763a01be4ad",
+    "created_at": "2026-10-02T10:42:13Z",
+    "updated_at": "2026-10-02T10:42:13Z",
+    "expires_at": "2026-10-09T10:42:13Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11221664191,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMTY2NDE5MQ==",
+    "name": "desktop-windows-x86_64-release-36996168725-1",
+    "size_in_bytes": 212241,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221664191",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221664191/zip",
+    "expired": false,
+    "digest": "sha256:ca23350995c12fe3d6f49e1c73a08ec23aac18b62a5c6ed721215b9b0bdcc3ec",
+    "created_at": "2026-10-02T10:47:08Z",
+    "updated_at": "2026-10-02T10:47:08Z",
+    "expires_at": "2026-10-09T10:47:07Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11222072051,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMjA3MjA1MQ==",
+    "name": "desktop-windows-x86_64-portability-36996168725-1",
+    "size_in_bytes": 120400,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222072051",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222072051/zip",
+    "expired": false,
+    "digest": "sha256:5a633c9abffb88b38c2842441c7746b5ddd42445e3c3ac4be7c8135befba8846",
+    "created_at": "2026-10-02T10:40:24Z",
+    "updated_at": "2026-10-02T10:40:24Z",
+    "expires_at": "2026-10-09T10:40:23Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11222690825,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMjY5MDgyNQ==",
+    "name": "desktop-windows-aarch64-release-36996168725-1",
+    "size_in_bytes": 200964,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222690825",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222690825/zip",
+    "expired": false,
+    "digest": "sha256:3d773c08749548e28332931efc779f20effa93e0597d1634ec017be901c7be1a",
+    "created_at": "2026-10-02T10:48:38Z",
+    "updated_at": "2026-10-02T10:48:38Z",
+    "expires_at": "2026-10-09T10:48:37Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11221418935,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMTQxODkzNQ==",
+    "name": "desktop-windows-aarch64-checks-36996168725-1",
+    "size_in_bytes": 42755,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221418935",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221418935/zip",
+    "expired": false,
+    "digest": "sha256:e662a8da7bf6f6cc60be1b0fd2d788edbe0b701851b94bb3a1cc6b279ac80baa",
+    "created_at": "2026-10-02T10:37:33Z",
+    "updated_at": "2026-10-02T10:37:33Z",
+    "expires_at": "2026-10-09T10:37:32Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11221155025,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMTE1NTAyNQ==",
+    "name": "desktop-windows-x86_64-checks-36991068435-1",
+    "size_in_bytes": 399773,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221155025",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11221155025/zip",
+    "expired": false,
+    "digest": "sha256:53a0cac7adb34afb457b6844235e4148f0636bb9ee13621ccdc1ca998022dae3",
+    "created_at": "2026-10-02T10:04:39Z",
+    "updated_at": "2026-10-02T10:04:39Z",
+    "expires_at": "2026-10-09T10:04:38Z",
+    "workflow_run": {
+      "id": 36991068435,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-combined-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11220765495,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMDc2NTQ5NQ==",
+    "name": "desktop-windows-aarch64-release-36991068435-1",
+    "size_in_bytes": 201081,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11220765495",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11220765495/zip",
+    "expired": false,
+    "digest": "sha256:16049cf07ce3bed1f2b63154bce916fbf284e8e742c184a88a1c8394f5b54bc9",
+    "created_at": "2026-10-02T09:55:21Z",
+    "updated_at": "2026-10-02T09:55:21Z",
+    "expires_at": "2026-10-09T09:55:20Z",
+    "workflow_run": {
+      "id": 36991068435,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-combined-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11220536143,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMDUzNjE0Mw==",
+    "name": "desktop-linux-aarch64-checks-36991068435-1",
+    "size_in_bytes": 377821,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11220536143",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11220536143/zip",
+    "expired": false,
+    "digest": "sha256:b3274844ec427e4dfc769e30c7177d97230d86fcf7b7b4edd5ad7c4ccb515a93",
+    "created_at": "2026-10-02T10:00:22Z",
+    "updated_at": "2026-10-02T10:00:22Z",
+    "expires_at": "2026-10-09T10:00:21Z",
+    "workflow_run": {
+      "id": 36991068435,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-combined-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11220525894,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMDUyNTg5NA==",
+    "name": "desktop-linux-x86_64-checks-36991068435-1",
+    "size_in_bytes": 472301,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11220525894",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11220525894/zip",
+    "expired": false,
+    "digest": "sha256:22ca3728694afab06b8684f308ebfac7ee0ef3181f28ec69aa4ea11dde794c78",
+    "created_at": "2026-10-02T09:58:32Z",
+    "updated_at": "2026-10-02T09:58:32Z",
+    "expires_at": "2026-10-09T09:58:31Z",
+    "workflow_run": {
+      "id": 36991068435,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-combined-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11220411223,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMDQxMTIyMw==",
+    "name": "desktop-macos-aarch64-checks-36991068435-1",
+    "size_in_bytes": 355762,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11220411223",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11220411223/zip",
+    "expired": false,
+    "digest": "sha256:3c8ec9a37b86757d1e8bb62d05f7233ffbe752ebf46934eba04dbb58a53fa807",
+    "created_at": "2026-10-02T09:55:26Z",
+    "updated_at": "2026-10-02T09:55:26Z",
+    "expires_at": "2026-10-09T09:55:24Z",
+    "workflow_run": {
+      "id": 36991068435,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-combined-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11220081429,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMDA4MTQyOQ==",
+    "name": "desktop-windows-x86_64-release-36991068435-1",
+    "size_in_bytes": 212503,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11220081429",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11220081429/zip",
+    "expired": false,
+    "digest": "sha256:b5d2a60060f2e004f64d1b990980c741091b598f5497758aa2e123c90d9b7eff",
+    "created_at": "2026-10-02T09:53:14Z",
+    "updated_at": "2026-10-02T09:53:14Z",
+    "expires_at": "2026-10-09T09:53:13Z",
+    "workflow_run": {
+      "id": 36991068435,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-combined-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11219863013,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIxOTg2MzAxMw==",
+    "name": "desktop-linux-aarch64-release-36991068435-1",
+    "size_in_bytes": 222725,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11219863013",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11219863013/zip",
+    "expired": false,
+    "digest": "sha256:b9ae5d1992f0bb8e7da17328f2d00b0de58ee2db84ae93ac4e29b709fe3b93ae",
+    "created_at": "2026-10-02T09:49:31Z",
+    "updated_at": "2026-10-02T09:49:31Z",
+    "expires_at": "2026-10-09T09:49:31Z",
+    "workflow_run": {
+      "id": 36991068435,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-combined-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11219777291,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIxOTc3NzI5MQ==",
+    "name": "desktop-windows-aarch64-checks-36991068435-1",
+    "size_in_bytes": 42753,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11219777291",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11219777291/zip",
+    "expired": false,
+    "digest": "sha256:7f660d4369e3e8afe60939bd07f671ca3bcc81430282b0cfe9f93c35bd8b4680",
+    "created_at": "2026-10-02T09:43:24Z",
+    "updated_at": "2026-10-02T09:43:24Z",
+    "expires_at": "2026-10-09T09:43:23Z",
+    "workflow_run": {
+      "id": 36991068435,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-combined-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11219763396,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIxOTc2MzM5Ng==",
+    "name": "desktop-linux-x86_64-release-36991068435-1",
+    "size_in_bytes": 322042,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11219763396",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11219763396/zip",
+    "expired": false,
+    "digest": "sha256:aecb9d2b6cf37accc6057f326b2f417f75689c062ceae78499444b713a477bb7",
+    "created_at": "2026-10-02T09:49:18Z",
+    "updated_at": "2026-10-02T09:49:18Z",
+    "expires_at": "2026-10-09T09:49:17Z",
+    "workflow_run": {
+      "id": 36991068435,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-combined-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11219723692,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIxOTcyMzY5Mg==",
+    "name": "desktop-macos-aarch64-release-36991068435-1",
+    "size_in_bytes": 256096,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11219723692",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11219723692/zip",
+    "expired": false,
+    "digest": "sha256:5405222fc269f8eaf2b50cd116e9cac1d10f11ec017a2651f15a2d01cdb925ff",
+    "created_at": "2026-10-02T09:49:00Z",
+    "updated_at": "2026-10-02T09:49:00Z",
+    "expires_at": "2026-10-09T09:48:58Z",
+    "workflow_run": {
+      "id": 36991068435,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-combined-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  },
+  {
+    "id": 11222445904,
+    "node_id": "MDg6QXJ0aWZhY3QxMTIyMjQ0NTkwNA==",
+    "name": "clang-analyzer-36996168725-1",
+    "size_in_bytes": 144144,
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222445904",
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11222445904/zip",
+    "expired": false,
+    "digest": "sha256:a19e677994802c67eeb66f9c4b7a12a7d21d49ce3c40ad79831fd4175144601b",
+    "created_at": "2026-10-02T10:42:13Z",
+    "updated_at": "2026-10-02T10:42:13Z",
+    "expires_at": "2026-10-16T10:42:12Z",
+    "workflow_run": {
+      "id": 36996168725,
+      "repository_id": 1071732997,
+      "head_repository_id": 1071732997,
+      "head_branch": "codex/ci-checks-split-overlap",
+      "head_sha": "e424b387fcb51b00c1d19e87e2d369ae8a212792"
+    }
+  }
+]
