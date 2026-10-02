@@ -24446,16 +24446,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tentative_alignment_merging(UnitTestAr
         String8 source;
         u32 alignment;
         u32 size;
-        u32 source_offset;
+        u32 line;
+        u32 column;
         bool internal;
     } cases[] = {
-        {S8("int x;\n_Alignas(16) int x;\n"), 16, 4, 4, false},
-        {S8("_Alignas(16) int x;\nint x;\n"), 16, 4, 17, false},
-        {S8("static int x;\n_Alignas(16) int x;\n"), 16, 4, 11, true},
-        {S8("static int x;\nextern _Alignas(16) int x;\n"), 16, 4, 11, true},
-        {S8("int x;\nextern _Alignas(32) int x;\nint x;\n"), 32, 4, 4, false},
-        {S8("int x[];\n_Alignas(16) int x[3];\n"), 16, 12, 4, false},
-        {S8("int x;\n_Alignas(16) int x = 1;\n"), 16, 4, 24, false},
+        {S8("int x;\n_Alignas(16) int x;\n"), 16, 4, 1, 5, false},
+        {S8("_Alignas(16) int x;\nint x;\n"), 16, 4, 1, 18, false},
+        {S8("static int x;\n_Alignas(16) int x;\n"), 16, 4, 1, 12, true},
+        {S8("static int x;\nextern _Alignas(16) int x;\n"), 16, 4, 1, 12, true},
+        {S8("int x;\nextern _Alignas(32) int x;\nint x;\n"), 32, 4, 1, 5, false},
+        {S8("int x[];\n_Alignas(16) int x[3];\n"), 16, 12, 1, 5, false},
+        {S8("int x;\n_Alignas(16) int x = 1;\n"), 16, 4, 2, 18, false},
     };
     String8 invalid[] = {
         S8("_Alignas(16) int x;\nint x = 1;\n"),
@@ -24493,7 +24494,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tentative_alignment_merging(UnitTestAr
                             IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
                             BUSTER_TEST(arguments, type && type->layout.resolved && type->layout.size == cases[case_index].size);
                             BUSTER_TEST(arguments, global->alignment == cases[case_index].alignment);
-                            BUSTER_TEST(arguments, global->source.offset == cases[case_index].source_offset && global->source.length == 1);
+                            CSourceSite site = {.file = global->source.source.value, .map_offset_plus_one = global->source.offset + 1};
+                            CSourceLocation location = c_preprocess_site_location(&tokens, site);
+                            BUSTER_TEST_RAW(arguments, location.line == cases[case_index].line && location.column == cases[case_index].column &&
+                                                       global->source.length == 1,
+                                string_format(temporary.arena, S8("tentative source target={u32} form={u32} expected={u32}:{u32} actual={u32}:{u32} length={u32}: {S8}"),
+                                              target_index, form, cases[case_index].line, cases[case_index].column, location.line, location.column,
+                                              global->source.length, cases[case_index].source));
                             BUSTER_TEST(arguments, symbol && symbol->linkage == (cases[case_index].internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL));
                         }
                     }
