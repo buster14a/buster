@@ -37,10 +37,19 @@ constexpr int signed_negative = negative;
 constexpr long long enum_value = unsigned_maximum;
 constexpr long long maximum = 9223372036854775807LL;
 constexpr long long minimum = -9223372036854775807LL - 1;
+#if defined(__SIZEOF_INT128__)
+constexpr __int128 wide_positive = (__int128)44;
+constexpr __int128 wide_negative = -(__int128)44;
+_Static_assert(wide_positive == 44 && wide_negative == -44, "wide scalar images");
+#endif
 _Static_assert(octet == 44 && signed_negative == -1, "conversion and signed enum");
 _Static_assert(enum_value == 4294967295LL, "unsigned enum operand");
 _Static_assert(maximum == 9223372036854775807LL && minimum == (-9223372036854775807LL - 1), "signed limits");
-int main(void) { return octet != 44 || signed_negative != -1 || enum_value != 4294967295LL || maximum != 9223372036854775807LL || minimum != (-9223372036854775807LL - 1); }
+int main(void) {
+#if defined(__SIZEOF_INT128__)
+    if (wide_positive != 44 || wide_negative != -44) return 1;
+#endif
+    return octet != 44 || signed_negative != -1 || enum_value != 4294967295LL || maximum != 9223372036854775807LL || minimum != (-9223372036854775807LL - 1); }
 '''
 # Each row records expected candidate behavior and whether a host compiler is
 # an applicable language oracle. Offset overflow refusals are Buster policy.
@@ -52,6 +61,13 @@ CASES = [
     ("constexpr-negative-unsigned", "gnu23", "constexpr unsigned int value = -1;\n", False, True),
     ("constexpr-negative-enum-unsigned", "gnu23", "enum { negative = -1 }; constexpr unsigned int value = negative;\n", False, True),
     ("constexpr-uncast-truncation", "gnu23", "constexpr unsigned char value = 300;\n", False, True),
+    ("constexpr-signed-overflow", "gnu23", "constexpr int value = 2147483647 + 1;\n", False, True),
+    ("constexpr-unary-overflow", "gnu23", "constexpr int value = -(-2147483647 - 1);\n", False, True),
+    ("constexpr-multiply-overflow", "gnu23", "constexpr int value = 1073741824 * 2;\n", False, True),
+    ("constexpr-unsigned-wrap", "gnu23", "constexpr unsigned int value = 0xffffffffU + 1U; _Static_assert(value == 0, \"wrap\");\n", True, True),
+    ("constexpr-dead-logical", "gnu23", "constexpr int value = 0 && (2147483647 + 1); _Static_assert(value == 0, \"dead\");\n", True, True),
+    ("constexpr-dead-conditional", "gnu23", "constexpr int value = 1 ? 44 : (2147483647 + 1); _Static_assert(value == 44, \"dead\");\n", True, True),
+    ("constexpr-nested-enum-context", "gnu23", "constexpr int value = sizeof(enum Nested { LIMIT = 2147483647 + 1 }); _Static_assert(value == sizeof(int), \"enum context\");\n", True, True),
     ("offset-negative-index", "gnu17", "struct S { int a[2]; }; enum { value = __builtin_offsetof(struct S, a[-1]) };\n", False, False),
     ("offset-index-division-zero", "gnu17", "struct S { int a[2]; }; enum { value = __builtin_offsetof(struct S, a[1 / 0]) };\n", False, False),
     ("offset-product-overflow", "gnu17", "struct S { int a[2]; }; enum { value = __builtin_offsetof(struct S, a[4611686018427387904ULL]) };\n", False, False),
@@ -59,6 +75,9 @@ CASES = [
 ]
 POLICY_CASES = [
     ("signed-overflow", "constexpr int value = 2147483647 + 1;\n"),
+    ("signed-sign-bit-shift", "constexpr int value = 1 << 31;\n"),
+    ("signed-unary-overflow", "constexpr int value = -(-2147483647 - 1);\n"),
+    ("signed-multiply-overflow", "constexpr int value = 1073741824 * 2;\n"),
     ("negative-left-shift", "constexpr int value = -1 << 1;\n"),
 ]
 TARGETS = ["x86_64-unknown-linux-gnu", "wasm32-unknown-wasi"]
@@ -123,11 +142,15 @@ class Proof:
                     tag = f"policy-{name}-{Path(compiler).name}-{'wrapv' if wrap else 'default'}"
                     command = [compiler] + (["cc"] if compiler == str(self.ide) else [])
                     command += ["-std=gnu23", "-fsyntax-only"] + (["-fwrapv"] if wrap else []) + [path]
-                    self.run(tag, command)
+                    required = self.args.phase == "candidate" and name in {"signed-overflow", "signed-unary-overflow", "signed-multiply-overflow"}
+                    self.run(tag, command, 1 if required else None)
 
     def baseline(self):
         self.run("witness-nested-rejected", [self.ide, "cc", "-std=gnu17", "-fsyntax-only", self.source("nested-offsetof-enum", NESTED)], 1)
         self.run("witness-unsigned-wrong-accept", [self.ide, "cc", "-std=gnu23", "-fsyntax-only", self.source("unsigned-sizeof-to-int", UNSIGNED_SIZEOF)], 0)
+        wide = self.source("wide-scalar-image", "constexpr __int128 value = (__int128)44; _Static_assert(value == 44, \"wide\"); int main(void) { return value != 44; }\n")
+        self.run("witness-wide-scalar-semantic", [self.ide, "cc", "-std=gnu23", "-fsyntax-only", wide], 0)
+        self.run("witness-wide-scalar-object-refused", [self.ide, "cc", "-std=gnu23", "-c", wide, "-o", self.output / "wide.o"], 1)
         self.policy_observations(self.references())
         self.offset_observations()
 

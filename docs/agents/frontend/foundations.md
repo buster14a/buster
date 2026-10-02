@@ -385,8 +385,11 @@ without facts for identical bitcode and diagnostics.
   needs the high limb receives an explicit unsupported-storage diagnostic:
   `CEntity` still publishes one magnitude limb, so full-width constexpr
   publication remains open under GitHub #1572. The live declaration machine
-  retains its evaluation mode; machineless validation uses the protected
-  declaration-point query. `c_test_constexpr_integer_types` covers typed
+  retains its evaluation mode while a scoped arithmetic guard refuses signed
+  overflow, including when later casts would hide it and regardless of `-fwrapv`;
+  machineless validation uses the protected declaration-point query. Supported
+  integer128 scalar objects retain relocation-free 16-byte initializer images.
+  `c_test_constexpr_integer_types` covers typed
   arithmetic, casts, declaration scope and refused publication.
 - A `_Static_assert` whose expression types as an integer takes its value
   from the typed evaluator (`c_parse_typed_constant`), with C's types,

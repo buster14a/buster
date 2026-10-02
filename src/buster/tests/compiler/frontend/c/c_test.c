@@ -30638,6 +30638,13 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_constexpr_integer_types_source = S8_INI
     "constexpr long target_truncated = (long)4294967297ULL;\n"
     "constexpr unsigned long target_unsigned = (unsigned long)-1;\n"
     "constexpr int boolean_cast = (_Bool)300U;\n"
+    "#if defined(__SIZEOF_INT128__)\n"
+    "constexpr __int128 low_positive = (__int128)44;\n"
+    "constexpr __int128 low_negative = -44;\n"
+    "#define WIDE_VALUE_CHECK (low_positive == 44 && low_negative == -44)\n"
+    "#else\n"
+    "#define WIDE_VALUE_CHECK 1\n"
+    "#endif\n"
     "static_assert(wrapped_byte == 44 && signed_cast == -1 && signed_byte == -1 && signed_maximum == 2147483647);\n"
     "static_assert(enum_signed == -3 && enum_unsigned == 2147483648U && boolean_cast == 1);\n"
     "static_assert(target_signed == (sizeof(long) == 8 ? 4294967295LL : -1LL));\n"
@@ -30648,7 +30655,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_constexpr_integer_types_source = S8_INI
     " enum_signed != -3 || enum_unsigned != 2147483648U || boolean_cast != 1 ||\n"
     " target_signed != (sizeof(long) == 8 ? 4294967295LL : -1LL) ||\n"
     " target_truncated != (sizeof(long) == 8 ? 4294967297LL : 1LL) ||\n"
-    " target_unsigned != (sizeof(long) == 8 ? 18446744073709551615ULL : 4294967295ULL); }\n");
+    " target_unsigned != (sizeof(long) == 8 ? 18446744073709551615ULL : 4294967295ULL) || !WIDE_VALUE_CHECK; }\n");
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_types(UnitTestArguments* arguments)
 {
@@ -30754,6 +30761,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_range(UnitTestArgume
         bool long64_only;
         bool needs_int128;
         String8 diagnostic;
+        bool negative;
+        bool check_int128_bytes;
     } cases[] = {
         {S8("constexpr int value = sizeof(int) - 5;"), 0, false, false, false},
         {S8("constexpr int value = -1U;"), 0, false, false, false},
@@ -30762,11 +30771,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_range(UnitTestArgume
         {S8("constexpr unsigned char value = 300;"), 0, false, false, false},
         {S8("constexpr unsigned char value = -1;"), 0, false, false, false},
         {S8("constexpr signed char value = 128;"), 0, false, false, false},
+        {S8("constexpr int value = 2147483647 + 1;"), 0, false, false, false, S8("integer constant expression")},
+        {S8("constexpr int value = -(-2147483647 - 1);"), 0, false, false, false, S8("integer constant expression")},
+        {S8("constexpr int value = 1073741824 * 2;"), 0, false, false, false, S8("integer constant expression")},
         {S8("constexpr long value = 4294967296ULL;"), UINT64_C(4294967296), true, true, false},
         {S8("constexpr long long value = ((__int128)1 << 100);"), 0, false, false, true},
         {S8("constexpr unsigned char value = (((__int128)1 << 64) | 44);"), 0, false, false, true},
         {S8("constexpr __int128 value = ((__int128)1 << 100);"), 0, false, false, true, S8("supported constant storage")},
-        {S8("constexpr __int128 value = (__int128)44; static_assert(value == 44);"), 44, true, false, true},
+        {.source = S8("constexpr __int128 value = (__int128)44; static_assert(value == 44);"),
+            .expected = 44, .valid = true, .needs_int128 = true, .check_int128_bytes = true},
+        {.source = S8("constexpr __int128 value = -44; static_assert(value == -44);"),
+            .expected = 44, .valid = true, .needs_int128 = true, .negative = true, .check_int128_bytes = true},
         {S8("constexpr long long value = (long long)(((__int128)1 << 100) | 9); static_assert(value == 9);"), 9, true, false, true},
         {S8("constexpr int value = sizeof(struct Inline { int member; }); static_assert(sizeof(struct Inline) == 4);"), 4, true, false, false},
         {S8("constexpr int value = sizeof(struct { int member; });"), 4, true, false, false},
@@ -30817,7 +30832,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_range(UnitTestArgume
                                 BUSTER_TEST_RAW(arguments, entity->has_constant_value == valid, cases[row].source);
                                 if (valid)
                                 {
-                                    BUSTER_TEST_RAW(arguments, entity->constant_value == cases[row].expected && !entity->constant_is_negative,
+                                    BUSTER_TEST_RAW(arguments, entity->constant_value == cases[row].expected &&
+                                        entity->constant_is_negative == cases[row].negative,
                                         cases[row].source);
                                 }
                             }
@@ -30847,7 +30863,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_range(UnitTestArgume
                         BUSTER_TEST_RAW(arguments, valid || !lowered.program, cases[row].source);
                         if (valid && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
                         {
-                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                            IrModule* module = lowered.program->modules;
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                            if (cases[row].check_int128_bytes)
+                            {
+                                IrGlobal* global = c_test_find_ir_global(module, lowered.program, S8("value"));
+                                if (BUSTER_REQUIRE(arguments, global && global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES &&
+                                    global->bytes.pointer && global->bytes.length == 16))
+                                {
+                                    IrType* type = ir_type_from_id(&lowered.program->types, global->type);
+                                    BUSTER_TEST(arguments, type && type->kind == IR_TYPE_INTEGER && type->bit_width == 128 &&
+                                        type->is_signed && global->is_read_only);
+                                    u64 low = cases[row].negative ? 0 - cases[row].expected : cases[row].expected;
+                                    for (u32 byte = 0; byte < 16; byte += 1)
+                                    {
+                                        u8 expected_byte = byte < 8 ? (u8)(low >> (byte * 8)) : cases[row].negative ? 0xff : 0;
+                                        BUSTER_TEST(arguments, global->bytes.pointer[byte] == expected_byte);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -31056,6 +31090,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArgume
                     string_format(temporary.arena, S8("unsigned long long probe(void) {{ return {S8}; }}"), expression),
                 };
                 String8 source = string_format(temporary.arena, S8("{S8}\n{S8}\n"), cases[row].declaration, contexts[context]);
+                String8 label = string_format(arguments->arena, S8("offsetof refusal target={u32} case={u32} context={u32}: {S8}"),
+                    target_index, row, context, source);
                 CPreprocessResult tokens = c_preprocess(temporary.arena, source,
                     (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
                 if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0))
@@ -31073,23 +31109,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArgume
                     {
                         semantic_errors += semantic.diagnostics[diagnostic].severity == C_DIAGNOSTIC_ERROR;
                     }
-                    // Enum/assertion contexts reach the parser constant walk.
+                    // Enumerators reject during model construction; assertions
+                    // can defer until semantics-only validation or lowering.
                     // Syntax-only validation of scalar/runtime offsetof calls
                     // remains a separate builtin-validation gap in #1570.
                     if (context < 2)
                     {
-                        BUSTER_TEST_RAW(arguments, parsed_errors != 0 && semantic_errors != 0, source);
+                        BUSTER_TEST_RAW(arguments, semantic_errors != 0, label);
+                        if (!context)
+                        {
+                            BUSTER_TEST_RAW(arguments, parsed_errors != 0, label);
+                        }
                     }
                     for (u32 form = 0; form < 2; form += 1)
                     {
-                        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("offsetof-typed-refusal.c"), tokens, parsed, target,
-                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        CIRLowerResult lowered = {0};
+                        if (!parsed_errors)
+                        {
+                            lowered = c_lower_to_ir_with_options(temporary.arena, S8("offsetof-typed-refusal.c"), tokens, parsed, target,
+                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        }
                         u32 lowered_errors = 0;
                         for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
                         {
                             lowered_errors += lowered.diagnostics[diagnostic].severity == C_DIAGNOSTIC_ERROR;
                         }
-                        BUSTER_TEST_RAW(arguments, lowered_errors != 0 && !lowered.canonical_ir_certified, source);
+                        BUSTER_TEST_RAW(arguments, parsed_errors + lowered_errors != 0 && !lowered.canonical_ir_certified, label);
                     }
                 }
                 scratch_end(temporary);

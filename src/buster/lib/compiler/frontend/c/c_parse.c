@@ -17849,7 +17849,10 @@ BUSTER_C_INTERNAL bool c_parse_record_constexpr_integer(CTypeParseMachine* machi
             CIntegerConstant constant;
             if (machine)
             {
+                bool previous_rejection = machine->reject_signed_constant_overflow;
+                machine->reject_signed_constant_overflow = true;
                 constant = c_parse_typed_integer_constant(machine, temporary.arena, preprocess, result, scope, initializer_start, initializer_end);
+                machine->reject_signed_constant_overflow = previous_rejection;
             }
             else
             {
@@ -22045,12 +22048,16 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CTypeParseMachine* mach
                                                                                         scalar.bit_width, scalar.is_signed, count.bit_width)
                                                              : (CIntegerConstantResult){0};
             value.valid &= computed.constant;
+            bool reject_overflow = scalar.is_signed &&
+                                   (mode == C_CONSTANT_EVALUATION_TYPE || (mode == C_CONSTANT_EVALUATION_NORMAL && machine->reject_signed_constant_overflow)) &&
+                                   (computed.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW);
+            value.valid &= !reject_overflow;
+            value.faulted |= reject_overflow;
             if (mode == C_CONSTANT_EVALUATION_TYPE && scalar.is_signed)
             {
                 bool negative_left = scalar.bit_width > 64 ? (left.integer_high >> 63) != 0
                     : scalar.bit_width && ((left.integer >> (scalar.bit_width - 1)) & 1) != 0;
-                value.valid &= !(computed.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW) &&
-                               !(operation == C_CONDITIONAL_SHIFT_LEFT && negative_left);
+                value.valid &= !(operation == C_CONDITIONAL_SHIFT_LEFT && negative_left);
             }
             value.faulted |= operator_known && !computed.constant && !(computed.faults & IR_INTEGER_FAULT_UNSUPPORTED);
             value.integer = computed.bits.low;
@@ -22719,10 +22726,12 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                             c_integer_constant_unary(minus ? C_CONDITIONAL_UNARY_MINUS : C_CONDITIONAL_BITWISE_NOT,
                                                      (IrInteger){.low = last.integer, .high = last.integer_high}, scalar.bit_width);
                         last.valid &= !last.is_float && computed.constant;
-                        if (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE && scalar.is_signed)
-                        {
-                            last.valid &= !(computed.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW);
-                        }
+                        bool reject_overflow = scalar.is_signed &&
+                            (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE ||
+                             (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->reject_signed_constant_overflow)) &&
+                            (computed.faults & IR_INTEGER_FAULT_SIGNED_OVERFLOW);
+                        last.valid &= !reject_overflow;
+                        last.faulted |= reject_overflow;
                         last.integer = computed.bits.low;
                         last.integer_high = computed.bits.high;
                     }

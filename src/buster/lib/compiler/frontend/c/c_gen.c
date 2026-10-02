@@ -15896,20 +15896,32 @@ BUSTER_C_SHARED bool c_ir_declaration_initializer_range(CPreprocessResult prepro
 
 BUSTER_C_INTERNAL bool c_ir_constexpr_initializer_valid(IrType* type, IrGlobal* initializer)
 {
-    if (!type || !initializer)
+    bool valid = false;
+    if (type && initializer)
     {
-        return false;
+        if (type->kind == IR_TYPE_POINTER)
+        {
+            valid = initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+        }
+        else if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+        {
+            valid = initializer->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && initializer->relocation_count == 0;
+        }
+        else if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128 &&
+                 initializer->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES)
+        {
+            // Wide scalar constants use their target byte image, just like
+            // ordinary integer128 globals, rather than the one-limb payload.
+            valid = type->layout.size == 16 && initializer->bytes.pointer && initializer->bytes.length == 16 &&
+                    initializer->relocation_count == 0;
+        }
+        else
+        {
+            valid = initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO || initializer->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER ||
+                    initializer->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT;
+        }
     }
-    if (type->kind == IR_TYPE_POINTER)
-    {
-        return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
-    }
-    if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
-    {
-        return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && initializer->relocation_count == 0;
-    }
-    return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO || initializer->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER ||
-           initializer->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT;
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_report_unsupported_signature(CIntegerIrBuilder* builder, String8 name)
