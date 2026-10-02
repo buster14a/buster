@@ -26111,6 +26111,13 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             bool write = builtin != C_SYMBOL_BUILTIN_VA_ARG && builtin != C_SYMBOL_BUILTIN_VA_END;
             bool valid = count == (builtin == C_SYMBOL_BUILTIN_VA_END ? 1u : 2u);
             u32 operands = builtin == C_SYMBOL_BUILTIN_VA_COPY ? 2u : 1u;
+            u32 checked_operand = C_ID_UNDERLYING_INVALID;
+            String8 first_operand_token = {0};
+            CTypeId checked_type = C_TYPE_ID_INVALID;
+            CType operand_facts = {0};
+            CType pointee_facts = {0};
+            bool checked_addressed = false;
+            bool checked_query_valid = false;
             for (u32 argument = 0; valid && argument < operands; argument += 1)
             {
                 CTypeId type = C_TYPE_ID_INVALID;
@@ -26123,6 +26130,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                     operand_start += 1;
                 }
                 valid = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, operand_start, ends[argument], &type);
+                checked_query_valid = valid;
                 if (valid && (!write || argument) && type.value < result->type_count && result->types[type.value].kind == C_TYPE_POINTER)
                 {
                     type = result->types[type.value].element_type;
@@ -26130,6 +26138,14 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                 CType* operand = type.value < result->type_count ? result->types + type.value : 0;
                 CType* element = operand && operand->kind == C_TYPE_POINTER && operand->element_type.value < result->type_count
                                      ? result->types + operand->element_type.value : 0;
+                // Retain the existing check's facts; refusal reporting does not query the expression again.
+                checked_operand = argument;
+                first_operand_token = starts[argument] < ends[argument] && starts[argument] < preprocess.token_count
+                                          ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[starts[argument]]) : (String8){0};
+                checked_type = type;
+                operand_facts = operand ? *operand : (CType){0};
+                pointee_facts = element ? *element : (CType){0};
+                checked_addressed = addressed_start;
                 // The Windows CRT's literal intrinsic addresses its public char* cursor.
                 // This representation bridge does not give other pointer typedefs va_list identity.
                 bool windows_cursor = addressed_start && preprocess.target.os == OPERATING_SYSTEM_WINDOWS &&
@@ -26147,6 +26163,19 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             {
                 message = write ? S8("va_start/va_copy requires a modifiable va_list destination and valid arguments") :
                           builtin == C_SYMBOL_BUILTIN_VA_ARG ? S8("va_arg requires a va_list operand") : S8("va_end requires a va_list operand");
+                CType* wrapper = declaration->type.value < result->type_count ? result->types + declaration->type.value : 0;
+                message = string_format(result->arena,
+                    S8("{S8} (builtin={S8} arguments={u32} operand={u32} first_token={S8} addressed={u32} queried={u32} query_valid={u32} "
+                       "operand_type={u32} operand_kind={u32} operand_const={u32} operand_volatile={u32} operand_restrict={u32} operand_atomic={u32} "
+                       "pointee_kind={u32} pointee_const={u32} pointee_volatile={u32} pointee_restrict={u32} pointee_atomic={u32} "
+                       "wrapper_type={u32} wrapper_kind={u32} variadic={u32} os={u32} arch={u32})"),
+                    message, name, count, checked_operand, first_operand_token, (u32)checked_addressed,
+                    (u32)(checked_operand != C_ID_UNDERLYING_INVALID), (u32)checked_query_valid, checked_type.value,
+                    (u32)operand_facts.kind, (u32)operand_facts.is_const, (u32)operand_facts.is_volatile,
+                    (u32)operand_facts.is_restrict, (u32)operand_facts.is_atomic, (u32)pointee_facts.kind,
+                    (u32)pointee_facts.is_const, (u32)pointee_facts.is_volatile, (u32)pointee_facts.is_restrict, (u32)pointee_facts.is_atomic,
+                    declaration->type.value, (u32)(wrapper ? wrapper->kind : C_TYPE_INVALID), (u32)(wrapper && wrapper->is_variadic),
+                    (u32)preprocess.target.os, (u32)preprocess.target.cpu_arch);
             }
             if (valid && builtin == C_SYMBOL_BUILTIN_VA_ARG)
             {
