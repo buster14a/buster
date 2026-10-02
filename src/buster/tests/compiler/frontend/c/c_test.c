@@ -58,7 +58,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_query_buffer_owner(UnitTestArgument
     BUSTER_TEST(arguments, c_test_ir_query_buffer_budget());
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     CPreprocessResult preprocess = c_preprocess(temporary.arena,
-        S8("static int retained = sizeof(int) + 3; int read_retained(void) { return retained; }"),
+        S8("static int retained[1] = {sizeof(int) + 3}; int read_retained(void) { return retained[0]; }"),
         (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
     CParseResult parse = c_parse(temporary.arena, preprocess);
     if (BUSTER_REQUIRE(arguments, !preprocess.diagnostic_count && !parse.diagnostic_count))
@@ -108,6 +108,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_query_buffer_owner(UnitTestArgument
         }
     }
     scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_typedef_for_declaration(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef int VisitedNode;\n#define EachNode(it, T, first) (T *it = first; it != 0; it = it->next)\nstatic int starts, steps;\nint main(void)\n{\n    unsigned total = 0;\n    {\n        typedef struct VisitedNode VisitedNode;\n        struct VisitedNode { VisitedNode *next; unsigned value; };\n        VisitedNode second = {0, 7}, first = {&second, 3};\n        for EachNode(n, VisitedNode, (starts += 1, &first))\n        {\n            total += n->value;\n            steps += 1;\n        }\n    }\n    {\n        typedef unsigned Count;\n        for (Count index = 0; index < 3; index += 1) total += index;\n        {\n            int Count = 2, multiplier = 3;\n            for (Count * multiplier; Count > 0; Count -= 1) total += multiplier;\n        }\n    }\n    { VisitedNode outer = 5; total += outer; }\n    return total != 24 || starts != 1 || steps != 2;\n}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, preprocess);
+            bool parsed_ok = preprocess.diagnostic_count == 0 && parsed.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, parsed_ok, string_format(temporary.arena,
+                S8("local typedef for declaration parser target={u32} form={u32}: {S8}"), target_index, form,
+                parsed.diagnostic_count ? parsed.diagnostics[0].message : S8("none")));
+            if (parsed_ok)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("local-typedef-for.c"), preprocess, parsed, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, string_format(temporary.arena,
+                    S8("local typedef for declaration IR target={u32} form={u32}: {S8}"), target_index, form,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+                if (lowered.diagnostic_count == 0 && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+                {
+                    BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=none")};
+    String8 path = buster_test_temporary_path(arguments->arena, S8("local-typedef-for"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("local-typedef-for-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+#if BUSTER_CPU_ARCH_X86_64
+                    S8("-mattr=+sse2,+cx16"),
+#endif
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode < 2;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("local typedef for declaration mode={S8} form={u32}: {S8}"), modes[mode], form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("local typedef for declaration mode={S8} form={u32}: status={u32} timed_out={u32}"),
+                                modes[mode], form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
     return result;
 }
 
@@ -34021,6 +34101,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_initializer_inferred_bounds);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_array_element_initializers);
     BUSTER_TEST_FIXTURE(arguments, c_test_runtime_compound_literal_overrides);
+    BUSTER_TEST_FIXTURE(arguments, c_test_local_typedef_for_declaration);
     BUSTER_TEST_FIXTURE(arguments, c_test_promoted_offsetof_static_tables);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_expression_brace_elision);
     BUSTER_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);

@@ -39751,7 +39751,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 first_entity.value < builder->parse.entity_count && builder->parse.entities[first_entity.value].kind == C_ENTITY_TYPEDEF;
             bool first_is_unbound_typedef_name =
                 first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID &&
-                c_parse_type_start_token(&builder->parse, builder->preprocess, c_ir_current_scope(builder), first);
+                c_parse_type_start_token(&builder->parse, builder->preprocess,
+                    c_parse_scope_for_token(&builder->parse, c_ir_current_scope(builder), index), first);
             if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end))
             {
                 CIrLabel* label = c_ir_label_find(labels, label_count, c_token_spelling(builder->preprocess.spelling_base, first));
