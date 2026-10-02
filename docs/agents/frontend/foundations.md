@@ -996,6 +996,8 @@ real-component projections of enumerators under prefix/postfix updates and
 nested complete groups. A separate canonical volatile scalar-literal neighbor
 requires one volatile read and two volatile stores (initialization and update),
 so place recovery cannot retain an artificial value read or erase its qualifier.
+Both the expression core and the exact scalar-literal completion copy the
+object's volatile flag before its initializer store.
 Independent sources run through syntax, semantic and
 canonical APIs on six native layouts, GNU17/GNU23 and both frontend forms. A
 combined executable retains all literal oracles in every native allocator mode

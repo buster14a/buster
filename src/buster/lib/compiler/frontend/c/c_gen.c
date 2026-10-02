@@ -34214,6 +34214,11 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             {
                 value = c_ir_emit_cast(builder, value, task.as.compound_literal.type, task.as.compound_literal.source);
                 IrValueId place = c_ir_emit_temporary(builder, task.as.compound_literal.type, task.as.compound_literal.source);
+                if (place.value < builder->function->value_count)
+                {
+                    IrType* literal_type = ir_type_from_id(&builder->program->types, task.as.compound_literal.type);
+                    builder->function->values[place.value].is_volatile = literal_type && literal_type->is_volatile;
+                }
                 if (value.value == IR_ID_UNDERLYING_INVALID || place.value == IR_ID_UNDERLYING_INVALID ||
                     !c_ir_emit_store_place(builder, place, task.as.compound_literal.type, value, task.as.compound_literal.source))
                 {
