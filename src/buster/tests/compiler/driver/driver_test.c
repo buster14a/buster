@@ -14047,11 +14047,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_addresses
                             ByteSlice reread = file_read(arena, output, (FileReadOptions){0});
                             BUSTER_TEST_RAW(arguments, reread.length == map.bytes.length &&
                                             memcmp(reread.pointer, map.bytes.pointer, map.bytes.length) == 0, context);
-                            printf("STATIC-LITERAL object row=%.*s dialect=%.*s form=%.*s sha256=%s payload=%u addend=%lld\n",
-                                   (int)expected->name.length, (char const*)expected->name.pointer,
-                                   (int)dialects[dialect].length, (char const*)dialects[dialect].pointer,
-                                   (int)forms[form].length, (char const*)forms[form].pointer,
-                                   (char const*)digest, expected->payload_length, (long long)expected->addend);
+                            arguments->show(arguments, S8("STATIC-LITERAL object row={S8} dialect={S8} form={S8} sha256={S8} payload={u32} addend={s64}\n"),
+                                            expected->name, dialects[dialect], forms[form],
+                                            (String8){ .pointer = digest, .length = SHA256_HEX_CAPACITY - 1 },
+                                            expected->payload_length, expected->addend);
                             file_map_unmap(map);
                         }
                         BUSTER_TEST(arguments, os_file_delete(output));
@@ -14305,12 +14304,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                                                 waited.platform_status == 0, diagnostic);
                                 BUSTER_TEST_RAW(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
-                                printf("STATIC-LITERAL native dialect=%.*s form=%.*s mode=%.*s optimization=%.*s status=%u timeout=%u\n",
-                                       (int)dialects[dialect].length, (char const*)dialects[dialect].pointer,
-                                       (int)forms[form].length, (char const*)forms[form].pointer,
-                                       (int)modes[mode].length, (char const*)modes[mode].pointer,
-                                       (int)optimizations[optimization].length, (char const*)optimizations[optimization].pointer,
-                                       waited.platform_status, (u32)waited.timed_out);
+                                arguments->show(arguments, S8("STATIC-LITERAL native dialect={S8} form={S8} mode={S8} optimization={S8} status={u32} timeout={u32}\n"),
+                                                dialects[dialect], forms[form], modes[mode], optimizations[optimization],
+                                                waited.platform_status, (u32)waited.timed_out);
                             }
                             BUSTER_TEST(arguments, os_file_delete(output));
                         }
@@ -14338,9 +14334,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                     bool is_clang = string_first_sequence(text, S8("clang")) != BUSTER_STRING_NO_MATCH;
                     available = version.result == PROCESS_RESULT_SUCCESS && !version.timed_out && is_clang == (compiler != 0);
                     BUSTER_TEST_RAW(arguments, available, text);
-                    printf("STATIC-LITERAL reference compiler=%.*s version=%.*s\n",
-                           (int)compilers[compiler].length, (char const*)compilers[compiler].pointer,
-                           (int)text.length, (char const*)text.pointer);
+                    arguments->show(arguments, S8("STATIC-LITERAL reference compiler={S8} version={S8}\n"), compilers[compiler], text);
                 }
                 else
                 {
@@ -14380,10 +14374,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                                                 waited.platform_status == 0, diagnostic);
                                 BUSTER_TEST_RAW(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
-                                printf("STATIC-LITERAL reference dialect=%.*s optimization=%.*s status=%u timeout=%u\n",
-                                       (int)reference_dialects[dialect].length, (char const*)reference_dialects[dialect].pointer,
-                                       (int)optimizations[optimization].length, (char const*)optimizations[optimization].pointer,
-                                       waited.platform_status, (u32)waited.timed_out);
+                                arguments->show(arguments, S8("STATIC-LITERAL reference dialect={S8} optimization={S8} status={u32} timeout={u32}\n"),
+                                                reference_dialects[dialect], optimizations[optimization],
+                                                waited.platform_status, (u32)waited.timed_out);
                             }
                             BUSTER_TEST(arguments, os_file_delete(output));
                         }
@@ -14398,6 +14391,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
         BUSTER_TEST(arguments, os_file_delete(input));
     }
     scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
 #endif
     return result;
 }
