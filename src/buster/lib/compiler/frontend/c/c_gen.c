@@ -52686,6 +52686,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
         bool unneeded_definition = (internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index];
+        // Without inline substitution, calls and addresses name the single
+        // external definition; this C99 inline-only body supplies none.
+        declaration.is_definition &= !inline_definition;
         // Every declaration of an entity shares one IrFunction: the first
         // earlier declaration of the entity that took a row names it. Search
         // the entity's own declarations rather than the name index, whose
@@ -52885,7 +52888,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
-        if ((internal || inline_definition) && !function_needed[declaration_index])
+        if (inline_definition || (internal && !function_needed[declaration_index]))
         {
             continue;
         }

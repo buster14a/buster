@@ -298,6 +298,10 @@ non-inline prototype and both GNU attribute directions. Its two-unit program
 checks the literal result 14, distinct private static helpers and equal
 function pointers. All four native allocator modes compile the units together
 and separately; Linux x86-64 also links the Buster objects with GCC and Clang
-and runs independent host-built versions of the same source recipe. This
-regression is published before the bounded emission repair so hosted evidence
-can show the duplicate definition before the fix.
+and runs independent host-built versions of the same source recipe.
+
+The existing per-entity declaration scan decides whether a body supplies an
+external definition. A referenced C99 inline-only body retains a canonical
+external declaration and emits no body; calls and addresses bind to the
+external definition from another unit. Unused bodies retain their existing
+dropped state. No inline optimizer, dependency walk or GNU policy is added.
