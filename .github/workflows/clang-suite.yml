@@ -47,9 +47,13 @@ jobs:
           clang --version > "$RUNNER_TEMP/clang-suite-evidence/clang.txt"
           clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/clang-suite-evidence/build-driver"
           sha256sum "$RUNNER_TEMP/clang-suite-evidence/build-driver" > "$RUNNER_TEMP/clang-suite-evidence/driver.sha256"
+      - name: Exercise native source and checker controls before building
+        run: |
+          "$RUNNER_TEMP/clang-suite-evidence/build-driver" test_clang_suite --self-test
+          "$RUNNER_TEMP/clang-suite-evidence/build-driver" test_clang_suite --inventory "$GITHUB_WORKSPACE/.clang-suite-upstream" "$RUNNER_TEMP/clang-suite-evidence/prebuild-inventory"
       - name: Build Release compiler through the native driver
         run: |
-          "$RUNNER_TEMP/clang-suite-evidence/build-driver" generate --ci --no-sanitize --no-fuzz
+          "$RUNNER_TEMP/clang-suite-evidence/build-driver" generate --ci --no-sanitize --no-fuzz --linker DEFAULT
           "$RUNNER_TEMP/clang-suite-evidence/build-driver" build --config Release -t ide
           sha256sum build/Release/ide > "$RUNNER_TEMP/clang-suite-evidence/ide.sha256"
       - name: Exercise inventory and preprocessing contracts
