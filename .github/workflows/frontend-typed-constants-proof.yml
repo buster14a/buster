@@ -1,0 +1,131 @@
+name: Frontend typed constant proof
+
+# Temporary diagnostic branch only. This is correctness evidence, not a
+# performance qualification or a replacement for the source PR's ordinary CI.
+on:
+  push:
+    branches: [codex/1570-typed-constants-proof]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-typed-constants-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BASELINE_SOURCE_SHA: 353c338398173120a36bbe18221d6ce032ec4cd3
+  BASELINE_SOURCE_TREE: 10468ad84d97d19a4f4b9c8afff5ecca004604b3
+  CANDIDATE_SOURCE_SHA: 532641ad9180a3dfd54e41b57ba6aa99b69cd505
+  BUSTER_TEST_JOBS: '2'
+
+jobs:
+  correctness:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && github.ref == 'refs/heads/codex/1570-typed-constants-proof' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout this diagnostic's exact scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          path: proof-source
+          persist-credentials: false
+      - name: Checkout pinned baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.BASELINE_SOURCE_SHA }}
+          path: baseline-source
+          persist-credentials: false
+      - name: Checkout pinned source candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.CANDIDATE_SOURCE_SHA }}
+          path: candidate-source
+          persist-credentials: false
+      - name: Record identities and provision matching sanitizer runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/frontend-proof"
+          {
+            printf 'diagnostic_sha=%s\nbaseline_sha=%s\ncandidate_sha=%s\n' "$GITHUB_SHA" "$BASELINE_SOURCE_SHA" "$CANDIDATE_SOURCE_SHA"
+            uname -a
+            clang --version
+            gcc --version
+            cmake --version
+            ninja --version
+            python3 --version
+            git -C proof-source rev-parse HEAD 'HEAD^{tree}'
+            git -C baseline-source rev-parse HEAD 'HEAD^{tree}'
+            git -C candidate-source rev-parse HEAD 'HEAD^{tree}'
+            sha256sum proof-source/tools/frontend_typed_constants_proof.py
+          } 2>&1 | tee "$RUNNER_TEMP/frontend-proof/identity.txt"
+          clang_major=$(clang -dumpversion | cut -d. -f1)
+          test "$clang_major" -ge 18
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes "libclang-rt-${clang_major}-dev"
+          dpkg-query -W "libclang-rt-${clang_major}-dev" >> "$RUNNER_TEMP/frontend-proof/identity.txt"
+      - name: Build baseline with the hosted Clang bootstrap exception
+        shell: bash
+        working-directory: baseline-source
+        run: |
+          set -euo pipefail
+          set -x
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/frontend-baseline-driver"
+          "$RUNNER_TEMP/frontend-baseline-driver" generate --build-directory build/frontend-proof-release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/frontend-baseline-driver" build --build-directory build/frontend-proof-release --config Release -t ide
+      - name: Require both original defects before candidate construction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B proof-source/tools/frontend_typed_constants_proof.py --phase baseline --source-root baseline-source --expected-sha "$BASELINE_SOURCE_SHA" --expected-tree "$BASELINE_SOURCE_TREE" --ide baseline-source/build/frontend-proof-release/Release/ide --evidence "$RUNNER_TEMP/frontend-proof"
+      - name: Build candidate Clang Release
+        id: clang_release
+        shell: bash
+        working-directory: candidate-source
+        run: |
+          set -euo pipefail
+          set -x
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/frontend-candidate-driver"
+          "$RUNNER_TEMP/frontend-candidate-driver" generate --build-directory build/frontend-proof-release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/frontend-candidate-driver" build --build-directory build/frontend-proof-release --config Release -t ide
+      - name: Candidate exact-source CLI, native execution and reference contrasts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B proof-source/tools/frontend_typed_constants_proof.py --phase candidate --source-root candidate-source --expected-sha "$CANDIDATE_SOURCE_SHA" --ide candidate-source/build/frontend-proof-release/Release/ide --evidence "$RUNNER_TEMP/frontend-proof"
+      - name: Candidate Clang Release frontend module
+        if: ${{ !cancelled() && steps.clang_release.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B proof-source/tools/frontend_typed_constants_proof.py --phase module --label clang-release --source-root candidate-source --expected-sha "$CANDIDATE_SOURCE_SHA" --ide candidate-source/build/frontend-proof-release/Release/ide --build-directory candidate-source/build/frontend-proof-release --config Release --evidence "$RUNNER_TEMP/frontend-proof"
+      - name: Candidate Clang sanitized Debug frontend module
+        if: ${{ !cancelled() && steps.clang_release.outcome == 'success' }}
+        shell: bash
+        working-directory: candidate-source
+        run: |
+          set -euo pipefail
+          set -x
+          "$RUNNER_TEMP/frontend-candidate-driver" generate --build-directory build/frontend-proof-sanitize --cc clang --ci --sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/frontend-candidate-driver" build --build-directory build/frontend-proof-sanitize --config Debug -t ide
+          python3 -B ../proof-source/tools/frontend_typed_constants_proof.py --phase module --label clang-sanitized-debug --source-root . --expected-sha "$CANDIDATE_SOURCE_SHA" --ide build/frontend-proof-sanitize/Debug/ide --build-directory build/frontend-proof-sanitize --config Debug --require-fatal-sanitizers --evidence "$RUNNER_TEMP/frontend-proof"
+      - name: Candidate GCC Release frontend module
+        if: ${{ !cancelled() && steps.clang_release.outcome == 'success' }}
+        shell: bash
+        working-directory: candidate-source
+        run: |
+          set -euo pipefail
+          set -x
+          "$RUNNER_TEMP/frontend-candidate-driver" generate --build-directory build/frontend-proof-gcc --cc gcc --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/frontend-candidate-driver" build --build-directory build/frontend-proof-gcc --config Release -t ide
+          python3 -B ../proof-source/tools/frontend_typed_constants_proof.py --phase module --label gcc-release --source-root . --expected-sha "$CANDIDATE_SOURCE_SHA" --ide build/frontend-proof-gcc/Release/ide --build-directory build/frontend-proof-gcc --config Release --evidence "$RUNNER_TEMP/frontend-proof"
+      - name: Retain exact-source evidence, including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-typed-constants-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frontend-proof
+          if-no-files-found: error
+          retention-days: 14
