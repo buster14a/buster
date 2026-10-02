@@ -2478,7 +2478,8 @@ CodegenAbi codegen_abi_for_target(Target target)
     case CPU_ARCH_WASM32:
     case CPU_ARCH_WASM64:
     case CPU_ARCH_BPFEL:
-        // WebAssembly and eBPF are emitted directly from canonical IR and do not
+    case CPU_ARCH_SPIRV_COMPUTE:
+        // WebAssembly, eBPF and SPIR-V are emitted directly from canonical IR and do not
         // use a native platform ABI or the native machine-code pipeline.
         return CODEGEN_ABI_COUNT;
         break;

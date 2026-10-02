@@ -120,6 +120,7 @@
 #include <buster/tests/compiler/jit/jit_test.h>
 #include <buster/tests/compiler/link/link_test.h>
 #include <buster/tests/compiler/gpu/gpu_test.h>
+#include <buster/tests/compiler/spirv/spirv_test.h>
 #include <buster/tests/compiler/driver/driver_test.h>
 #include <buster/tests/compiler/driver/object_path_test.h>
 
@@ -181,6 +182,7 @@
 #include <buster/tests/compiler/jit/jit_test.c>
 #include <buster/tests/compiler/link/link_test.c>
 #include <buster/tests/compiler/gpu/gpu_test.c>
+#include <buster/tests/compiler/spirv/spirv_test.c>
 #include <buster/tests/compiler/driver/driver_test.c>
 #include <buster/tests/compiler/driver/object_path_test.c>
 #if BUSTER_CPU_ARCH_X86_64
@@ -883,6 +885,7 @@ typedef enum TestId
     TEST_ID_JIT,
     TEST_ID_LINK,
     TEST_ID_GPU_PIPELINE,
+    TEST_ID_SPIRV_COMPUTE,
     TEST_ID_COMPILER_DIAGNOSTIC,
     TEST_ID_COMPILER_DRIVER,
     TEST_ID_COMPILER_DRIVER_OBJECT_PATH,
@@ -948,6 +951,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_JIT] = {S8_INITIALIZER("jit_tests"), &jit_tests},
     [TEST_ID_LINK] = {S8_INITIALIZER("link_tests"), &link_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_GPU_PIPELINE] = {S8_INITIALIZER("gpu_pipeline_tests"), &gpu_pipeline_tests},
+    [TEST_ID_SPIRV_COMPUTE] = {S8_INITIALIZER("spirv_compute_tests"), &spirv_compute_tests},
     [TEST_ID_COMPILER_DIAGNOSTIC] = {S8_INITIALIZER("compiler_diagnostic_tests"), &compiler_diagnostic_tests, true},
     [TEST_ID_COMPILER_DRIVER] = {S8_INITIALIZER("compiler_driver_tests"), &compiler_driver_tests, true},
     [TEST_ID_COMPILER_DRIVER_OBJECT_PATH] = {S8_INITIALIZER("compiler_driver_object_path_tests"), &compiler_driver_object_path_tests, !BUSTER_ANDROID && !BUSTER_IOS},
