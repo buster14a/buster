@@ -76,8 +76,8 @@
     },
     {
       "source": "src/buster/lib/compiler/ir/model.h",
-      "bytes": 20518,
-      "sha256": "f52f96d04ffe501d425200fbd2b728104ec52f894b8215c8f82dc54034eb456b"
+      "bytes": 20782,
+      "sha256": "f855913d5619d9aed51af9a14e7b451f36afdef0832c5335dd46cab0469f0930"
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.c",
