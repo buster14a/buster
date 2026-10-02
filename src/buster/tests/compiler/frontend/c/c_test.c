@@ -31040,6 +31040,9 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_gnu_omitted_conditional_source = S8_INI
     "    if (nested != 4294967295.0 || first_calls != 1) result = 13;\n"
     "    unsigned high = 0x80000000U;\n"
     "    if ((1 ? (high ?: -1) : 0) < 0 || ((high ?: -1) ?: 0) < 0) result = 14;\n"
+);
+
+BUSTER_GLOBAL_LOCAL String8 const c_test_gnu_omitted_conditional_source_tail = S8_INITIALIZER(
     "    int object = 3; int *pointer = &object;\n"
     "    int *picked = pointer++ ?: 0;\n"
     "    if (picked != &object || pointer != &object + 1) result = 15;\n"
@@ -31133,7 +31136,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_omitted_conditional(UnitTestArgume
             u32 form = profile & 1;
             CPreprocessDialect dialect = dialects[profile / 2];
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-            CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_gnu_omitted_conditional_source,
+            String8 source_parts[] = {c_test_gnu_omitted_conditional_source, c_test_gnu_omitted_conditional_source_tail};
+            String8 source = string_join_arena(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
                 (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = dialect});
             CParserResult syntax = c_parse_ast(temporary.arena, tokens);
             CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("gnu-omitted-conditional.c"), tokens, syntax, target,
@@ -31191,12 +31196,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_omitted_conditional(UnitTestArgume
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     TemporalArena source_temporary = scratch_begin(&arguments->arena, 1);
+    String8 source_parts[] = {c_test_gnu_omitted_conditional_source, c_test_gnu_omitted_conditional_source_tail};
+    String8 source = string_join_arena(source_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
     String8 source_path = buster_test_temporary_path(source_temporary.arena, S8("gnu-omitted-conditional"), S8(".c"));
     String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                            S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
-    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_test_gnu_omitted_conditional_source))))
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
         for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
         {
