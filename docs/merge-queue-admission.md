@@ -9,9 +9,10 @@ and an initial build limit of one with a merge limit of one, ALLGREEN, and
 merge commits. The saved response passed `check-ruleset` at main
 `6929d847fbab0014284f698cd235ddb570d60e9d`. The live limit was later raised to
 20. On 2026-09-29, #1805 measured that limit exhausting the 50-job macOS runner
-ceiling ([ci-runner-queue.md](ci-runner-queue.md)); the checked-in ruleset now
-describes a build limit of 4. Verify live settings before relying on it. The
-checker has no write API.
+ceiling ([ci-runner-queue.md](ci-runner-queue.md)) and the policy was cut to 4.
+After #1986 halved `ci.yml`'s macOS jobs, the checked-in ruleset now describes
+a build limit of 6. Verify live settings before relying on it. The checker has
+no write API.
 
 On 2026-09-24, the administrator intentionally added Repository admin (role 5)
 and `davidgmbb` (user 39247043) as `always` bypass actors. The repository
@@ -30,17 +31,18 @@ fixtures do not establish GitHub's live synthetic-commit shape or queue behavior
 ## One admission owner, no branch-freshness requirement
 
 GitHub's native merge queue owns order, synthetic heads and rebuilding. Configure
-`max_entries_to_build: 4`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
+`max_entries_to_build: 6`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
 `min_entries_to_merge_wait_minutes: 0`, `check_response_timeout_minutes: 360`,
 `grouping_strategy: ALLGREEN`, and `merge_method: MERGE`. Retain
 `strict_required_status_checks_policy: false`. A clean feature branch does not
 need to be manually updated merely because main advanced. The queue, not the
 feature author, constructs and validates the combined candidate.
 
-Build concurrency permits up to 4 queued candidates to run speculative
-combined-head validation concurrently; it does not authorize 4 merges. Each
-`ci.yml` group needs eight macOS jobs, so four groups hold at most 32 of the 50
-observed macOS runners and leave room for pull-request and main validation. A
+Build concurrency permits up to 6 queued candidates to run speculative
+combined-head validation concurrently; it does not authorize 6 merges. Since
+#1986 each `ci.yml` group needs four macOS jobs, so six groups hold at most 24
+of the 50 observed macOS runners and leave room for pull-request and main
+validation. A
 later candidate may have the preceding unmerged synthetic commit as its base.
 Both admission jobs keep that exact group pending until the base lands on main;
 they never grant success while the predecessor is speculative. The merge limit
@@ -137,7 +139,8 @@ for the predecessor and the six gates, and did almost no verification. The
   Every pass enumerates the live `gh-readonly-queue/main/*` refs itself and never
   trusts a delivery payload. Duplicate, out-of-order, missed and coalesced events
   therefore converge to the same result. One global concurrency group
-  serializes passes; each job has a 10-minute limit and never sleeps.
+  serializes passes; each job has a 10-minute limit and never waits on prerequisites.
+  Only transient GET recovery uses bounded backoff, as described below.
 - **Trust.** The job checks out live `main` and runs only that code. It fetches
   group commits as data and never checks out or executes them. The job has read
   scopes plus `checks: write`, and `CheckWriter` can only create or update a
@@ -212,6 +215,46 @@ tracked on #1807.
 
 ## Exact identities and fail-closed evidence
 
+### API read recovery and retired groups (#1983)
+
+Both admission clients use `github_read_json` from the already trusted
+`native_retirement_integration.py`. A GET has at most four attempts within a
+30-second elapsed recovery budget, with 1/2/4-second backoff. The helper retries
+500/502/503/504, 429, connection failures and timeouts. A 403 retries only with
+rate-limit evidence. `Retry-After` (seconds or HTTP date) and rate-limit reset
+timing are respected; a delay outside the remaining budget leaves the read
+unresolved instead of retrying early. Other 4xx and malformed JSON fail closed.
+POST/PATCH publication remains single-attempt. Diagnostics name the operation,
+repository-relative API path, status and attempt count without response bodies
+or credentials.
+
+A queue-ref GET additionally retries a 404 within that budget. Persistent 404
+does not itself prove retirement: a successful `git/matching-refs` read must
+prove that the exact ref is absent or names a different head. A failed,
+malformed or ambiguous confirmation remains unresolved. A successful exact-ref
+read showing replacement also retires only the old head. GitHub owns rebuilding;
+no result is carried into a replacement group.
+
+The reconciler records confirmed retirement as `retired`, publishes no admission
+check for that observation, and continues the sweep. Retired groups alone do
+not fail the maintenance run. An evidence/checks GET returning 404 is likewise
+classified as retired only after a fresh exact-ref confirmation; otherwise it
+remains `retry`. Exhausted native-gate API recovery remains `retry`, rather than
+being converted into a terminal policy rejection by the subprocess caller.
+Actual policy or required-check failures retain their terminal denial.
+
+Legacy `check-group` and `wait-base` terminate a retired group's wait with a
+structured `status=retry`, `reason=group-retired` and exit 75. Exhausted API
+reads use the same non-success exit with `reason=api-read`. An obsolete required
+job is never turned green, and downstream native validation cannot proceed
+from that wait. These old jobs can therefore still appear failed for a group
+GitHub has already removed; the distinction is explicit in the report. The
+reconciler maintenance pass is the route that can finish successfully without
+authorizing the obsolete group.
+
+This is a source-only backwards-compatible authority bootstrap: it changes no
+generated state, support manifest, ruleset, required checks or writer grant.
+
 For a group, both admission workflows check out live `main` as independently
 trusted policy, never the speculative `merge_group.base_sha` or candidate-modified
 authority code. The collector fetches the immutable group object without
@@ -265,7 +308,7 @@ group base still equals live main and the queue ref still names this head, and v
 the active ruleset again. The ruleset validator retains the six original checks,
 preserves independent retirement admission, adds the exact-group gate, rejects
 visible bypass inventories other than the two reviewed actors and strict branch updates, and
-requires the exact 4-build/one-merge policy. The success artifact records each
+requires the exact 6-build/one-merge policy. The success artifact records each
 required workflow's run ID, run attempt and job ID. These are read-only checks;
 GitHub's enforced queue still owns the final atomic admission/rebuild decision.
 
@@ -283,9 +326,20 @@ verified actor inventory.
 The exact two-actor bypass configuration is an administrator-audited deployment
 invariant, not something the read-only workflow can independently prove.
 `check-ruleset` remains strict: a saved administrator response must explicitly
-contain both actors with `always` mode and no others. Audit that response at activation, after every
-ruleset change, and after any emergency recovery. Do not give the admission
-workflow ruleset-write credentials to expose this field.
+contain both actors with `always` mode and no others. When present,
+`current_user_can_bypass` may be `never`, `always` or `pull_requests_only` in
+this offline administrator audit; unknown values fail. The administrator
+must read back the response using an account covered by the reviewed actors
+(Repository admin role 5 or `davidgmbb`). The saved JSON reports the reader's
+capability but does not identify or authenticate the reader; `check-ruleset`
+validates its policy fields, not the provenance of a local file. Record the
+reader account alongside the deployment audit. The read-only admission path
+still rejects every returned caller capability other than `never`, even if
+the full reviewed actor inventory is visible.
+
+Audit that response at activation, after every ruleset change, and after any
+emergency recovery. Do not give the admission workflow ruleset-write credentials
+to expose this field.
 
 The first live group for #956 exposed the former bug: treating a hidden list as
 a standing bypass. The repair preserves trusted-base execution. Consequently,
@@ -348,14 +402,14 @@ The merge-group workflow runs admission code from the main revision checked out
 as trusted policy, so a PR
 changing the repository queue contract must first pass the policy already on
 `main`. Keep the live `Build concurrency` field in ruleset `22537199` at the
-value the trusted policy accepts (20 before #1805) while the policy PR passes
-and merges through the existing queue with all required checks; do not bypass
-admission or edit the live value first. Resolve the exact resulting `main`
-commit before changing the live setting to `4`. Read the ruleset back, run
-`check-ruleset` on the saved response and observe `Main integration admission`
-accept a new exact merge group. Between the PR merge and the live edit, the
-trusted policy expects `4` while GitHub still reports `20`, so new groups fail
-closed; groups already dispatched keep their actual outcomes. Do not bulk-cancel
+value the trusted policy accepts (20 before #1805, 4 before the raise to 6)
+while the policy PR passes and merges through the existing queue with all
+required checks; do not bypass admission or edit the live value first. Resolve
+the exact resulting `main` commit before changing the live setting to the new
+value (`6`). Read the ruleset back, run `check-ruleset` on the saved response
+and observe `Main integration admission` accept a new exact merge group.
+Between the PR merge and the live edit, the trusted policy expects the new
+value while GitHub still reports the old one, so new groups fail closed; groups already dispatched keep their actual outcomes. Do not bulk-cancel
 or reorder the queue.
 Only the build limit changes; leave the merge limit, grouping strategy, merge
 method, timeout, checks, non-strict freshness and bypass settings untouched.

@@ -2,8 +2,26 @@
 
 [Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
+
+Canonical fallback identity casts of structs and unions copy the complete
+resolved layout between value frame homes on x86-64 and AArch64. The frontend
+keeps these casts on aggregate comma results to preserve their non-lvalue
+semantics. `compiler_driver_test_aggregate_comma` covers calls, initializers,
+returns, partial eightbytes and tail fields with canonical FAST disabled,
+both frontend forms and all four allocators; desktop lanes execute the native
+fixture as well as compiling both architectures.
+
 ## Machine instruction selection and scheduling
 
+- System V indirect variadic calls keep the vector-register count in AL
+  through the call instruction. The canonical emitter reloads the callee from
+  its frame home into caller-saved R10 after argument staging; the MIR allocators
+  reserve the same indirect-call register. `compiler_driver_test_sysv_indirect_variadic`
+  checks counts 0/1/8 and floating arguments crossing the register/stack boundary
+  against aligned foreign assembly and host-compiled `va_arg` callees. It covers
+  both frontend forms and every allocator on all four System V x86-64 targets;
+  matching desktop hosts execute the mixed objects.
 - `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
   memory-effect, fixed-register, tie, early-clobber, register-clobber, and
   implicit-vector-scratch membership in `MachineOpcodeInfo`, accessed through the
@@ -128,6 +146,36 @@
   variadic signature checks the general incoming-address expansion past 4095
   bytes. Darwin callers extend narrow integer register arguments to 32 bits
   before physical-register staging, as required by its public ABI.
+- The x86-64 encoder applies the verified local rewrites of the
+  [machine rewrite campaign](../machine-rewrite-campaign.md), each an encoding
+  choice under a precondition it decides locally: frame chunks use disp8
+  when the final RBP displacement is a nonzero signed byte; an allocator
+  `COPY` onto its own register and a `RELOAD`/`TEMP_RELOAD` right after the
+  64-bit spill of the same register to the same offset (same block) emit
+  nothing; `MOV_RI` rows and `REMATERIALIZE` edits of zero use `XOR r32, r32`
+  where `machine_x64_flags_dead_at` proves no reader observes the flags;
+  System V frames without callee-saved pushes return through `LEAVE`. The
+  flag proof treats only `CMP`, `TEST`, two-operand ALU rows and `NEG` as
+  killers and only `MACHINE_OPCODE_ROW_FLAGS_USE` rows and inline assembly as
+  readers; keep new flag readers marked, or the proof becomes unsound. New
+  forms come from metadata-published fixed templates, never literal bytes.
+- x86-64 blocks are emitted in index order, and the encoder lays out a
+  block's final terminator against that order: a `JMP` to block `index + 1`
+  emits nothing; a `JCC` whose fallthrough is next emits only its `Jcc`, and
+  one whose taken block is next branches on the inverted condition (x86
+  condition nibbles pair at bit 0) to its fallthrough. Allocator edits after
+  the terminator, an asm-goto landing addend on the `JMP`, or a `JCC` payload
+  that is not a plain condition nibble keep the two-branch form. Block order
+  therefore affects size, never semantics.
+- x86-64 `COPY_FRAME_FROM_FRAME`, `COPY_FRAME_FROM_PTR` and
+  `COPY_PTR_FROM_FRAME` move whole sixteen-byte chunks through XMM0 with
+  `MOVUPS` (RBP-frame sides from patched fixed templates), then 8/4/2/1-byte
+  general-register tails, ascending, each chunk loaded whole before it is
+  stored. That plan is exact for disjoint or identical objects, which C
+  assignment requires (C11 6.5.16.1p3), and for every overlap where the
+  former eight-byte plan was exact. The rows declare XMM0 clobbered and join
+  the implicit vector-state chain; selection must keep placing copies before
+  XMM argument staging and after result capture.
 - x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
   0 tied to operand 1. Allocators satisfy the physical two-address constraint;
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.
@@ -152,6 +200,13 @@
   on assignment and read only after the pin-map membership check. Instruction
   masks and final pin counts use the same list. The global pin-map bridge is
   scratch-owned and is not retained by the returned placement.
+- FAST/QUALITY never store a recreatable value. A single-definition constant
+  reloads as `MACHINE_EDIT_REMATERIALIZE` of its immediate, and a non-mutable
+  value whose only definition is the target's `frame_address_opcode` row reloads
+  as `MACHINE_EDIT_REMATERIALIZE_FRAME`, naming the value; both encoders replay
+  the defining row's slot address (`machine_x64_emit_exact_frame_address`,
+  `machine_a64_emit_frame_address`). This is sound because a slot whose address
+  a row takes keeps its own storage for the whole function.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
   giving every spilled value and every stack slot its own bytes. Selector slots
   close their touched rows through a block-level liveness fixed point over
@@ -175,7 +230,11 @@
   when no call in the function returns twice: a `longjmp` can re-enter the frame
   at a row no machine edge reaches. Address-taken, volatile-tainted,
   inline-assembly, variadic, outgoing-argument and unproven-form objects keep
-  storage of their own. Debug records may name slots but never decide layout.
+  storage of their own. With an optional `stack_slot_memory_flags` array, only
+  `MACHINE_STACK_SLOT_MEMORY_NONVOLATILE` admits an object to reuse; zero is
+  unknown and keeps dedicated storage. An absent array preserves manual
+  fixtures' existing reuse subject to the other lifetime and ownership guards.
+  Debug records may name slots but never decide layout.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
@@ -259,12 +318,16 @@
   or CFG blocks. The extended-precision contract retains all 64 integer bits;
   arbitrary rounding-control modes and the complete control word are preserved.
 - System V x86-64 sixteen-byte vector wrappers retain SSE/SSEUP as one
-  sixteen-byte VECTOR ABI part. Union merging can split that pair into two
-  independent parts; an orphan SSEUP becomes SSE. Canonical classification
-  publishes no FLOAT_UP parts. MIR keeps these aggregates in frame slots,
-  with explicit XMM definition/use operands for whole-register argument
-  transfers and the existing XMM0 result bridges. Variadic prologues save
-  all sixteen XMM bytes, and each VECTOR read consumes one FP cursor slot.
+  sixteen-byte VECTOR ABI part. Android IEEE binary128 scalar values and
+  one-member wrappers use the same XMM contract. Union merging can split that
+  pair into two independent parts; an orphan SSEUP becomes SSE. Canonical
+  classification publishes no FLOAT_UP parts. MIR keeps these values in frame
+  slots, with explicit XMM definition/use operands for whole-register argument
+  transfers and the existing XMM0 result bridges. `machine_x64_type_is_f128`
+  admits only Android's exact sixteen-byte scalar layout; constants write both
+  limbs, CFG joins use the canonical pair mapping, and ordinary loads/stores
+  copy all sixteen bytes. Variadic prologues save all sixteen XMM bytes, and
+  each VECTOR read consumes one FP cursor slot.
   The shared direct oracle also copies both register-save/overflow halves
   and aligns the overflow cursor after an eight-byte stack argument.
   `basic_c_sysv_sseup.c` requires strict MIR across four SysV targets, all
@@ -421,6 +484,15 @@
   integer staging pass, after all XMM bridges, and omit the System V AL count.
   Cross-compiler regressions cover both call directions, register exhaustion,
   copied lists, small/indirect aggregates, and hidden result pointers.
+- x86-64 hidden aggregate-result pointers satisfy the return type's natural
+  alignment for direct and indirect calls, including discarded results. Internal
+  SSA aggregate homes retain eight-byte alignment. Stronger result alignment,
+  including sixteen, uses checked private backing slack and ordinary MIR pointer
+  rounding; used results copy exact object bytes back after the call. The registered
+  `machine_test_x64_result_alignment` covers eight-aligned controls and
+  16/32/64/128-byte results in both frontend forms and all allocators. Its native
+  System V observer reads the raw hidden pointer and performs an aligned SSE
+  store independently of Buster's aggregate-store choices.
 - Windows/UEFI x86-64 indirect aggregate arguments occupy one pointer slot.
   Callers copy exact value bytes after their shadow and stack-argument area.
   Copies meet both the sixteen-byte floor and the declared type alignment;
@@ -500,7 +572,8 @@
   fixture and tests independent binary128 byte cases under every allocator.
   Native Linux AArch64 exchanges producer/consumer roles with the configured
   host compiler and checks all rounding modes, FPCR/FPSR and sentinels.
-  Binary128 scalar signatures, arithmetic and truncation are separate gaps.
+  Binary128 arithmetic and rounding conversions are frontend runtime calls;
+  see the wide-float frontend guide.
 - AArch64 128-bit multiplication combines the low-limb product, its generated
   UMULH high half, and the two cross products. Negation propagates the low
   limb's borrow. Variable shifts use masks at the 64-bit boundary and suppress
@@ -738,16 +811,18 @@
   selection is not implemented. Mach-O, COFF, UEFI, eBPF and Wasm keep their
   existing accepted no-op behavior. `-fno-pic` clears the PIC model;
   `-fno-pie` remains an accepted no-op.
-- The built-in linker resolves both forms for the image it writes, which binds
-  every name in it: `PLT32` patches the same rel32 `PC32` does, and a GOT load
-  is relaxed back into the `lea` it would have been (`link_x86_relax_got_load`),
-  the same relaxation `ld` performs for a `GOTPCRELX` it can resolve. The ELF
-  reader takes `R_X86_64_GOTPCREL`, `GOTPCRELX` and `REX_GOTPCRELX` as one
-  kind for that reason, so a `-fPIC` object -- this compiler's or clang's --
-  links here. An instruction shape the relaxation does not recognize fails the
-  link by name rather than being rewritten. It relaxes the two indirect
+- The built-in linker binds every name in its image: `PLT32` patches the same
+  rel32 `PC32` does. The ELF reader preserves `GOTPCREL`, `GOTPCRELX`,
+  `REX_GOTPCRELX` and `CODE_4_GOTPCRELX` as distinct relocation kinds.
+  `link_x86_relax_got_reference` carries their psABI spelling and site to
+  `buster_x86_metadata_relax_got_reference`, which derives and validates the
+  length-preserving replacement and its field descriptor. The relaxable kinds
+  authorize conversion; plain `GOTPCREL` retains a GOT reference. An
+  unrecognized site fails by name rather than guessing replacement bytes.
+  It relaxes the two indirect
   thread-local models back to local-exec for the same reason
-  (`link_elf_relax_thread_local`).
+  (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
+  sequence too (`link_elf_relax_local_dynamic`).
 
 ## Wide integer conversion rounding
 

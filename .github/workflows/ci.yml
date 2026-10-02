@@ -2,7 +2,9 @@ name: Buster CI
 
 # Build/test policy remains in build.c. Two shards per desktop lane, five
 # independent native mode lanes, three Unix differential lanes and two mobile
-# lanes retain full coverage. See docs/ci-suite-partition.md for suite ownership
+# lanes retain full coverage. Manual split-layout measurements replace the
+# combined checks shard on Linux x86-64/AArch64 and Windows x86-64 with three owners.
+# See docs/ci-suite-partition.md for suite ownership
 # and measurement; docs/ci-combination-shards.md describes the internal
 # combination partition; docs/ci-workflow-audit.md documents cache boundaries
 # and reproduction.
@@ -39,6 +41,7 @@ env:
   # Sanitizer correctness policy belongs to generated test commands; keeping a
   # second workflow default would conceal precedence regressions.
   BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
+  BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && 'split' || 'combined' }}
 
 jobs:
   lint:
@@ -65,6 +68,8 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 tests/action_pins_test.py
+          python3 -B tools/ci_checks_qualification_test.py -v
+          python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
         shell: bash
@@ -131,10 +136,44 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  reuse:
+    name: Main CI reuse decision
+    if: ${{ github.server_url == 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      reuse: ${{ steps.admit.outcome == 'success' && steps.admit.outputs.reuse == 'true' && steps.retain.outcome == 'success' }}
+      receipt_digest: ${{ steps.admit.outputs.receipt_digest }}
+      receipt: ${{ steps.admit.outputs.receipt }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify exact queue execution before scheduling main jobs
+        id: admit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tools/main_ci_reuse.py decide --output "$RUNNER_TEMP/main-ci-reuse.json"
+      - name: Retain main CI reuse decision
+        id: retain
+        if: always()
+        uses: ./.github/actions/native-artifact-upload
+        with:
+          label: main-ci-reuse
+          label_title: Main CI reuse
+          name: main-ci-reuse-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/main-ci-reuse.json
+          if-no-files-found: error
+          retention-days: 7
+
   test:
-    # Queue desktop shards wait for cheap workflow lint. Ordinary runs still
+    # Desktop shards wait for the main reuse decision and cheap queue lint. Ordinary runs still
     # execute for diagnostics even when lint fails.
-    needs: lint
+    needs: [lint, reuse]
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -153,7 +192,8 @@ jobs:
       fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         lane: [linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64, windows-aarch64]
-        shard: [release, checks]
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && '["release", "checks", "sanitized-debug", "sanitized-release", "portability"]' || '["release", "checks"]') }}
+        exclude: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && '[{"lane":"linux-x86_64","shard":"checks"},{"lane":"linux-aarch64","shard":"checks"},{"lane":"windows-x86_64","shard":"checks"},{"lane":"macos-aarch64","shard":"sanitized-debug"},{"lane":"macos-aarch64","shard":"sanitized-release"},{"lane":"macos-aarch64","shard":"portability"},{"lane":"windows-aarch64","shard":"sanitized-debug"},{"lane":"windows-aarch64","shard":"sanitized-release"},{"lane":"windows-aarch64","shard":"portability"}]' || '[]') }}
         include:
           - name: Linux x86-64
             lane: linux-x86_64
@@ -273,75 +313,70 @@ jobs:
 
       - name: Workflow tool regression tests
         id: workflow_tools
-        if: ${{ matrix.shard == 'release' && steps.zig_cache_policy.outcome == 'success' }}
-        # Thirteen suites include native fixture builds and process launches.
+        if: ${{ matrix.shard == 'release' && needs.reuse.outputs.reuse != 'true' && steps.zig_cache_policy.outcome == 'success' }}
+        # Native fixture builds and process launches; see docs/ci-bootstrap-wrapper.md.
         # Windows ARM64 exceeded 120s in run 35733354799; Intel macOS
         # exhausted 120s in run 35934837738 despite passing suite summaries.
         timeout-minutes: ${{ (matrix.os == 'windows' || matrix.os == 'macos') && 5 || 2 }}
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/buster-ci"
-          workflow_tools_started=$SECONDS
-          run_suite() {
-            local suite=$1 log=$2 started=$SECONDS status
-            printf 'SUITE_START path=%s at=%s\n' "$suite" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            if "$BUSTER_CI_PYTHON" "$suite" -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/$log"; then
-              printf 'SUITE_END path=%s result=success elapsed_seconds=%s at=%s\n' \
-                "$suite" "$((SECONDS - started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            else
-              status=$?
-              printf 'SUITE_END path=%s result=failure status=%s elapsed_seconds=%s at=%s\n' \
-                "$suite" "$status" "$((SECONDS - started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-              return "$status"
-            fi
-          }
-          run_suite tests/ci_tools_test.py workflow-tools.log
-          run_suite tools/ci_admission_test.py ci-admission.log
-          run_suite tools/ci_zig_test.py zig-installer-test.log
-          run_suite tools/ci_zig_cache_test.py zig-cache-policy-test.log
-          run_suite tools/ci_android_sdk_test.py android-sdk-installer-test.log
-          run_suite tools/analyzer_selection_test.py analyzer-selection.log
-          run_suite tools/coverage_manifest_test.py coverage-manifest.log
-          run_suite tools/matrix_shard_test.py matrix-shard.log
-          run_suite tools/differential_ci_policy_test.py differential-ci-policy.log
-          run_suite tools/native_producer_profile_test.py native-producer-profile.log
-          run_suite tools/native_target_compatibility_test.py native-target-compatibility.log
-          run_suite tools/ci_llvm_test.py llvm-installer-test.log
-          run_suite tools/ci_configure_evidence_test.py configure-evidence-test.log
-          run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
-          run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
-          run_suite tools/ci_native_observation_test.py native-observation-test.log
-          run_suite tools/ci_sanitize_logs_test.py sanitize-logs-test.log
-          run_suite tools/github_ci_time_test.py ci-queue-timing-test.log
-          run_suite tools/ci_vs_dev_shell_test.py vs-dev-shell-test.log
+          # Independent suites share three lanes, slowest first (#2021).
+          suites=(
+            tools/ci_vs_dev_shell_test.py=vs-dev-shell-test.log
+            tools/coverage_manifest_test.py=coverage-manifest.log
+            tools/matrix_shard_test.py=matrix-shard.log
+            tools/matrix_unit_observation_test.py=matrix-unit-observation.log
+            tests/ci_tools_test.py=workflow-tools.log
+            tools/bootstrap_wrapper_cases_test.py=bootstrap-case-controls.log
+            tools/ci_matrix_phases_test.py=matrix-phases-test.log
+            tools/ci_native_observation_test.py=native-observation-test.log
+            tools/native_target_compatibility_test.py=native-target-compatibility.log
+            tools/ci_admission_test.py=ci-admission.log
+            tools/main_ci_reuse_test.py=main-ci-reuse.log
+            tools/ci_zig_test.py=zig-installer-test.log
+            tools/ci_zig_cache_test.py=zig-cache-policy-test.log
+            tools/ci_android_sdk_test.py=android-sdk-installer-test.log
+            tools/analyzer_selection_test.py=analyzer-selection.log
+            tools/differential_ci_policy_test.py=differential-ci-policy.log
+            tools/native_producer_profile_test.py=native-producer-profile.log
+            tools/ci_llvm_test.py=llvm-installer-test.log
+            tools/ci_configure_evidence_test.py=configure-evidence-test.log
+            tools/ci_matrix_phases_bridge_test.py=matrix-phases-bridge-test.log
+            tools/ci_sanitize_logs_test.py=sanitize-logs-test.log
+            tools/github_ci_time_test.py=ci-queue-timing-test.log
+            tools/ci_workflow_tools_test.py=workflow-tools-runner-test.log
+          )
           if [[ '${{ matrix.os }}' == macos ]]; then
-            run_suite tools/ci_runner_resources_test.py runner-resources-test.log
+            suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)
           fi
-          printf 'WORKFLOW_TOOLS_END result=success elapsed_seconds=%s at=%s\n' \
-            "$((SECONDS - workflow_tools_started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          "$BUSTER_CI_PYTHON" tools/ci_workflow_tools.py --jobs 3 --log-directory "$RUNNER_TEMP/buster-ci" "${suites[@]}"
 
       # Wrapper integration starts many real shells. It must not consume the
       # policy suites' shared budget; see docs/ci-bootstrap-wrapper.md.
       - name: Bootstrap wrapper regression tests
         id: bootstrap_wrappers
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
         timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}
         shell: bash
         run: |
           set -euo pipefail
           # Preserve the wrapper lifecycle guard on every shard, but run its
           # expensive regression suite only in its canonical Release owner.
-          if [[ "$BUSTER_MATRIX_SHARD" == checks ]]; then
+          if [[ "$BUSTER_MATRIX_SHARD" != release ]]; then
             printf 'BOOTSTRAP_WRAPPERS owned-by-release-shard\n'
             exit 0
           fi
           mkdir -p "$RUNNER_TEMP/buster-ci"
-          "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 2 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          else
+            "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+          fi
 
       - name: Install mold
         id: mold
-        if: ${{ !cancelled() && matrix.os == 'linux' && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.os == 'linux' && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -449,7 +484,7 @@ jobs:
       # image's Clang; macOS keeps Xcode's AppleClang. See docs/ci-llvm.md.
       - name: Install latest stable LLVM
         id: llvm
-        if: ${{ !cancelled() && matrix.os != 'macos' && steps.checkout.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.os != 'macos' && steps.checkout.outcome == 'success' }}
         timeout-minutes: 15
         shell: bash
         env:
@@ -463,7 +498,7 @@ jobs:
 
       - name: Application compilers
         id: tools_unix
-        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.zig_cache_evidence.outcome == 'success' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.platform == 'unix' && steps.zig_cache_evidence.outcome == 'success' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -475,7 +510,8 @@ jobs:
         id: combinations_unix
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
-        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
+          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -487,10 +523,12 @@ jobs:
 
       - name: Combination matrix (Windows)
         id: combinations_windows
-        if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' && steps.llvm.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' && steps.llvm.outcome == 'success' }}
         shell: powershell
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
+          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
+          BUSTER_MATRIX_TEST_ADMISSION: ${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && matrix.shard == 'checks' && github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' && 'all-builds' || 'overlap' }}
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
           CLANG_ARCH: ${{ matrix.clang_arch }}
@@ -518,7 +556,7 @@ jobs:
       # Keep raw diagnostics outside build/ so failed attempts survive cleanup.
       - name: Collect CMake configure evidence
         id: configure_evidence
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && steps.checkout.outcome == 'success' }}
         timeout-minutes: 2
         shell: bash
         run: |
@@ -526,7 +564,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_configure_evidence.py --build-root build --output "$RUNNER_TEMP/buster-ci/configure" --profile-requested "$BUSTER_CMAKE_PROFILE"
 
       - name: Desktop result and reproduction
-        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && always() && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
@@ -540,6 +578,15 @@ jobs:
           BUSTER_CI_COVERAGE_PLATFORM: ${{ matrix.os }}
           BUSTER_CI_COVERAGE_ARCH: ${{ matrix.arch }}
         run: '"$BUSTER_CI_PYTHON" tools/ci_summary.py'
+
+      - name: Report reused desktop validation
+        if: ${{ !cancelled() && needs.reuse.outputs.reuse == 'true' && steps.zig_cache_evidence.outcome == 'success' }}
+        shell: bash
+        env:
+          SOURCE_RECEIPT_DIGEST: ${{ needs.reuse.outputs.receipt_digest }}
+        run: |
+          set -euo pipefail
+          printf 'Desktop build/test validation reused from the exact queue execution. This job ran only the main Zig cache lifecycle. Receipt digest: %s\n' "$SOURCE_RECEIPT_DIGEST" | tee "$RUNNER_TEMP/buster-ci/desktop-reuse.txt" >> "$GITHUB_STEP_SUMMARY"
 
       # Logs may contain symlinks into build/.buster-cache. upload-artifact
       # follows those links and can fail on intentionally unreadable cache entries.
@@ -570,9 +617,10 @@ jobs:
   # desktop platforms. Unix additionally reuses that fresh compiler for the
   # native differential corpus; Windows reports the mode gate independently.
   native:
+    needs: reuse
     env:
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true' }}
     # Draft pull-request deferral of macOS runners; see the desktop job.
     name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
@@ -893,7 +941,8 @@ jobs:
           retention-days: 7
 
   mobile:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    needs: reuse
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true' }}
     # Draft pull-request deferral of macOS runners; see the desktop job.
     name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
     timeout-minutes: 300
@@ -1067,8 +1116,9 @@ jobs:
           retention-days: 7
 
   uefi:
+    needs: reuse
     name: UEFI firmware boot
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
@@ -1132,8 +1182,9 @@ jobs:
           retention-days: 14
 
   analyzer:
+    needs: reuse
     name: Clang analyzer shards
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
@@ -1142,6 +1193,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Bootstrap candidate and select reference build driver
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
@@ -1163,9 +1215,12 @@ jobs:
           clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
           rm -f "$candidate_depfile" "$reference_depfile" build/analyzer-baseline
           rm -rf "$reference_root"
-          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
-            -MMD -MF "$candidate_depfile" build.c -o build/analyzer-driver
-          python3 tools/analyzer_reference.py manifest \
+          bootstrap_arguments=(bootstrap)
+          if [[ "$EVENT_NAME" == merge_group ]]; then
+            bootstrap_arguments+=(--bind-context)
+          fi
+          python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
+            --driver "$GITHUB_WORKSPACE/build/analyzer-driver" \
             --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
             --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
             --output "$candidate_manifest"
@@ -1174,7 +1229,8 @@ jobs:
             --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
             --requested "$COMPARISON_REQUESTED" \
             --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision")"
+            --reference-revision "$reference_revision" \
+            --candidate-manifest "$candidate_manifest")"
           if [[ "$reference_materialized" == true ]]; then
             mkdir -p "$reference_root"
             trap 'rm -rf "$reference_root"' EXIT
@@ -1183,12 +1239,8 @@ jobs:
               echo '::error::Historical analyzer reference contains a symlink.'
               exit 1
             fi
-            (
-              cd "$reference_root"
-              clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
-                -MMD -MF "$reference_depfile" build.c -o "$GITHUB_WORKSPACE/build/analyzer-baseline"
-            )
-            python3 tools/analyzer_reference.py manifest \
+            python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
+              --driver "$GITHUB_WORKSPACE/build/analyzer-baseline" \
               --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
               --root "$reference_root" --depfile "$reference_depfile" \
               --output "$reference_manifest"
@@ -1222,16 +1274,19 @@ jobs:
             trap - EXIT
           fi
       - name: Exercise analyzer failure and coverage controls
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           build/analyzer-driver clang_analyze --self-test 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/self-test.log"
       - name: Configure the authoritative split-source database
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
       - name: Compare reference analysis and aggregate all module shards
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
@@ -1255,26 +1310,33 @@ jobs:
               exit 1
             fi
           done
+          candidate_arguments=(manifest)
+          reference_arguments=(manifest)
+          if [[ "$EVENT_NAME" == merge_group ]]; then
+            candidate_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-driver")
+            reference_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-baseline")
+          fi
+          python3 tools/analyzer_reference.py "${candidate_arguments[@]}" \
+            --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
+            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
+            --output "$expected_directory/candidate.json"
           expected_materialized="$(python3 tools/analyzer_reference.py materialization \
             --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
             --requested "$COMPARISON_REQUESTED" \
             --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision")"
+            --reference-revision "$reference_revision" \
+            --candidate-manifest "$expected_directory/candidate.json")"
           if [[ "${ANALYZER_REFERENCE_MATERIALIZED-}" != "$expected_materialized" ]]; then
             echo '::error::Analyzer reference materialization evidence is missing or stale.'
             exit 1
           fi
-          python3 tools/analyzer_reference.py manifest \
-            --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
-            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
-            --output "$expected_directory/candidate.json"
           if [[ "$expected_materialized" == true ]]; then
             if [[ ! -d "$reference_root" || -L "$reference_root" || \
                   ! -f "$reference_depfile" || -L "$reference_depfile" ]]; then
               echo '::error::Historical analyzer reference evidence is missing or unsafe.'
               exit 1
             fi
-            python3 tools/analyzer_reference.py manifest \
+            python3 tools/analyzer_reference.py "${reference_arguments[@]}" \
               --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
               --root "$reference_root" --depfile "$reference_depfile" \
               --output "$expected_directory/reference.json"
@@ -1333,6 +1395,15 @@ jobs:
               ;;
           esac
           build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/aggregate.log"
+      - name: Report reused analyzer validation
+        if: ${{ !cancelled() && needs.reuse.outputs.reuse == 'true' }}
+        shell: bash
+        env:
+          SOURCE_RECEIPT_DIGEST: ${{ needs.reuse.outputs.receipt_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-analyzer"
+          printf 'Full candidate analyzer validation and failure/coverage controls reused from the exact queue execution. Receipt digest: %s\n' "$SOURCE_RECEIPT_DIGEST" | tee "$RUNNER_TEMP/buster-analyzer/reuse.txt" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain analyzer inventory, results and measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1352,7 +1423,7 @@ jobs:
       contents: read
       actions: read
       checks: read
-    needs: [lint, test, native, mobile, uefi, analyzer]
+    needs: [lint, test, native, mobile, uefi, analyzer, reuse]
     if: ${{ always() && github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -1361,17 +1432,30 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify every desktop partition exists
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: 'python3 tools/github_ci_time.py require-jobs --output "$RUNNER_TEMP/desktop-partitions.json"'
+        run: 'python3 tools/github_ci_time.py require-jobs --checks-layout "$BUSTER_CI_CHECKS_LAYOUT" --output "$RUNNER_TEMP/desktop-partitions.json"'
+      - name: Reverify queue source and current main jobs
+        id: reverified
+        if: ${{ needs.reuse.outputs.reuse == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RECEIPT_DIGEST: ${{ needs.reuse.outputs.receipt_digest }}
+          SOURCE_RECEIPT: ${{ needs.reuse.outputs.receipt }}
+        run: python3 -B tools/main_ci_reuse.py finish --expected-digest "$SOURCE_RECEIPT_DIGEST" --expected-receipt "$SOURCE_RECEIPT" --output "$RUNNER_TEMP/main-ci-reuse-finish.json"
       - name: Retain desktop partition inventory
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-partitions-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/desktop-partitions.json
-          if-no-files-found: ignore
+          # Retain the reuse result on success AND failure; a failed result is not proof.
+          path: |
+            ${{ runner.temp }}/desktop-partitions.json
+            ${{ runner.temp }}/main-ci-reuse-finish.json
+          if-no-files-found: error
           retention-days: 7
       - name: Require every shard
         if: ${{ always() }}
@@ -1383,15 +1467,26 @@ jobs:
           MOBILE_RESULT: ${{ needs.mobile.result }}
           UEFI_RESULT: ${{ needs.uefi.result }}
           ANALYZER_RESULT: ${{ needs.analyzer.result }}
+          REUSE_REQUESTED: ${{ needs.reuse.outputs.reuse }}
+          REUSE_REVERIFIED: ${{ steps.reverified.outcome }}
         run: |
           {
-            printf '| Shards | Result |\n| --- | --- |\n| All ten desktop shards | %s |\n| All two mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
+            printf '| Shards | Result |\n| --- | --- |\n| All desktop shards | %s |\n| All two mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
             printf '| All five native lanes | %s |\n' "$NATIVE_RESULT"
             printf '| UEFI firmware boot | %s |\n' "$UEFI_RESULT"
             printf '| Clang analyzer shards | %s |\n' "$ANALYZER_RESULT"
             printf '| Workflow lint | %s |\n' "$LINT_RESULT"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$LINT_RESULT" != success || "$DESKTOP_RESULT" != success || "$NATIVE_RESULT" != success || "$MOBILE_RESULT" != success || "$UEFI_RESULT" != success || "$ANALYZER_RESULT" != success ]]; then
-            echo '::error::All desktop, native, mobile, UEFI and analyzer shards must succeed; failure, cancellation and skips do not pass.'
+          if [[ "$LINT_RESULT" != success || "$DESKTOP_RESULT" != success || "$ANALYZER_RESULT" != success ]]; then
+            echo '::error::Main-specific lint, desktop and analyzer jobs must succeed.'
+            exit 1
+          fi
+          if [[ "$REUSE_REQUESTED" == true ]]; then
+            if [[ "$REUSE_REVERIFIED" != success || "$NATIVE_RESULT" != skipped || "$MOBILE_RESULT" != skipped || "$UEFI_RESULT" != skipped ]]; then
+              echo '::error::Skipped main jobs require fresh, exact queue proof and completed main-only work.'
+              exit 1
+            fi
+          elif [[ "$NATIVE_RESULT" != success || "$MOBILE_RESULT" != success || "$UEFI_RESULT" != success ]]; then
+            echo '::error::All native, mobile and UEFI jobs must succeed without queue proof; failure, cancellation and skips do not pass.'
             exit 1
           fi

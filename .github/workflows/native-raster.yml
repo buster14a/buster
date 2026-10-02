@@ -1,0 +1,119 @@
+name: Native raster validation
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/native-raster.yml
+      - CMakeLists.txt
+      - cmake/Raster.cmake
+      - cmake/ImageBrowser.cmake
+      - src/buster/apps/image_browser/**
+      - src/buster/tests/image_browser*
+      - tests/image-browser/**
+      - src/buster/lib/rendering_raster.*
+      - src/buster/lib/rendering/raster*
+      - src/buster/lib/window*
+      - src/buster/lib/window/**
+      - src/buster/tests/rendering_raster*
+  push:
+    branches: [main]
+    paths:
+      - CMakeLists.txt
+      - src/buster/lib/window.*
+      - .github/workflows/native-raster.yml
+      - cmake/Raster.cmake
+      - cmake/ImageBrowser.cmake
+      - src/buster/apps/image_browser/**
+      - src/buster/tests/image_browser*
+      - tests/image-browser/**
+      - src/buster/lib/rendering_raster.*
+      - src/buster/lib/rendering/raster*
+      - src/buster/lib/window/**
+      - src/buster/tests/rendering_raster*
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-raster-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  raster:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cc: clang
+            config: Debug
+            unity: 'OFF'
+            sanitize: --no-sanitize
+          - cc: clang
+            config: Release
+            unity: 'ON'
+            sanitize: --no-sanitize
+          - cc: clang
+            config: Debug
+            unity: 'OFF'
+            sanitize: --sanitize
+          - cc: gcc
+            config: Release
+            unity: 'OFF'
+            sanitize: --no-sanitize
+    name: XCB raster (${{ matrix.cc }}, ${{ matrix.config }}, ${{ matrix.sanitize }})
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Existing XCB backend prerequisites and virtual X server
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes ninja-build libxcb1-dev libxcb-util-dev libxcb-keysyms1-dev libxcb-xkb-dev libxcb-imdkit-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb xauth
+      - name: Hosted driver bootstrap
+        run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/buster-raster-build"
+      - name: Configure explicit slice through build driver
+        run: |
+          "$RUNNER_TEMP/buster-raster-build" generate --cc ${{ matrix.cc }} --config ${{ matrix.config }} --ci ${{ matrix.sanitize }} --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_BUILD_IMAGE_BROWSER=ON -DBUSTER_UNITY_BUILD=${{ matrix.unity }} -DBUSTER_DEBUG_INFO=OFF
+          git rev-parse HEAD
+          git rev-parse 'HEAD^{tree}'
+      - name: Headless pixel, orientation and admission tests
+        run: '"$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_rendering_raster'
+      - name: Actual XCB pixel readback and native lifecycle
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" "$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_rendering_raster_native
+      - name: Headless application state and ownership
+        run: '"$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_image_browser_state'
+      - name: Actual image-browser loading, rendering, navigation and shutdown
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" "$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_image_browser_native
+      - name: Unavailable-display failure path
+        run: '"$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_rendering_raster_no_display'
+      - name: Preserve tested runnable slice
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # existing repository v7.0.1 pin
+        with:
+          name: image-browser-${{ matrix.cc }}-${{ matrix.config }}-unity-${{ matrix.unity }}-${{ matrix.sanitize }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/${{ matrix.config }}/image_browser
+            docs/projects/image-browser.md
+            tests/image-browser/*.ppm
+            LICENSES/README.md
+            LICENSES/xcb-xproto-LICENSE.txt
+      - name: Production application graph without test instrumentation
+        if: ${{ matrix.cc == 'clang' && matrix.config == 'Release' }}
+        run: |
+          "$RUNNER_TEMP/buster-raster-build" generate --cc clang --config Release --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_BUILD_IMAGE_BROWSER=ON -DBUSTER_UNITY_BUILD=ON -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/buster-raster-build" build --config Release -t image_browser
+          build/Release/image_browser --help
+      - name: Source-size and whitespace checks
+        run: |
+          "$RUNNER_TEMP/buster-raster-build" source_size --write-baseline
+          cat docs/source-size-baseline.txt
+          "$RUNNER_TEMP/buster-raster-build" source_size --base 'HEAD^1'
+          git diff --check HEAD^1 HEAD

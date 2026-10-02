@@ -4,6 +4,21 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Logical constant eligibility
+
+`c_ir_constant_apply_binary` preserves unknownness for the necessarily evaluated
+left operand of `&&` and `||`. A known right-hand zero/one may predict the result,
+but does not prove that a live call or volatile read is eligible for constant
+treatment. `__builtin_constant_p(effect() && 0)` and the corresponding `|| 1`
+query therefore return zero without evaluating their operands. Proven left
+short circuits (`0 && effect()` and `1 || effect()`) still return one.
+
+`c_test_logical_constant_predicates` checks result bits and absence of emitted
+effects across six target layouts and both frontend forms. Its embedded runtime
+fixture checks direct/comma/volatile queries, short-circuit controls, and
+exactly-once ordinary/choose-expression fallbacks in every native allocator.
+Truth conversion of places and operand preparation retain their separate owners.
+
 ## Direct local SSA (GitHub #34)
 
 `c_ir_ssa_*` in `c_gen.c` constructs pruned canonical block-argument SSA for
@@ -138,6 +153,14 @@ late escape, scalar temporaries, bitfields and dynamic-stack fallback. Native
 machine tests exercise vector block parameters as well as preserving the
 independent legacy mutable-register and pressure-census contracts.
 
+Every lowered row enters its block through `c_ir_append_instruction`, which
+commits it with ir.h's block-row protocol: the commit links the row, binds its
+result's definition and closes the block on a terminator, and a refused row
+rejects the function at `c_ir_finish_construction`. Do not write
+`next`/`first_instruction`/`last_instruction`, `IrBlock.terminated` or
+`IrValue.definition` directly; use the `ir_block_*` primitives. See
+[canonical IR construction](../../canonical-ir-construction.md).
+
 `ir_prepare_canonical_module` consumes an input-only producer certificate.
 Changed output is checked with the existing canonical verifier in debug,
 test and sanitizer builds; optimized production retains the pass-contract
@@ -156,6 +179,33 @@ consumers. Terminators own topology, including parameter-free destinations and
 duplicate-target suppression. `ir_function_cfg_edge` replaces incoming-list
 searches. Mutation must invalidate `IrFunction.published_cfg`; it is not a
 semantic certificate. See [publication and lifetime details](../../canonical-cfg-publication.md).
+
+## Number facts
+
+`c_parse_ast` converts every preprocessing number of the final stream once
+(`c_number_facts_build`) and publishes `CParserResult.number_facts`, which
+semantic analysis borrows into `CParseResult.number_facts` and lowering reads
+through its parse result. A rank index maps a final-stream token index to its
+number ordinal: one bit per token in 64-token windows plus each window's prefix
+count. Each number keeps the `c_conditional_number` value, whether it
+converted, `c_number_is_float`'s class, and the literal's
+`c_semantic_integer_literal_kind` for the stream's data model.
+
+- The facts are immutable after the syntax pass and live in its arena.
+- They answer only for the token array they were built from. Synthesized
+  evaluation tokens and hand-built results convert their spellings as before.
+- A cached kind is reused only when the consumer's `cpu_arch` and `os` match,
+  because literal typing reads the target only through `target_data_layout`.
+  If that dependency ever widens, widen the key in `c_number_fact_kind` too.
+- A failed conversion writes no value. The syntax diagnostic is issued at the
+  same point and in the same order as before.
+- Do not store literal facts in `CToken.symbol`. Several readers treat a nonzero
+  symbol as an identifier without testing the kind.
+
+`c_test_number_facts` covers every fact of an adversarial spelling set slid
+across the rank windows on five data models, and checks lowering with and
+without facts for identical bitcode and diagnostics.
+`c_test_parser_body_frame_storage` counts the facts as published syntax storage.
 
 ## C frontend and canonical IR rules
 
@@ -204,6 +254,26 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   across batch pushes that may grow the array. An ENABLE marker remains below
   its replacement batch, and refused identifiers retain `no_expand` on rescans.
   Output nodes and source-stamp ownership are independent of task storage.
+  Ordinary newline runs before a following `(` join the current source
+  batch, so direct names, object aliases and replacement tails find their
+  argument list across whitespace. Directive lines retain their ordered batch
+  boundary. Builtin `__LINE__` uses its invocation stamp, including an argument
+  on a later line of that batch.
+  `_Pragma`/`__pragma` push/pop macro markers survive argument prescan, then
+  execute at the outer rescan cursor before following tokens. A substituted
+  argument executes each surviving marker occurrence, matching Clang/GCC's
+  phase-four behavior. Pack markers retain their output-token positions.
+  ENABLE tasks own definition generations rather than just names: a restored
+  different definition can expand inside an older replacement. A pop restores
+  the generation's disabled state from active ENABLE tasks without consuming
+  them; child argument contexts never execute macro-state effects.
+  The saved definition includes the dynamic `__LINE__`/`__FILE__` builtin kind,
+  so restoring one after an ordinary definition also restores its behavior.
+  `c_macro_conditional_tests` checks these boundaries against literal token
+  expectations, independent hosted Clang/GCC preprocessors and both frontend
+  lowering forms. Its oracle rows record GCC's alias-newline `__LINE__` value
+  separately and omit only GCC's observed nonterminating self-push/pop control;
+  Buster's literal checks and Clang's matching controls remain in place.
   A non-builtin definition without `#` or `##` is written straight into its
   reserved batch by `c_macro_produce_plain_tasks` (exact size from
   `plain_count` and per-parameter use counts); builtins, stringify and paste
@@ -213,10 +283,24 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
 - Macro placemarkers survive the entire `##` sequence. The replacement loop
   compacts into its existing materialized buffer and removes placemarkers only
   when emitting the rescan tokens. Only the explicitly marked GNU
-  `, ## __VA_ARGS__` operator may delete a comma for an empty argument;
-  named parameters and ordinary macros retain it.
+  `, ## __VA_ARGS__` operator may delete a comma for an omitted variadic
+  argument; an explicitly supplied empty slot retains it. For a macro with
+  only a variadic parameter, an empty invocation is omitted in GNU modes and
+  explicitly empty in standard modes. Fixed-parameter omission retains the
+  GCC/Clang compatibility extension in both mode families. The omission flag
+  occupies one bit of the argument's expanded-count word, preserving its
+  48-byte row. Named fixed parameters and ordinary macros retain the comma.
   `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+  `c_test_variadic_comma_omission` checks omission, explicit emptiness, forwarding,
+  named variadics and ordinary placemarkers in every supported dialect.
+- `_Pragma` destringizes either an ordinary or `L`-prefixed string operand.
+  It strips the optional `L` and the quotes, and removes a backslash only
+  before a quote or another backslash. Macro-generated operands use the same
+  path. Pack markers retain their token-position contract; wide push/pop-macro
+  operations retain their existing ordering. `c_test_wide_pragma_operands`
+  checks both operand forms, macro-produced pack operations, nested alignment
+  restoration and saved macro definitions.
 - Source `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, and `#endif` lines may
   cross an in-progress function-like macro invocation as the GCC/Clang
   compatibility extension. The source driver processes each conditional once
@@ -246,12 +330,77 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   association by token range without flattening or copying the translation
   unit, and unselected associations are never evaluated. The nested
   generic-constant cases cover this path (GitHub #797).
-- Legacy integer constant ranges and static assertions share the private
+  `c_parse_type_integer_constant` owns an independent
+  `C_CONSTANT_EVALUATION_TYPE` machine over a by-value semantic model. It
+  shares existing rows for reads and seals growable capacities at copied counts,
+  forcing the first append into private storage. Fixed parameter, alignment and
+  diagnostic buffers are copied too; slots after a checkpoint's counts may
+  belong to a later model that shares those buffers. Its
+  aggregate/definition indexes, token/scalar caches, symbol interning and layout
+  work counters are detached. Casts, generic controllers/association types and
+  `typeof` use the same private explicit frames, with machineless scalar reads
+  that cannot define or complete tags. New tag bodies remain unresolved.
+  Absent named struct/union pointers mint incomplete forward rows only in the
+  private model. Scalar type-name attributes are applied once by their owner.
+  Private model growth uses a separate scratch arena from expression frames;
+  its rows survive frame rewinds until stable integer facts have been extracted.
+  Ordinary and pending enumerator bindings precede typedef cast detection.
+  The returned signed magnitude, rank and target width survive the query;
+  temporary type IDs do not. Qualified enum aliases read integer facts through
+  their original tag even when the alias was created before its completion.
+  Existing enumerator folding retains the
+  `C_CONSTANT_EVALUATION_ENUM` compatibility mode on the declaration machine,
+  including its machineless `sizeof` path. Migrating that consumer requires
+  declaration-owned preparation of source-ordered operand facts; this stage
+  adds the protected query without changing enum admission or arithmetic.
+  Its caller supplies the semantic model at the expression's declaration point.
+  Scope alone cannot reconstruct earlier tag completeness from a finished unit;
+  deferred consumers must retain the bindings and layout facts of their operands.
+  Recognized vector-size attributes accept only nonzero literals in the query;
+  other arguments remain unresolved before the legacy recursive folder can run.
+  The copied model retains its protected-query flag through machineless operand
+  copies, so the actual vector reader also refuses indirect arguments in stored
+  array-bound ranges outside the query span. Already declared vector types remain
+  readable.
+  The query accepts no live declaration machine. Its isolation fixture snapshots
+  full shared buffers and indexes on successful and refused queries, including
+  a shortened checkpoint whose buffers contain later type rows (GitHub #1247).
+- Legacy integer constant ranges share the private
   `c_parse_constant_expression_evaluate` walker over original token indices.
   The shape sidecar and parse position index describe that stream; copying a
   range into a synthesized token view while retaining either derived index
   gives the wrong classification. Spelling, source recovery, and pack changes
   still belong to the original preprocess result (GitHub #629).
+- A `_Static_assert` whose expression types as an integer takes its value
+  from the typed evaluator (`c_parse_typed_constant`), with C's types,
+  promotions and conversions: `0u - 1 == 4294967295u` holds and
+  `-1 < sizeof(int)` fails. The legacy retokenizer still runs first and
+  still decides which assertions wait for the deferred typed check (casts,
+  unary `sizeof`, enumerators), so deferred diagnostics keep their wording;
+  its `intmax_t` arithmetic (preprocessing's rule, C17 6.10.1p4) answers
+  only shapes the typed evaluator does not model. A typed fault (division by
+  zero, a shift count outside the promoted width) is final. An assertion
+  decided at the declaration reports `static assertion failed: "<message>"`
+  (GitHub #1238).
+- Compile-time integer arithmetic has one implementation, `ir_integer_*`
+  (`ir_integer.c`): fixed-width two's-complement values of 1..128 bits and
+  the canonical operations, each result carrying its exact-value faults
+  (signed overflow, unsigned wrap, division by zero, shift count, negative
+  shifted operand). `c_integer_operation` maps a C operator and the
+  signedness of its operation type to the canonical operation for runtime
+  lowering (`c_ir_operation`, `c_ir_apply_operation`) and for the three
+  constant evaluators; `c_integer_constant_binary/unary` apply C's constant
+  policy. Preprocessing (`c_conditional_apply`) keeps its `intmax_t` rule and
+  deferred faults; integer constant expressions (`c_parse_constant_binary`,
+  `c_ir_constant_apply_binary`) are not constant on a division by zero or a
+  shift count outside `[0, width)` of the separately promoted left operand,
+  and keep the wrapped value on signed overflow (the value GCC and Clang
+  fold to; the C17 6.6p4 diagnostic needs a warning channel the frontend
+  does not have). Lowering's value queries (`c_ir_value_integer_constant_evaluate`)
+  read conversions by their canonical operation, so a signed widening
+  sign-extends (GitHub #1347). `ir_integer_test.c` checks every operation
+  exhaustively at widths 1..8 and against the host's 128-bit type at wider
+  widths.
 - Preprocessing integer-expression reductions carry signedness and a deferred
   arithmetic-fault bit in the same byte. Division by zero and signed
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
@@ -266,12 +415,38 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   live-fault and malformed-dead-operand controls;
   `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
   allocator matrix (GitHub #147, #258).
+- Constant truth queries distinguish invalid, unknown, known false and known
+  true. `c_ir_constant_truth` materializes scalar places, preserves unknown
+  reads, and decays arrays/functions to addresses. Boolean casts, negation,
+  logical operators, conditional selection and static assertions consume that
+  checked result; they never interpret UNKNOWN as zero. Volatile/atomic reads
+  cannot use read-only storage as a constant certificate. Arithmetic and
+  comparison folding also materialize scalar places before reading payloads.
+  Unknown binary results retain comparison, promotion and pointer-operation
+  result types so an unselected conditional arm still supplies its C type.
+  `c_ir_type_name_prefix` preserves volatile pointees, including qualifiers
+  interspersed with primitive type words, before constructing cast pointers;
+  each pointer level retains its own volatile/atomic access qualification.
+  `c_test_constant_scalar_truth` checks constant initializers, unevaluated
+  predicate bits/effects, diagnostics and native execution (#1225).
+  Its static const initializer cases use the existing GNU folding extension;
+  ISO integer-constant-expression admission keeps its separate checks.
 - A folded conditional expression converts its selected value to the common
   type of both arms before any enclosing operator consumes it. Constant and
   runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
   usual conversion helper. `tests/basic_c_constant_conditional_type.c` pins
   signed/unsigned widening, mixed floating/integer arithmetic, nested folds,
   and pointer/null selections under every allocator (GitHub #219).
+- Static pointer folding retains casts that precede trailing arithmetic:
+  `(char *)&object + 1` scales by `sizeof(char)`, including scalar globals
+  and local statics. Only a cast covering the entire operand range may be
+  removed by the bare-address shortcut. Constant subscripts retain their
+  signedness before checked scaling into the relocation's signed addend.
+  `compiler_driver_test_static_pointer_addresses` checks the address family
+  under both frontend forms and all four allocators, reads serialized ELF
+  addends, and rejects unrepresentable indices (GitHub #1230). Arithmetic on
+  non-null integer-to-pointer static casts remains unsupported; it is refused
+  rather than folded as if the trailing operator belonged inside the cast.
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
@@ -292,9 +467,23 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   validity oracle, guard-page/window differential cases and driver failures are
   registered in the frontend/driver suites; `basic_c_utf8_identifiers.c` checks
   valid source through every native allocator (GitHub #253).
+- In C99/GNU99 and C11/C17/GNU11/GNU17, identifier UCNs are decoded under
+  the dialect's Annex D policy before symbol interning. Raw and escaped
+  spellings then share canonical UTF-8 identity. Original token spellings
+  survive macro `#` and `##`; only the final fused identifier-respelling
+  pass exposes canonical bytes to semantic/lowering consumers, under stamps
+  retaining the original source location. C23/GNU23/GNU89 identifier-escape
+  admission is unchanged. Literal conversion remains separate; raw UTF-8
+  keeps the encoding-only rule above. See the dialect boundary and registered
+  UCN fixtures in [frontend.md](../frontend.md).
 - Arena ownership is part of the API contract. Returned source, syntax,
   semantic, and IR structures may reference earlier-stage storage; callers must
   retain the translation-unit arena until every downstream consumer finishes.
+  The one exception is a phase arena (`CPreprocessOptions.phase_arena`): a
+  phase allocates what only it reads there and releases it before returning,
+  so no result may reference it. `c_preprocess_seal` copies the preprocessing
+  result out of it; semantic layout queries keep their tables there and
+  release them on return. See [compiler phase lifetimes](../../compiler-lifetime.md).
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin
@@ -320,6 +509,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   still sized by the whole type table (#1502), is allocated only for that
   walk. `c_test_type_self_compatibility` compares the two for every type of a
   type-rich unit and for hand-built invalid rows and a 100,000-deep chain.
+- Semantic records keep a `CSourceSite` (mapped offset plus one, and source),
+  never an eager `CSourceLocation`. Recover line, column and physical offset
+  with `c_preprocess_site_location` only where a diagnostic or
+  `c_parse_entity_visible_at` reads them, and build IR ranges from sites with
+  `c_ir_site_source_range`. A location resolved for a failure that has not
+  happened is gated on that failure, as `c_type_parse_root_finish` callers do.
+  See [diagnostics](../../diagnostics.md) for the recovery contract and its
+  frozen equivalence test.
 
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
@@ -416,7 +613,10 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   The prediction is still the last resort for both words, under the same
   guards: an inline aggregate definition and an object whose array type never
   mapped are refused rather than guessed at. `tests/basic_c_alignof_expression.c`
-  is the fixture, and every value in it was compared against clang.
+  is the fixture, and every value in it was compared against clang. A named
+  object's own `_Alignas`/`aligned` then raises that answer, in constant
+  expressions too (`compiler_driver_tests` compiles and runs that case); see
+  [`_Alignof` over an object](layout.md#_alignof-over-an-object).
 - **`void` is one byte, and an object of it is still refused.** GNU gives
   `void` a size and an alignment of one so that arithmetic on a `void *` steps
   by bytes, and clang and gcc both fold `sizeof(void)`, `sizeof(const void)`
@@ -548,7 +748,21 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   Indexing, pointer offsets/differences and dereferencing use that saved shape;
   pointer-local reads restore their declaration's bounds. Explicit scalar
   pointer casts discard it, even when canonical pointer types match. `sizeof`
-  of a named VLA pointer's dereference reads the cached suffix size.
+  of a VLA pointer's dereference reads the cached suffix size, including
+  computed pointers and `*&array`. Type queries retain frontend-only runtime
+  array shells through type names and `typeof`; they never use the predictor's
+  integer guess as a VLA size. `sizeof(T[n][m])` lowers its bounds through the
+  existing layout continuation, while alignment queries do not evaluate bounds.
+  Pointer-to-VLA casts evaluate their bounds and attach the resulting shape
+  to a flattened canonical pointer. Typedef declarations evaluate bounds where
+  they occur; later objects and type queries reuse those declaration-time
+  values even after a bound variable changes.
+  `compiler_driver_test_vla_runtime_types` checks these sizes, allocation and
+  row casts at O0/O2 in both frontend forms and all four allocators. It also
+  checks nested call arguments and the effects of VLA-valued `typeof` operands.
+  Object and typedef declarations evaluate VLA-valued `typeof` operands before
+  capturing their layout. Nested pointer-to-VLA casts receive a diagnostic
+  until their indirect shape can be retained.
   A saved size does not suppress evaluation of a VLA-typed operand. The
   sizeof continuation evaluates its operand once through the existing
   expression machine, discards the row address, and retains that size.
@@ -713,6 +927,41 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   deferred assertions, once per token range however often the definition is
   parsed. Regression:
   `c_test_member_declaration_without_declarator_diagnostics` (GitHub #1661).
+  The same registered test pins GitHub #1250: false literal assertions in
+  structs and unions report once even when several declarators reparse the
+  definition, under C11/C17 and the C23 message-less spelling. True assertions
+  at the beginning, middle and end preserve every member. The issue's nested
+  bit-field record and the trailing struct/union members retain their
+  `sizeof`/`offsetof` answers and canonical-IR layout on x86-64 Linux in both
+  frontend forms; the named target keeps Windows bit-field ABI differences
+  out of that oracle.
+
+## String literal memo
+
+Semantic analysis sizes, types and validates a string literal through
+several independent consumers: expression typing, array-bound inference,
+braced string initializers, member initializers and initializer validation.
+Each of them asks `c_ir_count_string_literal_range_for_target`. Lowering then
+needs the same literal's bytes. `CParseResult.string_literals` (a
+`CStringLiteralMemo`) records a narrow fragment's decoded bytes, keyed by
+final-stream token index, the first time semantic analysis sizes it. Later
+semantic queries read the recorded length, and lowering's
+`c_ir_decode_string_literal_range_for_target` reads the recorded bytes.
+
+- Only narrow fragments (plain and `u8`) are recorded, because their bytes do
+  not depend on the target. Wide fragments are decoded every time.
+- Rejected fragments are never recorded.
+- The memo answers only for the token array it was created for.
+- The header, its slots and every recorded buffer live in the never-rewound
+  parse arena, which outlives lowering. Rollback's wholesale `CParseResult`
+  restore therefore keeps a valid pointer.
+- Only semantic analysis records; lowering only reads. Every reader copies
+  the bytes it keeps, so a recorded buffer is never written. Keep it that
+  way: a consumer that edits decoded bytes in place must copy them first.
+
+The decode/count differential checks memoized counts and decodes on a miss
+and on a hit, byte for byte, and `c_test_string_literal_memo` crosses
+several rebuilds.
 
 ## Immutable aggregate and complex construction
 
@@ -767,8 +1016,9 @@ float/double/long double rows (signed zeros, subnormal, infinite and NaN
 halves, projection controls) in every native allocator at O0/O2. Imaginary
 constants remain outside parse-side integer constant expressions
 (`enum { E = (_Bool)2.0i }` is refused) and complex static initializers are
-not folded to real targets; `_Bool` bit-field stores fail canonical validation
-independently of this conversion.
+not folded to real targets. Boolean bit-field accesses use an unsigned raw
+integer storage unit; canonical validation admits that unit at the recorded
+field access size even when the layout did not narrow it.
 
 ## ABI decomposition ownership
 
@@ -791,6 +1041,9 @@ context, just as changing layout does; neither selection mutates `IrType`.
 Cache pages contain 64 types for one use, with a resolution mask; values are
 initialized before their bit is published. Variadic arguments reuse argument
 classification except on Windows AArch64, whose convention distinguishes them.
+Both public query entries validate before the shared resident-page lookup.
+Allocation and classification live in a separate cold helper; a hit copies its
+answer directly without allocating, reclassifying, or repeating public checks.
 Unresolved layouts are not cached. Adding a type under a fresh id is supported;
 changing an existing layout requires `ir_program_invalidate_abi` (or invalidating
 every independent context), because dependent aggregate classifications change

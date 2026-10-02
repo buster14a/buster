@@ -2,6 +2,7 @@
 
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/work_ledger.h>
 
 typedef struct MachineFunction MachineFunction;
 typedef struct MachineStackPlacement MachineStackPlacement;

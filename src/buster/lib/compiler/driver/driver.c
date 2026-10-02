@@ -5,6 +5,8 @@
 // mode — rejecting unknown languages and retired options explicitly
 // rather than guessing. It first replaces `@path` arguments through
 // compiler_driver_expand_response_files (bounded, one level, no nesting).
+// Comma-separated -Wl payloads become individual linker arguments;
+// link_validate_linker_arguments owns their supported semantic subset.
 // compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
 // through preprocess, parse, lowering, codegen, and object/executable
@@ -24,9 +26,11 @@
 // compiler_driver_publish_c_diagnostics preserves producer/stage ordering.
 // Optional fallback_records retain source/function attribution across TU arena
 // destruction; no per-function recording is allocated in ordinary compilation.
-// compiler_driver_unit_lane owns one private TU arena/collector per stable
-// input slot. Opt-in native C link batches publish in input order only after
-// the gang returns; assembly and archive selection remain serial boundaries.
+// compiler_driver_unit_lane fills one private TU arena/collector per stable
+// input slot; the coordinator creates and destroys those arenas, so the
+// per-thread arena pool circulates them. Opt-in native C link batches publish
+// in input order only after the gang returns; assembly and archive selection
+// remain serial boundaries.
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
 
 #include <buster/lib/compiler/driver/driver.h>
@@ -41,6 +45,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_semantics.h>
 #include <buster/lib/compiler/object/object.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/file.h>
 #include <buster/lib/string.h>
 #include <buster/lib/compiler/driver/archive.c>
@@ -500,6 +505,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
     else if (invocation->c_dialect_explicit)
     {
         compiler_driver_argument_error(arena, invocation, S8("the native C dialect option is not used by GPU target: {S8}"),
+                                       gpu_target_to_string(arena, invocation->gpu_target));
+    }
+    else if (invocation->plain_char_policy_explicit)
+    {
+        compiler_driver_argument_error(arena, invocation, S8("plain-char signedness options are not supported for external GPU target: {S8}"),
                                        gpu_target_to_string(arena, invocation->gpu_target));
     }
     else if (invocation->source_metrics_path.length)
@@ -1122,7 +1132,19 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     // At most one resource directory plus four sysroot directories. Native
     // Windows INCLUDE entries reserve their own exact-sized array below.
     u64 default_include_capacity = 5;
-    if (arguments.length > UINT32_MAX - default_include_capacity)
+    u64 linker_argument_capacity = arguments.length;
+    for (u64 index = 0; index < arguments.length; index += 1)
+    {
+        String8 argument = arguments.pointer[index];
+        if (string_starts_with_sequence(argument, S8("-Wl,")))
+        {
+            for (u64 offset = 4; offset < argument.length; offset += 1)
+            {
+                linker_argument_capacity += argument.pointer[offset] == ',';
+            }
+        }
+    }
+    if (arguments.length > UINT32_MAX - default_include_capacity || linker_argument_capacity > UINT32_MAX)
     {
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         invocation.diagnostic = S8("too many compiler arguments");
@@ -1137,7 +1159,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     invocation.libraries = arena_allocate(arena, String8, arguments.length);
     invocation.framework_paths = arena_allocate(arena, String8, arguments.length);
     invocation.frameworks = arena_allocate(arena, String8, arguments.length);
-    invocation.linker_arguments = arena_allocate(arena, String8, arguments.length);
+    invocation.linker_arguments = arena_allocate(arena, String8, linker_argument_capacity);
     invocation.gpu_arguments = arena_allocate(arena, String8, arguments.length);
     u64 feature_override_capacity = 0;
     for (u64 argument_index = 0; argument_index < arguments.length; argument_index += 1)
@@ -1594,6 +1616,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.verify_codegen = true;
             continue;
         }
+        if (string_equal(argument, S8("-funsigned-char")) || string_equal(argument, S8("-fsigned-char")))
+        {
+            invocation.plain_char_policy = string_equal(argument, S8("-funsigned-char")) ?
+                                               TARGET_PLAIN_CHAR_POLICY_UNSIGNED : TARGET_PLAIN_CHAR_POLICY_SIGNED;
+            invocation.plain_char_policy_explicit = true;
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-fsysv-unnamed-bitfields=")))
         {
             value = compiler_driver_option_value(argument, S8("-fsysv-unnamed-bitfields="));
@@ -1777,10 +1806,29 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.c_dialect_explicit = true;
             continue;
         }
-        value = compiler_driver_option_value(argument, S8("-Wl,"));
-        if (value.length)
+        if (string_starts_with_sequence(argument, S8("-Wl,")))
         {
-            invocation.linker_arguments[invocation.linker_argument_count++] = value;
+            u64 start = 4;
+            for (u64 end = start; end <= argument.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; end += 1)
+            {
+                if (end == argument.length || argument.pointer[end] == ',')
+                {
+                    if (end == start)
+                    {
+                        compiler_driver_argument_error(arena, &invocation, S8("empty linker argument in {S8}"), argument);
+                    }
+                    else
+                    {
+                        invocation.linker_arguments[invocation.linker_argument_count++] = string_slice(argument, start, end);
+                    }
+                    start = end + 1;
+                }
+            }
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-Wp,")) || string_starts_with_sequence(argument, S8("-Wa,")))
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported pass-through option: {S8}"), argument);
             continue;
         }
         String8 prefix = {
@@ -1948,6 +1996,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         invocation.position_independent = true;
     }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.plain_char_policy_explicit)
+    {
+        invocation.target.plain_char_policy = invocation.plain_char_policy;
+    }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.emit_llvm_bitcode &&
         (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
          invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
@@ -2002,8 +2054,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         else if (!invocation.has_gpu_target && invocation.target.os == OPERATING_SYSTEM_UEFI && invocation.linker_argument_count)
         {
-            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-            invocation.diagnostic = S8("raw linker arguments are not supported for UEFI targets");
+            compiler_driver_argument_error(arena, &invocation, S8("raw linker arguments are not supported for UEFI targets: {S8}"),
+                                           invocation.linker_arguments[0]);
         }
         else if (!invocation.has_gpu_target && invocation.framework_count && invocation.target.os != OPERATING_SYSTEM_MACOS &&
                  invocation.target.os != OPERATING_SYSTEM_IOS)
@@ -2015,6 +2067,20 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
             invocation.diagnostic = S8("no input files");
+        }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.linker_argument_count)
+    {
+        String8 unsupported = invocation.linker_arguments[0];
+        NativeExecutableLinkOptions options = {
+            .linker_arguments = invocation.linker_arguments,
+            .linker_argument_count = invocation.linker_argument_count,
+            .image_kind = (u8)invocation.image_kind,
+        };
+        if (invocation.action != COMPILER_DRIVER_ACTION_LINK || invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
+            !link_validate_linker_arguments(invocation.target, options, true, &unsupported))
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported linker argument for this output: {S8}"), unsupported);
         }
     }
     return invocation;
@@ -2864,7 +2930,7 @@ BUSTER_GLOBAL_LOCAL CPreprocessorDefinition compiler_driver_c_definition(String8
 }
 
 BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, CompilerDriverInvocation invocation, String8 requested, bool* found,
-                                                                  String8* path_out)
+                                                                  String8* path_out, FileMapRead* map_out)
 {
     ObjectArchive result = {0};
     bool exact = requested.length && requested.pointer[0] == ':';
@@ -2907,8 +2973,8 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
         }
         *found = true;
         *path_out = archive_path;
-        ObjectArchive archive = object_archive_read(arena, archive_bytes, invocation.target);
-        file_map_unmap(archive_map);
+        ObjectArchive archive = object_archive_read_link(arena, archive_bytes, invocation.target);
+        *map_out = archive_map;
         return archive;
     }
     if (exact_archive)
@@ -2919,8 +2985,8 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
         {
             *found = true;
             *path_out = exact_name;
-            ObjectArchive archive = object_archive_read(arena, archive_bytes, invocation.target);
-            file_map_unmap(archive_map);
+            ObjectArchive archive = object_archive_read_link(arena, archive_bytes, invocation.target);
+            *map_out = archive_map;
             return archive;
         }
         file_map_unmap(archive_map);
@@ -3350,12 +3416,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
 
 // A failed native link names its reason and symbol. A relocation refused in
 // a position-independent image is almost always an object compiled for a
-// fixed address, so the diagnostic says what the image needs instead.
+// fixed address, so the diagnostic says what the image needs instead. A
+// failed artifact write names the operating-system error that refused it.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link)
 {
     String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION
                        ? S8(" (a position-independent image needs objects compiled with -fPIC)")
-                       : S8("");
+                   : link.error == LINK_ERROR_FILE_WRITE && link.write_error.v ? string_format(arena, S8(" ({EOs})"), link.write_error)
+                                                                               : S8("");
     return string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
 }
 
@@ -3388,7 +3456,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         {
             return;
         }
-        ObjectArtifact artifact = object_write(arena, &object, object_format_for_target(invocation.target));
+        // The file is the only consumer of these bytes, and the object's
+        // section payloads stay live in this arena until it is written, so
+        // the image borrows them instead of copying every payload byte.
+        ObjectArtifact artifact = object_write_borrowing(arena, &object, object_format_for_target(invocation.target));
         result->object_write_statistics = artifact.statistics;
         if (artifact.error != OBJECT_ERROR_NONE)
         {
@@ -3401,8 +3472,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                      : string_format(arena, S8("native object serialization failed with error {u32}"), (u32)artifact.error);
             return;
         }
+        WORK_LEDGER_RECORD(OUTPUT_OBJECT_BYTES, artifact.bytes.length);
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
-        if (!file_publish(output, artifact.bytes))
+        u32 slice_count = 0;
+        ByteSlice* slices = object_artifact_slices(arena, artifact, &slice_count);
+        if (!file_publish_slices(output, slices, slice_count))
         {
             result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
@@ -3478,6 +3552,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                     .image_kind = (u8)invocation.image_kind,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+    WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result->native_link.executable.length);
     if (result->native_link.error != LINK_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_LINK;
@@ -3506,17 +3581,21 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind compiler_driver_assembly_section_kind(Asse
 // rather than written without its relocation.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyRelocationKind kind, ObjectRelocationKind* object_kind)
 {
+    bool valid = true;
     switch (kind)
     {
-    case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; return true;
-    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32: *object_kind = OBJECT_RELOCATION_ABSOLUTE32; return true;
-    case ASSEMBLY_RELOCATION_X86_ABSOLUTE64: *object_kind = OBJECT_RELOCATION_ABSOLUTE64; return true;
-    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED: *object_kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S; return true;
-    case ASSEMBLY_RELOCATION_AARCH64_BRANCH26: *object_kind = OBJECT_RELOCATION_AARCH64_JUMP26; return true;
-    case ASSEMBLY_RELOCATION_AARCH64_CALL26: *object_kind = OBJECT_RELOCATION_AARCH64_CALL26; return true;
-    default: break;
+    case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; break;
+    case ASSEMBLY_RELOCATION_X86_PC64: *object_kind = OBJECT_RELOCATION_X86_64_PC64; break;
+    case ASSEMBLY_RELOCATION_AARCH64_PREL32: *object_kind = OBJECT_RELOCATION_AARCH64_PREL32; break;
+    case ASSEMBLY_RELOCATION_AARCH64_PREL64: *object_kind = OBJECT_RELOCATION_AARCH64_PREL64; break;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32: *object_kind = OBJECT_RELOCATION_ABSOLUTE32; break;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE64: *object_kind = OBJECT_RELOCATION_ABSOLUTE64; break;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED: *object_kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S; break;
+    case ASSEMBLY_RELOCATION_AARCH64_BRANCH26: *object_kind = OBJECT_RELOCATION_AARCH64_JUMP26; break;
+    case ASSEMBLY_RELOCATION_AARCH64_CALL26: *object_kind = OBJECT_RELOCATION_AARCH64_CALL26; break;
+    default: valid = false; break;
     }
-    return false;
+    return valid;
 }
 
 // One assembly input, from source text to the same three outputs a C input
@@ -3603,6 +3682,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
             result.diagnostic = string_format(arena, S8("{S8}: relocation family {u32} has no object representation"), path, (u32)relocation.kind);
             return result;
+        }
+        if (relocation.plt)
+        {
+            kind = OBJECT_RELOCATION_X86_64_PLT32;
         }
         object.relocations[object.relocation_count++] = (ObjectRelocation){
             // The assembler's addend already carries the distance from the
@@ -3721,6 +3804,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .include_paths = invocation.include_paths,
                                                     .system_include_paths = invocation.system_include_paths,
                                                     .source_path = path,
+                                                    .source_identity = source_file.identity,
                                                     .target = invocation.target,
                                                     .data_layout = target_data_layout(invocation.target),
                                                     .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
@@ -3796,6 +3880,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         definitions[index] = compiler_driver_c_definition(invocation.definitions[index]);
     }
+    WORK_LEDGER_PHASE(PREPROCESS);
     CPreprocessResult preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
                                                 (CPreprocessOptions){
                                                     .macro_operations = invocation.macro_operations,
@@ -3804,6 +3889,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .include_paths = invocation.include_paths,
                                                     .system_include_paths = invocation.system_include_paths,
                                                     .source_path = invocation.input_paths[0],
+                                                    .source_identity = source_file.identity,
                                                     .target = invocation.target,
                                                     .data_layout = target_data_layout(invocation.target),
                                                     .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
@@ -3813,6 +3899,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
+                                                    .omit_spelled_bytes = invocation.omit_spelled_bytes,
                                                 });
     // Reported even when a later stage fails: the units the frontend read are
     // measured by then, and a failing compile is exactly when the size of
@@ -3861,6 +3948,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             goto end;
         }
     }
+    WORK_LEDGER_PHASE(PARSE);
     CParserResult syntax = c_parse_ast(arena, preprocess);
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
@@ -3870,6 +3958,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                   syntax.diagnostic_count, invocation.input_paths[0], (String8){0});
         goto end;
     }
+    WORK_LEDGER_PHASE(SEMANTIC);
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
         CAnalysisResult semantic = c_analyze_semantics_only(arena, preprocess, syntax);
@@ -3891,7 +3980,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
-                                                                    .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
+                                                                    .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
+                                                                    .omit_debug_locals = !invocation.debug_info});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -3910,6 +4000,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
     lowered.program->fast_passes = invocation.fast_passes;
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
+    WORK_LEDGER_PHASE(PREPARE);
     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
                                                                 lowered.canonical_ir_certified && !invocation.bootstrap_trace_prefix.length && !invocation.verify_codegen);
     result.local_promotion = module->local_promotion;
@@ -3935,6 +4026,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                           boundary, (u32)validation.error, validation.function.value, function_name, validation.block.value, validation.instruction.value, opcode);
         goto end;
     }
+    WORK_LEDGER_PHASE(CODEGEN);
     if (invocation.emit_llvm_bitcode)
     {
         LlvmBitcodeArtifact artifact =
@@ -3943,15 +4035,25 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         compiler_driver_write_llvm_bitcode(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
+    // The preparation above is the module's validation boundary: it already
+    // scanned or certified these exact rows and they have not changed since.
+    // Hand that fact to the direct emitters, as native code generation and
+    // LLVM bitcode receive it, instead of letting each one re-prepare
+    // uncertified and walk the whole module again. (-fverify-codegen, which
+    // forces uncertified preparation, is refused for these targets.)
     if (compiler_driver_target_is_wasm(invocation.target))
     {
-        WasmArtifact artifact = wasm_emit(arena, lowered.program, module, 1, compiler_driver_wasm_options(invocation.target));
+        WasmOptions options = compiler_driver_wasm_options(invocation.target);
+        options.assume_validated = true;
+        WasmArtifact artifact = wasm_emit(arena, lowered.program, module, 1, options);
         compiler_driver_write_wasm(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
     if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
     {
-        EbpfArtifact artifact = ebpf_emit(arena, lowered.program, module, 1);
+        EbpfOptions options = EBPF_OPTIONS_DEFAULT;
+        options.assume_validated = true;
+        EbpfArtifact artifact = ebpf_emit_with_options(arena, lowered.program, module, 1, options);
         compiler_driver_write_ebpf(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
@@ -4116,6 +4218,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic = compiler_diagnostic_render(arena, diagnostic);
         goto end;
     }
+    WORK_LEDGER_PHASE(OBJECT);
     ObjectFile object = object_from_canonical_codegen_module(arena, lowered.program, &code, invocation.target);
     result.object_error = object.error;
     if (object.error != OBJECT_ERROR_NONE)
@@ -4128,6 +4231,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     result.object = object;
     result.has_object = true;
+    WORK_LEDGER_PHASE(OUTPUT);
     compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result);
 end:
     file_map_unmap(source_file);
@@ -4319,6 +4423,7 @@ void compiler_parallel_prewarm(void)
     // parked. Prepare both native families before the first worker exists;
     // this opt-in cold cost must not leak into ordinary serial compilation.
     codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_X86_64});
+    machine_x86_64_exact_prewarm_all_shapes();
     buster_x86_metadata_prewarm_all_forms();
     buster_aarch64_prewarm();
     buster_aarch64_semantics_prewarm();
@@ -4334,11 +4439,9 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
     LaneRange range = lane_range(batch->count);
     for (u64 index = range.start; index < range.end; index += 1)
     {
+        // The coordinator created this slot's arena and will destroy it; the
+        // lane only fills it.
         CompilerDriverUnit* unit = &batch->units[index];
-        unit->arena = arena_create((ArenaCreation){
-            .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
-            .flags = {.pool_reuse = 1},
-        });
         if (unit->arena)
         {
             unit->warnings = (CompilerDriverDiagnosticCollector){
@@ -4370,6 +4473,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     };
     CompilerDriverResult result = {.compilation_workers = 1};
     CompilerDriverArchiveState archive_state = {0};
+    FileMapRead* input_archive_maps = 0;
+    FileMapRead* library_archive_maps = 0;
     u32 fallback_record_capacity = 0;
     CompilerDriverUnit* unit_tasks = 0;
     u32 unit_task_count = 0;
@@ -4384,6 +4489,22 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = invocation.error;
         result.diagnostic = invocation.diagnostic.length ? invocation.diagnostic : S8("invalid compiler invocation");
         goto finish;
+    }
+    if (invocation.linker_argument_count)
+    {
+        String8 unsupported = invocation.linker_arguments ? invocation.linker_arguments[0] : S8("(missing argument storage)");
+        NativeExecutableLinkOptions options = {
+            .linker_arguments = invocation.linker_arguments,
+            .linker_argument_count = invocation.linker_argument_count,
+            .image_kind = (u8)invocation.image_kind,
+        };
+        if (invocation.action != COMPILER_DRIVER_ACTION_LINK || invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
+            !link_validate_linker_arguments(invocation.target, options, true, &unsupported))
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = string_format(arena, S8("unsupported linker argument for this output: {S8}"), unsupported);
+            goto finish;
+        }
     }
     if ((invocation.input_languages && invocation.input_language_count != invocation.input_count) ||
         (!invocation.input_languages && invocation.input_language_count))
@@ -4550,6 +4671,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     // arena or reserves a slot for it. Prebuilt inputs are link-only as well.
     bool link_inputs_retained = !invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK;
     ObjectArchive* input_archives = arena_allocate(arena, ObjectArchive, invocation.input_count);
+    input_archive_maps = arena_allocate_zeroed(arena, FileMapRead, invocation.input_count);
     u32 object_capacity = link_inputs_retained ? invocation.input_count : 0;
     for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
     {
@@ -4566,8 +4688,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             file_map_unmap(archive_file);
             goto finish;
         }
-        input_archives[input_index] = object_archive_read(arena, archive_file.bytes, invocation.target);
-        file_map_unmap(archive_file);
+        input_archive_maps[input_index] = archive_file;
+        input_archives[input_index] = object_archive_read_link(arena, archive_file.bytes, invocation.target);
         if (input_archives[input_index].error != OBJECT_ERROR_NONE || input_archives[input_index].object_count > UINT32_MAX - object_capacity)
         {
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
@@ -4578,13 +4700,15 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         object_capacity += input_archives[input_index].object_count;
     }
     ObjectArchive* library_archives = arena_allocate(arena, ObjectArchive, invocation.library_count);
+    library_archive_maps = arena_allocate_zeroed(arena, FileMapRead, invocation.library_count);
+    String8* library_archive_paths = arena_allocate(arena, String8, invocation.library_count);
     bool* static_libraries = arena_allocate(arena, bool, invocation.library_count);
     memset(static_libraries, 0, sizeof(*static_libraries) * invocation.library_count);
     for (u32 library_index = 0; library_index < invocation.library_count; library_index += 1)
     {
         bool found = false;
         String8 archive_path = {0};
-        ObjectArchive archive = compiler_driver_library_archive(arena, invocation, invocation.libraries[library_index], &found, &archive_path);
+        ObjectArchive archive = compiler_driver_library_archive(arena, invocation, invocation.libraries[library_index], &found, &archive_path, &library_archive_maps[library_index]);
         if (!found)
         {
             if (invocation.target.os == OPERATING_SYSTEM_UEFI)
@@ -4595,6 +4719,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             }
             continue;
         }
+        library_archive_paths[library_index] = archive_path;
         static_libraries[library_index] = true;
         library_archives[library_index] = archive;
         if (archive.error != OBJECT_ERROR_NONE || archive.object_count > UINT32_MAX - object_capacity)
@@ -4631,6 +4756,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             ObjectArchive* archive = &input_archives[input_index];
             compiler_driver_archive_extract(arena, &archive_state, archive, objects, &object_count);
+            if (archive->error != OBJECT_ERROR_NONE)
+            {
+                result.error = COMPILER_DRIVER_ERROR_OBJECT;
+                result.object_error = archive->error;
+                result.diagnostic = string_format(arena, S8("could not read archive {S8}: {S8}"), input_path, archive->diagnostic);
+                goto finish;
+            }
             continue;
         }
         if (compiler_driver_object_input(input_path))
@@ -4698,6 +4830,21 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 }
                 batch_end = batch_first + unit_task_count;
                 memset(unit_tasks, 0, sizeof(*unit_tasks) * unit_task_count);
+                // Arena pools are per thread (arena.c), and this thread destroys
+                // every slot after ordered publication, so it creates them too.
+                // A lane-created arena would park here where no worker can take
+                // it back: every cohort would reserve and fault fresh worker
+                // arenas while this pool filled toward ARENA_POOL_LIMIT
+                // committed TU arenas across cohorts and invocations. Created
+                // here, at most one arena per slot circulates. A failed
+                // creation stays a null slot and is diagnosed in input order.
+                for (u32 index = 0; index < unit_task_count; index += 1)
+                {
+                    unit_tasks[index].arena = arena_create((ArenaCreation){
+                        .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
+                        .flags = {.pool_reuse = 1},
+                    });
+                }
                 if (unit_task_count > 1 && !units_prewarmed)
                 {
                     compiler_parallel_prewarm();
@@ -4970,6 +5117,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         ObjectArchive* archive = &library_archives[library_index];
         compiler_driver_archive_extract(arena, &archive_state, archive, objects, &object_count);
+        if (archive->error != OBJECT_ERROR_NONE)
+        {
+            result.error = COMPILER_DRIVER_ERROR_OBJECT;
+            result.object_error = archive->error;
+            result.diagnostic = string_format(arena, S8("could not read archive {S8}: {S8}"), library_archive_paths[library_index], archive->diagnostic);
+            goto finish;
+        }
     }
     if (archive_state.arena)
     {
@@ -5084,6 +5238,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .image_kind = (u8)invocation.image_kind,
                                                 });
     compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+    WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result.native_link.executable.length);
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
@@ -5091,6 +5246,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
 finish:
     if (archive_state.arena) arena_destroy(archive_state.arena, 1);
+    for (u32 index = 0; input_archive_maps && index < invocation.input_count; index += 1) file_map_unmap(input_archive_maps[index]);
+    for (u32 index = 0; library_archive_maps && index < invocation.library_count; index += 1) file_map_unmap(library_archive_maps[index]);
     // Every lane has joined before this unwind. A failed input can leave
     // later slots populated; none may outlive the driver invocation.
     for (u32 index = 0; index < unit_task_count; index += 1)

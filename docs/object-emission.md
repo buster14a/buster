@@ -45,6 +45,24 @@ range's end had every byte written exactly once. Only such an image is
 returned; any error returns no bytes. The plan's tables and the priority split
 live in a scratch arena, so the caller's arena keeps only the image.
 
+**Borrowed payloads (`-c`).** `object_write_borrowing`, which the driver's
+`-c` uses, is the same writer with one change in the emit phase. A payload of
+at least `OBJECT_BORROWED_PAYLOAD_MINIMUM` (4 KiB) is named in place
+(`object_image_borrow`) instead of stored. Its range of the image is reserved
+but never written, so its pages are never touched, and the artifact records
+the payload's `(offset, bytes)` in file order. `object_artifact_slices` yields
+the file as the image's own ranges interleaved with those payloads, and
+`file_publish_slices` writes them with the same staging, flush and atomic
+replace as `file_publish`. The file is byte-identical to `object_write`'s
+image. The payloads are ranges of the caller's `ObjectFile` (the priority
+split only narrows them), so the `ObjectFile` must outlive the publish. The
+borrowed table is allocated in the caller's arena, and only when some payload
+qualifies. A borrowing result is complete in the same sense as above: every
+cursor reached its range's end, by stores and borrows together. COFF and
+Mach-O never borrow. `compiler_driver_test_object_borrowed_payloads` compares
+the published file, the slices and `object_write`'s image, and holds the
+ledger identities below.
+
 The bytes are identical to the writer this replaced. Test builds keep that
 writer as `object_test_write_elf64_reference`, a differential oracle; the
 registered `object_test_elf_planned_writer` compares both on seeded and
@@ -65,6 +83,7 @@ happens rather than estimated:
 | `image_bytes_zeroed` | Stores that wrote zero fill or padding. |
 | `image_bytes_patched` | Stores over bytes already stored. |
 | `payload_bytes_copied` | Section payload bytes copied into the image. |
+| `payload_bytes_borrowed` | Section payload bytes a borrowing write named in place instead of storing. |
 | `scratch_bytes` | Other arena bytes the writer requested, released or not. |
 | `retained_bytes` | What the call left allocated in the caller's arena, image included. |
 | `output_bytes` | The artifact's length, or zero on error. |
@@ -73,13 +92,20 @@ For the planned ELF writer, `image_bytes_reserved`, `image_bytes_stored`,
 `retained_bytes` and `output_bytes` are equal, `image_bytes_patched` is zero,
 and each relocation and symbol is visited three times (validation, plan,
 emission), priority split or not. The registered tests hold the writer to
-those equalities.
+those equalities. A borrowing write stores `image_bytes_reserved` minus
+`payload_bytes_borrowed` bytes, still patches none, and retains its borrowed
+table (one `ObjectBorrowedPayload` per payload) beyond the image; its
+`payload_bytes_copied` plus `payload_bytes_borrowed` is what `object_write`
+copies.
 
 `ide cc -v -c` prints the ledger as one `OBJECT_WRITE` record, summed over the
-objects when there are several inputs (`object_write_statistics_add`):
+objects when there are several inputs (`object_write_statistics_add`). For the
+unity compiler at `-g0` (`ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1
+-DBUSTER_INCLUDE_TESTS=0 -g0 -v -c src/buster/apps/ide/ide.c`), every
+non-empty payload is at least 4 KiB, so all of them are borrowed:
 
 ```text
-OBJECT_WRITE format=elf64 section_visits=126 symbol_visits=61944 relocation_visits=187695 image_reserved=38057760 image_stored=38057760 image_zeroed=113 image_patched=0 payload_copied=35589769 scratch=84280 retained=38057760 output=38057760
+OBJECT_WRITE format=elf64 section_visits=150 symbol_visits=62646 relocation_visits=191454 image_reserved=38328904 image_stored=2509361 image_zeroed=107 image_patched=0 payload_copied=0 payload_borrowed=35819543 scratch=85312 retained=38329000 output=38328904
 ```
 
 ## COFF and Mach-O
@@ -102,3 +128,24 @@ necessary. Moving them onto a plan is a staged follow-up.
 Independent readers and linkers (GNU `readelf`, `llvm-readelf`,
 `llvm-objdump`, `ld -r`, `ld.lld -r`, and full GNU ld/LLD links) are exercised
 by the evidence script recorded with the introducing audit.
+
+## In-memory executable sections
+
+`object_link_executable` relocates an object inside one temporary writable,
+nonexecutable reservation, then publishes it only after final protection and
+instruction-cache flushing succeed. Each nonempty section occupies its own
+page-rounded span: text becomes RX, mutable data and zero-fill become RW, and
+readonly/unwind/initializer/debug sections become R. No final page is both
+writable and executable. Section alignments greater than a host page remain
+absolute address constraints; padding stays readonly.
+
+`ObjectExecutable.address` names the first nonempty text section. Its
+`allocation_address` and `allocation_size` name the complete reservation,
+including any alignment prefix, and `object_release_executable` releases that
+reservation. Failed layout, relocation, protection or cache flushing publishes
+neither address. This helper does not register unwind tables or run constructors,
+and thread-local relocations still require an external runtime and are refused.
+
+The registered `object_test_executable_sections` checks data and BSS through
+PC-relative and absolute references on x86-64/AArch64, repeated updates,
+over-page alignment and Linux, Windows and macOS mapping permission queries.

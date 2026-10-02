@@ -1,0 +1,673 @@
+#!/usr/bin/env python3
+"""Network-free source and current-run tests for main CI reuse."""
+
+import copy
+import contextlib
+import io
+import json
+import urllib.error
+from datetime import datetime, timedelta, timezone
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import github_ci_time as inventory
+import main_ci_reuse as reuse
+from merge_queue_admission import AdmissionError, GitHub
+
+SHA = "a" * 40
+BLOB = "b" * 40
+SOURCE_ID = 100
+CURRENT_ID = 101
+NOW = datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc)
+BRANCH = "gh-readonly-queue/main/pr-7-abc"
+
+
+def run(run_id, event, branch, when):
+    return {"id": run_id, "workflow_id": reuse.WORKFLOW_ID,
+            "path": reuse.WORKFLOW_PATH, "head_sha": SHA,
+            "head_commit": {"id": SHA}, "head_branch": branch, "event": event,
+            "run_attempt": 1, "status": "completed" if event == "merge_group" else "in_progress",
+            "conclusion": "success" if event == "merge_group" else None,
+            "repository": {"id": reuse.REPOSITORY_ID, "full_name": reuse.REPOSITORY},
+            "head_repository": {"id": reuse.REPOSITORY_ID},
+            "created_at": when.isoformat(), "updated_at": when.isoformat()}
+
+
+def job(name, run_id, *, status="completed", conclusion="success"):
+    required = set(inventory._required_job_steps(name))
+    for candidate, _, mandatory in reuse.REUSED:
+        if name == candidate:
+            required.add(mandatory)
+            if name.startswith("Windows") and name.endswith("native"):
+                required.add("Native MSVC reference differential")
+            if name.endswith("native") and not name.startswith("Windows"):
+                required.add("Native configuration differential matrix")
+    if name in inventory.ANALYZER:
+        required.update(reuse.ANALYZER_STEPS)
+    return {"id": len(name) + run_id, "name": name, "run_id": run_id,
+            "run_attempt": 1, "head_sha": SHA, "status": status,
+            "conclusion": conclusion,
+            "steps": [{"name": step, "status": "completed", "conclusion": "success"}
+                      for step in sorted(required)] if conclusion != "skipped" else []}
+
+
+class FakeAPI:
+    def __init__(self):
+        self.current = run(CURRENT_ID, "push", "main", NOW - timedelta(minutes=1))
+        self.source = run(SOURCE_ID, "merge_group", BRANCH, NOW - timedelta(minutes=2))
+        self.jobs = [job(name, SOURCE_ID) for name in inventory.COMBINATION_JOBS]
+        for index, record in enumerate(self.jobs):
+            record["id"] = 1000 + index
+        self.artifacts = []
+        for index, (_, prefix, _) in enumerate(reuse.SOURCE_COVERAGE):
+            self.artifacts.append({
+                "id": index + 1, "name": f"{prefix}-{SOURCE_ID}-1", "size_in_bytes": 100,
+                "expired": False, "expires_at": (NOW + timedelta(days=1)).isoformat(),
+                "digest": "sha256:" + "c" * 64,
+                "workflow_run": {"id": SOURCE_ID, "repository_id": reuse.REPOSITORY_ID,
+                                 "head_repository_id": reuse.REPOSITORY_ID,
+                                 "head_sha": SHA, "head_branch": BRANCH}})
+        self.main_jobs = [job(name, CURRENT_ID, status="in_progress" if name == "CI complete" else "completed",
+                              conclusion=None if name == "CI complete" else "success")
+                          for name in reuse.RETAINED_NAMES]
+        for record in self.main_jobs:
+            if record['name'] in reuse.DESKTOP_NAMES:
+                record['steps'] = [dict(name=name, status='completed', conclusion='success')
+                                   for name in reuse.CACHE_STEPS]
+                record['steps'] += [dict(name=name, status='completed', conclusion='skipped')
+                                    for name in reuse.VALIDATION_STEPS]
+            if record['name'] in inventory.ANALYZER:
+                record['steps'] = [dict(name=name, status='completed', conclusion='success')
+                                   for name in reuse.ANALYZER_RECEIPT_STEPS]
+                record['steps'] += [dict(name=name, status='completed', conclusion='skipped')
+                                    for name in reuse.ANALYZER_STEPS]
+        self.main_jobs.append(job(inventory.MAIN_REUSE_JOB, CURRENT_ID))
+        self.main_jobs += [job(name, CURRENT_ID, conclusion="skipped") for name in reuse.REUSED_NAMES]
+        for index, record in enumerate(self.main_jobs):
+            record["id"] = 2000 + index
+        self.movement = False
+
+    def get(self, path, **query):
+        if path == f"actions/runs/{CURRENT_ID}":
+            return copy.deepcopy(self.current)
+        if path == f"actions/runs/{SOURCE_ID}":
+            value = copy.deepcopy(self.source)
+            if self.movement:
+                value["run_attempt"] = 2
+            return value
+        if path == "contents/" + reuse.WORKFLOW_PATH and query == {"ref": SHA}:
+            return {"type": "file", "sha": BLOB}
+        raise AssertionError(path)
+
+    def pages(self, path, field, **query):
+        if path == f"actions/workflows/{reuse.WORKFLOW_ID}/runs" and field == "workflow_runs":
+            return [copy.deepcopy(self.source)]
+        if path == f"actions/runs/{SOURCE_ID}/attempts/1/jobs" and field == "jobs":
+            return copy.deepcopy(self.jobs)
+        if path == f"actions/runs/{SOURCE_ID}/artifacts" and field == "artifacts":
+            return copy.deepcopy(self.artifacts)
+        if path == f"actions/runs/{CURRENT_ID}/jobs" and field == "jobs":
+            return copy.deepcopy(self.main_jobs)
+        raise AssertionError((path, field, query))
+
+
+DRAFT_PREDICATE = ("github.event_name == 'pull_request' && github.event.pull_request.draft && "
+                   "github.run_attempt == '1'")
+
+
+class MainCIReuseTests(unittest.TestCase):
+    def setUp(self):
+        self.api = FakeAPI()
+
+    def admit(self):
+        return reuse.verify_source(self.api, SHA, CURRENT_ID, BLOB, NOW)
+
+    def test_exact_commit_source_and_main_specific_jobs(self):
+        receipt = self.admit()
+        self.assertEqual(len(receipt["source_jobs"]), 19)
+        self.assertEqual(len(receipt["source_artifacts"]), 19)
+        self.assertEqual(receipt["source_run_id"], SOURCE_ID)
+        self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 13)
+        self.assertRegex(reuse.receipt_digest(receipt), r"[0-9a-f]{64}\Z")
+
+    def test_dispatch_split_layout_cannot_change_the_main_reuse_inventory(self):
+        self.assertEqual(inventory.combination_jobs(), inventory.COMBINATION_JOBS)
+        self.assertEqual(len(inventory.combination_jobs()), 21)
+        self.assertEqual(len(inventory.combination_jobs("split")), 27)
+        self.assertEqual(len(reuse.RETAINED_NAMES), 13)
+        self.assertIn("Windows x86-64 checks", reuse.RETAINED_NAMES)
+        self.assertNotIn("Windows x86-64 sanitized-debug", reuse.RETAINED_NAMES)
+        self.api.jobs = [job(name, SOURCE_ID) for name in inventory.combination_jobs("split")]
+        with self.assertRaises(AdmissionError):
+            self.admit()
+
+    def test_wrong_identity_policy_and_event_fall_back(self):
+        cases = (("current", "head_sha", "d" * 40),
+                 ("current", "event", "workflow_dispatch"),
+                 ("current", "run_attempt", 2),
+                 ("source", "workflow_id", 1),
+                 ("source", "head_sha", "d" * 40),
+                 ("source", "head_branch", "feature"),
+                 ("source", "run_attempt", 2),
+                 ("source", "status", "in_progress"),
+                 ("source", "conclusion", "failure"))
+        for target, field, value in cases:
+            with self.subTest(target=target, field=field):
+                self.api = FakeAPI()
+                getattr(self.api, target)[field] = value
+                with self.assertRaises(AdmissionError):
+                    self.admit()
+        self.api = FakeAPI()
+        self.api.source["repository"]["full_name"] = "another/repo"
+        with self.assertRaises(AdmissionError):
+            self.admit()
+        self.api = FakeAPI()
+        with self.assertRaisesRegex(AdmissionError, "workflow revision"):
+            reuse.verify_source(self.api, SHA, CURRENT_ID, "d" * 40, NOW)
+
+    def test_missing_failed_cancelled_and_skipped_coverage(self):
+        for conclusion in (None, "failure", "cancelled", "skipped"):
+            with self.subTest(conclusion=conclusion):
+                self.api = FakeAPI()
+                self.api.jobs[0]["conclusion"] = conclusion
+                with self.assertRaises(AdmissionError):
+                    self.admit()
+        self.api = FakeAPI()
+        self.api.jobs.pop(0)
+        with self.assertRaises(AdmissionError):
+            self.admit()
+        self.api = FakeAPI()
+        native = next(j for j in self.api.jobs if j["name"] == "Linux x86-64 native")
+        native["steps"] = [s for s in native["steps"] if s["name"] != "Native configuration differential matrix"]
+        with self.assertRaises(AdmissionError):
+            self.admit()
+
+    def test_expired_missing_and_wrong_artifacts(self):
+        for field, value in (("expired", True), ("size_in_bytes", 0),
+                             ("digest", "bad"), ("expires_at", (NOW - timedelta(seconds=1)).isoformat())):
+            with self.subTest(field=field):
+                self.api = FakeAPI()
+                self.api.artifacts[0][field] = value
+                with self.assertRaises(AdmissionError):
+                    self.admit()
+        self.api = FakeAPI()
+        self.api.artifacts.pop()
+        with self.assertRaises(AdmissionError):
+            self.admit()
+        self.api = FakeAPI()
+        self.api.artifacts[0]["workflow_run"]["head_sha"] = "d" * 40
+        with self.assertRaises(AdmissionError):
+            self.admit()
+
+    def test_stale_source_and_attempt_movement(self):
+        self.api.source["updated_at"] = (NOW - timedelta(hours=3)).isoformat()
+        with self.assertRaises(AdmissionError):
+            self.admit()
+        self.api = FakeAPI()
+        self.api.movement = True
+        with self.assertRaises(AdmissionError):
+            self.admit()
+
+    def test_current_recheck_refuses_missing_red_or_executed_jobs(self):
+        for conclusion in ("failure", "cancelled", "skipped"):
+            with self.subTest(conclusion=conclusion):
+                self.api = FakeAPI()
+                self.api.main_jobs[0]["conclusion"] = conclusion
+                with self.assertRaises(AdmissionError):
+                    reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+        self.api = FakeAPI()
+        self.api.main_jobs.pop(0)
+        with self.assertRaises(AdmissionError):
+            reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+        self.api = FakeAPI()
+        self.api.main_jobs[-1]["conclusion"] = "success"
+        with self.assertRaises(AdmissionError):
+            reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+
+    def test_all_desktop_source_coverage_and_artifacts_are_required(self):
+        for name, prefix, mandatory in reuse.DESKTOP:
+            with self.subTest(name=name):
+                self.api = FakeAPI()
+                source = next(j for j in self.api.jobs if j['name'] == name)
+                source['steps'] = [s for s in source['steps'] if s['name'] != mandatory]
+                with self.assertRaises(AdmissionError):
+                    self.admit()
+                self.api = FakeAPI()
+                self.api.artifacts = [a for a in self.api.artifacts
+                                      if a['name'] != f'{prefix}-{SOURCE_ID}-1']
+                with self.assertRaises(AdmissionError):
+                    self.admit()
+
+    def test_cache_only_jobs_require_cache_and_skip_validation(self):
+        for name in reuse.DESKTOP_NAMES:
+            for step_name in reuse.CACHE_STEPS + reuse.VALIDATION_STEPS:
+                with self.subTest(name=name, step=step_name):
+                    self.api = FakeAPI()
+                    current = next(j for j in self.api.main_jobs if j['name'] == name)
+                    step = next(s for s in current['steps'] if s['name'] == step_name)
+                    step['conclusion'] = 'failure' if step_name in reuse.CACHE_STEPS else 'success'
+                    with self.assertRaises(AdmissionError):
+                        reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+
+    def test_desktop_cache_only_workflow_boundary(self):
+        text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
+        desktop = text.split('\n  test:\n', 1)[1].split('\n  native:\n', 1)[0]
+        self.assertIn('needs: [lint, reuse]', desktop)
+        for name in reuse.VALIDATION_STEPS:
+            block = desktop.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
+            condition = next(line for line in block.splitlines() if line.startswith('        if:'))
+            self.assertIn("needs.reuse.outputs.reuse != 'true'", condition)
+        for name in reuse.CACHE_STEPS:
+            block = desktop.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
+            self.assertNotIn("needs.reuse.outputs.reuse != 'true'", block)
+        self.assertEqual(reuse.DESKTOP_NAMES, set(inventory.COMBINATION_PLATFORMS))
+
+    def test_analyzer_requires_complete_source_controls_and_main_receipt(self):
+        for step_name in reuse.ANALYZER_STEPS:
+            self.api = FakeAPI()
+            source = next(j for j in self.api.jobs if j['name'] in inventory.ANALYZER)
+            next(s for s in source['steps'] if s['name'] == step_name)['conclusion'] = 'skipped'
+            with self.assertRaises(AdmissionError):
+                self.admit()
+        for step_name in reuse.ANALYZER_STEPS + reuse.ANALYZER_RECEIPT_STEPS:
+            self.api = FakeAPI()
+            current = next(j for j in self.api.main_jobs if j['name'] in inventory.ANALYZER)
+            next(s for s in current['steps'] if s['name'] == step_name)['conclusion'] = 'failure'
+            with self.assertRaises(AdmissionError):
+                reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+        text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
+        analyzer = text.split('\n  analyzer:\n', 1)[1].split('\n  complete:\n', 1)[0]
+        self.assertIn('needs: reuse', analyzer)
+        # Queue and main bind baseline to their exact SHA; explicit comparisons
+        # remain dispatch-only and never enter main reuse.
+        self.assertEqual(analyzer.count('BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}'), 2)
+        for name in reuse.ANALYZER_STEPS:
+            block = analyzer.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
+            self.assertIn("if: ${{ needs.reuse.outputs.reuse != 'true' }}", block)
+
+    def test_api_uncertainty_and_incomplete_pagination_fall_back(self):
+        with mock.patch.object(self.api, "pages", side_effect=OSError("API unavailable")):
+            with self.assertRaises(OSError):
+                self.admit()
+        with mock.patch.object(self.api, "pages", side_effect=AdmissionError("incomplete pagination")):
+            with self.assertRaisesRegex(AdmissionError, "pagination"):
+                self.admit()
+
+    def test_decision_falls_back_but_finish_fails_closed_on_api_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            environment = dict(os.environ, GITHUB_REPOSITORY=reuse.REPOSITORY,
+                               GITHUB_EVENT_NAME="push", GITHUB_REF="refs/heads/main",
+                               GITHUB_SHA=SHA, GITHUB_RUN_ID=str(CURRENT_ID),
+                               GITHUB_RUN_ATTEMPT="1", GH_TOKEN="fixture",
+                               GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(root / "summary"))
+            receipt = self.admit()
+            with mock.patch.dict(os.environ, environment), \
+                    mock.patch.object(reuse, "local_workflow_blob", return_value=BLOB), \
+                    mock.patch.object(reuse, "GitHub", side_effect=OSError("API offline")):
+                with mock.patch.object(sys, "argv", ["main_ci_reuse.py", "decide", "--output", str(root / "receipt")]):
+                    self.assertEqual(reuse.cli(), 0)
+                self.assertEqual(output.read_text(), "reuse=false\n")
+                with mock.patch.object(sys, "argv", ["main_ci_reuse.py", "finish", "--output", str(root / "receipt"),
+                                                     "--expected-receipt", json.dumps(receipt),
+                                                     "--expected-digest", reuse.receipt_digest(receipt)]):
+                    self.assertEqual(reuse.cli(), 1)
+
+    def test_real_pagination_reader_rejects_partial_or_moving_totals(self):
+        api = object.__new__(GitHub)
+        api.get = mock.Mock(side_effect=[{"total_count": 101, "jobs": [{}] * 100},
+                                             {"total_count": 102, "jobs": [{}]}])
+        with self.assertRaisesRegex(AdmissionError, "truncated"):
+            api.pages("actions/runs/1/jobs", "jobs")
+        api.get = mock.Mock(return_value={"total_count": 100, "jobs": [{}] * 100})
+        with self.assertRaisesRegex(AdmissionError, "pagination limit"):
+            api.pages("actions/runs/1/jobs", "jobs")
+
+    def test_workflow_wiring_and_inventory_match_policy(self):
+        text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
+        self.assertEqual(reuse.REUSED_NAMES,
+                         set(inventory.NATIVE + inventory.MOBILE + inventory.UEFI))
+        self.assertEqual(len(reuse.RETAINED_NAMES), 13)
+        for key in ("native", "mobile", "uefi"):
+            header = re.split(r"\n  [a-z][a-z_]*:\n", text.split(f"\n  {key}:\n", 1)[1], maxsplit=1)[0]
+            self.assertIn("needs: reuse", header)
+            self.assertIn("needs.reuse.outputs.reuse != 'true'", header)
+            self.assertNotIn("GITHUB_EVENT_NAME", header)
+            # Draft deferral and queue fail-fast are false on both push and
+            # merge_group, so they cannot make the reused jobs event-dependent.
+            header = header.replace(DRAFT_PREDICATE, "")
+            self.assertNotIn("github.event_name", re.sub(r"^      fail-fast:.*$", "", header, flags=re.M))
+        self.assertIn("name: Main CI reuse decision", text)
+        self.assertIn("main_ci_reuse.py finish", text)
+        self.assertIn("needs.reuse.outputs.reuse == 'true'", text)
+        self.assertIn("receipt: ${{ steps.admit.outputs.receipt }}", text)
+        self.assertIn("SOURCE_RECEIPT: ${{ needs.reuse.outputs.receipt }}", text)
+        self.assertIn('--expected-receipt "$SOURCE_RECEIPT"', text)
+        self.assertIn("steps.retain.outcome == 'success'", text)
+        self.assertIn("name: Retain main CI reuse decision", text)
+
+
+class MainCIReuseFinishTests(unittest.TestCase):
+    def setUp(self):
+        self.api = FakeAPI()
+        self.sleeps = mock.patch.object(reuse.time, "sleep").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def invoke(self, phase, handoff=None, *, stale=False):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "result.json"
+            if stale:
+                path.write_text('{"status":"verified","receipt":{"stale":true}}')
+            environment = {"GITHUB_REPOSITORY": reuse.REPOSITORY,
+                           "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main",
+                           "GITHUB_SHA": SHA, "GITHUB_RUN_ID": str(CURRENT_ID),
+                           "GITHUB_RUN_ATTEMPT": "1", "GH_TOKEN": "fixture-secret",
+                           "GITHUB_OUTPUT": str(root / "outputs"),
+                           "GITHUB_STEP_SUMMARY": str(root / "summary")}
+            argv = ["main_ci_reuse.py", phase, "--output", str(path)]
+            if handoff is not None:
+                argv += ["--expected-receipt", handoff["receipt"],
+                         "--expected-digest", handoff["receipt_digest"]]
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(reuse, "local_workflow_blob", return_value=BLOB), \
+                    mock.patch.object(reuse, "GitHub", return_value=self.api), \
+                    mock.patch.object(reuse, "datetime", wraps=datetime) as clock, \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                clock.now.return_value = NOW
+                code = reuse.cli()
+            report = json.loads(path.read_text())
+            outputs = (root / "outputs").read_text() if (root / "outputs").exists() else ""
+            return code, report, dict(line.split("=", 1) for line in outputs.splitlines()), \
+                stdout.getvalue() + stderr.getvalue() + (root / "summary").read_text()
+
+    def decide(self):
+        code, report, handoff, _ = self.invoke("decide")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "verified")
+        self.assertEqual(handoff["reuse"], "true")
+        return handoff
+
+    def assert_refused(self, result, stage=None):
+        code, report, outputs, text = result
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "failed")
+        self.assertNotIn("receipt", report)
+        self.assertNotIn("reuse", outputs)
+        self.assertNotIn("Main CI reuse verified", text)
+        self.assertNotIn("Queue validation verified", text)
+        if stage is not None:
+            self.assertEqual(report["diagnostics"]["stage"], stage)
+
+    def list_sequence(self, sequence):
+        original = self.api.pages
+        reads = iter(sequence)
+
+        def pages(path, field, **query):
+            if path == reuse.DISCOVERY_PATH:
+                self.assertEqual(query, {"event": "merge_group", "head_sha": SHA})
+                item = next(reads)
+                if isinstance(item, Exception):
+                    raise item
+                return copy.deepcopy(item)
+            return original(path, field, **query)
+        return mock.patch.object(self.api, "pages", side_effect=pages)
+
+    def unexpanded_jobs(self):
+        self.api.main_jobs = [row for row in self.api.main_jobs if row["name"] not in reuse.REUSED_NAMES]
+        for index, name in enumerate((reuse.UNEXPANDED_REUSE_NAME, reuse.UNEXPANDED_REUSE_NAME,
+                                      "UEFI firmware boot")):
+            row = job(name, CURRENT_ID, conclusion="skipped")
+            row.update(id=4000 + index, steps=[], runner_id=None)
+            self.api.main_jobs.append(row)
+
+    def test_two_phase_handoff_binds_main_and_source(self):
+        handoff = self.decide()
+        receipt = json.loads(handoff["receipt"])
+        self.assertEqual(receipt["main_run_id"], CURRENT_ID)
+        self.assertEqual(receipt["source_run_id"], SOURCE_ID)
+        self.assertEqual(receipt["source_branch"], BRANCH)
+        code, report, outputs, _ = self.invoke("finish", handoff)
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "verified")
+        self.assertEqual(len(report["receipt"]["main_jobs"]), 13)
+        self.assertEqual(outputs, {})
+
+    def test_transient_empty_listing_is_recollected_after_direct_lookup(self):
+        handoff = self.decide()
+        calls = []
+        original_get = self.api.get
+        def get(path, **query):
+            calls.append(("get", path))
+            return original_get(path, **query)
+        with self.list_sequence([[], [self.api.source]]), mock.patch.object(self.api, "get", side_effect=get):
+            # Capture the order without replacing the observation logic.
+            pages = self.api.pages
+            def listed(path, field, **query):
+                calls.append(("list", path))
+                return pages(path, field, **query)
+            with mock.patch.object(self.api, "pages", side_effect=listed):
+                code, report, _, _ = self.invoke("finish", handoff)
+        self.assertEqual(code, 0)
+        self.assertLess(calls.index(("get", f"actions/runs/{SOURCE_ID}")),
+                        calls.index(("list", reuse.DISCOVERY_PATH)))
+        snapshots = report["diagnostics"]["discovery"]
+        self.assertEqual([row["candidate_count"] for row in snapshots], [0, 1])
+        self.assertEqual(snapshots[0]["error"]["code"], "missing-source")
+        self.sleeps.assert_called_once_with(1)
+
+    def test_persistent_missing_list_fails_and_overwrites_stale_receipt(self):
+        handoff = self.decide()
+        with self.list_sequence([[], [], []]):
+            result = self.invoke("finish", handoff, stale=True)
+        self.assert_refused(result, "source-discovery")
+        report = result[1]
+        self.assertEqual(report["error"]["code"], "missing-source")
+        self.assertEqual(report["expected_source_run_id"], SOURCE_ID)
+        self.assertEqual(len(report["diagnostics"]["discovery"]), 3)
+        self.assertEqual(self.sleeps.call_args_list, [mock.call(1), mock.call(2)])
+
+    def test_duplicate_or_replacement_run_never_retries_or_selects_green(self):
+        handoff = self.decide()
+        replacement = dict(self.api.source, id=SOURCE_ID + 10)
+        for rows, code in (([self.api.source, replacement], "ambiguous-source"),
+                           ([replacement], "source-replaced"),
+                           ([self.api.source, self.api.source], "ambiguous-source")):
+            with self.subTest(code=code), self.list_sequence([rows]):
+                result = self.invoke("finish", handoff)
+                self.assert_refused(result, "source-discovery")
+                self.assertEqual(result[1]["error"]["code"], code)
+        self.sleeps.assert_not_called()
+
+    def test_source_attempt_failure_and_identity_changes_refuse_before_discovery(self):
+        for field, value in (("run_attempt", 2), ("run_attempt", True),
+                             ("status", "in_progress"), ("conclusion", "failure"),
+                             ("conclusion", "cancelled"), ("head_sha", "d" * 40),
+                             ("workflow_id", 99), ("event", "push"),
+                             ("head_branch", BRANCH + "-replaced"),
+                             ("updated_at", NOW.isoformat())):
+            with self.subTest(field=field, value=value):
+                self.api = FakeAPI()
+                handoff = self.decide()
+                self.api.source[field] = value
+                with mock.patch.object(self.api, "pages", wraps=self.api.pages) as pages:
+                    self.assert_refused(self.invoke("finish", handoff), "bound-source")
+                    pages.assert_not_called()
+        self.sleeps.assert_not_called()
+
+    def test_moving_pagination_and_transient_http_reads_retry_but_definite_errors_do_not(self):
+        handoff = self.decide()
+        errors = [AdmissionError("API response is truncated or changed during pagination"),
+                  urllib.error.HTTPError("https://api.github.com", 502, "Bad Gateway", {}, None),
+                  urllib.error.HTTPError("https://api.github.com", 429, "Limited", {}, None),
+                  urllib.error.URLError("temporary connection loss")]
+        for error in errors:
+            with self.subTest(error=error), self.list_sequence([error, [self.api.source]]):
+                code, report, _, _ = self.invoke("finish", handoff)
+                self.assertEqual(code, 0)
+                self.assertIn("error", report["diagnostics"]["discovery"][0])
+        self.sleeps.reset_mock()
+        for error in (urllib.error.HTTPError("https://api.github.com", 403, "Forbidden", {}, None),
+                      AdmissionError("API pagination limit reached; refusing partial evidence")):
+            with self.subTest(error=error), self.list_sequence([error]):
+                self.assert_refused(self.invoke("finish", handoff), "source-discovery")
+        self.sleeps.assert_not_called()
+
+    def test_malformed_or_wrong_identity_scoped_listing_fails(self):
+        handoff = self.decide()
+        for rows in ([None], {}, [dict(self.api.source, workflow_id=42)],
+                     [dict(self.api.source, head_sha="d" * 40)]):
+            with self.subTest(rows=rows), self.list_sequence([rows]):
+                self.assert_refused(self.invoke("finish", handoff), "source-discovery")
+        self.sleeps.assert_not_called()
+
+    def test_attempt_movement_during_backoff_does_not_get_another_chance(self):
+        handoff = self.decide()
+        self.sleeps.side_effect = lambda delay: self.api.source.update(run_attempt=2)
+        with self.list_sequence([[], [self.api.source]]):
+            result = self.invoke("finish", handoff)
+        self.assert_refused(result, "bound-source")
+        self.assertEqual(len(result[1]["diagnostics"]["discovery"]), 1)
+        self.assertEqual(result[1]["error"]["code"], "changed-attempt")
+        self.assertEqual(result[1]["diagnostics"]["source_run"]["run_attempt"], 2)
+
+    def test_missing_malformed_and_tampered_handoff_fails_without_api(self):
+        handoff = self.decide()
+        for broken in (None, dict(handoff, receipt="{}"), dict(handoff, receipt="not-json"),
+                       dict(handoff, receipt_digest="fixture-secret"),
+                       dict(handoff, receipt="x" * (reuse.MAX_RECEIPT_BYTES + 1))):
+            with self.subTest(broken=broken is None), mock.patch.object(self.api, "get") as get:
+                result = self.invoke("finish", broken)
+                self.assert_refused(result, "receipt-handoff")
+                self.assertNotIn("fixture-secret", json.dumps(result[1]) + result[3])
+                get.assert_not_called()
+
+    def test_handoff_cannot_cross_main_runs_attempts_workflow_or_source(self):
+        handoff = self.decide()
+        receipt = json.loads(handoff["receipt"])
+        for field, value in (("main_run_id", CURRENT_ID + 1), ("main_attempt", 2),
+                             ("source_run_id", True), ("source_attempt", True),
+                             ("policy", "other-policy"), ("repository", "other/repo"),
+                             ("workflow_id", 44), ("workflow_blob", "d" * 40),
+                             ("head_sha", "e" * 40)):
+            changed = dict(receipt, **{field: value})
+            invalid = {"receipt": json.dumps(changed), "receipt_digest": reuse.receipt_digest(changed)}
+            with self.subTest(field=field), mock.patch.object(self.api, "get") as get:
+                self.assert_refused(self.invoke("finish", invalid), "receipt-handoff")
+                get.assert_not_called()
+
+    def test_changed_artifact_or_job_id_cannot_match_original_digest(self):
+        for kind in ("artifact", "job"):
+            self.api = FakeAPI()
+            handoff = self.decide()
+            if kind == "artifact":
+                self.api.artifacts[0]["digest"] = "sha256:" + "d" * 64
+            else:
+                next(row for row in self.api.jobs if row["name"] in reuse.REUSED_NAMES)["id"] += 9000
+            with self.subTest(kind=kind):
+                self.assert_refused(self.invoke("finish", handoff), "receipt-comparison")
+
+    def test_missing_expired_or_misbound_artifacts_remain_red(self):
+        for field, value in (("expired", True), ("size_in_bytes", 0),
+                             ("digest", "bad"), ("expires_at", NOW.isoformat())):
+            self.api = FakeAPI()
+            handoff = self.decide()
+            self.api.artifacts[0][field] = value
+            with self.subTest(field=field):
+                self.assert_refused(self.invoke("finish", handoff), "source-artifacts")
+        self.api = FakeAPI()
+        handoff = self.decide()
+        self.api.artifacts.pop()
+        self.assert_refused(self.invoke("finish", handoff), "source-artifacts")
+
+    def test_failed_source_or_main_jobs_emit_failure_not_success_receipts(self):
+        for target in ("jobs", "main_jobs"):
+            for conclusion in ("failure", "cancelled", "skipped"):
+                self.api = FakeAPI()
+                handoff = self.decide()
+                getattr(self.api, target)[0]["conclusion"] = conclusion
+                with self.subTest(target=target, conclusion=conclusion):
+                    self.assert_refused(self.invoke("finish", handoff),
+                                        "source-jobs" if target == "jobs" else "main-jobs")
+
+    def test_attempt_moves_during_main_collection(self):
+        handoff = self.decide()
+        original = self.api.pages
+        def pages(path, field, **query):
+            result = original(path, field, **query)
+            if path == f"actions/runs/{CURRENT_ID}/jobs":
+                self.api.source["run_attempt"] = 2
+            return result
+        with mock.patch.object(self.api, "pages", side_effect=pages):
+            self.assert_refused(self.invoke("finish", handoff), "final-source-recheck")
+
+    def test_decision_without_proof_falls_back_and_retains_diagnostics(self):
+        with self.list_sequence([[]]):
+            code, report, outputs, _ = self.invoke("decide")
+        self.assertEqual(code, 0)
+        self.assertEqual(outputs, {"reuse": "false"})
+        self.assertEqual(report["status"], "unavailable")
+        self.assertNotIn("receipt", report)
+        self.assertEqual(report["error"]["code"], "missing-source")
+        self.sleeps.assert_not_called()
+
+    def test_exception_token_is_redacted_from_diagnostic_and_log(self):
+        handoff = self.decide()
+        with self.list_sequence([OSError("transport fixture-secret\\nwith untrusted text")]):
+            result = self.invoke("finish", handoff)
+        self.assert_refused(result)
+        self.assertNotIn("fixture-secret", json.dumps(result[1]) + result[3])
+        self.assertIn("[redacted]", result[1]["error"]["message"])
+
+    def test_real_unexpanded_matrices_are_skips_not_duplicate_executions(self):
+        handoff = self.decide()
+        self.unexpanded_jobs()
+        code, report, _, _ = self.invoke("finish", handoff)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(report["receipt"]["main_jobs"]), 13)
+        skipped = report["diagnostics"]["skipped_jobs"]
+        self.assertEqual([row["job_id"] for row in skipped], [4000, 4001, 4002])
+        self.assertTrue(all(row["conclusion"] == "skipped" for row in skipped))
+
+    def test_missing_duplicate_or_unrecognized_skip_groups_fail(self):
+        for case in ("missing", "duplicate", "unknown", "none", "duplicate-id"):
+            self.api = FakeAPI()
+            handoff = self.decide()
+            self.unexpanded_jobs()
+            if case == "missing":
+                self.api.main_jobs.pop()
+            elif case == "duplicate":
+                self.api.main_jobs.append(dict(self.api.main_jobs[-2], id=5000))
+            elif case == "unknown":
+                self.api.main_jobs[-2]["name"] = "${{ matrix.unknown }}"
+            elif case == "none":
+                self.api.main_jobs = self.api.main_jobs[:-3]
+            else:
+                self.api.main_jobs[-2]["id"] = self.api.main_jobs[0]["id"]
+            with self.subTest(case=case):
+                self.assert_refused(self.invoke("finish", handoff), "main-jobs")
+
+    def test_skipped_rows_must_not_have_run_or_belong_to_another_attempt(self):
+        for field, value in (("head_sha", "d" * 40), ("run_id", 900), ("run_attempt", 2),
+                             ("run_attempt", True), ("conclusion", "success"),
+                             ("status", "in_progress"), ("steps", [{"name": "ran"}]),
+                             ("runner_id", 123)):
+            self.api = FakeAPI()
+            handoff = self.decide()
+            self.unexpanded_jobs()
+            self.api.main_jobs[-2][field] = value
+            with self.subTest(field=field):
+                self.assert_refused(self.invoke("finish", handoff), "main-jobs")
+
+
+if __name__ == "__main__":
+    unittest.main()

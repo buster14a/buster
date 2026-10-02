@@ -4,6 +4,11 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- Type-embedded constant producers use the protected TYPE query contract
+  described in [foundations](foundations.md). It reads a declaration-point
+  model and returns stable integer facts without entering the live declaration
+  machine. Enum consumers retain the explicit ENUM compatibility mode until
+  their declaration preparation is migrated (#1247).
 - A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
   alignment above the native stack's sixteen-byte guarantee, both canonical
   and machine emitters compute `align_down(old_sp - size, alignment)` and
@@ -69,9 +74,23 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   bit on `CMember`; an object declarator's `aligned` joins the specifier-level
   alignment specifiers in the one contiguous run `alignment_start`/
   `alignment_count` names, which is why the trailing scan runs immediately
-  after the specifier one. `#pragma pack(N)` asks the same question -- the
-  ceiling a member's alignment is clamped to -- and `packed` is that ceiling at
-  one byte, so both feed one knob. **Two layout engines read it**:
+  after the specifier one. GNU `packed` lowers natural member alignment to one
+  byte, and an explicit member `aligned` or `_Alignas` can raise it again.
+  Standard `_Alignas` constraints still use the declared type's original
+  natural alignment, so packing cannot legalize a weaker request (#2192).
+  GNU `aligned` may request less than the natural alignment and merges with
+  the packed placement floor.
+  `#pragma pack(N)` instead caps that merged member alignment on Itanium and
+  AAPCS64 targets (#1244, duplicate #1248). A nonzero bit-field contributes its
+  unpacked alignment capped to the pragma ceiling, even with GNU packed. Its
+  explicit start request applies only when it does not exceed that ceiling. Zero-width bit-fields retain their natural and
+  explicit alignment; Microsoft's required explicit member alignment overrides
+  packing. The actual pragma ceiling stays separate from aggregate `packed` in
+  both engines. `c_test_pragma_pack_explicit_alignment` pins these target rules,
+  parse-time constants, and canonical member offsets. The registered
+  `compiler_driver_test_pragma_pack_alignment` also cross-links independent
+  host/Buster definitions and consumers in both directions for every allocator
+  on desktop Linux. **Two layout engines read it**:
   `c_parse_type_layout` in `c_parse.c` folds `sizeof`/`_Alignof` during the
   parse and `c_lower_to_ir` in `c_gen.c` builds the `IrType`. They disagreed
   about `#pragma pack` before this: the fold packed and the IR did not, so a
@@ -121,10 +140,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   **A zero width belongs to the *unnamed* bit-field alone**: C requires a named
   one to be at least one bit wide (C23 6.7.3.2p4) and both reference compilers
   refuse `int b : 0;`, where accepting it laid out a member that occupies no
-  bits and can still be assigned and read back (issue #710). The width is
-  checked in `c_lower_to_ir` where the constant expression is folded, so the
-  expression spelling `int b : 1 - 1;` is refused with the literal one rather
-  than only the spelling the parse fast path folds. The report shares the
+  bits and can still be assigned and read back (issue #710). **A width is
+  evaluated once, where the member is declared**: `c_parse.c` folds a
+  single-token literal (decimal, hex, octal or suffixed) with
+  `c_integer_expression_evaluate` and anything else through
+  `c_parse_typed_integer_constant`, the evaluator enumerators use, and stores
+  it on `CMember.bit_width` with `bit_width_resolved`. The sizeof folding,
+  bit-field promotion, the zero-width check and the IR layout all read that
+  number, so `int b : (5)`, an enumerator, a cast, `0x5` or
+  `sizeof(int) * 8 - 7` lays out identically in a folded `sizeof`/`offsetof`
+  and in the object. An unresolved width holds the layout unresolved instead
+  of reading as zero; lowering still evaluates such a width itself as a
+  temporary bridge, and `c_parse_validate_bit_field_widths` re-evaluates only
+  unresolved widths to diagnose a non-integer one.
+  `c_test_bit_field_width_authority` pins clang's answers for each spelling.
+  `int b : 1 - 1;` is refused like the literal `int b : 0;`. The report shares the
   one-diagnostic-per-type budget with the rejected alignment specifier -- they
   are one `definition_rejection` slot whose kind travels with the message --
   and the definition still lays out, the way a rejected alignment specifier
@@ -215,10 +245,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   or call arguments.
   **Integer promotion uses the bit-field width, not its storage width.** An
   `unsigned int : 3` promotes to `int`, while an `unsigned int : 32` remains
-  unsigned. `c_ir_mark_unsigned_bit_field_value` keeps this distinction in a
-  lazily allocated frontend table; canonical types and field layout retain
-  the declared type. Arithmetic, unary plus, default arguments, and switches
-  consult the promotion fact. Explicit casts discard it, and assignment
+  unsigned. The same width rule applies to implementation-defined wider
+  integer bit-fields: widths below 32 promote to `int`, signed width 32 to
+  `int`, and unsigned width 32 to `unsigned int`; widths above 32 retain the
+  declared type. `c_ir_mark_bit_field_value` keeps a differing `int` or
+  `unsigned int` promotion in a lazily allocated frontend table; canonical
+  types and field layout retain the declared type. Arithmetic, unary plus,
+  default arguments, and switches consult the promotion fact. Explicit casts discard it, and assignment
   results retain it after masking to the stored width, without rereading a
   volatile field. The strict operand type walk receives the promotion context
   explicitly so `_Generic(+field)` and conditional arms agree with emitted
@@ -226,6 +259,25 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `tests/basic_c_bit_field_promotion.c` covers widths 1, 3, 31, and 32,
   anonymous members, casts, assignments, and argument promotion under every
   allocator (GitHub #218).
+  Assignment, compound assignment and prefix update results normalize to the
+  stored field width for every integer bit-field, independently of promotion.
+  Signed results sign-extend from that width; narrow declared types normalize
+  at 32 bits before converting back. Boolean results use truth conversion.
+  The computed value supplies the result without a second volatile load.
+  Assignment-expression destination calls are prepared before place lowering;
+  the retained place carries their result into the store exactly once. The
+  runtime fixture includes `get_fields()->c = 9` in a local initializer, whose
+  returned value is 1 and whose destination call must run once.
+  `compiler_driver_test_bit_field_assignment_results` covers both frontend
+  forms and all four allocators, with ordinary, volatile and split packed
+  fields, postfix controls, full-width fields and terminating update loops.
+  `c_test_bit_field_assignment_accesses` also pins the volatile load/store
+  counts on six desktop layouts in both forms. Boolean raw-unit accesses
+  remain valid even when their layout needs no narrowed storage unit.
+  The registered `c_test_typeof_conditional_type` additionally covers
+  `long`/`long long` fields of widths 20, 31, 32 and 33, signed and unsigned
+  promotions, both semantic and IR signatures, and an inline runtime regression
+  under GNU17/GNU23, both frontend forms and every allocator (GitHub #1245).
   Automatic nested initializers select known fields by index, preserving the
   initializer expression's source range without inventing a token for an
   anonymous member. Positional cursors and brace-elided descent skip unnamed
@@ -355,6 +407,28 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   refusing the type, the way the settled-table scan reports without refusing
   one: the report is what refuses the translation unit.
 
+## `_Alignof` over an object
+
+GNU `_Alignof`/`__alignof__` accept an expression, and over a named object they
+answer the object's alignment rather than its type's: GCC and Clang fold
+`_Alignas(32) int g; _Alignof(g)` to 32 and accept it as an integer constant
+expression (issue #1704). Both layout engines raise the type's answer by the
+same runs, which `c_alignof_object_next_run` names: the entity's own and those
+of every object declaration of it that is complete before the operand, so
+`extern int g; _Alignas(32) int g;` answers 32 after the second declaration.
+`c_parse_alignof_object_alignment` serves the parse-time folds; a file-scope
+static assertion over such an operand is deferred to canonical-IR constant
+evaluation, where `c_ir_alignof_object_alignment` serves both that and the
+lowered value. An enum initializer runs inside the type machine and must not
+mutate it, so there only runs of integer expressions and builtin types fold;
+`_Alignas(struct S)` there is refused as not constant. A run may itself spell
+`_Alignof(object)`, so each engine counts nested evaluations and refuses past
+`C_ALIGNOF_OBJECT_DEPTH_LIMIT`; the refusal is sticky up to the outermost
+operand, because a record's evaluator otherwise falls back to another fold and
+answers the type's alignment. Member operands (`_Alignof(s.x)` with an
+`_Alignas` member, or a `packed` one) still answer the member type's alignment
+where Clang answers the member's (issue #1249).
+
 ## Padded GNU vectors
 
 Non-power-of-two vectors preserve their logical lane count and round their
@@ -362,7 +436,10 @@ object size to the next power of two. The x86-64 SysV and Win64 canonical
 emitters implement their call boundaries; optimized modes currently report
 canonical fallback for those new shapes. The registered driver suite keeps
 the complete padded-vector source inline and materializes a private file for
-cross-target, native mixed-compiler, and Wine checks. The approved retirement
+cross-target, native mixed-compiler, and Wine checks. In the native Linux
+mixed-compiler rows Buster compiles its half for `znver5` while the PATH Clang
+compiles the other half for `x86-64-v4`, which has the same 64-byte vector ABI
+and is accepted by Clang releases older than 19, unlike `znver5`. The approved retirement
 corpus and its pre-existing C ABI header stay unchanged: #507 explicitly
 leaves this new frontend feature to #73, separate from retirement coverage.
 

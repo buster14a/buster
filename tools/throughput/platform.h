@@ -39,6 +39,40 @@ typedef enum TpDiagnostic
     TP_DIAGNOSTICS
 } TpDiagnostic;
 
+/* Child-side failures are distinct from a program that legitimately exits 125. */
+typedef enum TpLaunchStage
+{
+    TP_LAUNCH_NONE,
+    TP_LAUNCH_GROUP,
+    TP_LAUNCH_STDOUT,
+    TP_LAUNCH_STDERR,
+    TP_LAUNCH_DIRECTORY,
+    TP_LAUNCH_CPU,
+    TP_LAUNCH_READY,
+    TP_LAUNCH_SIGNAL,
+    TP_LAUNCH_EXEC,
+    TP_LAUNCH_REPORT
+} TpLaunchStage;
+
+static char const* tp_launch_stage_name(TpLaunchStage stage)
+{
+    char const* result = "unknown";
+    switch (stage)
+    {
+    case TP_LAUNCH_NONE: result = "none"; break;
+    case TP_LAUNCH_GROUP: result = "process-group"; break;
+    case TP_LAUNCH_STDOUT: result = "stdout"; break;
+    case TP_LAUNCH_STDERR: result = "stderr"; break;
+    case TP_LAUNCH_DIRECTORY: result = "working-directory"; break;
+    case TP_LAUNCH_CPU: result = "cpu-affinity"; break;
+    case TP_LAUNCH_READY: result = "ready-pipe"; break;
+    case TP_LAUNCH_SIGNAL: result = "restore-signal"; break;
+    case TP_LAUNCH_EXEC: result = "exec"; break;
+    case TP_LAUNCH_REPORT: result = "error-pipe"; break;
+    }
+    return result;
+}
+
 typedef struct TpProcess
 {
     double wall_seconds, user_seconds, system_seconds, peak_rss_bytes;
@@ -47,6 +81,7 @@ typedef struct TpProcess
     uint64_t diagnostics[TP_DIAGNOSTICS];
     unsigned diagnostics_available;
     int exit_code, signal_number, timed_out, launch_error;
+    TpLaunchStage launch_stage;
 } TpProcess;
 
 static int tp_mkdir(char const* path)
@@ -263,9 +298,15 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
         result.running_fraction[i] = NAN;
         result.counter_errors[i] = counters ? ENOSYS : 0;
     }
-    int ready[2] = {-1, -1};
+    int ready[2] = {-1, -1}, launch[2] = {-1, -1};
     int log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    int ok = log >= 0 && pipe(ready) == 0;
+    /* The child reports one small packet before exec. CLOEXEC distinguishes
+     * a real exit 125; nonblocking reads cannot inherit a descendant wait. */
+    int ok = log >= 0 && pipe(ready) == 0 && pipe(launch) == 0 &&
+             fcntl(launch[0], F_SETFL, O_NONBLOCK) == 0 &&
+             fcntl(launch[1], F_SETFL, O_NONBLOCK) == 0 &&
+             fcntl(launch[0], F_SETFD, FD_CLOEXEC) == 0 &&
+             fcntl(launch[1], F_SETFD, FD_CLOEXEC) == 0;
     struct sigaction handler, previous, ignore_pipe, previous_pipe, cancel, previous_int, previous_term;
     memset(&cancel, 0, sizeof(cancel));
     cancel.sa_handler = tp_cancel_handler;
@@ -291,28 +332,46 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     if (pid == 0)
     {
         close(ready[1]);
-        int child_ok = setpgid(0, 0) == 0 && dup2(log, STDOUT_FILENO) >= 0 && dup2(log, STDERR_FILENO) >= 0;
-        close(log);
-        if (child_ok && directory)
+        close(launch[0]);
+        struct { int stage, error; } failure = {TP_LAUNCH_NONE, 0};
+        if (setpgid(0, 0) != 0)
         {
-            child_ok = chdir(directory) == 0;
+            failure.stage = TP_LAUNCH_GROUP;
+            failure.error = errno;
         }
-        if (child_ok && cpu >= 0)
+        if (!failure.error && dup2(log, STDOUT_FILENO) < 0)
         {
+            failure.stage = TP_LAUNCH_STDOUT;
+            failure.error = errno;
+        }
+        if (!failure.error && dup2(log, STDERR_FILENO) < 0)
+        {
+            failure.stage = TP_LAUNCH_STDERR;
+            failure.error = errno;
+        }
+        close(log);
+        if (!failure.error && directory && chdir(directory) != 0)
+        {
+            failure.stage = TP_LAUNCH_DIRECTORY;
+            failure.error = errno;
+        }
+        if (!failure.error && cpu >= 0)
+        {
+            failure.stage = TP_LAUNCH_CPU;
 #ifdef __linux__
             cpu_set_t set;
             CPU_ZERO(&set);
             if (cpu >= CPU_SETSIZE)
             {
-                child_ok = 0;
+                failure.error = EINVAL;
             }
             else
             {
                 CPU_SET(cpu, &set);
-                child_ok = sched_setaffinity(0, sizeof(set), &set) == 0;
+                if (sched_setaffinity(0, sizeof(set), &set) != 0) failure.error = errno;
             }
 #else
-            child_ok = 0;
+            failure.error = ENOSYS;
 #endif
         }
         char byte;
@@ -321,17 +380,37 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
         {
             received = read(ready[0], &byte, 1);
         } while (received < 0 && errno == EINTR);
-        close(ready[0]);
-        if (child_ok && received == 1)
+        if (!failure.error && received != 1)
         {
-            sigaction(SIGPIPE, &previous_pipe, NULL);
-            execv(args[0], args);
+            failure.stage = TP_LAUNCH_READY;
+            failure.error = received < 0 ? errno : EIO;
         }
-        /* No buffered parent streams are flushed after a failed exec. */
+        close(ready[0]);
+        if (!failure.error && sigaction(SIGPIPE, &previous_pipe, NULL) != 0)
+        {
+            failure.stage = TP_LAUNCH_SIGNAL;
+            failure.error = errno;
+        }
+        if (!failure.error)
+        {
+            execv(args[0], args);
+            failure.stage = TP_LAUNCH_EXEC;
+            failure.error = errno;
+        }
+        /* No allocation or buffered streams after fork. The packet is below
+         * PIPE_BUF and its empty pipe is nonblocking; interrupted writes retry. */
+        ssize_t reported;
+        do
+        {
+            reported = write(launch[1], &failure, sizeof(failure));
+        } while (reported < 0 && errno == EINTR);
+        close(launch[1]);
         _exit(125);
     }
     if (ok)
     {
+        close(launch[1]);
+        launch[1] = -1;
         tp_active_pid = (sig_atomic_t)pid;
         close(ready[0]);
         ready[0] = -1;
@@ -418,6 +497,26 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
             result.peak_rss_bytes = (double)usage.ru_maxrss * 1024.0;
 #endif
         }
+        if (waited == pid)
+        {
+            struct { int stage, error; } failure = {0, 0};
+            ssize_t received;
+            do
+            {
+                received = read(launch[0], &failure, sizeof(failure));
+            } while (received < 0 && errno == EINTR);
+            if (received == (ssize_t)sizeof(failure) && failure.stage > TP_LAUNCH_NONE &&
+                failure.stage < TP_LAUNCH_REPORT && failure.error > 0)
+            {
+                result.launch_stage = (TpLaunchStage)failure.stage;
+                result.launch_error = failure.error;
+            }
+            else if (received != 0)
+            {
+                result.launch_stage = TP_LAUNCH_REPORT;
+                result.launch_error = received < 0 ? errno : EIO;
+            }
+        }
         /* Clean any helper that outlived the compiler (including failures).
          * All measured compiler work is required to have finished at exit. */
         (void)kill(-pid, SIGKILL);
@@ -463,6 +562,8 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     {
         close(ready[1]);
     }
+    if (launch[0] >= 0) close(launch[0]);
+    if (launch[1] >= 0) close(launch[1]);
     if (int_set) sigaction(SIGINT, &previous_int, NULL);
     if (term_set) sigaction(SIGTERM, &previous_term, NULL);
     if (pipe_handler_set)

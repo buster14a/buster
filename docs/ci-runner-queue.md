@@ -107,12 +107,14 @@ commands above; lower queue depth alone is not a throughput improvement.
    about `50 / 8`, i.e. 6, CI runs; deeper entries cannot hold macOS runners,
    compete with pull requests, and are the first cancelled when an earlier
    entry fails. The maintainer asked for 2 as a conservative start; the source
-   policy now requires 4 (32 of 50 macOS runners, leaving about two CI runs of
-   headroom for pull requests and `main`). The live ruleset changes only after
-   that policy lands (see [merge-queue-admission.md](merge-queue-admission.md)).
-   Compare completed merges per hour, end-to-end latency, macOS wait and runner
-   minutes, not queue depth; move to 2 if macOS starvation persists after
-   dispatched work drains.
+   policy then required 4 (32 of 50 macOS runners at eight jobs per run). After
+   #1986 cut `ci.yml` to four macOS jobs, the maintainer raised it to 6 (24 of
+   50 macOS runners, leaving room for pull requests and `main`). This raise is
+   not measured; the live ruleset changes only after the policy lands (see
+   [merge-queue-admission.md](merge-queue-admission.md)). Compare completed
+   merges per hour, end-to-end latency, macOS wait, cancelled merge-group
+   minutes and runner minutes, not queue depth; move back to 4 if macOS
+   starvation or cancellation waste grows after dispatched work drains.
 2. **Avoid revalidating merge-group heads on `main` pushes** (about 8% of macOS
    minutes here). Push runs may prime `main`-scoped caches and feed other
    workflows; verify those consumers before proposing any change, and never
@@ -130,8 +132,8 @@ coverage unchanged (#1825). Gating macOS lanes on a Linux result was rejected
 because it serializes PR latency.
 
 **`ci.yml`.** On the first attempt of a `pull_request` run whose payload is a
-draft, each job that would hold a macOS runner (four desktop shards, two
-native lanes, two iOS lanes) runs on `ubuntu-26.04` as
+draft, each job that would hold a macOS runner (two desktop shards, one
+native lane, one iOS lane) runs on `ubuntu-26.04` as
 `<job> (deferred for draft PR)`. Its first step fails unless that condition
 holds, then records a notice. Checkout is skipped, which skips every later step.
 Every other event, a ready pull request and "Re-run all jobs" (attempt 2 or
@@ -147,6 +149,18 @@ record is attempt 1, and the deferral step succeeded. A merge group, push,
 tag, manual or ready run with a deferred no-op fails closed. Accepted
 deferrals are listed in the job summary and as a notice on the pull request.
 Tests: `tools/matrix_shard_test.py` (`DraftMacosDeferralTests`).
+
+**"Re-run failed jobs".** A partial rerun keeps each successful job and GitHub
+lists it again under every later attempt, with a new job ID but the original
+timestamps, conclusion and steps (run 36717332363, #2052). `latest_run_jobs`
+resolves such copies of a deferral to the attempt-1 original, so a draft
+rerun judges the deferrals exactly as attempt 1 did and can pass. The
+original is used only when it completed with recorded start and completion
+times and every later record of that job is identical to it apart from ID
+and attempt. A deferral that ran again, a changed record in any later
+attempt, a failed, cancelled or skipped deferral, and any deferral in a
+non-draft run still fail closed. A rerun of a failed deferral runs the real
+macOS lane, because the workflow only defers on attempt 1.
 
 **Marking a draft ready.** `ready_for_review` cannot be added to the `on:`
 block without the support-declaration transition that also blocks #1808. Until

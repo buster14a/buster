@@ -4,9 +4,9 @@
 
 ## Tests
 
-- All tests run inside the `ide` executable; there is no external unit-test
-  framework. From the repository root, run `ide test --verbose=1 --ci=1` or
-  build the `test_all` target.
+- Compiler and foundation module tests run inside the `ide` executable; there
+  is no external unit-test framework. From the repository root, run
+  `ide test --verbose=1 --ci=1` or build the `test_all` target.
 - `ide test --module=<name>[,<name>...]` runs only the named modules. A name
   is a `TestDescriptor.name` from `test_descriptors` in
   `src/buster/tests/test.c`, such as `object_tests`, and must match exactly.
@@ -18,15 +18,36 @@
   `[N/N] Unit tests (k of M modules selected)`. Without `--module`, every
   module runs, as in CI and `test_all`.
 - The bootstrap wrappers have a controlled platform test at
-  `python3 tests/bootstrap_wrapper_test.py -v`. It supplies a fake TCC and
+  `python3 tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v`. It supplies a fake TCC and
   driver, and covers cold/warm reuse, dependency and compiler invalidation,
   corrupt/incomplete entries, failure propagation, argument forwarding and
-  concurrent immutable publication. CI runs it on every desktop OS/architecture
-  lane before installing optional tools.
+  concurrent immutable publication. Each desktop Release shard owns this suite;
+  the checks shard retains the required lifecycle step without repeating it.
+  Windows runs the same tests through
+  `python tools/bootstrap_wrapper_cases.py --jobs 2`: two independent scenarios
+  at once, with the existing six-writer publication scenario running alone.
+  All within-scenario cache transitions stay ordered. The policy step executes
+  `python3 tools/bootstrap_wrapper_cases_test.py -v` on each Release lane,
+  covering deadlines, launch/startup failures, cancellation, descendant cleanup,
+  failure status and stable diagnostics. See [wrapper CI](../ci-bootstrap-wrapper.md).
+  The whole original suite's obsolete workflow assertions remain tracked by
+  [#1835](https://github.com/buster14a/buster/issues/1835); they are not an executed
+  CI contract.
 - Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
   compile each test source independently.
+- The desktop `test_ui_slider` component target runs the focused
+  `ui_slider_tests` module against production `ui_core`/`ui_builder` and an
+  unused native renderer boundary. It is part of `test_all` and `test_units`
+  when tests and libc are enabled, without adding UI dependencies to `ide`.
+  The retained broad `ui_tests` suite remains unregistered; see
+  [graphics/UI](../projects/graphics-ui.md).
+- The separate desktop `test_ui_utf8` component target runs actual UI text-event
+  activation and underline draw-command consumers using the production
+  `ui_core` module and an inert native renderer boundary. It is included in
+  `test_all` and `test_units` when tests and libc are enabled, without adding UI
+  dependencies or a descriptor to `ide`; see [graphics/UI](../projects/graphics-ui.md).
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
@@ -141,6 +162,21 @@
   resolves safe `.` and `..` segments inside the rooted APK asset namespace so
   nested quoted includes consume the same fixture bytes as desktop tests;
   traversal above the asset root is rejected.
+- The iOS payload runs `test --verbose=1 --ci=1`. Failed launches report
+  `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
+  module/index and the last module observed in timing or arena records;
+  `unavailable` means no such record arrived. The last observed module is
+  evidence of progress, not a claim that it is still running. Simulator
+  process-table, unified-log and crash-report probes retain separate bounded
+  lifecycle receipts and up to 64 KiB of stdout/stderr per command, with
+  native exit, timeout/helper status and capture completion distinguished.
+  Probe failure does not establish an app crash. The additive
+  `bash ios/launch_diagnostics_mock_test.sh` attached-monitor controls
+  cover rejection, native exit 124, watchdog expiry, large output and cleanup.
+  `bash ios/launch_diagnostics_simulator_test.sh` uses a synthetic timed-out
+  payload with real CoreSimulator boot, probes and shutdown on hosted macOS
+  ARM64. The mobile lifecycle workflow retains actual probe availability and
+  failure reasons there; real app compilation/execution remains in mobile CI.
 - On GitHub-hosted macOS arm64, `ios/test_ci.sh` supplies a 180-second
   codesign deadline when the caller has not supplied one. This is separate
   from the test-execution, boot, install, and shutdown deadlines. Local and
@@ -172,6 +208,13 @@
   receipt distinguishes this path from direct shutdown and the already-Shutdown
   timeout reconciliation; `ios/hosted_signing_budget_test.py` covers both the
   successful and fail-closed cases.
+- Android SDK setup uses `tools/ci_android_sdk.py` with three bounded attempts.
+  Each attempt requests only structurally missing or invalid packages, keeping
+  valid preinstalled packages and packages completed by an earlier attempt.
+  Detailed `sdkmanager` output and initial package validation are retained in
+  the mobile artifact. Every required package is validated after each attempt;
+  a nonzero installer status or invalid package still fails setup. Run
+  `python3 tools/ci_android_sdk_test.py -v` for the hermetic setup controls.
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
@@ -212,13 +255,26 @@
   raise the deadline; `docs/ci-github-actions.md` records the #685 occurrence.
   The lifecycle helper treats an owned terminated zombie as already stopped,
   not as a signalable emulator; the harness holds a child unreaped to cover
-  this path deterministically. A process-state query that loses the PID after
-  an initial `kill -0` is reconciled with one more liveness probe: confirmed
-  disappearance is stopped while persistent ambiguity remains fail-closed.
-  Once teardown observes a terminal state it is monotonic for that ownership
-  check and is not immediately re-probed. SIGTERM and SIGKILL are followed by
-  bounded stop verification; sending SIGKILL alone is not a failure, but an
-  owned process that remains live after it is.
+  this path deterministically. The numeric PID marker stays compatible with
+  existing callers; its `.identity` sidecar records the launch identity before
+  the PID marker is published. The Linux Android lane compares boot ID and
+  kernel start ticks from `/proc/<pid>/stat`, reading state and identity in one
+  snapshot. The portable/macOS fake-tool path uses `LC_ALL=C ps` start time
+  (one-second resolution) and state. These are checked at start reuse, wait,
+  shutdown and immediately before signals; an identity mismatch is a retired
+  owned process, not a new cleanup target. This is a shell snapshot check, not
+  an atomic pidfd signal operation; the portable timestamp also cannot resolve
+  reuse within the same second. Missing/malformed ownership or an unverifiable
+  live PID fails cleanup without targeting that PID, and retains the record
+  for retry. Once cleanup proves the owned process stopped it removes both
+  records, preventing another invocation from resurrecting the ownership.
+  SIGTERM and SIGKILL retain bounded stop verification; sending SIGKILL alone
+  is not a failure, but a surviving owned process is. `android/run_tests_test.sh`
+  also runs `android/emulator_identity_test.py` for independent identity,
+  malformed-record, unavailable-probe and surviving-process controls. Its real
+  workflow-body fixture simulates PID reuse after the payload observes the
+  original emulator terminal, and requires successful structured cleanup with
+  no adb shutdown or signal to the unrelated replacement.
 
 The private OS resource-failure, flood and process-tree child modes dispatch at
 the start of `library_tests`, before compiler prewarming and other test modules.
@@ -301,6 +357,14 @@ the input object. Real GOT-base references and ordinary unresolved imports keep
 their errors. The registered link tests cover these boundaries and byte-identical
 output relative to an object without the unused marker.
 
+`compiler_driver_test_wide_vector_boundaries` exchanges padded-vector calls
+with the PATH `clang` at baseline, Haswell and Zen 5. Each row runs only when
+the host CPU can execute it. Buster compiles its half of the Zen 5 row for
+`znver5`, and Clang compiles its half for `x86-64-v4`, which has the same
+64-byte vector ABI. Clang accepts `znver5` only from version 19 (Ubuntu 24.04
+ships 18), but it accepts `x86-64-v4` from version 12, so the row needs no
+host-compiler gate; see the [layout guide](frontend/layout.md).
+
 The native driver's `compiler_discovery_self_test` runs before every combination
 matrix and covers real Clang identity, platform/override selection, and failed
 GCC requests preserving existing configurations. The GCC row selects Homebrew
@@ -330,6 +394,11 @@ for ABI fixtures, diagnostics, opt-in IR/MIR validation, sanitizer controls,
 reduction limits and evidence format. This supplements all existing gates;
 it does not replace target-matrix execution or the seeded differential corpus.
 
+Allocator-matrix commands place optimization flags before the explicit allocator
+flag because the last allocator-affecting option wins. Assert the parsed allocator
+on the invocation passed to execution; retain `-fverify-codegen` and allow machine
+fallback for NONE, while requiring strict machine coverage on applicable MIR rows.
+
 ## Oracle independence
 
 A differential test is evidence only when its two sides obtain the answer
@@ -348,6 +417,16 @@ matrix, optional engine discovery, explicit unexecuted rows, and grammar-aware
 failure reduction. See [metamorphic testing](../metamorphic-testing.md) for the
 transformation preconditions, reproducible seeds, strict execution mode and
 failure bundles. Cross-target compilation is not a behavioral pass.
+
+## Constant name-binding oracle
+
+`tools/scope_oracle/` is a hand-run, stdlib-only detector for a subset the other
+campaigns do not generate: ordinary identifiers shadowed across scopes and used in
+member bounds, bit-field widths, `_Alignas`, type names, and enumerator
+initializers. Expected values come from an independent C17 scope and psABI layout
+model, which Clang and GCC confirm. A mismatch counts only when both reference
+compilers reproduce the model. See its [README](../../tools/scope_oracle/README.md)
+for the dependency gap, the validation record, and the limits.
 
 ## External GPU consumers
 
@@ -504,11 +583,63 @@ requires the live started row, forbids the completed row, and checks the fatal
 stderr message. This harness regression changes neither assertion totals nor
 `TEST_MODULE_TIMING` rows.
 
+## AArch64 ELF direct memory references
+
+`compiler_driver_test_aarch64_elf_ldst` runs on desktop Linux AArch64 with
+the configured host compiler. Its host-only input is
+`src/buster/tests/compiler/driver/fixtures/aarch64_elf_ldst.c`, outside the
+frozen `tests/*.c` native-retirement census. The default fixture is the
+volatile-int store/load from GitHub #2077; `AARCH64_LDST_SCALE_FAMILY=1`
+checks byte, halfword, word, doubleword and 128-bit SIMD stores/loads with
+nonzero addends past one page. Each input is compiled at `-O2 -fno-pie`,
+with GNU's section anchors disabled to keep independent symbol references,
+linked and executed independently with the host toolchain, then imported,
+linked and executed through Buster. The test requires the expected scaled
+relocation kinds, loads and stores, and reports `AARCH64_ELF_LDST_NATIVE_V1`
+only after both executions succeed. Compiler/linker children and executions
+have bounded 30-second deadlines. `object_tests` covers REL/RELA, instruction
+classes, scale mismatches and malformed sites; `link_tests` derives patched
+addresses from static/dynamic section tables and imported-data copy slots.
+
+## Wasm object-address alignment
+
+`compiler_driver_test_wasm_stack_alignment` lowers both C frontend forms for
+wasm32 and Memory64, validates canonical IR and compares repeated module bytes.
+An opaque Node import observes actual linear-memory addresses and checks ordinary
+eight-byte objects, extended 64-byte objects, mixed locals and aggregate copies.
+Odd runtime allocation sizes stay live across nested calls; the next allocation
+must start at the independently rounded original caller end.
+
+Direct canonical controls raise only each LOCAL place's alignment above its
+unchanged byte-aligned array type. A deliberately non-64-aligned stack base
+exercises exact-limit success, padding-plus-frame exhaustion and base-padding
+exhaustion. The same instance must recover its exact entry pointer after every
+normal return and deliberate trap. Each pointer-width/frontend run completes
+84 engine checks, records the consumed module SHA-256 and checks the artifact
+against the original returned bytes after execution. The source and oracle are
+generated inline, leaving the frozen support inventory unchanged. Existing
+stack-reservation and memory-hint regressions remain required.
+
 ## Node-backed Wasm oracle deadlines
+
+`compiler_driver_test_wasm_integers` runs the frozen integer oracle and the
+additive `tools/wasm_unsigned_div_rem_execution.js` companion on the same freshly
+emitted artifact. It compares the file with the compiler's returned bytes before
+and after execution; the companion also records the consumed SHA-256. Four
+parameterized unsigned div/rem calls use UINT32_MAX/UINT64_MAX divided by two,
+with independent literal expectations. A hand-emitted unsigned baseline and four
+single-opcode signedness controls require the corresponding equality mismatch;
+validation failures, missing exports and traps do not count as semantic rejection.
+These controls establish the checker boundary, not production mutation coverage.
+The companion lives beside the startup shim in `tools/`, outside the frozen
+`tests/` input inventory. Both frozen oracle scripts and the reviewed support
+inventory remain unchanged.
 
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
+
+The startup shim also stamps the rest of the integer run, so a post-summary timeout (#2066) can be located. After the oracle returns, it queues `WASM_NODE_DONE uptime_us=<n> resources=<active Node resources>` on stdout. From Node's `exit` event, which fires only once the event loop has drained, it writes `WASM_NODE_EXIT uptime_us=<n>` synchronously. For readiness oracles the harness strips well-formed trailing stamps before the terminal-marker check. It logs `node_done`, `done_uptime_us`, `node_exit`, `exit_uptime_us` and `post_done_us` (elapsed harness time minus the DONE uptime, an upper bound on the time spent after the oracle returned). A timed-out run with the summary becomes `summary-then-teardown-stall` when EXIT was written, `summary-then-event-loop-stall` when only DONE was written, and stays `summary-before-timeout` otherwise. All three still fail without retry. Stamps are evidence only: they never replace the summary, a zero exit or empty stderr, and a malformed stamp fails the terminal-marker check.
 
 The Wasm oracle process-policy controls launch a native `ide test` child before
 compiler prewarming. Their short deadlines exercise completion, output, errors

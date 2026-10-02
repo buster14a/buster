@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 
@@ -21,6 +23,32 @@ gate = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = gate
 SPEC.loader.exec_module(gate)
+
+
+class APIReadTests(unittest.TestCase):
+    def test_native_client_retries_reads_but_never_writes(self):
+        api = gate.GitHub("a/b", "fixture-token")
+        error = urllib.error.HTTPError("https://example.invalid", 502, "fixture", {}, io.BytesIO())
+        with patch.object(gate.urllib.request, "urlopen", side_effect=[error, io.BytesIO(b'{"id":1}')]) as read, \
+                patch.object(gate.integration.time, "sleep") as sleep:
+            self.assertEqual(api.request("actions/runs/1"), {"id": 1})
+            self.assertEqual(read.call_count, 2)
+            sleep.assert_called_once_with(1)
+        for method in ("POST", "PATCH"):
+            error = urllib.error.HTTPError("https://example.invalid", 502, "fixture", {}, io.BytesIO())
+            with self.subTest(method=method), patch.object(gate.urllib.request, "urlopen", side_effect=error) as write, \
+                    patch.object(gate.integration.time, "sleep") as sleep:
+                with self.assertRaises(urllib.error.HTTPError):
+                    api.request("statuses/" + "b" * 40, method=method, body={"state": "pending"})
+                self.assertEqual(write.call_count, 1)
+                sleep.assert_not_called()
+            error.close()
+
+    def test_native_read_exhaustion_is_retry_not_policy_denial(self):
+        with patch.object(gate, "check_event", side_effect=gate.integration.APIReadError("actions/runs/1", 502, 4)):
+            self.assertEqual(gate.main(["check", "--repo-root", ".", "--base", "a" * 40,
+                                       "--head", "b" * 40, "--current-main", "a" * 40,
+                                       "--event", "pull_request"]), 75)
 
 
 def git(repo: Path, *arguments: str, input_text: str | None = None) -> str:

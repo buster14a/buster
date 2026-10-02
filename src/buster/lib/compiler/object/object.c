@@ -18,6 +18,8 @@
 //
 // DWARF 4/5 section payloads are carried without parsing unit headers;
 // object_debug_section_kind_from_name defines the supported section family.
+// object_append_dwarf_cfi anchors ELF FDEs to local text-section symbols so
+// weak/strong arbitration cannot attach unwind rules to replacement code.
 //
 // __attribute__((section)) (issue 1276) is the one way a section of its own
 // name enters the model: codegen lays every named definition out after the
@@ -39,6 +41,8 @@
 //                                                  (COFF, Mach-O)
 //   object_writer_capacity_aligned                 checked Mach-O file bound
 //                                                  (and the ELF reference's)
+//   object_aarch64_elf_page_relocate               checked direct/GOT page and
+//                                                  scaled memory relocations
 //   object_assembly_build_index                    stable section/offset views
 //   object_assembly_append_*                       the disassembly printer
 //                                                  (x86 and AArch64 operand
@@ -49,7 +53,8 @@
 //                                                  COFF joins repeated C13
 //                                                  debug contributions
 //   object_read_mach_o64, object_read              and their dispatcher
-//   object_bytes_are_object, object_archive_read   archives and detection
+//   object_bytes_are_object, object_archive_read   eager archive reading;
+//   object_archive_read_link                       borrowed lazy link metadata
 //   object_symbol_name_slot                        symbol-name interning
 //   object_symbol_for_program_symbol               debug relocations by
 //                                                  program symbol
@@ -79,6 +84,10 @@
 //   object_write_core, object_write                the dispatcher, which
 //                                                  counts every writer's work
 //                                                  in ObjectWriteStatistics
+//   object_write_borrowing,                        the -c form: the planned
+//   object_artifact_slices                         ELF image names large
+//                                                  payloads in place instead
+//                                                  of copying them
 
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/compiler/object/object_internal.h>
@@ -449,10 +458,34 @@ BUSTER_GLOBAL_LOCAL bool object_absolute32s_value(u64 address, s64 addend, s32* 
 #define OBJECT_AARCH64_ADD_X_IMMEDIATE UINT32_C(0x91000000)
 #define OBJECT_AARCH64_MOVZ_X UINT32_C(0xd2800000)
 
+BUSTER_GLOBAL_LOCAL bool object_relocation_kind_is_aarch64_elf_ldst(ObjectRelocationKind kind)
+{
+    return kind >= OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12 && kind <= OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12;
+}
+
+// AAELF64 278/284/285/286/299 carry the access size in the relocation type.
+// The instruction must independently agree: unsigned-immediate LD/ST only,
+// including scalar, sign-extending and SIMD forms (and scale-three PRFM).
+BUSTER_GLOBAL_LOCAL bool object_aarch64_elf_ldst_scale(ObjectRelocationKind kind, u32 word, u32* scale)
+{
+    u32 instruction_scale = 0;
+    u32 canonical = word & ~(A64_IMM12_MAX << 10);
+    bool valid = scale && object_relocation_kind_is_aarch64_elf_ldst(kind) &&
+                 (word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000) &&
+                 object_mach_pageoff12_shift(canonical, &instruction_scale) &&
+                 instruction_scale == (u32)(kind - OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12);
+    if (valid)
+    {
+        *scale = instruction_scale;
+    }
+    return valid;
+}
+
 bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKind kind)
 {
     return kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12 ||
-           kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12;
+           kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12 ||
+           object_relocation_kind_is_aarch64_elf_ldst(kind);
 }
 
 // R_AARCH64_LD64_GOT_LO12_NC names `LDR Xt, [Xn, #imm]`, 64-bit unsigned
@@ -468,7 +501,8 @@ BUSTER_GLOBAL_LOCAL bool object_aarch64_got_load_read(u32 word, u32* offset)
     return valid;
 }
 
-// AAELF64 275/277 use Page(S+A)-Page(P) and the low twelve bits of S+A.
+// AAELF64 direct page pairs use Page(S+A)-Page(P) and the low twelve bits
+// of S+A: ADD uses byte granularity, LD/ST scales by the relocation's size.
 // Share the checked address arithmetic and instruction authority between
 // the in-memory linker and both native ELF executable writers.
 //
@@ -505,6 +539,15 @@ bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 p
     else if (valid && kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
     {
         valid = a64_add_lo12_patch(word, (u32)(address & A64_IMM12_MAX), patched);
+    }
+    else if (valid && object_relocation_kind_is_aarch64_elf_ldst(kind))
+    {
+        u32 scale = 0;
+        valid = object_aarch64_elf_ldst_scale(kind, word, &scale) && !(address & (((u64)1 << scale) - 1));
+        if (valid)
+        {
+            *patched = (word & ~(A64_IMM12_MAX << 10)) | ((u32)((address & A64_IMM12_MAX) >> scale) << 10);
+        }
     }
     else
     {
@@ -740,6 +783,7 @@ void object_write_statistics_add(ObjectWriteStatistics* total, ObjectWriteStatis
     total->image_bytes_zeroed += unit->image_bytes_zeroed;
     total->image_bytes_patched += unit->image_bytes_patched;
     total->payload_bytes_copied += unit->payload_bytes_copied;
+    total->payload_bytes_borrowed += unit->payload_bytes_borrowed;
     total->scratch_bytes += unit->scratch_bytes;
     total->retained_bytes += unit->retained_bytes;
     total->output_bytes += unit->output_bytes;
@@ -1375,7 +1419,7 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
 
 BUSTER_GLOBAL_LOCAL u32 object_assembly_relocation_size(ObjectRelocationKind kind)
 {
-    return kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : 4;
+    return kind == OBJECT_RELOCATION_COFF_SECTION16 ? 2 : object_relocation_kind_width(kind);
 }
 
 BUSTER_GLOBAL_LOCAL bool object_assembly_is_apple(Target target)
@@ -1591,6 +1635,14 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
     {
         return false;
     }
+    if (object_relocation_kind_is_aarch64_elf_ldst(relocation->kind))
+    {
+        u32 scale = 0;
+        if (!object_aarch64_elf_ldst_scale(relocation->kind, word, &scale))
+        {
+            return false;
+        }
+    }
     if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
     {
         s64 addend = 0;
@@ -1707,6 +1759,12 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
             object_assembly_append_string(buffer, S8("\n"));
             return true;
+        case OBJECT_RELOCATION_X86_64_PC64:
+        case OBJECT_RELOCATION_AARCH64_PREL64:
+            object_assembly_append_string(buffer, S8("\t.quad "));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
         case OBJECT_RELOCATION_X86_64_PC32:
         case OBJECT_RELOCATION_X86_64_PLT32:
         case OBJECT_RELOCATION_AARCH64_PREL32:
@@ -1725,6 +1783,21 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, S8("\t.long "));
             object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLSGD"));
             object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_TLSLD:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLSLD"));
+            object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_DTPOFF32:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@DTPOFF"));
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_DTPOFF64:
+            object_assembly_append_string(buffer, S8("\t.quad "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@DTPOFF"));
+            object_assembly_append_string(buffer, S8("\n"));
             return true;
         case OBJECT_RELOCATION_X86_64_MACH_TLV_PC32:
             object_assembly_append_string(buffer, S8("\t.long "));
@@ -1802,6 +1875,11 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             return true;
         }
         case OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12:
         case OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12:
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
         case OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12:
@@ -2379,6 +2457,14 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_relocation_expression(Object
     else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD)
     {
         object_assembly_append_string(buffer, S8("@TLSGD"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD)
+    {
+        object_assembly_append_string(buffer, S8("@TLSLD"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64)
+    {
+        object_assembly_append_string(buffer, S8("@DTPOFF"));
     }
     else if (relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32)
     {
@@ -4291,7 +4377,7 @@ BUSTER_GLOBAL_LOCAL u64 object_reader_hash_u64(u64 value)
     return value ^ (value >> 31);
 }
 
-BUSTER_GLOBAL_LOCAL bool object_read_string_checked(ByteSlice bytes, u64 table_offset, u64 table_size, u32 string_offset, String8* result)
+BUSTER_GLOBAL_LOCAL bool object_read_string_checked(ByteSlice bytes, u64 table_offset, u64 table_size, u64 string_offset, String8* result)
 {
     if (string_offset >= table_size || table_offset > bytes.length || table_size > bytes.length - table_offset)
     {
@@ -4515,17 +4601,10 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String
     return result;
 }
 
-// The families this reader does not carry, by name, so a refusal says which
-// one it met. The supported vocabulary is deliberately absent: R_X86_64_64,
-// PC32, PLT32, 32, 32S, TPOFF32 and the three GOTPCREL spellings all read,
-// and the ones left here are the thread-local models -- general dynamic,
-// local dynamic and initial exec -- which this compiler neither emits nor
-// resolves.
 // The x86-64 ELF relocation vocabulary this file knows by name, which the
-// refusal above uses to say which one it met. Most of these read: the GOT
-// families and the initial-exec and general-dynamic thread-local pairs all
-// have a kind. R_X86_64_TLSLD is the one named here that has none -- local
-// dynamic is a model this compiler neither emits nor resolves.
+// refusal below uses to say which one it met.  Every one named here reads;
+// the table is what keeps a refusal of an unnamed type (TLSDESC, ...)
+// from being a bare number next to names the reader accepts.
 BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
 {
     switch (type)
@@ -4542,10 +4621,14 @@ BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
         return S8("R_X86_64_32");
     case 11:
         return S8("R_X86_64_32S");
+    case 17:
+        return S8("R_X86_64_DTPOFF64");
     case 19:
         return S8("R_X86_64_TLSGD");
     case 20:
         return S8("R_X86_64_TLSLD");
+    case 21:
+        return S8("R_X86_64_DTPOFF32");
     case 22:
         return S8("R_X86_64_GOTTPOFF");
     case 23:
@@ -5587,6 +5670,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             // facts pick the instruction the linker may write
                             // there, so neither survives being collapsed.
                             kind = relocation_type == 1                           ? OBJECT_RELOCATION_ABSOLUTE64
+                                   : relocation_type == 24                        ? OBJECT_RELOCATION_X86_64_PC64
                                    : relocation_type == 2 || relocation_type == 4 ? OBJECT_RELOCATION_X86_64_PC32
                                    : relocation_type == 9                         ? OBJECT_RELOCATION_X86_64_GOTPCREL
                                    : relocation_type == 41                        ? OBJECT_RELOCATION_X86_64_GOTPCRELX
@@ -5594,7 +5678,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                    : relocation_type == 43                        ? OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX
                                    : relocation_type == 10 ? OBJECT_RELOCATION_ABSOLUTE32
                                    : relocation_type == 11 ? OBJECT_RELOCATION_X86_64_ABSOLUTE32S
+                                   : relocation_type == 17 ? OBJECT_RELOCATION_X86_64_DTPOFF64
                                    : relocation_type == 19 ? OBJECT_RELOCATION_X86_64_TLSGD
+                                   : relocation_type == 20 ? OBJECT_RELOCATION_X86_64_TLSLD
+                                   : relocation_type == 21 ? OBJECT_RELOCATION_X86_64_DTPOFF32
                                    : relocation_type == 22 ? OBJECT_RELOCATION_X86_64_GOTTPOFF
                                    : relocation_type == 23 ? OBJECT_RELOCATION_X86_64_TPOFF32
                                                            : OBJECT_RELOCATION_COUNT;
@@ -5607,9 +5694,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         {
                             kind = relocation_type == 257                             ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 258                           ? OBJECT_RELOCATION_ABSOLUTE32
+                                   : relocation_type == 260                           ? OBJECT_RELOCATION_AARCH64_PREL64
                                    : relocation_type == 261                           ? OBJECT_RELOCATION_AARCH64_PREL32
                                    : relocation_type == 275                           ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21
                                    : relocation_type == 277                           ? OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12
+                                   : relocation_type == 278                           ? OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12
+                                   : relocation_type == 284                           ? OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12
+                                   : relocation_type == 285                           ? OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12
+                                   : relocation_type == 286                           ? OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12
+                                   : relocation_type == 299                           ? OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12
                                    : relocation_type == 311                           ? OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21
                                    : relocation_type == 312                           ? OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12
                                    : relocation_type == 282                           ? OBJECT_RELOCATION_AARCH64_JUMP26
@@ -5626,19 +5719,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     u64 relocation_width = 0;
                     if (read_ok)
                     {
-                        relocation_width = kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+                        relocation_width = object_relocation_kind_width(kind);
                     }
                     ObjectSection* target_section_data = 0;
                     if (read_ok)
                     {
                         target_section_data = &result.sections[section_kinds[target_section]];
-                        if (kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
-                            (target_section_data->alignment < 4 || source_offset > UINT64_MAX - section_bases[target_section] ||
-                             ((section_bases[target_section] + source_offset) & 3)))
-                        {
-                            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                            read_ok = false;
-                        }
                     }
                     if (read_ok)
                     {
@@ -5665,6 +5751,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             u32 instruction = 0;
                             u32 canonical = 0;
                             u32 immediate = 0;
+                            u32 scale = 0;
                             A64MCInst decoded = {0};
                             bool page = kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21;
                             read_ok = !(instruction_offset & 3) && target_section_data->alignment >= 4 &&
@@ -5672,6 +5759,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             if (read_ok && kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12)
                             {
                                 read_ok = object_aarch64_got_load_read(instruction, &immediate);
+                                canonical = instruction & ~(A64_IMM12_MAX << 10);
+                            }
+                            else if (read_ok && object_relocation_kind_is_aarch64_elf_ldst(kind))
+                            {
+                                read_ok = object_aarch64_elf_ldst_scale(kind, instruction, &scale);
+                                immediate = (instruction >> 10) & A64_IMM12_MAX;
                                 canonical = instruction & ~(A64_IMM12_MAX << 10);
                             }
                             else if (read_ok)
@@ -5686,7 +5779,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 // unlike its executed displacement and Mach-O's rule.
                                 if (section_type == 9)
                                 {
-                                    addend = page ? decoded.operands[1].value / 4096 : (s64)immediate;
+                                    if (object_relocation_kind_is_aarch64_elf_ldst(kind))
+                                    {
+                                        // AAELF64 REL instruction addends are
+                                        // sign-extended after access-size scaling.
+                                        read_ok = a64_signed_scaled_immediate_decode(immediate, 12, (u8)scale, &addend);
+                                    }
+                                    else
+                                    {
+                                        addend = page ? decoded.operands[1].value / 4096 : (s64)immediate;
+                                    }
                                 }
                                 memcpy(target_section_data->data.pointer + instruction_offset, &canonical, sizeof(canonical));
                             }
@@ -5722,7 +5824,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                         else if (section_type == 9)
                         {
                             u64 value_offset = section_bases[target_section] + source_offset;
-                            if (kind == OBJECT_RELOCATION_ABSOLUTE64)
+                            if (kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
+                                kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64)
                             {
                                 u64 stored = 0;
                                 if (!object_read_u64(target_section_data->data, value_offset, &stored))
@@ -5752,6 +5855,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             else if (kind == OBJECT_RELOCATION_X86_64_PC32 || object_relocation_kind_is_x86_got(kind) ||
                                      kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                                      kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+                                     kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
                                      kind == OBJECT_RELOCATION_AARCH64_PREL32)
                             {
                                 u32 stored = 0;
@@ -8654,24 +8758,408 @@ BUSTER_GLOBAL_LOCAL bool object_bytes_are_object(ByteSlice bytes)
     return false;
 }
 
-ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
+// Indexed archive admission is separate from ordinary object reading. Names
+// and member bytes borrow the caller's archive until extraction finishes.
+typedef enum ObjectArchiveIndexKind
+{
+    OBJECT_ARCHIVE_INDEX_NONE,
+    OBJECT_ARCHIVE_INDEX_GNU32,
+    OBJECT_ARCHIVE_INDEX_GNU64,
+    OBJECT_ARCHIVE_INDEX_BSD32,
+    OBJECT_ARCHIVE_INDEX_BSD64,
+} ObjectArchiveIndexKind;
+
+BUSTER_GLOBAL_LOCAL Target object_archive_member_target(ByteSlice bytes, Target requested)
+{
+    Target result = requested;
+    u32 magic = 0;
+    u16 machine = 0;
+    if (object_read_u32(bytes, 0, &magic))
+    {
+        if (magic == UINT32_C(0x464c457f))
+        {
+            (void)object_read_u16(bytes, 18, &machine);
+            result.cpu_arch = machine == 62 ? CPU_ARCH_X86_64 : machine == 183 ? CPU_ARCH_AARCH64 : CPU_ARCH_COUNT;
+            if (object_format_for_target(requested) != OBJECT_FORMAT_ELF64) result.os = OPERATING_SYSTEM_LINUX;
+        }
+        else if (magic == UINT32_C(0xfeedfacf))
+        {
+            u32 cpu = 0;
+            (void)object_read_u32(bytes, 4, &cpu);
+            result.cpu_arch = cpu == UINT32_C(0x01000007) ? CPU_ARCH_X86_64 : cpu == UINT32_C(0x0100000c) ? CPU_ARCH_AARCH64 : CPU_ARCH_COUNT;
+            if (object_format_for_target(requested) != OBJECT_FORMAT_MACH_O64) result.os = OPERATING_SYSTEM_MACOS;
+        }
+        else
+        {
+            (void)object_read_u16(bytes, 0, &machine);
+            result.cpu_arch = machine == 0x8664 ? CPU_ARCH_X86_64 : machine == 0xaa64 ? CPU_ARCH_AARCH64 : CPU_ARCH_COUNT;
+            if (object_format_for_target(requested) != OBJECT_FORMAT_COFF) result.os = OPERATING_SYSTEM_WINDOWS;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_archive_index_integer(ByteSlice bytes, u64 offset, u32 width, bool big_endian, u64* value)
+{
+    bool result = offset <= bytes.length && width <= bytes.length - offset;
+    if (result)
+    {
+        u64 number = 0;
+        for (u32 index = 0; index < width; index += 1)
+        {
+            u32 byte = big_endian ? width - index - 1 : index;
+            number |= (u64)bytes.pointer[offset + byte] << (index * 8);
+        }
+        *value = number;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 object_archive_member_at_offset(u64* offsets, u32 count, u64 offset)
+{
+    u32 low = 0;
+    u32 high = count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (offsets[middle] < offset) low = middle + 1;
+        else high = middle;
+    }
+    return low < count && offsets[low] == offset ? low : UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL ObjectError object_archive_index_members(Arena* arena, ObjectArchive* archive, u64* member_offsets,
+                                                            ByteSlice index, ObjectArchiveIndexKind kind)
+{
+    ObjectError result = OBJECT_ERROR_INVALID_INPUT;
+    bool bsd = kind == OBJECT_ARCHIVE_INDEX_BSD32 || kind == OBJECT_ARCHIVE_INDEX_BSD64;
+    u32 width = kind == OBJECT_ARCHIVE_INDEX_GNU64 || kind == OBJECT_ARCHIVE_INDEX_BSD64 ? 8 : 4;
+    u64 first = 0;
+    bool valid = object_archive_index_integer(index, 0, width, !bsd, &first);
+    u64 record_size = bsd ? width * 2 : width;
+    u64 count = bsd ? first / record_size : first;
+    valid = valid && (!bsd || !(first % record_size)) && count <= UINT32_MAX &&
+            index.length >= width && count <= (index.length - width) / record_size;
+    u64 strings = valid ? width + count * record_size : 0;
+    u64 string_size = valid ? index.length - strings : 0;
+    if (valid && bsd)
+    {
+        valid = object_archive_index_integer(index, strings, width, false, &string_size);
+        strings += width;
+        valid = valid && strings <= index.length && string_size <= index.length - strings;
+    }
+    if (valid && object_reader_arena_can_allocate_count(arena, count, sizeof(ObjectSymbol), BUSTER_ALIGN_OF(ObjectSymbol)))
+    {
+        ObjectSymbol* symbols = arena_allocate_zeroed(arena, ObjectSymbol, count);
+        // Count each member's definitions, then fill a contiguous slice in
+        // index order. Offset lookup is logarithmic in archive members.
+        for (u32 pass = 0; pass < 2 && valid; pass += 1)
+        {
+            u64 name_cursor = 0;
+            for (u64 symbol = 0; symbol < count && valid; symbol += 1)
+            {
+                u64 record = width + symbol * record_size;
+                u64 member_offset = 0;
+                u64 name_offset = name_cursor;
+                valid = object_archive_index_integer(index, record + (bsd ? width : 0), width, !bsd, &member_offset);
+                if (valid && bsd) valid = object_archive_index_integer(index, record, width, false, &name_offset);
+                u32 member = valid ? object_archive_member_at_offset(member_offsets, archive->object_count, member_offset) : UINT32_MAX;
+                String8 name = {0};
+                valid = valid && member != UINT32_MAX && object_read_string_checked(index, strings, string_size, name_offset, &name) && name.length;
+                if (valid)
+                {
+                    name_cursor = name_offset + name.length + 1;
+                    ObjectFile* object = &archive->objects[member];
+                    if (object_format_for_target(object->target) == OBJECT_FORMAT_MACH_O64 && name.length && name.pointer[0] == '_')
+                    {
+                        name.pointer += 1;
+                        name.length -= 1;
+                    }
+                    if (!pass) object->symbol_count += 1;
+                    else object->symbols[object->symbol_count++] = (ObjectSymbol){.name = name, .section = OBJECT_SECTION_DATA, .global = true};
+                }
+            }
+            if (!pass && valid)
+            {
+                u64 cursor = 0;
+                for (u32 member = 0; member < archive->object_count; member += 1)
+                {
+                    ObjectFile* object = &archive->objects[member];
+                    object->symbols = symbols + cursor;
+                    cursor += object->symbol_count;
+                    object->symbol_count = 0;
+                }
+            }
+        }
+        if (valid) result = OBJECT_ERROR_NONE;
+    }
+    else if (valid)
+    {
+        result = OBJECT_ERROR_CAPACITY;
+    }
+    return result;
+}
+
+// Unindexed archives still need definitions to make a selection. Read only
+// the symbol/name tables; code, data, relocations and target admission remain
+// the responsibility of object_read after extraction selects this descriptor.
+BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteSlice bytes, Target target)
+{
+    ObjectFile result = {.target = target, .error = OBJECT_ERROR_INVALID_INPUT};
+    u32 magic = 0;
+    u64 symbol_offset = 0;
+    u64 symbol_count = 0;
+    u64 string_offset = 0;
+    u64 string_size = 0;
+    u32 stride = 0;
+    bool valid = object_read_u32(bytes, 0, &magic);
+    ObjectFormat format = OBJECT_FORMAT_COUNT;
+    if (valid && magic == UINT32_C(0x464c457f))
+    {
+        format = OBJECT_FORMAT_ELF64;
+        u64 section_table = 0;
+        u16 section_size = 0;
+        u16 section_count = 0;
+        valid = bytes.length >= 64 && bytes.pointer[4] == 2 && bytes.pointer[5] == 1 &&
+                object_read_u64(bytes, 40, &section_table) && object_read_u16(bytes, 58, &section_size) && section_size == 64 &&
+                object_read_u16(bytes, 60, &section_count) && section_table <= bytes.length &&
+                (u64)section_count * section_size <= bytes.length - section_table;
+        bool found = false;
+        for (u32 section = 0; section < section_count && valid; section += 1)
+        {
+            u64 header = section_table + (u64)section * section_size;
+            u32 type = 0;
+            valid = object_read_u32(bytes, header + 4, &type);
+            if (valid && type == 2)
+            {
+                u64 size = 0;
+                u64 entry_size = 0;
+                u32 strings = 0;
+                valid = !found && object_read_u64(bytes, header + 24, &symbol_offset) && object_read_u64(bytes, header + 32, &size) &&
+                        object_read_u64(bytes, header + 56, &entry_size) && entry_size == 24 && !(size % entry_size) &&
+                        object_read_u32(bytes, header + 40, &strings) && strings < section_count;
+                if (valid)
+                {
+                    u64 string_header = section_table + (u64)strings * section_size;
+                    u32 string_type = 0;
+                    valid = object_read_u32(bytes, string_header + 4, &string_type) && string_type == 3 &&
+                            object_read_u64(bytes, string_header + 24, &string_offset) && object_read_u64(bytes, string_header + 32, &string_size);
+                    symbol_count = size / entry_size;
+                    found = true;
+                }
+            }
+        }
+        stride = 24;
+    }
+    else if (valid && magic == UINT32_C(0xfeedfacf))
+    {
+        format = OBJECT_FORMAT_MACH_O64;
+        u32 command_count = 0;
+        u32 commands_size = 0;
+        valid = bytes.length >= 32 && object_read_u32(bytes, 16, &command_count) &&
+                object_read_u32(bytes, 20, &commands_size) && commands_size <= bytes.length - 32;
+        u64 cursor = 32;
+        u64 end = 32 + (u64)commands_size;
+        bool found = false;
+        for (u32 command = 0; command < command_count && valid; command += 1)
+        {
+            u32 kind = 0;
+            u32 size = 0;
+            valid = cursor <= end && 8 <= end - cursor && object_read_u32(bytes, cursor, &kind) &&
+                    object_read_u32(bytes, cursor + 4, &size) && size >= 8 && size <= end - cursor;
+            if (valid && kind == 2)
+            {
+                u32 offset = 0;
+                u32 count = 0;
+                u32 strings = 0;
+                u32 string_bytes = 0;
+                valid = !found && size >= 24 && object_read_u32(bytes, cursor + 8, &offset) &&
+                        object_read_u32(bytes, cursor + 12, &count) && object_read_u32(bytes, cursor + 16, &strings) &&
+                        object_read_u32(bytes, cursor + 20, &string_bytes);
+                if (valid)
+                {
+                    symbol_offset = offset;
+                    symbol_count = count;
+                    string_offset = strings;
+                    string_size = string_bytes;
+                    found = true;
+                }
+            }
+            if (valid) cursor += size;
+        }
+        valid = valid && cursor == end;
+        stride = 16;
+    }
+    else if (valid && object_bytes_are_object(bytes))
+    {
+        format = OBJECT_FORMAT_COFF;
+        u32 offset = 0;
+        u32 count = 0;
+        valid = bytes.length >= 20 && object_read_u32(bytes, 8, &offset) && object_read_u32(bytes, 12, &count);
+        symbol_offset = offset;
+        symbol_count = count;
+        stride = 18;
+        if (valid && !symbol_count)
+        {
+            string_offset = 0;
+            string_size = 0;
+        }
+        else if (valid && symbol_offset <= bytes.length && symbol_count <= (bytes.length - symbol_offset) / stride)
+        {
+            string_offset = symbol_offset + symbol_count * stride;
+            u32 size = 0;
+            valid = object_read_u32(bytes, string_offset, &size) && size >= 4;
+            string_size = size;
+        }
+        else valid = false;
+    }
+    else
+    {
+        // Ordinary archives may carry non-object bookkeeping members.
+        valid = true;
+        symbol_count = 0;
+    }
+    valid = valid && symbol_count <= UINT32_MAX && symbol_offset <= bytes.length &&
+            (!symbol_count || (stride && symbol_count <= (bytes.length - symbol_offset) / stride)) &&
+            string_offset <= bytes.length && string_size <= bytes.length - string_offset;
+    if (valid && object_reader_arena_can_allocate_count(arena, symbol_count, sizeof(ObjectSymbol), BUSTER_ALIGN_OF(ObjectSymbol)))
+    {
+        result.symbols = arena_allocate(arena, ObjectSymbol, symbol_count);
+        for (u32 index = 0; index < symbol_count && valid; index += 1)
+        {
+            u64 source = symbol_offset + (u64)index * stride;
+            u32 name_offset = 0;
+            String8 name = {0};
+            bool global = false;
+            bool weak = false;
+            bool defined = false;
+            if (format == OBJECT_FORMAT_ELF64)
+            {
+                u16 section = 0;
+                valid = object_read_u32(bytes, source, &name_offset) && object_read_u16(bytes, source + 6, &section);
+                u8 binding = bytes.pointer[source + 4] >> 4;
+                global = binding != 0 && (bytes.pointer[source + 4] & 0xf) != 4 && section < 0xff00;
+                weak = binding == 2;
+                defined = section != 0;
+            }
+            else if (format == OBJECT_FORMAT_MACH_O64)
+            {
+                u16 description = 0;
+                u64 value = 0;
+                valid = object_read_u32(bytes, source, &name_offset) && object_read_u16(bytes, source + 6, &description) &&
+                        object_read_u64(bytes, source + 8, &value);
+                u8 type = bytes.pointer[source + 4];
+                global = (type & 1) && !(type & 0xe0) && ((type & 0x0e) == 0 || (type & 0x0e) == 0x0e);
+                defined = (type & 0x0e) == 0x0e;
+                weak = defined && (description & 0x80) != 0;
+                BUSTER_UNUSED(value);
+            }
+            else if (format == OBJECT_FORMAT_COFF)
+            {
+                u32 prefix = 0;
+                u16 section = 0;
+                u32 value = 0;
+                valid = object_read_u32(bytes, source, &prefix) && object_read_u16(bytes, source + 12, &section) &&
+                        object_read_u32(bytes, source + 8, &value);
+                u8 storage = bytes.pointer[source + 16];
+                u8 auxiliaries = bytes.pointer[source + 17];
+                valid = valid && auxiliaries < symbol_count - index;
+                global = (storage == 2 || storage == 105) && (s16)section >= 0;
+                weak = false;
+                defined = section != 0;
+                BUSTER_UNUSED(value);
+                if (prefix)
+                {
+                    name = (String8){.pointer = (char8*)bytes.pointer + source, .length = 0};
+                    while (name.length < 8 && name.pointer[name.length]) name.length += 1;
+                }
+                else valid = valid && object_read_u32(bytes, source + 4, &name_offset);
+                index += auxiliaries;
+            }
+            if (valid && global)
+            {
+                if (!name.pointer) valid = object_read_string_checked(bytes, string_offset, string_size, name_offset, &name);
+                if (valid && format == OBJECT_FORMAT_MACH_O64 && name.length && name.pointer[0] == '_')
+                {
+                    name.pointer += 1;
+                    name.length -= 1;
+                }
+                if (valid && name.length)
+                {
+                    result.symbols[result.symbol_count++] = (ObjectSymbol){.name = name, .section = defined ? OBJECT_SECTION_DATA : OBJECT_SECTION_UNDEFINED,
+                        .global = true, .weak = weak};
+                }
+            }
+        }
+        if (valid) result.error = OBJECT_ERROR_NONE;
+    }
+    else if (valid) result.error = OBJECT_ERROR_CAPACITY;
+    return result;
+}
+
+// Count real headers instead of treating every 60 payload bytes as another
+// possible member. The archive structure pass never touches object payloads.
+BUSTER_GLOBAL_LOCAL bool object_archive_member_capacity(ByteSlice bytes, u32* count_out)
+{
+    u64 cursor = 8;
+    u64 count = 0;
+    bool valid = true;
+    while (cursor < bytes.length && valid)
+    {
+        u64 size = 0;
+        valid = 60 <= bytes.length - cursor && bytes.pointer[cursor + 58] == '`' && bytes.pointer[cursor + 59] == '\n' &&
+                object_archive_decimal(bytes.pointer + cursor + 48, 10, &size);
+        if (valid)
+        {
+            cursor += 60;
+            valid = size <= bytes.length - cursor && count < UINT32_MAX;
+            if (valid)
+            {
+                count += 1;
+                cursor += size;
+                if (cursor & 1)
+                {
+                    valid = cursor < bytes.length && bytes.pointer[cursor] == '\n';
+                    if (valid) cursor += 1;
+                }
+            }
+        }
+    }
+    if (valid) *count_out = (u32)count;
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL ObjectArchive object_archive_read_core(Arena* arena, ByteSlice bytes, Target target, bool lazy)
 {
     ObjectArchive result = {
+        .target = target,
         .error = OBJECT_ERROR_INVALID_INPUT,
+        .failed_member = UINT32_MAX,
     };
+    u64* member_offsets = 0;
+    ByteSlice symbol_index = {0};
+    ObjectArchiveIndexKind index_kind = OBJECT_ARCHIVE_INDEX_NONE;
     static char const archive_magic[] = "!<arch>\n";
     if (arena && bytes.pointer && bytes.length >= sizeof(archive_magic) - 1 && memcmp(bytes.pointer, archive_magic, sizeof(archive_magic) - 1) == 0)
     {
-        u64 member_capacity_u64 = bytes.length / 60;
-        if (member_capacity_u64 <= UINT32_MAX)
+        u32 member_capacity = 0;
+        if (object_archive_member_capacity(bytes, &member_capacity))
         {
-            u32 member_capacity = (u32)member_capacity_u64;
             if (object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(ObjectFile), BUSTER_ALIGN_OF(ObjectFile)))
             {
                 result.objects = arena_allocate(arena, ObjectFile, member_capacity);
                 if (object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(String8), BUSTER_ALIGN_OF(String8)))
                 {
                     result.member_names = arena_allocate(arena, String8, member_capacity);
+                    if (lazy)
+                    {
+                        if (!object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(ByteSlice) + sizeof(u64), BUSTER_ALIGN_OF(u64)))
+                        {
+                            return result;
+                        }
+                        result.member_bytes = arena_allocate(arena, ByteSlice, member_capacity);
+                        member_offsets = arena_allocate(arena, u64, member_capacity);
+                    }
                     String8 long_names = {0};
                     u64 member_name_bytes = 0;
                     u64 cursor = sizeof(archive_magic) - 1;
@@ -8703,7 +9191,7 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
                         u64 object_offset = member_offset;
                         u64 object_size = member_size;
                         bool metadata = false;
-                        if (string_equal(raw_name, S8("/")) || string_equal(raw_name, S8("/<ECSYMBOLS>/")) ||
+                        if (string_equal(raw_name, S8("/")) || string_equal(raw_name, S8("/SYM64/")) || string_equal(raw_name, S8("/<ECSYMBOLS>/")) ||
                             string_equal(raw_name, S8("__.SYMDEF")) || string_equal(raw_name, S8("__.SYMDEF SORTED")))
                         {
                             metadata = true;
@@ -8766,11 +9254,28 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
                         {
                             member_name.length -= 1;
                         }
+                        // BSD ranlib names may themselves use #1/ extended
+                        // names. Classify after decoding and stripping padding.
+                        while (member_name.length && !member_name.pointer[member_name.length - 1]) member_name.length -= 1;
+                        ObjectArchiveIndexKind member_index = string_equal(raw_name, S8("/")) ? OBJECT_ARCHIVE_INDEX_GNU32
+                            : string_equal(raw_name, S8("/SYM64/")) ? OBJECT_ARCHIVE_INDEX_GNU64
+                            : string_equal(member_name, S8("__.SYMDEF")) || string_equal(member_name, S8("__.SYMDEF SORTED")) ? OBJECT_ARCHIVE_INDEX_BSD32
+                            : string_equal(member_name, S8("__.SYMDEF_64")) || string_equal(member_name, S8("__.SYMDEF_64 SORTED")) ? OBJECT_ARCHIVE_INDEX_BSD64
+                            : OBJECT_ARCHIVE_INDEX_NONE;
+                        if (member_index != OBJECT_ARCHIVE_INDEX_NONE)
+                        {
+                            metadata = true;
+                            if (!symbol_index.pointer)
+                            {
+                                symbol_index = (ByteSlice){.pointer = bytes.pointer + object_offset, .length = object_size};
+                                index_kind = member_index;
+                            }
+                        }
                         ByteSlice object_bytes = {
                             .pointer = bytes.pointer + object_offset,
                             .length = object_size,
                         };
-                        if (!metadata && object_bytes_are_object(object_bytes))
+                        if (!metadata && (lazy || object_bytes_are_object(object_bytes)))
                         {
                             if (member_name.length > UINT64_MAX - member_name_bytes)
                             {
@@ -8781,11 +9286,17 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
                             {
                                 return result;
                             }
-                            ObjectFile object = object_read(arena, object_bytes, target);
+                            ObjectFile object = lazy ? (ObjectFile){.target = object_archive_member_target(object_bytes, target)}
+                                                     : object_read(arena, object_bytes, target);
                             if (object.error != OBJECT_ERROR_NONE || result.object_count == member_capacity)
                             {
                                 result.error = object.error;
                                 return result;
+                            }
+                            if (lazy)
+                            {
+                                result.member_bytes[result.object_count] = object_bytes;
+                                member_offsets[result.object_count] = cursor;
                             }
                             result.objects[result.object_count] = object;
                             result.member_names[result.object_count] = string_duplicate_arena(arena, member_name, false);
@@ -8804,6 +9315,21 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
                     if (cursor == bytes.length)
                     {
                         result.error = OBJECT_ERROR_NONE;
+                        if (lazy && symbol_index.pointer)
+                        {
+                            result.error = object_archive_index_members(arena, &result, member_offsets, symbol_index, index_kind);
+                        }
+                        else if (lazy)
+                        {
+                            // Without a ranlib index, read only symbol/name
+                            // metadata from each descriptor. Payload and
+                            // invocation-target checks still wait for selection.
+                            for (u32 member = 0; member < result.object_count && result.error == OBJECT_ERROR_NONE; member += 1)
+                            {
+                                result.objects[member] = object_archive_member_symbols(arena, result.member_bytes[member], result.objects[member].target);
+                                result.error = result.objects[member].error;
+                            }
+                        }
                     }
                 }
             }
@@ -8811,6 +9337,16 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
     }
 
     return result;
+}
+
+ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
+{
+    return object_archive_read_core(arena, bytes, target, false);
+}
+
+ObjectArchive object_archive_read_link(Arena* arena, ByteSlice bytes, Target target)
+{
+    return object_archive_read_core(arena, bytes, target, true);
 }
 
 #if BUSTER_FUZZ_AVAILABLE
@@ -9714,6 +10250,11 @@ bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind)
            kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX || kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX;
 }
 
+u32 object_relocation_kind_width(ObjectRelocationKind kind)
+{
+    return kind == OBJECT_RELOCATION_ABSOLUTE64 || kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ? 8 : 4;
+}
+
 BUSTER_GLOBAL_LOCAL void object_metadata_sections_initialize(ObjectFile* object)
 {
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
@@ -10069,12 +10610,10 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
 // Each FDE's initial location, as a PC-relative reference to the function it
 // describes. `section_symbols`, indexed by section, holds the local symbol
 // covering each text section -- `.text` and every named one (issue 1276) --
-// or is null to name the function itself. Under -fPIC it has to be the
-// former: an FDE naming a preemptible function is a PC-relative reference to
-// an interposable symbol, which `ld` refuses in a shared object for the same
-// reason it refuses one in the body -- and every consumer of these records
-// resolves the symbol's address plus the addend, so the section symbol with
-// the function's own offset names the identical byte.
+// or is null for the non-ELF path. Every ELF FDE must name its own instruction
+// bytes, independently of PIC: resolving a weak function symbol to a strong
+// override would attach the default's CFA program and range to different code.
+// The local section symbol plus the function's offset cannot be interposed.
 BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiResult built, u32 const* section_symbols)
 {
     if (!built.valid)
@@ -10800,6 +11339,8 @@ BUSTER_GLOBAL_LOCAL bool object_codegen_relocation_width(ObjectRelocationKind ki
     {
         case OBJECT_RELOCATION_ABSOLUTE32:
         case OBJECT_RELOCATION_X86_64_ABSOLUTE32S: *width = 4; return true;
+        case OBJECT_RELOCATION_X86_64_PC64:
+        case OBJECT_RELOCATION_AARCH64_PREL64:
         case OBJECT_RELOCATION_ABSOLUTE64: *width = 8; return true;
         default: *width = 4; return true;
     }
@@ -11400,9 +11941,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .alignment = object_section_default_alignment(kind),
         };
     }
-    result.symbols = arena_allocate(arena, ObjectSymbol, module->entry_count + module->global_count + alias_count + module->relocation_count +
-                                                             (apple_thread_local ? 1 : 0) + (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) +
-                                                             (windows_unwind.function_count ? 1 : 0) + (module->position_independent ? 1 : 0) + named.count);
+    result.symbols = arena_allocate(arena, ObjectSymbol,
+                                    module->entry_count + module->global_count + alias_count + module->relocation_count + (apple_thread_local ? 1 : 0) +
+                                        (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) + (windows_unwind.function_count ? 1 : 0) +
+                                        (cfi.valid && object_format_for_target(target) == OBJECT_FORMAT_ELF64 ? 1 : 0) + named.count);
     for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
     {
         CodegenModuleEntry entry = module->entries[entry_index];
@@ -11679,12 +12221,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     {
         u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf, name_index, entry_by_symbol, entry_symbol_capacity);
         object_append_codeview(&result, codeview, entry_by_symbol, entry_symbol_capacity);
-        // One local symbol over the text section, added only for the code
-        // model that needs it and only when the debug sections did not
-        // already contribute the same one, so an object built without -fPIC
-        // keeps the symbol table it has always had.
+        // ELF unwind relocations always use local section anchors. Reuse the
+        // debug text anchor when present; -g0 still needs an independent one.
         u32* cfi_section_symbols = 0;
-        if (cfi.valid && module->position_independent)
+        if (cfi.valid && object_format_for_target(target) == OBJECT_FORMAT_ELF64)
         {
             cfi_section_symbols = arena_allocate(arena, u32, result.section_count);
             memset(cfi_section_symbols, 0xFF, sizeof(*cfi_section_symbols) * result.section_count);
@@ -11737,13 +12277,17 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
 {
     if (arch == CPU_ARCH_X86_64)
     {
-        return kind == OBJECT_RELOCATION_X86_64_PC32            ? 2
+        return kind == OBJECT_RELOCATION_X86_64_PC64            ? 24
+               : kind == OBJECT_RELOCATION_X86_64_PC32            ? 2
                : kind == OBJECT_RELOCATION_X86_64_PLT32         ? 4
                : kind == OBJECT_RELOCATION_X86_64_GOTPCREL      ? 9
                : kind == OBJECT_RELOCATION_X86_64_GOTPCRELX        ? 41
                : kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX    ? 42
                : kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX ? 43
+               : kind == OBJECT_RELOCATION_X86_64_DTPOFF64         ? 17
                : kind == OBJECT_RELOCATION_X86_64_TLSGD            ? 19
+               : kind == OBJECT_RELOCATION_X86_64_TLSLD            ? 20
+               : kind == OBJECT_RELOCATION_X86_64_DTPOFF32         ? 21
                : kind == OBJECT_RELOCATION_X86_64_GOTTPOFF      ? 22
                : kind == OBJECT_RELOCATION_X86_64_TPOFF32       ? 23
                : kind == OBJECT_RELOCATION_ABSOLUTE64           ? 1
@@ -11753,9 +12297,15 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
     }
     return kind == OBJECT_RELOCATION_AARCH64_JUMP26                 ? 282
            : kind == OBJECT_RELOCATION_AARCH64_CALL26               ? 283
+           : kind == OBJECT_RELOCATION_AARCH64_PREL64               ? 260
            : kind == OBJECT_RELOCATION_AARCH64_PREL32               ? 261
            : kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21            ? 275
            : kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12          ? 277
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12        ? 278
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12       ? 284
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12       ? 285
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12       ? 286
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12      ? 299
            : kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21        ? 311
            : kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12     ? 312
            : kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ? 549
@@ -12044,6 +12594,22 @@ BUSTER_GLOBAL_LOCAL void object_image_zero_to(ObjectImageRange* range, u64 offse
     }
 }
 
+// A payload the image names in place instead of storing: the range stays
+// reserved but unwritten, so its pages are never touched, and the file writer
+// takes the section's own bytes for it (object_artifact_slices).
+BUSTER_GLOBAL_LOCAL void object_image_borrow(ObjectImageRange* range, u64 size)
+{
+    if (range->valid && size > range->end - range->position)
+    {
+        range->valid = false;
+    }
+    else if (range->valid)
+    {
+        range->position += size;
+        range->statistics->payload_bytes_borrowed += size;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void object_image_u8(ObjectImageRange* range, u8 value)
 {
     object_image_store(range, &value, sizeof(value));
@@ -12139,6 +12705,18 @@ struct ObjectElfPlan
     u64 section_header_offset;
     u64 size;
 };
+
+// st_info's type nibble for a symbol-table entry: STT_OBJECT 1, STT_FUNC 2,
+// STT_TLS 6. An undefined data symbol no input typed -- an undeclared
+// assembly reference, or an STT_NOTYPE one read from another toolchain --
+// stays STT_NOTYPE 0: stamping STT_OBJECT would invent the claim that makes a
+// linker copy a library function into the executable (GitHub #1242). Both ELF
+// writers share this so their bytes agree.
+BUSTER_GLOBAL_LOCAL u8 object_elf64_symbol_type(ObjectSymbol const* source, bool is_defined, bool is_thread_local)
+{
+    bool untyped = !is_defined && source->kind == OBJECT_SYMBOL_DATA && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
+    return is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1;
+}
 
 BUSTER_GLOBAL_LOCAL bool object_elf64_section_is_thread_local(ObjectSection const* section)
 {
@@ -12325,8 +12903,20 @@ BUSTER_GLOBAL_LOCAL void object_elf64_section_header(ObjectImageRange* range, u3
 // ELF index for the relocations, and `relocation_ranges` holds one cursor per
 // input section; both are scratch sized by the plan. Each relocation is
 // placed by `moves` as it is written, as the plan placed it when counting.
+// A payload this large costs more to copy and fault into the image than to
+// hand to the file writer as one more write.
+#define OBJECT_BORROWED_PAYLOAD_MINIMUM 4096
+
+BUSTER_GLOBAL_LOCAL bool object_elf64_payload_borrowable(ObjectSection const* section)
+{
+    return !object_section_kind_is_zero_fill(section->kind) && section->data.length >= OBJECT_BORROWED_PAYLOAD_MINIMUM;
+}
+
+// `borrowed` is null unless the caller borrows payloads; it then has room for
+// every borrowable payload, which the emitter records in file order.
 BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializerSplit const* moves, ObjectElfPlan const* plan, u8* image,
-                                           u32* symbol_indices, ObjectImageRange* relocation_ranges, ObjectWriteStatistics* statistics)
+                                           u32* symbol_indices, ObjectImageRange* relocation_ranges, ObjectBorrowedPayload* borrowed,
+                                           u32* borrowed_count, ObjectWriteStatistics* statistics)
 {
     u32 input_count = object->section_count;
     u64 symbol_table = plan->offsets[plan->symbol_section];
@@ -12372,7 +12962,15 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         ObjectSection const* source = object->sections + section;
         statistics->section_visits += 1;
         object_image_zero_to(&payloads, plan->offsets[section + 1]);
-        if (!object_section_kind_is_zero_fill(source->kind))
+        if (borrowed && object_elf64_payload_borrowable(source))
+        {
+            borrowed[(*borrowed_count)++] = (ObjectBorrowedPayload){
+                .offset = payloads.position,
+                .bytes = source->data,
+            };
+            object_image_borrow(&payloads, source->data.length);
+        }
+        else if (!object_section_kind_is_zero_fill(source->kind))
         {
             object_image_store(&payloads, source->data.pointer, source->data.length);
             statistics->payload_bytes_copied += source->data.length;
@@ -12407,7 +13005,7 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         ObjectImageRange* slot = source->global ? &globals : &locals;
         symbol_indices[symbol] = source->global ? next_global++ : next_local++;
         object_image_u32(slot, name);
-        object_image_u8(slot, (u8)(binding | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1)));
+        object_image_u8(slot, (u8)(binding | object_elf64_symbol_type(source, is_defined, is_thread_local)));
         // st_other holds st_visibility in its low two bits: STV_DEFAULT 0,
         // STV_HIDDEN 2.
         object_image_u8(slot, source->hidden ? 2 : 0);
@@ -12513,13 +13111,19 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
+// With `borrow_payloads`, each payload of at least
+// OBJECT_BORROWED_PAYLOAD_MINIMUM bytes is named in place (object_image_borrow)
+// rather than copied. The split's payloads are ranges of `object`'s own, so
+// they outlive this call's scratch arena; the borrowed table lives in `arena`
+// with the image, and only when some payload qualifies.
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object, bool borrow_payloads, ObjectWriteStatistics* statistics)
 {
     ObjectArtifact result = {
         .format = OBJECT_FORMAT_ELF64,
     };
     // The plan, its tables and the priority split live only as long as this
-    // call; the image is the one allocation the caller's arena keeps.
+    // call; the caller's arena keeps the image and, when payloads are
+    // borrowed, their table.
     Arena* conflicts[] = {
         arena,
     };
@@ -12545,17 +13149,33 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
         result.error =
             symbol_indices && relocation_ranges && object_reader_arena_can_allocate_bytes(arena, plan.size, 1) ? OBJECT_ERROR_NONE : OBJECT_ERROR_CAPACITY;
     }
+    u32 borrowable_count = 0;
+    for (u32 section = 0; borrow_payloads && result.error == OBJECT_ERROR_NONE && section < split_object.section_count; section += 1)
+    {
+        statistics->section_visits += 1;
+        borrowable_count += object_elf64_payload_borrowable(split_object.sections + section);
+    }
+    if (borrowable_count && !object_reader_arena_can_allocate_bytes(arena, (u64)borrowable_count * sizeof(ObjectBorrowedPayload) + plan.size,
+                                                                     BUSTER_ALIGN_OF(ObjectBorrowedPayload)))
+    {
+        result.error = OBJECT_ERROR_CAPACITY;
+    }
     if (result.error == OBJECT_ERROR_NONE)
     {
         u64 image_position = arena->position;
+        ObjectBorrowedPayload* borrowed = borrowable_count ? arena_allocate(arena, ObjectBorrowedPayload, borrowable_count) : 0;
+        u32 borrowed_count = 0;
         u8* image = arena_allocate(arena, u8, plan.size);
         statistics->image_bytes_reserved += plan.size;
-        if (object_elf64_emit(&split_object, &moves, &plan, image, symbol_indices, relocation_ranges, statistics))
+        if (object_elf64_emit(&split_object, &moves, &plan, image, symbol_indices, relocation_ranges, borrowed, &borrowed_count, statistics) &&
+            borrowed_count == borrowable_count)
         {
             result.bytes = (ByteSlice){
                 .pointer = image,
                 .length = plan.size,
             };
+            result.borrowed_payloads = borrowed;
+            result.borrowed_payload_count = borrowed_count;
         }
         else
         {
@@ -12856,7 +13476,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_reference_write_elf64_with_capacity(Ar
         // local-then-global and sh_info below counts that split: a local
         // STB_WEAK entry would contradict it.
         u8 binding = source->global ? (source->weak ? 0x20 : 0x10) : 0;
-        object_write_u8_at(&buffer, offset + 4, (u8)(binding | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1)));
+        object_write_u8_at(&buffer, offset + 4, (u8)(binding | object_elf64_symbol_type(source, is_defined, is_thread_local)));
         // st_other holds st_visibility in its low two bits: STV_DEFAULT 0,
         // STV_HIDDEN 2.
         object_write_u8_at(&buffer, offset + 5, source->hidden ? 2 : 0);
@@ -13773,8 +14393,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
 }
 
 // Validates the object for `format` and dispatches to its writer. `reference`
-// selects the pre-plan ELF64 writer, which exists only in test builds.
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool reference)
+// selects the pre-plan ELF64 writer, which exists only in test builds;
+// `borrow_payloads` lets the planned ELF64 writer name large payloads in
+// place (object_write_borrowing).
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool reference, bool borrow_payloads)
 {
     ObjectArtifact result = {
         .format = format,
@@ -13837,7 +14459,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         }
         if (source->kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
-            if ((source->offset & 3) || object->sections[source->section].alignment < 4)
+            if (format != OBJECT_FORMAT_ELF64 && ((source->offset & 3) || object->sections[source->section].alignment < 4))
             {
                 return result;
             }
@@ -13925,9 +14547,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
             u32 word = 0;
             u32 canonical = 0;
             memcpy(&word, object->sections[source->section].data.pointer + source->offset, sizeof(word));
+            u64 validation_target = object_relocation_kind_is_aarch64_elf_ldst(source->kind) ? 0 : source->offset;
             if (format != OBJECT_FORMAT_ELF64 || object->target.cpu_arch != CPU_ARCH_AARCH64 ||
                 object->sections[source->section].alignment < 4 ||
-                !object_aarch64_elf_page_relocate(source->kind, word, source->offset, source->offset, 0, &canonical))
+                !object_aarch64_elf_page_relocate(source->kind, word, source->offset, validation_target, 0, &canonical))
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 return result;
@@ -14003,7 +14626,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
 #endif
     if (format == OBJECT_FORMAT_ELF64)
     {
-        result = object_write_elf64(arena, object, &statistics);
+        result = object_write_elf64(arena, object, borrow_payloads, &statistics);
     }
     else if (format == OBJECT_FORMAT_COFF)
     {
@@ -14014,7 +14637,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         result = object_write_mach_o64(arena, object, &statistics);
     }
     // Whatever the writer took from the caller's arena beyond the image it
-    // reserved is scratch left behind; the planned writer takes none.
+    // reserved is scratch left behind; the planned writer takes none except
+    // a borrowing write's table of borrowed payloads.
     statistics.retained_bytes = arena->position - arena_start;
     statistics.scratch_bytes += statistics.retained_bytes - statistics.image_bytes_reserved;
     statistics.output_bytes = result.error == OBJECT_ERROR_NONE ? result.bytes.length : 0;
@@ -14024,13 +14648,48 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
 
 ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format)
 {
-    return object_write_core(arena, object, format, false);
+    return object_write_core(arena, object, format, false, false);
+}
+
+// The file-output form of object_write. Only an ELF image currently borrows
+// its section payloads; COFF and Mach-O images stay contiguous, so their
+// artifacts carry no borrowed ranges and yield one slice.
+ObjectArtifact object_write_borrowing(Arena* arena, ObjectFile* object, ObjectFormat format)
+{
+    return object_write_core(arena, object, format, false, true);
+}
+
+// The artifact's file in order: the image's own ranges interleaved with the
+// borrowed payloads, which ascend by offset because the writer placed them.
+// Empty image ranges are omitted; a contiguous artifact is one slice.
+ByteSlice* object_artifact_slices(Arena* arena, ObjectArtifact artifact, u32* slice_count_out)
+{
+    u32 capacity = artifact.borrowed_payload_count * 2 + 1;
+    ByteSlice* slices = arena_allocate(arena, ByteSlice, capacity);
+    u32 count = 0;
+    u64 cursor = 0;
+    for (u32 index = 0; index < artifact.borrowed_payload_count; index += 1)
+    {
+        ObjectBorrowedPayload payload = artifact.borrowed_payloads[index];
+        if (payload.offset > cursor)
+        {
+            slices[count++] = (ByteSlice){.pointer = artifact.bytes.pointer + cursor, .length = payload.offset - cursor};
+        }
+        slices[count++] = payload.bytes;
+        cursor = payload.offset + payload.bytes.length;
+    }
+    if (artifact.bytes.length > cursor)
+    {
+        slices[count++] = (ByteSlice){.pointer = artifact.bytes.pointer + cursor, .length = artifact.bytes.length - cursor};
+    }
+    *slice_count_out = count;
+    return slices;
 }
 
 #if BUSTER_INCLUDE_TESTS
 ObjectArtifact object_test_write_elf64_reference(Arena* arena, ObjectFile* object)
 {
-    return object_write_core(arena, object, OBJECT_FORMAT_ELF64, true);
+    return object_write_core(arena, object, OBJECT_FORMAT_ELF64, true, false);
 }
 
 ObjectError object_test_elf64_plan(Arena* arena, ObjectFile* object, u64* size)
@@ -14052,293 +14711,340 @@ BUSTER_GLOBAL_LOCAL bool object_address_difference(u64 target, u64 place, s64 ad
 ObjectExecutable object_link_executable(ObjectFile* object)
 {
     ObjectExecutable result = {0};
-    if (!object || object->error != OBJECT_ERROR_NONE || object->section_count <= OBJECT_SECTION_TEXT || object->section_count > OBJECT_SECTION_COUNT ||
-        !object->sections || (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations))
+    do
     {
-        result.error = OBJECT_ERROR_INVALID_INPUT;
-        return result;
-    }
-    u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
-    u64 image_size = 0;
-    for (u32 section = 0; section < object->section_count; section += 1)
-    {
-        ObjectSection* source = object->sections + section;
-        if ((u32)source->kind >= (u32)OBJECT_SECTION_COUNT || (source->data.length && !source->data.pointer) ||
-            (object_section_kind_is_zero_fill(source->kind) && source->data.length) ||
-            (source->alignment && (source->alignment & (source->alignment - 1))))
+        if (!object || object->error != OBJECT_ERROR_NONE || object->section_count <= OBJECT_SECTION_TEXT || object->section_count > OBJECT_SECTION_COUNT ||
+            !object->sections || (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations))
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
+            break;
         }
-        u64 alignment = object->sections[section].alignment;
-        if (!alignment)
+        u64 page_size = os_get_page_size();
+        if (!page_size || (page_size & (page_size - 1)))
         {
-            alignment = 1;
+            result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
+            break;
         }
-        if (image_size > UINT64_MAX - (alignment - 1))
+        u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
+        u64 section_spans[OBJECT_SECTION_COUNT] = {0};
+        u64 maximum_alignment = page_size;
+        u32 text_section = UINT32_MAX;
+        u64 image_size = 0;
+        for (u32 section = 0; section < object->section_count; section += 1)
+        {
+            ObjectSection* source = object->sections + section;
+            if ((u32)source->kind >= (u32)OBJECT_SECTION_COUNT || (source->data.length && !source->data.pointer) ||
+                (object_section_kind_is_zero_fill(source->kind) && source->data.length) ||
+                (source->alignment && (source->alignment & (source->alignment - 1))))
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            if (source->kind == OBJECT_SECTION_TEXT && (source->data.length || source->virtual_size) && text_section == UINT32_MAX) text_section = section;
+            u64 alignment = object->sections[section].alignment;
+            alignment = BUSTER_MAX(alignment, page_size);
+            maximum_alignment = BUSTER_MAX(maximum_alignment, alignment);
+            if (image_size > UINT64_MAX - (alignment - 1))
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            image_size = (image_size + alignment - 1) & ~(alignment - 1);
+            section_offsets[section] = image_size;
+            u64 section_size = BUSTER_MAX(source->data.length, source->virtual_size);
+            if (section_size > UINT64_MAX - image_size)
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            if (section_size > UINT64_MAX - (page_size - 1))
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            section_spans[section] = (section_size + page_size - 1) & ~(page_size - 1);
+            if (section_spans[section] > UINT64_MAX - image_size)
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            image_size += section_spans[section];
+        }
+        if (text_section == UINT32_MAX) result.error = OBJECT_ERROR_INVALID_INPUT;
+        if (result.error != OBJECT_ERROR_NONE)
+        {
+            break;
+        }
+        if (image_size > UINT64_MAX - (maximum_alignment - page_size))
         {
             result.error = OBJECT_ERROR_CAPACITY;
-            return result;
+            break;
         }
-        image_size = (image_size + alignment - 1) & ~(alignment - 1);
-        section_offsets[section] = image_size;
-        u64 section_size = BUSTER_MAX(source->data.length, source->virtual_size);
-        if (section_size > UINT64_MAX - image_size)
+        u64 allocation_size = image_size + maximum_alignment - page_size;
+        if (!allocation_size)
+        {
+            allocation_size = page_size;
+        }
+        if (allocation_size > SIZE_MAX)
         {
             result.error = OBJECT_ERROR_CAPACITY;
-            return result;
-        }
-        image_size += section_size;
-    }
-    u64 page_size = os_get_page_size();
-    if (!page_size || (page_size & (page_size - 1)) || image_size > UINT64_MAX - (page_size - 1))
-    {
-        result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
-        return result;
-    }
-    u64 allocation_size = (image_size + page_size - 1) & ~(page_size - 1);
-    if (!allocation_size)
-    {
-        allocation_size = page_size;
-    }
-    void* address = os_reserve(0, allocation_size, (ProtectionFlags){.read = 1, .write = 1}, (MapFlags){.priv = 1, .anonymous = 1});
-    if (!address)
-    {
-        result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
-        return result;
-    }
-    for (u32 section = 0; section < object->section_count; section += 1)
-    {
-        if (object->sections[section].data.length)
-        {
-            memcpy((u8*)address + section_offsets[section], object->sections[section].data.pointer, object->sections[section].data.length);
-        }
-    }
-    for (u32 index = 0; index < object->relocation_count; index += 1)
-    {
-        ObjectRelocation* relocation = object->relocations + index;
-        if (relocation->section < object->section_count && object_section_kind_is_debug(object->sections[relocation->section].kind))
-        {
-            continue;
-        }
-        if (relocation->section >= object->section_count || relocation->symbol >= object->symbol_count)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
-        if ((u32)relocation->kind >= (u32)OBJECT_RELOCATION_COUNT)
+        void* allocation = os_reserve(0, allocation_size, (ProtectionFlags){.read = 1, .write = 1}, (MapFlags){.priv = 1, .anonymous = 1});
+        if (!allocation)
         {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
+            result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
             break;
         }
-        u64 relocation_size = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
-        ObjectSection* source_section = object->sections + relocation->section;
-        if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
+        u64 allocation_value = (u64)(uintptr_t)allocation;
+        u8* address = (u8*)(uintptr_t)((allocation_value + maximum_alignment - 1) & ~(maximum_alignment - 1));
+        for (u32 section = 0; section < object->section_count; section += 1)
         {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
-            ((relocation->offset & 3) || source_section->alignment < 4))
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        ObjectSymbol* symbol = object->symbols + relocation->symbol;
-        if (symbol->section == OBJECT_SECTION_UNDEFINED)
-        {
-            result.error = OBJECT_ERROR_UNRESOLVED_SYMBOL;
-            break;
-        }
-        u8* patch = (u8*)address + section_offsets[relocation->section] + relocation->offset;
-        if (symbol->section >= object->section_count)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        ObjectSection* target_section = object->sections + symbol->section;
-        u64 target_section_size = BUSTER_MAX(target_section->data.length, target_section->virtual_size);
-        if (symbol->value > target_section_size || symbol->size > target_section_size - symbol->value)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        u8* target = (u8*)address + section_offsets[symbol->section] + symbol->value;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
-        {
-            s64 displacement = 0;
-            if (!object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
-                displacement < INT32_MIN || displacement > INT32_MAX)
+            if (object->sections[section].data.length)
             {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            s32 value = (s32)displacement;
-            memcpy(patch, &value, sizeof(value));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
-        {
-            s32 value = 0;
-            if (!object_absolute32s_value((u64)(uintptr_t)target, relocation->addend, &value))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            memcpy(patch, &value, sizeof(value));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)
-        {
-            s64 displacement = 0;
-            u32 instruction = 0;
-            u32 patched = 0;
-            memcpy(&instruction, patch, sizeof(instruction));
-            A64Opcode opcode = relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ? A64_OPCODE_BL : A64_OPCODE_B;
-            if (symbol->kind != OBJECT_SYMBOL_FUNCTION || ((u64)(uintptr_t)patch & 3) ||
-                !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
-                !a64_pc_relative_patch(opcode, instruction, displacement, &patched))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            memcpy(patch, &patched, sizeof(patched));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
-        {
-            s64 displacement = 0;
-            if (((u64)(uintptr_t)patch & 3) ||
-                !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
-                displacement < INT32_MIN || displacement > INT32_MAX)
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            s32 value = (s32)displacement;
-            memcpy(patch, &value, sizeof(value));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
-        {
-            u64 value = 0;
-            if (!object_address_addend((u64)(uintptr_t)target, relocation->addend, &value))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            memcpy(patch, &value, sizeof(value));
-        }
-        else if (object_relocation_kind_is_aarch64_elf_page(relocation->kind))
-        {
-            u32 word = 0;
-            u32 patched = 0;
-            memcpy(&word, patch, sizeof(word));
-            if (!object_aarch64_elf_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
-                                                relocation->addend, &patched))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            memcpy(patch, &patched, sizeof(patched));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
-        {
-            u32 word = 0;
-            u32 patched = 0;
-            memcpy(&word, patch, sizeof(word));
-            if (!object_aarch64_pe_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
-                                                  relocation->addend, &patched))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            memcpy(patch, &patched, sizeof(patched));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
-        {
-            if (!object_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
-                                                           relocation->addend))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
+                memcpy((u8*)address + section_offsets[section], object->sections[section].data.pointer, object->sections[section].data.length);
             }
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
-                 relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
-                 relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 ||
-                 relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
+        for (u32 index = 0; index < object->relocation_count; index += 1)
         {
-            // A standalone executable image has no thread-pointer or Darwin
-            // TLVP resolver.  Keep these relocations fail-closed rather than
-            // encoding an address that would only work by accident on one
-            // host's TLS layout.
-            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-            break;
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB)
-        {
-            u64 value = section_offsets[symbol->section] + symbol->value;
-            if (relocation->addend < 0)
+            ObjectRelocation* relocation = object->relocations + index;
+            if (relocation->section < object->section_count && object_section_kind_is_debug(object->sections[relocation->section].kind))
             {
-                u64 magnitude = (u64)(-(relocation->addend + 1)) + 1;
-                if (magnitude > value)
+                continue;
+            }
+            if (relocation->section >= object->section_count || relocation->symbol >= object->symbol_count)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            if ((u32)relocation->kind >= (u32)OBJECT_RELOCATION_COUNT)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            u64 relocation_size = object_relocation_kind_width(relocation->kind);
+            ObjectSection* source_section = object->sections + relocation->section;
+            if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
+                ((relocation->offset & 3) || source_section->alignment < 4))
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            ObjectSymbol* symbol = object->symbols + relocation->symbol;
+            if (symbol->section == OBJECT_SECTION_UNDEFINED)
+            {
+                result.error = OBJECT_ERROR_UNRESOLVED_SYMBOL;
+                break;
+            }
+            u8* patch = (u8*)address + section_offsets[relocation->section] + relocation->offset;
+            if (symbol->section >= object->section_count)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            ObjectSection* target_section = object->sections + symbol->section;
+            u64 target_section_size = BUSTER_MAX(target_section->data.length, target_section->virtual_size);
+            if (symbol->value > target_section_size || symbol->size > target_section_size - symbol->value)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            u8* target = (u8*)address + section_offsets[symbol->section] + symbol->value;
+            if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
+            {
+                s64 displacement = 0;
+                if (!object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
+                    displacement < INT32_MIN || displacement > INT32_MAX)
                 {
                     result.error = OBJECT_ERROR_CAPACITY;
                     break;
                 }
-                value -= magnitude;
+                s32 value = (s32)displacement;
+                memcpy(patch, &value, sizeof(value));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
+            {
+                s32 value = 0;
+                if (!object_absolute32s_value((u64)(uintptr_t)target, relocation->addend, &value))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                memcpy(patch, &value, sizeof(value));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)
+            {
+                s64 displacement = 0;
+                u32 instruction = 0;
+                u32 patched = 0;
+                memcpy(&instruction, patch, sizeof(instruction));
+                A64Opcode opcode = relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ? A64_OPCODE_BL : A64_OPCODE_B;
+                if (symbol->kind != OBJECT_SYMBOL_FUNCTION || ((u64)(uintptr_t)patch & 3) ||
+                    !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
+                    !a64_pc_relative_patch(opcode, instruction, displacement, &patched))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                memcpy(patch, &patched, sizeof(patched));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+            {
+                s64 displacement = 0;
+                if (((u64)(uintptr_t)patch & 3) ||
+                    !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
+                    displacement < INT32_MIN || displacement > INT32_MAX)
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                s32 value = (s32)displacement;
+                memcpy(patch, &value, sizeof(value));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
+            {
+                u64 value = 0;
+                if (!object_address_addend((u64)(uintptr_t)target, relocation->addend, &value))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                memcpy(patch, &value, sizeof(value));
+            }
+            else if (object_relocation_kind_is_aarch64_elf_page(relocation->kind))
+            {
+                u32 word = 0;
+                u32 patched = 0;
+                memcpy(&word, patch, sizeof(word));
+                if (!object_aarch64_elf_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
+                                                    relocation->addend, &patched))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                memcpy(patch, &patched, sizeof(patched));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
+            {
+                u32 word = 0;
+                u32 patched = 0;
+                memcpy(&word, patch, sizeof(word));
+                if (!object_aarch64_pe_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
+                                                      relocation->addend, &patched))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                memcpy(patch, &patched, sizeof(patched));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+            {
+                if (!object_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
+                                                               relocation->addend))
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
+                     relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
+                     relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 ||
+                     relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
+            {
+                // A standalone executable image has no thread-pointer or Darwin
+                // TLVP resolver.  Keep these relocations fail-closed rather than
+                // encoding an address that would only work by accident on one
+                // host's TLS layout.
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                break;
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB)
+            {
+                u64 value = section_offsets[symbol->section] + symbol->value;
+                if (relocation->addend < 0)
+                {
+                    u64 magnitude = (u64)(-(relocation->addend + 1)) + 1;
+                    if (magnitude > value)
+                    {
+                        result.error = OBJECT_ERROR_CAPACITY;
+                        break;
+                    }
+                    value -= magnitude;
+                }
+                else
+                {
+                    u64 addend = (u64)relocation->addend;
+                    if (addend > UINT32_MAX || value > UINT32_MAX - addend)
+                    {
+                        result.error = OBJECT_ERROR_CAPACITY;
+                        break;
+                    }
+                    value += addend;
+                }
+                if (value > UINT32_MAX)
+                {
+                    result.error = OBJECT_ERROR_CAPACITY;
+                    break;
+                }
+                u32 image_relative = (u32)value;
+                memcpy(patch, &image_relative, sizeof(image_relative));
             }
             else
             {
-                u64 addend = (u64)relocation->addend;
-                if (addend > UINT32_MAX || value > UINT32_MAX - addend)
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                value += addend;
-            }
-            if (value > UINT32_MAX)
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 break;
             }
-            u32 image_relative = (u32)value;
-            memcpy(patch, &image_relative, sizeof(image_relative));
+        }
+        if (result.error == OBJECT_ERROR_NONE && !os_protect(allocation, allocation_size, (ProtectionFlags){.read = 1}))
+        {
+            result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
+        }
+        for (u32 section = 0; section < object->section_count && result.error == OBJECT_ERROR_NONE; section += 1)
+        {
+            ObjectSectionKind kind = object->sections[section].kind;
+            ProtectionFlags protection = {
+                .read = 1,
+                .write = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO ||
+                         kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO,
+                .execute = kind == OBJECT_SECTION_TEXT,
+            };
+            if (section_spans[section] &&
+                (!os_protect(address + section_offsets[section], section_spans[section], protection) ||
+                 (protection.execute && !os_flush_instruction_cache(address + section_offsets[section], section_spans[section]))))
+            {
+                result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
+            }
+        }
+        if (result.error == OBJECT_ERROR_NONE)
+        {
+            result.address = address + section_offsets[text_section];
+            result.allocation_address = allocation;
+            result.allocation_size = allocation_size;
         }
         else
         {
-            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-            break;
+            os_unreserve(allocation, allocation_size);
         }
-    }
-    if (result.error != OBJECT_ERROR_NONE)
-    {
-        os_unreserve(address, allocation_size);
-        return result;
-    }
-    if (!os_commit(address, allocation_size,
-                   (ProtectionFlags){
-                       .read = 1,
-                       .execute = 1,
-                   },
-                   false) ||
-        !os_flush_instruction_cache(address, image_size))
-    {
-        os_unreserve(address, allocation_size);
-        result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
-        return result;
-    }
-    result.address = (u8*)address + section_offsets[OBJECT_SECTION_TEXT];
-    result.allocation_size = allocation_size;
+    } while (false);
     return result;
 }
 
@@ -14346,6 +15052,6 @@ void object_release_executable(ObjectExecutable executable)
 {
     if (executable.address && executable.allocation_size)
     {
-        os_unreserve(executable.address, executable.allocation_size);
+        os_unreserve(executable.allocation_address, executable.allocation_size);
     }
 }

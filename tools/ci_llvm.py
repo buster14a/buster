@@ -8,6 +8,7 @@ and already publishes this target's archive. The archive is verified against
 the SHA-256 digest and size GitHub records for that asset before anything is
 extracted, and only the compiler, linker, archiver, and Clang resource tree are
 written, so the multi-gigabyte distribution never lands on the runner disk.
+Linux additionally stages a pinned, verified ICU package privately for LLD.
 
 LLVM releases older than MINIMUM_VERSION are rejected: 22.1.0 is the first
 stable release with the AVX10 host-detection correction (issue #1501).
@@ -47,6 +48,21 @@ KEPT_TOOLS = frozenset((
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_TIMEOUT_SECONDS = 120
 CHUNK_SIZE = 1024 * 1024
+# Ubuntu Jammy's signed main/updates/security indexes, inspected in run
+# 36838076717, publish these ICU 70.1-2 packages. LLVM 23.1.2's Linux LLD
+# needs all three ICU 70 SONAMEs; its verified archives do not bundle them.
+ICU_RUNTIME_ASSETS = {
+    "x86_64-linux": {
+        "name": "libicu70_70.1-2_amd64.deb", "size": 10581942,
+        "digest": "sha256:58a154f6307289813da2276f900498ef536ae7c0522d2cf31a3c3c5cf62dfd9a",
+        "browser_download_url": "https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu70_70.1-2_amd64.deb",
+    },
+    "aarch64-linux": {
+        "name": "libicu70_70.1-2_arm64.deb", "size": 10503646,
+        "digest": "sha256:ac68372cf4a976e6a206858fd9b28c68e49d37d650b9b8653270038a6e7bc174",
+        "browser_download_url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/i/icu/libicu70_70.1-2_arm64.deb",
+    },
+}
 
 
 def parse_version(tag):
@@ -215,6 +231,53 @@ def unpack(archive, install):
             extract(stream, install, "r|xz")
 
 
+def validate_tools(target, bin_directory, version):
+    """Require the selected compiler, linker frontends and archiver to launch."""
+    suffix = ".exe" if target.endswith("windows") else ""
+    tools = ["clang", "llvm-ar", "lld-link" if target.endswith("windows") else "ld.lld"]
+    tools.extend(tool for tool in ("ld.lld", "ld64.lld", "lld-link", "wasm-ld")
+                 if tool not in tools and (bin_directory / (tool + suffix)).is_file())
+    for tool in tools:
+        executable = bin_directory / (tool + suffix)
+        try:
+            probe = subprocess.run([str(executable), "--version"], check=True,
+                                   capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as error:
+            diagnostic = getattr(error, "stderr", None) or str(error)
+            raise RuntimeError(f"LLVM tool {executable} is not launchable: {diagnostic}") from error
+        identity = probe.stdout.strip()
+        print(f"LLVM_TOOL_READY tool={tool} path={executable}\n{identity}")
+        if tool == "clang" and (not identity or
+                                f"clang version {format_version(version)}" not in identity.splitlines()[0]):
+            raise RuntimeError(f"installed clang does not report version {format_version(version)}")
+
+
+def provision_linux_runtime(target, work, install, token):
+    """Stage verified ICU 70 privately for the upstream LLD's ELF RUNPATH."""
+    if target in ICU_RUNTIME_ASSETS:
+        asset = ICU_RUNTIME_ASSETS[target]
+        package = work / asset["name"]
+        staging = work / "icu-runtime"
+        if staging.exists():
+            shutil.rmtree(staging)
+        print(f"LLVM_RUNTIME package={asset['name']} size={asset['size']} digest={asset['digest']} "
+              f"url={asset['browser_download_url']}")
+        download(asset, package, token)
+        subprocess.run(["dpkg-deb", "--extract", str(package), str(staging)], check=True, timeout=30)
+        triplet = "x86_64-linux-gnu" if target == "x86_64-linux" else "aarch64-linux-gnu"
+        source = staging / "usr" / "lib" / triplet
+        # Preserve real ICU 70 SONAME links; never alias the host's newer ICU ABI.
+        for name in ("libicui18n.so.70", "libicuuc.so.70", "libicudata.so.70"):
+            if not (source / name).is_file():
+                raise RuntimeError(f"verified ICU package is missing {name}")
+        shutil.copytree(source, install / "lib", symlinks=True, dirs_exist_ok=True)
+        notices = install / "share" / "licenses" / "icu70"
+        notices.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(staging / "usr" / "share" / "doc" / "libicu70" / "copyright", notices / "copyright")
+        package.unlink()
+        shutil.rmtree(staging)
+
+
 def install_llvm(target, work, releases, token, pinned=None):
     formats = archive_formats(shutil.which("zstd") is not None)
     version, asset = select_release(releases, target, formats, pinned)
@@ -227,12 +290,9 @@ def install_llvm(target, work, releases, token, pinned=None):
     download(asset, archive, token)
     unpack(archive, install)
     archive.unlink()
+    provision_linux_runtime(target, work, install, token)
     bin_directory = install / "bin"
-    clang = bin_directory / ("clang.exe" if target.endswith("windows") else "clang")
-    identity = subprocess.run([str(clang), "--version"], check=True, capture_output=True, text=True).stdout
-    print(identity, end="")
-    if f"clang version {format_version(version)}" not in identity.splitlines()[0]:
-        raise RuntimeError(f"installed clang does not report version {format_version(version)}")
+    validate_tools(target, bin_directory, version)
     return version, bin_directory
 
 

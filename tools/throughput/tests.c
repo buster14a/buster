@@ -21,8 +21,9 @@ static void test_child_exit(TpProcess result, int expected, char const* log, int
     if (result.exit_code != expected || result.timed_out || result.launch_error)
     {
         ++test_failures;
-        fprintf(stderr, "TEST failure %d: child exit_code=%d expected=%d signal=%d timed_out=%d launch_error=%d wall_seconds=%.3f log=%s\n",
-                line, result.exit_code, expected, result.signal_number, result.timed_out, result.launch_error, result.wall_seconds, log);
+        fprintf(stderr, "TEST failure %d: child exit_code=%d expected=%d signal=%d timed_out=%d launch_error=%d launch_stage=%s wall_seconds=%.3f log=%s\n",
+                line, result.exit_code, expected, result.signal_number, result.timed_out, result.launch_error,
+                tp_launch_stage_name(result.launch_stage), result.wall_seconds, log);
         char kept[TP_PATH_CAP], chunk[4096], tail[2048];
         int length = snprintf(kept, sizeof(kept), "%s.line-%d", log, line);
         FILE* input = fopen(log, "rb");
@@ -165,6 +166,7 @@ static int test_child(int argc, char** argv)
     int result = 0;
     if (argc < 3) result = 2;
     else if (!strcmp(argv[2], "fail")) result = 7;
+    else if (!strcmp(argv[2], "exit125")) result = 125;
     else if (!strcmp(argv[2], "throughput")) result = throughput_cli_main(argc - 2, argv + 2);
     else if (!strcmp(argv[2], "throughput-admission-oom"))
     {
@@ -236,17 +238,48 @@ static int test_child(int argc, char** argv)
         for (int i = 3; i < argc; ++i) printf("%s\n", argv[i]);
     }
 #ifndef _WIN32
-    else if (!strcmp(argv[2], "summary-write-failure") && argc == 4)
+    else if (argc == 4 && (!strcmp(argv[2], "summary-write-failure") ||
+                           !strcmp(argv[2], "summary-write-setup-failure")))
     {
-        /* Restrict only this child so buffered report writes fail at close. */
-        struct rlimit limit;
-        int ok = getrlimit(RLIMIT_FSIZE, &limit) == 0;
+        /* The native one-byte limit also truncates the redirected child log.
+         * Save each outcome, restore the limit after comparison closes its
+         * streams, then publish diagnostics. Setup failure is not a write test. */
+        int resource = !strcmp(argv[2], "summary-write-failure") ? RLIMIT_FSIZE : -1;
+        struct rlimit saved;
+        char const* stage = "getrlimit";
+        int ok = getrlimit(resource, &saved) == 0;
+        int setup_error = ok ? 0 : errno;
+        int comparison = -1, comparison_error = 0, restore_status = -1, restore_error = 0;
         if (ok)
         {
-            limit.rlim_cur = 1;
-            ok = signal(SIGXFSZ, SIG_IGN) != SIG_ERR && setrlimit(RLIMIT_FSIZE, &limit) == 0;
+            stage = "signal";
+            ok = signal(SIGXFSZ, SIG_IGN) != SIG_ERR;
+            if (!ok) setup_error = errno;
         }
-        result = ok && tp_compare(argv[3]) == 2 ? 0 : 1;
+        if (ok)
+        {
+            struct rlimit limit = saved;
+            limit.rlim_cur = 1;
+            stage = "setrlimit";
+            ok = setrlimit(resource, &limit) == 0;
+            if (!ok) setup_error = errno;
+        }
+        if (ok)
+        {
+            stage = "compare";
+            comparison = tp_compare(argv[3]);
+            comparison_error = errno;
+            restore_status = setrlimit(resource, &saved);
+            if (restore_status != 0) restore_error = errno;
+        }
+        /* A failed diagnostic write under the injected limit sets stream
+         * error flags. Clear only the log streams, never the report streams. */
+        clearerr(stdout);
+        clearerr(stderr);
+        int reported = fprintf(stderr, "\nSUMMARY_WRITE_FAILURE stage=%s setup_errno=%d compare=%d restore=%d restore_errno=%d last_errno=%d\n",
+                               stage, setup_error, comparison, restore_status, restore_error, comparison_error) >= 0;
+        if (fflush(stderr) != 0) reported = 0;
+        result = ok && comparison == 2 && restore_status == 0 && reported ? 0 : 1;
     }
 #endif
     else result = 2;
@@ -468,6 +501,66 @@ static void test_processes(char const* executable, char const* root)
     for (unsigned i = 0; i < TP_COUNTERS; ++i)
         CHECK(isfinite(quoted.counters[i]) ? quoted.running_fraction[i] >= 0.90 : quoted.counter_errors[i] != 0);
 }
+
+#ifndef _WIN32
+static unsigned test_open_descriptor_count(void)
+{
+    unsigned count = 0;
+    for (int descriptor = 0; descriptor < 256; ++descriptor)
+    {
+        if (fcntl(descriptor, F_GETFD) >= 0) ++count;
+    }
+    return count;
+}
+
+/* The error channel must report preexec failure, survive repeated cleanup,
+ * and remain empty when a successfully launched program itself exits 125. */
+static void test_launch_errors(char const* executable, char const* root)
+{
+    char log[TP_PATH_CAP], denied_path[TP_PATH_CAP], format_path[TP_PATH_CAP];
+    int paths_ok = tp_path(log, root, "launch-errors.log") &&
+                   tp_path(denied_path, root, "launch-denied") &&
+                   tp_path(format_path, root, "launch-format");
+    CHECK(paths_ok);
+    if (paths_ok)
+    {
+        CHECK(test_text(root, "launch-denied", "not executable\n") && chmod(denied_path, 0600) == 0);
+        CHECK(test_text(root, "launch-format", "not an executable format\n") && chmod(format_path, 0700) == 0);
+        char* valid[] = {(char*)executable, "child", "exit125", NULL};
+        TpProcess exited = tp_process(valid, NULL, log, 2, -1, 0);
+        CHECK(exited.exit_code == 125 && !exited.signal_number && !exited.timed_out &&
+              !exited.launch_error && exited.launch_stage == TP_LAUNCH_NONE);
+        char* missing[] = {"/definitely/missing/buster-throughput-compiler", NULL};
+        char* denied[] = {denied_path, NULL};
+        char* format[] = {format_path, NULL};
+        char* commands[] = {(char*)executable, "child", "fail", NULL};
+        struct
+        {
+            char** argv;
+            char const* directory;
+            int error;
+            TpLaunchStage stage;
+        } cases[] = {
+            {missing, NULL, ENOENT, TP_LAUNCH_EXEC},
+            {denied, NULL, EACCES, TP_LAUNCH_EXEC},
+            {format, NULL, ENOEXEC, TP_LAUNCH_EXEC},
+            {commands, "/definitely/missing/buster-throughput-directory", ENOENT, TP_LAUNCH_DIRECTORY},
+        };
+        unsigned descriptors = test_open_descriptor_count();
+        for (unsigned round = 0; round < 4; ++round)
+        {
+            for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+            {
+                TpProcess failed = tp_process(cases[i].argv, cases[i].directory, log, 2, -1, 0);
+                CHECK(failed.exit_code == 125 && !failed.signal_number && !failed.timed_out &&
+                      failed.launch_error == cases[i].error && failed.launch_stage == cases[i].stage);
+            }
+        }
+        CHECK(test_open_descriptor_count() == descriptors);
+        puts("THROUGHPUT_LAUNCH_ERRORS cases=4 repetitions=4 valid_exit125=distinct");
+    }
+}
+#endif
 
 /* Exact integer serialization is independent of floating-point summary
  * medians. Zero, UINT64_MAX and unavailable must survive a complete replay. */
@@ -1076,10 +1169,11 @@ static void test_workload_admission(char const* executable, char const* root)
     CHECK(tp_path(output, directory, "success"));
 #if defined(_WIN32)
     TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
-#elif defined(BUSTER_SANITIZE)
+#elif BUSTER_SANITIZE
     puts("THROUGHPUT_ADMISSION_STACK status=unsupported reason=sanitizer-instrumented");
     TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
 #else
+    puts("THROUGHPUT_ADMISSION_STACK status=selected mode=throughput-low-stack");
     TpProcess result = test_admit_workload_mode(executable, "throughput-low-stack", descriptor, source_root,
                                                 evidence, output, manifests, log);
 #endif
@@ -1091,6 +1185,12 @@ static void test_workload_admission(char const* executable, char const* root)
     {
         size_t size = fread(report, 1, sizeof(report) - 1, file);
         CHECK(size < sizeof(report) - 1 && !ferror(file) && fclose(file) == 0);
+        // The low-stack child's report is otherwise only inside the CI artifact.
+        if (!(result.exit_code == 0 && !result.launch_error && !result.timed_out) || !strstr(report, "\"admitted\":true"))
+        {
+            fprintf(stderr, "THROUGHPUT_ADMISSION_REPORT exit=%d signal=%d launch_error=%d timed_out=%d\n%s\n",
+                    result.exit_code, result.signal_number, result.launch_error, result.timed_out, report);
+        }
         CHECK(strstr(report, "\"admitted\":true") && strstr(report, "\"performed_cells\":[") &&
               strstr(report, "\"object\":{\"command_count\":2") &&
               strstr(report, "\"translated_bytes\":32") && strstr(report, "\"runtime-transcript\"") &&
@@ -1354,17 +1454,48 @@ static void test_summary_cleanup(char const* root)
 static void test_summary_write_failure(char const* executable, char const* root)
 {
     char directory[TP_PATH_CAP], log[TP_PATH_CAP];
-    int paths_ok = tp_path(directory, root, "summary-write-failure") &&
-                   tp_path(log, root, "summary-write-failure.log");
+    int paths_ok = tp_path(directory, root, "summary-write-failure");
     CHECK(paths_ok);
     if (paths_ok)
     {
         CHECK(test_bundle(directory, 0));
-        char* command[] = {(char*)executable, "child", "summary-write-failure", directory, NULL};
-        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(child.exit_code == 0 && !child.timed_out && !child.launch_error);
-        test_summaries(directory, 0);
-        CHECK(tp_completion(directory, 1, 20, 1, 0));
+        CHECK(tp_compare(directory) == 0);
+        test_summaries(directory, 1);
+        char const* modes[] = {"summary-write-failure", "summary-write-setup-failure"};
+        char const* logs[] = {"summary-write-failure.log", "summary-write-setup-failure.log"};
+        for (unsigned mode = 0; mode < 2; ++mode)
+        {
+            int log_ok = tp_path(log, root, logs[mode]);
+            CHECK(log_ok);
+            if (log_ok)
+            {
+                char* command[] = {(char*)executable, "child", (char*)modes[mode], directory, NULL};
+                TpProcess child = tp_process(command, NULL, log, 3, -1, 0);
+                CHECK_CHILD_EXIT(child, mode ? 1 : 0, log);
+                /* Require a complete diagnostic after the one-byte write
+                 * limit, including for the deliberately invalid setup. */
+                FILE* file = fopen(log, "rb");
+                CHECK(file != NULL);
+                if (file)
+                {
+                    char diagnostic[1024], expected[256];
+                    size_t length = fread(diagnostic, 1, sizeof(diagnostic) - 1, file);
+                    diagnostic[length] = 0;
+                    CHECK(!ferror(file) && feof(file));
+                    CHECK(fclose(file) == 0);
+                    snprintf(expected, sizeof(expected),
+                             "SUMMARY_WRITE_FAILURE stage=%s setup_errno=%d compare=%d restore=%d restore_errno=0",
+                             mode ? "getrlimit" : "compare", mode ? EINVAL : 0, mode ? -1 : 2, mode ? -1 : 0);
+                    CHECK(strstr(diagnostic, expected) != NULL);
+                }
+            }
+            /* A real write failure removes reports; a setup failure never
+             * enters comparison and must leave the existing reports alone. */
+            test_summaries(directory, mode != 0);
+            CHECK(tp_completion(directory, 1, 20, 1, 0));
+            CHECK(tp_compare(directory) == 0);
+            test_summaries(directory, 1);
+        }
     }
 }
 #endif
@@ -1714,6 +1845,9 @@ int main(int argc, char** argv)
         test_inputs(root);
         test_maximum_jobs(root);
         test_processes(executable, root);
+#ifndef _WIN32
+        test_launch_errors(executable, root);
+#endif
         test_retirement_statistics();
         printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu job=%zu max_jobs=%u run_heap=%zu replay_heap=%zu\n",
                sizeof(TpProcess), sizeof(TpRow), sizeof(TpJob), (unsigned)TP_MAX_JOBS,

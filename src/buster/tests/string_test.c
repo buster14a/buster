@@ -205,6 +205,38 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, pages != 0);
         bool committed = pages && os_commit(pages, page_size, (ProtectionFlags){.read = 1, .write = 1}, false);
         BUSTER_TEST(arguments, committed);
+        {
+            char8 suffixed[] = {'f', 'o', 'o', 'b', 'a', 'r'};
+            String8Z bounded_copy = {0};
+            bool bounded_valid = string8z_copy_arena(arguments->arena, (String8){suffixed, 3}, &bounded_copy);
+            String8 bounded_text = {.pointer = bounded_copy.pointer, .length = bounded_copy.length};
+            BUSTER_TEST(arguments, bounded_valid && string_equal(bounded_text, S8("foo")) && bounded_copy.pointer[bounded_copy.length] == 0);
+
+            char8 embedded_nul[] = {'f', 'o', 0, 'o'};
+            String8Z rejected = bounded_copy;
+            bool embedded_valid = string8z_copy_arena(arguments->arena, (String8){embedded_nul, BUSTER_ARRAY_LENGTH(embedded_nul)}, &rejected);
+            BUSTER_TEST(arguments, !embedded_valid && !rejected.pointer && !rejected.length);
+            bool null_valid = string8z_copy_arena(arguments->arena, (String8){.length = 1}, &rejected);
+            BUSTER_TEST(arguments, !null_valid && !rejected.pointer && !rejected.length);
+
+            String16Z wide_copy = {0};
+            bool wide_valid = string16z_from_string8_arena(arguments->arena, (String8){suffixed, 3}, &wide_copy);
+            String16 wide_text = {.pointer = wide_copy.pointer, .length = wide_copy.length};
+            String16 expected_wide = string16_from_string8(arguments->arena, S8("foo"), false);
+            BUSTER_TEST(arguments, wide_valid && string16_equal(wide_text, expected_wide) && wide_copy.pointer[wide_copy.length] == 0);
+
+            if (committed)
+            {
+                char8* last_bytes = pages + page_size - 3;
+                last_bytes[0] = 'e';
+                last_bytes[1] = 'n';
+                last_bytes[2] = 'd';
+                String8Z guarded_copy = {0};
+                bool guarded_valid = string8z_copy_arena(arguments->arena, (String8){last_bytes, 3}, &guarded_copy);
+                String8 guarded_text = {.pointer = guarded_copy.pointer, .length = guarded_copy.length};
+                BUSTER_TEST(arguments, guarded_valid && string_equal(guarded_text, S8("end")) && guarded_copy.pointer[guarded_copy.length] == 0);
+            }
+        }
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parsers); i += 1)
         {
             StringIntegerParserCase parser = parsers[i];
@@ -6476,29 +6508,36 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         // A backslash run is literal unless followed by a quote. Before a
         // quote, pairs decode to slashes and the odd slash escapes the quote;
         // an even run toggles quoting. Check both initial quote states.
+        enum { max_slash_count = 65 };
         for (u64 quoted = 0; quoted < 2; quoted += 1)
         {
             for (u64 quote_after = 0; quote_after < 2; quote_after += 1)
             {
-                for (u64 slash_count = 0; slash_count <= 65; slash_count += 1)
+                for (u64 slash_count = 0; slash_count <= max_slash_count; slash_count += 1)
                 {
-                    char16 command_line[80];
-                    char8 expected[80];
+                    // Input: opening quote, x, slashes, following quote, space,
+                    // y and NUL. Output reaches at most 65 + x + space + y;
+                    // reserve one extra byte for the independently bounded quote.
+                    char16 command_line[max_slash_count + 6];
+                    char8 expected[max_slash_count + 4];
                     u64 input_length = 0;
-                    u64 expected_length = 0;
+                    u64 expected_slash_count = quote_after ? slash_count / 2 : slash_count;
+                    u64 expected_length = 1 + expected_slash_count;
                     if (quoted)
                     {
                         command_line[input_length++] = '"';
                     }
                     command_line[input_length++] = 'x';
-                    expected[expected_length++] = 'x';
+                    expected[0] = 'x';
                     for (u64 i = 0; i < slash_count; i += 1)
                     {
                         command_line[input_length++] = '\\';
                     }
-                    for (u64 i = 0; i < (quote_after ? slash_count / 2 : slash_count); i += 1)
+                    // Index the slash span directly: GCC 13 must see that
+                    // every store stays within the fixed fixture bound.
+                    for (u64 i = 0; i < expected_slash_count; i += 1)
                     {
-                        expected[expected_length++] = '\\';
+                        expected[1 + i] = '\\';
                     }
                     if (quote_after)
                     {

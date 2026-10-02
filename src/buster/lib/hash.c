@@ -58,8 +58,21 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u64 buster_hash_avalanche(u64 hash)
 }
 #endif
 
+#if BUSTER_BENCH_ALLOCATIONS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL BusterHashCensus buster_hash_totals;
+
+BusterHashCensus buster_hash_census(void)
+{
+    return buster_hash_totals;
+}
+#endif
+
 u64 buster_hash_64(u8* pointer, u64 length)
 {
+#if BUSTER_BENCH_ALLOCATIONS
+    buster_hash_totals.calls += 1;
+    buster_hash_totals.bytes += length;
+#endif
 #if USE_XXHASH
     // Callers may reserve 0 as an "empty" sentinel; the non-xxhash path below
     // never returns it, so keep both paths consistent.

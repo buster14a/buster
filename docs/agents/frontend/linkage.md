@@ -80,6 +80,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `compiler_driver_test_attribute_queries` reads emitted ELF/Mach-O/COFF
   symbols and initializer arrays, then runs the guarded fixture through
   native source and object links in all four allocators (GitHub #666).
+- **ELF unwind records name the producing object's instruction bytes.**
+  `object_append_dwarf_cfi` uses local text-section symbols plus function
+  offsets on x86-64 and AArch64, with or without PIC and debug information.
+  Named text sections get their own local anchors. A weak default's FDE
+  therefore stays with its own code when a strong definition overrides it.
+  `link_elf_eh_frame_header_write` refuses duplicate initial locations with
+  `LINK_ERROR_RELOCATION`, including legacy function-symbol FDEs that resolve
+  to the same winner; no unwinder search order chooses between their rules.
+  Registered driver tests inspect serialized relocations in all four allocator
+  modes and exercise host-compiled overrides under GNU ld, available LLD and
+  Buster's linker in both input orders on native Linux x86-64 and AArch64.
+  Link tests cover duplicate refusal and distinct local-anchor controls for
+  both architectures on every test host.
 - **`__attribute__((weak))` and `__attribute__((alias("target")))`** reach the
   object file, because musl publishes `malloc`, `free`, `errno` and most of
   its pthread surface as weak aliases of internal names. Weak is
@@ -370,6 +383,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   symbol's copy-slot address, including aliases. Untyped exported AArch64
   ELF text labels can serve as assembly entry points; explicit object types
   remain data. Mach-O, PE and TLS relocation contracts remain separate.
+
+- Direct AArch64 ELF unsigned-immediate memory references use distinct
+  `ELF_LDST8_LO12`, `ELF_LDST16_LO12`, `ELF_LDST32_LO12`, `ELF_LDST64_LO12`
+  and `ELF_LDST128_LO12` kinds (AAELF64 types 278/284/285/286/299). The
+  relocation's access size must match the instruction's encoding, including
+  sign-extending scalar, SIMD and Q-register forms; scale-three PRFM is
+  accepted too. Reserved, unscaled and register-offset forms fail. The reader
+  clears imm12, keeps RELA's explicit signed addend and sign-extends REL's
+  imm12 before access-size scaling. The shared ELF page helper applies only
+  bits `[11:scale]` of `S+A`, checks arithmetic and final-address alignment,
+  and preserves operation/register bits in object, in-memory and static or
+  dynamic native links. Dynamic imported data uses its copy slot, including
+  aliases. These direct memory references remain separate from GOT relaxation,
+  TLS, Mach-O and PE contracts. See
+  [AAELF64 addends and relocation definitions](https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst).
 
 - Ordinary Windows ARM64 address pairs use the PE-specific
   `PAGEBASE_REL21`/`PAGEOFFSET_12A` object kinds (COFF types 4/6), never the

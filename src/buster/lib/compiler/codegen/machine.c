@@ -13,6 +13,7 @@
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 
@@ -98,6 +99,9 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 // them keeps vector values clear of rows that scribble the low XMM file.
 #define MACHINE_X64_FLOAT_SCRATCH_CLOBBER ((1u << MACHINE_X64_ZMM0) | (1u << MACHINE_X64_ZMM1))
 #define MACHINE_X64_FLOAT_BRIDGE_CLOBBER (0xffu << MACHINE_X64_ZMM0)
+// Aggregate copies move whole sixteen-byte chunks through XMM0 (MOVUPS) and
+// the remainder through their general data scratch.
+#define MACHINE_X64_COPY_VECTOR_CLOBBER (1u << MACHINE_X64_ZMM0)
 
 // Shorthand rows for the x86-64 scalar subset: destination-and-source
 // moves, read-modify-write arithmetic, flag producers/consumers, frame and
@@ -431,22 +435,25 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_COPY_FRAME_FROM_FRAME] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
-        .clobber_mask = 1u << MACHINE_X64_RAX,
+        .clobber_mask = (1u << MACHINE_X64_RAX) | MACHINE_X64_COPY_VECTOR_CLOBBER,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .implicit_vector_state = 1,
     },
     [MACHINE_X64_COPY_FRAME_FROM_PTR] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
-        .clobber_mask = 1u << MACHINE_X64_RAX,
+        .clobber_mask = (1u << MACHINE_X64_RAX) | MACHINE_X64_COPY_VECTOR_CLOBBER,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .implicit_vector_state = 1,
     },
     [MACHINE_X64_COPY_PTR_FROM_FRAME] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
-        .clobber_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX),
+        .clobber_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX) | MACHINE_X64_COPY_VECTOR_CLOBBER,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .implicit_vector_state = 1,
     },
     [MACHINE_X64_FARITH] = {
         .operand_count = 3,
@@ -1265,7 +1272,7 @@ BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_regist
 #undef MACHINE_X64_REGISTRY_ROW
 };
 
-BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 7u);
+BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 8u);
 BUSTER_CT_CHECK(MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT == 14u);
 
 // Canonical x86 authority records.  These rows name only the metadata module
@@ -1307,6 +1314,11 @@ BUSTER_GLOBAL_LOCAL MachineX64CanonicalAuthoritySite const
         .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
         .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
         .owner_symbol = S8_INITIALIZER("buster_x86_metadata_relax_tls"),
+    },
+    {
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
+        .owner_symbol = S8_INITIALIZER("buster_x86_metadata_relax_tls_local_dynamic"),
     },
 };
 
@@ -5199,9 +5211,10 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
         // around establishing RBP. Where the pushes follow it, the save area was
         // included in `running` above and is subtracted back out when sizing the
         // post-save allocation; where they precede it, `push_area` is zero and
-        // the whole run is frame. Either way, add eight bytes for odd push parity
-        // to restore the call boundary before any nested call.
-        placement.frame_size = ((running - push_area + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
+        // the whole run is frame. Round to the smallest allocation that covers
+        // the slots while restoring sixteen-byte alignment after the pushes.
+        u32 push_parity = (push_count & 1u) ? 8u : 0u;
+        placement.frame_size = ((running - push_area + push_parity + 15u) & ~15u) - push_parity + function->outgoing_bytes;
         if (function->outgoing_bytes)
         {
             placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;

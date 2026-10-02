@@ -93,6 +93,13 @@ moving foreign-platform binaries to an aggregate runner for a fictitious
 re-probe. Missing matrix entries cannot turn a smaller surviving group green.
 The job inventory is retained as `desktop-partitions-<run>-<attempt>`.
 
+For a main push with [admitted exact queue evidence](ci-main-reuse.md), the
+native, mobile and UEFI groups are skipped on main and the aggregate verifies
+their eight actual queue job executions, artifacts and retained current-run
+inventory. The full 21-job inventory remains mandatory on all other
+events and on main whenever admission falls back. The desktop partition
+proof and main-only effects still execute on main.
+
 The inventory reader paginates **all attempts of the same immutable run** and
 selects each job's highest attempt, never its most recent *successful* attempt.
 This supports re-running failed jobs while retaining earlier successful jobs
@@ -203,3 +210,118 @@ The existing desktop artifact also retains [versioned native phase records](ci-m
 Their consumer joins every tree to this authoritative coverage manifest and
 fails the desktop result on missing or inconsistent evidence. Scheduling and
 row ownership remain unchanged; alternative-order predictions are diagnostic.
+
+## Isolated module process experiment
+
+The `BUSTER_TEST_PROCESS_PARTITIONS` CMake option defaults to `OFF`; the CI
+matrix enables it for its sanitized Clang test trees, whose serialized test phases receive
+the whole low-core budget (see [build guidance](agents/build.md)).
+CI trees expose `test_units_partitioned` and `test_unit_inventory` for the
+native `build.c test_units_partitioned <ide-path>` diagnostic. The partition
+driver runs `compiler_driver_tests` and the remaining enabled modules in
+separate processes, shares one built executable, divides its supplied test
+budget between the children, and replays their captured output in stable order.
+It rejects missing/duplicate module evidence, failed assertions/processes,
+timeouts, capture failures and incomplete cleanup. Whole-table audit exclusions
+remain owned by the original tree policy. Each child retains at least two test
+workers. A single-threaded driver or a budget below four uses the ordinary full
+invocation with inherited output streams and no added capture limit or parent
+deadline, preserving the existing concurrency assertions. When no
+`BUSTER_TEST_SOURCE_REVISION` is supplied, a bounded native Git query resolves
+the current checkout's `HEAD`. A source archive without Git runs with
+`source_revision=unknown`; comparison rejects that identity. A malformed
+explicit revision fails before grouped child admission.
+
+The [diagnostic workflow](../.github/workflows/ci-unit-partitions.yml) runs only
+on its owning experiment branch or explicit dispatch. Both arms use the same
+sanitized Debug binary and independent complete registry query. The baseline
+uses two test workers; the candidate uses two children with two workers each,
+within a four-worker available budget. One-worker children would omit three
+OS concurrency assertions relative to the standard two-worker invocation.
+Retained native phase intervals include identical CMake/Ninja launch scope.
+The observer allows 6000 seconds around the grouped driver's 5400-second child
+deadline, leaving headroom for startup, cleanup and diagnostic replay. Windows
+native commands use the Visual Studio environment in PowerShell, matching the
+ordinary Windows combination lane.
+The [postprocessor](../tools/ci_unit_tests_campaign.py) verifies every phase
+and submits the exact inventories, binary/source identities and module counts
+to the [comparison helper](../tools/ci_unit_tests_measure.py).
+
+A single alternating pair is screening evidence. Formal diagnostic review
+requires three alternating pairs. Neither result replaces ordinary CI
+completion or proves a full-workflow speedup. Production checks shards admit
+the partitioned runner by serializing their test phases, each with the whole
+four-CPU budget; builds may still overlap a test phase, which the
+[build guidance](agents/build.md) records as an accepted bounded overlap. See the
+[current observations and research](research/2026-09-30-ci-throughput.md),
+[#1826](https://github.com/buster14a/buster/issues/1826), and
+[#709](https://github.com/buster14a/buster/issues/709).
+
+## Further checks partition qualification (#2120)
+
+Partition version 2 assigns every original policy row to one of four owners:
+`release` (unsanitized optimized Clang), `sanitized-debug`, `sanitized-release`,
+and `portability`. `checks` selects the union of the three non-Release owners;
+`all` still selects the entire original policy. Excluded rows remain explicit.
+The original row IDs, policy version, counts and fingerprints are unchanged.
+The consumer independently derives owners and rejects missing, foreign,
+duplicated and empty completions.
+
+The default workflow retains ten desktop jobs. The split qualification replaces
+grouped checks on Linux x86-64, Linux AArch64 and Windows x86-64 with three
+independent jobs, giving sixteen desktop jobs and an exact 27-job required
+inventory (plus the main-reuse decision job). macOS retains its shared sanitizer
+tree and Windows AArch64 retains grouped MSVC portability checks. Individual
+Apple sanitizer selections and empty Windows AArch64 sanitizer selections fail
+before native build-tree mutation. Only Release owns preflight and canonical
+producer obligations. Each isolated sanitizer job receives its full host budget.
+
+The configure-evidence collector recognizes the native default compiler-tree
+prefixes for `sanitized-debug`, `sanitized-release`, and `portability` alongside
+the unsharded, Release and grouped-checks trees. It retains the same bounded
+CMake diagnostics for each split owner, excludes superbuild trees, and fails
+when no matrix configure trees are present.
+
+Qualification uses manual dispatch of the existing `ci.yml` on three branches
+pointing to **the same immutable commit**. Pushes and pull requests keep defaults.
+
+| Branch | Checks layout | Windows grouped-checks admission |
+| --- | --- | --- |
+| `codex/ci-checks-combined-overlap` | Combined | Overlap |
+| `codex/ci-checks-combined-all-builds` | Combined | All builds first |
+| `codex/ci-checks-split-overlap` | Split | Overlap |
+
+The original dispatch inputs and reviewed support ledger stay intact. Ordinary
+dispatches already bypass main-push reuse. Split completion additionally checks
+the exact API branch identity. Historical timing keeps combined and split job
+cohorts separate; admission A/B conclusions require native phase metadata.
+
+Only the combination steps on these exact dispatch refs enable
+`BUSTER_CI_CHECKS_EVIDENCE=1`. The native phase observer then retains each
+runtime invocation's independent module inventory, binary SHA-256 and test log
+in `unit-observations/<task-id>/` beside `matrix-phases/`. These receipts bind
+the native task, argv, source, run and attempt; the binary must stay unchanged
+through inventory and execution. Canonical Release and serial fallback receive
+the same evidence capture. Ordinary runs retain their original stream behavior.
+The inventory query and evidence overhead are part of the qualification cohort;
+all three variants use it. No tests run during the independent inventory query.
+
+Each variant needs three complete first attempts with matching source, runner
+images, toolchains and cache conditions. Compare queue-inclusive whole-workflow
+wall time, total runner seconds, exact policy/module/assertion census and all
+required success results. Admit split jobs only after at least 15% improvement
+in median whole-workflow wall time with at most 5% runner-second growth. A smaller
+job duration alone does not meet the contract. The implementation and local
+controls do not assert a measured speedup or close either research issue.
+
+`python3 tools/ci_checks_qualification.py <campaign.json>` reads digest-bound
+retained evidence and emits an independent timing/census verdict. Its module
+docstring defines the campaign format. Missing or incomparable observations
+remain `pending`; complete campaigns can meet or reject each timing threshold.
+Native phase CPU time and peak RSS remain unknown, so positive timing leaves
+overall qualification `pending` and `performance_accepted=false`. Actual
+resource observations and a resource/deadline/cleanup/reliability comparison
+are still required before either issue can be accepted.
+The tool records invocation binary/driver hashes within each sample while
+comparing source/policy, toolchains, conditions and exact census across runs;
+it does not require independently linked executables to have identical bytes.

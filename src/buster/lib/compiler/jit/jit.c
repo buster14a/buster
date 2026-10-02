@@ -252,6 +252,9 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_is_tls(ObjectRelocationKind kind)
         case OBJECT_RELOCATION_X86_64_TPOFF32:
         case OBJECT_RELOCATION_X86_64_GOTTPOFF:
         case OBJECT_RELOCATION_X86_64_TLSGD:
+        case OBJECT_RELOCATION_X86_64_TLSLD:
+        case OBJECT_RELOCATION_X86_64_DTPOFF32:
+        case OBJECT_RELOCATION_X86_64_DTPOFF64:
         case OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
         case OBJECT_RELOCATION_PE_TLS_OFFSET32:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
@@ -298,7 +301,7 @@ BUSTER_GLOBAL_LOCAL bool jit_external_data_relocation_is_supported(ObjectRelocat
 
 BUSTER_GLOBAL_LOCAL u64 jit_relocation_size(ObjectRelocationKind kind)
 {
-    return kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+    return object_relocation_kind_width(kind);
 }
 
 BUSTER_GLOBAL_LOCAL JitHostBinding const* jit_binding_find(JitOptions options, ObjectSymbol const* symbol, JitError* error)

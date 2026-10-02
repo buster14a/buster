@@ -143,6 +143,14 @@ class MergeQueueFailFastTests(unittest.TestCase):
         self.assertIn("remain pending", self.watch())
         self.assertEqual(self.api.cancelled, [])
 
+    def test_skipped_buster_job_does_not_cancel_the_group(self):
+        # Merge-group run 36831519396: the main-push-only reuse job completes
+        # as skipped beside healthy shards and must not trigger fail-fast.
+        self.api.jobs.append({"name": "Main CI reuse decision", "status": "completed",
+                              "conclusion": "skipped"})
+        self.assertIn("remain pending", self.watch())
+        self.assertEqual(self.api.cancelled, [])
+
     def test_buster_success_does_not_end_watch_while_other_checks_run(self):
         self.api.runs[0].update(status="completed", conclusion="success")
         self.api.jobs[0].update(status="completed", conclusion="success")
@@ -691,7 +699,12 @@ class StepDeadlineTests(unittest.TestCase):
         self.assertTrue(suffix == "" or (
             suffix.startswith("${{ github.event_name == 'pull_request' && ") and
             suffix.endswith(" || '' }}")), suffix)
-        self.assertIn("        shard: [release, checks]\n", test_job)
+        # Qualification dispatches expand checks; merge groups retain the
+        # combined matrix that this watcher budgets.
+        self.assertIn("        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && "
+                      "github.ref == 'refs/heads/codex/ci-checks-split-overlap' && "
+                      "'[\"release\", \"checks\", \"sanitized-debug\", \"sanitized-release\", \"portability\"]' || "
+                      "'[\"release\", \"checks\"]') }}\n", test_job)
         lanes = re.findall(r"^          - name: (.+)\n(?:            \w+: .+\n)*?"
                            r"            os: (\w+)$", test_job, re.M)
         self.assertEqual(workflow.count("- name: " + recovery.WORKFLOW_TOOLS_STEP + "\n"), 1)

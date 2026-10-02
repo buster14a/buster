@@ -240,6 +240,28 @@ struct OsTestThreadLivenessState
 
 // Parks until released so the caller can observe the process while this thread
 // is provably still running.
+// A created thread compiles like the main thread (driver test gangs, the
+// -fcompile-jobs lanes), so it must hold a frame far beyond Apple's 512 KiB
+// secondary-thread default. Touch one byte per page of a 2 MiB frame.
+#define OS_TEST_THREAD_STACK_FRAME_BYTES BUSTER_MB(2)
+#define OS_TEST_THREAD_STACK_PAGE_BYTES 4096
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_large_frame(void* argument)
+{
+    u64* checksum = (u64*)argument;
+    volatile u8 frame[OS_TEST_THREAD_STACK_FRAME_BYTES];
+    for (u64 offset = 0; offset < OS_TEST_THREAD_STACK_FRAME_BYTES; offset += OS_TEST_THREAD_STACK_PAGE_BYTES)
+    {
+        frame[offset] = (u8)(offset / OS_TEST_THREAD_STACK_PAGE_BYTES);
+    }
+    u64 sum = 0;
+    for (u64 offset = 0; offset < OS_TEST_THREAD_STACK_FRAME_BYTES; offset += OS_TEST_THREAD_STACK_PAGE_BYTES)
+    {
+        sum += frame[offset];
+    }
+    *checksum = sum;
+}
+
 BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_liveness(void* argument)
 {
     OsTestThreadLivenessState* state = (OsTestThreadLivenessState*)argument;
@@ -778,6 +800,132 @@ void os_test_process_child_run(UnitTestArguments* arguments)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_environment_lookup(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // os_tests runs serially, so these bounded captured-environment snapshots
+    // cannot affect another module. Preserve values and restore both slices.
+    SliceString8 saved_keys = program_state->input.environment_keys;
+    SliceString8 saved_values = program_state->input.environment_values;
+    String8 root_spellings[] = {S8("SystemRoot"), S8("SYSTEMROOT"), S8("systemroot"), S8("sYsTeMrOoT")};
+    String8 path_spellings[] = {S8("PATH"), S8("Path"), S8("path"), S8("pAtH")};
+#if BUSTER_WINDOWS
+    if (os_get_environment_variable(S8("BUSTER_OS_ENVIRONMENT_EVIDENCE")).length)
+    {
+        for (u64 index = 0; index < saved_keys.length; index += 1)
+        {
+            for (u64 spelling = 0; spelling < BUSTER_ARRAY_LENGTH(root_spellings); spelling += 1)
+            {
+                if (string_equal(saved_keys.pointer[index], root_spellings[spelling]) ||
+                    string_equal(saved_keys.pointer[index], path_spellings[spelling]))
+                {
+                    string_print(S8("OS_ENVIRONMENT_SPELLING name={S8}\n"), saved_keys.pointer[index]);
+                }
+            }
+        }
+        bool root_present = os_get_environment_variable(S8("SystemRoot")).length != 0;
+        bool path_present = os_get_environment_variable(S8("PATH")).length != 0;
+        string_print(S8("OS_ENVIRONMENT_LOOKUP SystemRoot_present={u32} PATH_present={u32}\n"), (u32)root_present, (u32)path_present);
+        BUSTER_TEST(arguments, root_present && path_present);
+    }
+#endif
+    String8 keys[] = {S8("SystemRoot"), S8("PATH"), S8("EMPTY"), S8("NULL_EMPTY")};
+    String8 values[] = {S8("C:\\WiNdOwS"), S8("C:\\Tools;D:\\Mixed Case"), S8(""), {0}};
+    program_state->input.environment_keys = (SliceString8)BUSTER_ARRAY_TO_SLICE(keys);
+    program_state->input.environment_values = (SliceString8)BUSTER_ARRAY_TO_SLICE(values);
+    for (u64 stored = 0; stored < BUSTER_ARRAY_LENGTH(root_spellings); stored += 1)
+    {
+        keys[0] = root_spellings[stored];
+        keys[1] = path_spellings[stored];
+        for (u64 queried = 0; queried < BUSTER_ARRAY_LENGTH(root_spellings); queried += 1)
+        {
+#if BUSTER_WINDOWS
+            bool expected = true;
+#else
+            bool expected = stored == queried;
+#endif
+            String8 root = os_get_environment_variable(root_spellings[queried]);
+            String8 path = os_get_environment_variable(path_spellings[queried]);
+            BUSTER_TEST(arguments, expected ? root.pointer == values[0].pointer && root.length == values[0].length : root.pointer == 0 && root.length == 0);
+            BUSTER_TEST(arguments, expected ? path.pointer == values[1].pointer && path.length == values[1].length : path.pointer == 0 && path.length == 0);
+        }
+    }
+    String8 absent[] = {S8("MISSING"), S8("PATHX"), S8("SystemRootX"), S8(""), {0}, {.length = 4}};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(absent); index += 1)
+    {
+        String8 missing = os_get_environment_variable(absent[index]);
+        BUSTER_TEST(arguments, missing.pointer == 0 && missing.length == 0);
+    }
+    String8 empty = os_get_environment_variable(S8("EMPTY"));
+    BUSTER_TEST(arguments, empty.pointer == values[2].pointer && empty.length == 0);
+    empty = os_get_environment_variable(S8("NULL_EMPTY"));
+    BUSTER_TEST(arguments, empty.pointer == 0 && empty.length == 0);
+
+    keys[0] = S8("SystemRoot");
+    char8 bounded_name[] = {'S', 'y', 's', 't', 'e', 'm', 'R', 'o', 'o', 't', 'X'};
+    String8 bounded = os_get_environment_variable((String8){.pointer = bounded_name, .length = 10});
+    BUSTER_TEST(arguments, bounded.pointer == values[0].pointer && bounded.length == values[0].length);
+    char8 exact_name[] = {'S', 'y', 's', 't', 'e', 'm', 'R', 'o', 'o', 't'};
+    bounded = os_get_environment_variable((String8){.pointer = exact_name, .length = sizeof(exact_name)});
+    BUSTER_TEST(arguments, bounded.pointer == values[0].pointer && bounded.length == values[0].length);
+
+    keys[0] = S8("BUSTER_\xc3\x89");
+    String8 unicode = os_get_environment_variable(S8("BUSTER_\xc3\x89"));
+    BUSTER_TEST(arguments, unicode.pointer == values[0].pointer && unicode.length == values[0].length);
+    unicode = os_get_environment_variable(S8("buster_\xc3\xa9"));
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, unicode.pointer == values[0].pointer && unicode.length == values[0].length);
+    // The uncommon Unicode path remains usable without a ThreadContext and
+    // does not change the caller's context or the captured value's lifetime.
+    ThreadContext* saved_context = thread_context_selected();
+    thread_context_select(0);
+    unicode = os_get_environment_variable(S8("buster_\xc3\xa9"));
+    thread_context_select(saved_context);
+    BUSTER_TEST(arguments, unicode.pointer == values[0].pointer && unicode.length == values[0].length);
+#else
+    BUSTER_TEST(arguments, unicode.pointer == 0 && unicode.length == 0);
+#endif
+    keys[1] = S8("buster_\xc3\xa9");
+    unicode = os_get_environment_variable(keys[1]);
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, unicode.pointer == values[0].pointer && unicode.length == values[0].length);
+#else
+    BUSTER_TEST(arguments, unicode.pointer == values[1].pointer && unicode.length == values[1].length);
+#endif
+    keys[0] = S8("BUSTER_\xef\xbf\xbd");
+    unicode = os_get_environment_variable(S8("BUSTER_\xff"));
+    BUSTER_TEST(arguments, unicode.pointer == 0 && unicode.length == 0);
+
+    keys[0] = S8("PaTh");
+    keys[1] = S8("PATH");
+    String8 duplicate = os_get_environment_variable(S8("PATH"));
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, duplicate.pointer == values[0].pointer && duplicate.length == values[0].length);
+#else
+    BUSTER_TEST(arguments, duplicate.pointer == values[1].pointer && duplicate.length == values[1].length);
+#endif
+    keys[0] = S8("PATH");
+    duplicate = os_get_environment_variable(S8("PATH"));
+    BUSTER_TEST(arguments, duplicate.pointer == values[0].pointer && duplicate.length == values[0].length);
+    values[0] = S8("");
+    duplicate = os_get_environment_variable(S8("PATH"));
+    BUSTER_TEST(arguments, duplicate.pointer == values[0].pointer && duplicate.length == 0);
+    keys[0] = S8("pAtH");
+    duplicate = os_get_environment_variable(S8("PATH"));
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, duplicate.pointer == values[0].pointer && duplicate.length == 0);
+#else
+    BUSTER_TEST(arguments, duplicate.pointer == values[1].pointer && duplicate.length == values[1].length);
+#endif
+    program_state->input.environment_keys = (SliceString8){0};
+    program_state->input.environment_values = (SliceString8){0};
+    String8 missing = os_get_environment_variable(S8("PATH"));
+    BUSTER_TEST(arguments, missing.pointer == 0 && missing.length == 0);
+    program_state->input.environment_keys = saved_keys;
+    program_state->input.environment_values = saved_values;
+    return result;
+}
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -811,6 +959,8 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+
+    BUSTER_TEST_FIXTURE(arguments, os_test_environment_lookup);
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
     // Test-owned subprocess modes above must dispatch before this fixture.
@@ -963,10 +1113,19 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 root = buster_test_temporary_path(arena, S8("shared-io space"), S8(""));
         BUSTER_TEST(arguments, os_make_directory_attempt(root));
         BUSTER_TEST(arguments, os_make_directory_attempt(root));
+        String8 status_directory = string_format_z(arena, S8("{S8}/directory-status"), root);
+        OsDirectoryCreateResult created_directory = os_make_directory(status_directory);
+        BUSTER_TEST(arguments, !created_directory.error.v && created_directory.created && !created_directory.already_exists &&
+                                   !created_directory.existing_directory);
+        OsDirectoryCreateResult existing_directory = os_make_directory(status_directory);
+        BUSTER_TEST(arguments, !existing_directory.error.v && !existing_directory.created && existing_directory.already_exists &&
+                                   existing_directory.existing_directory);
         String8 path = string_format_z(arena, S8("{S8}/bytes"), root);
         String8 absent = string_format_z(arena, S8("{S8}/absent/child"), root);
         BUSTER_TEST(arguments, !os_make_directory_attempt(absent));
         BUSTER_TEST(arguments, !os_make_directory_attempt((String8){0}));
+        OsDirectoryCreateResult missing_parent = os_make_directory(absent);
+        BUSTER_TEST(arguments, missing_parent.error.v != 0 && !missing_parent.created && !missing_parent.existing_directory);
         u8 original[257];
         u8 copy[300];
         for (u32 i = 0; i < sizeof(original); i += 1) original[i] = (u8)i;
@@ -983,6 +1142,9 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, !os_file_read_attempt(file, (ByteSlice){copy, 1}, &count) && count == 0);
             BUSTER_TEST(arguments, os_file_close(file));
         }
+        OsDirectoryCreateResult file_collision = os_make_directory(path);
+        BUSTER_TEST(arguments, file_collision.error.v != 0 && file_collision.already_exists && !file_collision.existing_directory &&
+                                   !file_collision.created);
         file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
         BUSTER_TEST(arguments, file != 0);
         if (file)
@@ -994,6 +1156,16 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, memcmp(copy, original + 13, sizeof(original) - 13) == 0);
             BUSTER_TEST(arguments, os_file_read_attempt(file, (ByteSlice){copy, sizeof(copy)}, &count) && count == 0);
             BUSTER_TEST(arguments, os_file_close(file));
+        }
+        {
+            String8 short_path = string_format_z(arena, S8("{S8}/foo"), root);
+            String8 long_path = string_format_z(arena, S8("{S8}/foobar"), root);
+            BUSTER_TEST(arguments, file_write(short_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("short-path"))));
+            BUSTER_TEST(arguments, file_write(long_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("long-path"))));
+            FileReadResult sliced_read = file_read_checked(arena, (String8){.pointer = long_path.pointer, .length = short_path.length}, (FileReadOptions){0});
+            String8 sliced_contents = {.pointer = (char8*)sliced_read.bytes.pointer, .length = sliced_read.bytes.length};
+            BUSTER_TEST(arguments, sliced_read.status == OS_FILE_READ_OK && string_equal(sliced_contents, S8("short-path")));
+            BUSTER_TEST(arguments, os_file_delete(long_path) && os_file_delete(short_path));
         }
 #if BUSTER_LINUX
         file = os_file_open(S8("/dev/full"), (OpenFlags){.write = 1}, (OpenPermissions){.read = 1, .write = 1});
@@ -1023,6 +1195,13 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         char8 invalid[] = {'a', 0, 'b'};
         BUSTER_TEST(arguments, !os_path_absolute_lexical(arena, (String8){invalid, sizeof(invalid)}, true).length);
         BUSTER_TEST(arguments, !os_path_absolute_lexical(arena, (String8){0, 1}, true).length);
+        OsFileOpenResult invalid_open = os_file_open_checked((String8){invalid, sizeof(invalid)}, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        BUSTER_TEST(arguments, !invalid_open.file && invalid_open.error.v != 0);
+        BUSTER_TEST(arguments, os_file_delete_checked((String8){invalid, sizeof(invalid)}).v != 0);
+        BUSTER_TEST(arguments, !os_dynamic_library_load((String8){invalid, sizeof(invalid)}));
+        BUSTER_TEST(arguments, !os_dynamic_library_function_load(0, (String8){invalid, sizeof(invalid)}));
+        FileMapRead invalid_map = file_map_read(arena, (String8){invalid, sizeof(invalid)}, (FileReadOptions){.map_required = 1});
+        BUSTER_TEST(arguments, !invalid_map.bytes.pointer);
         BUSTER_TEST(arguments, os_directory_delete(root));
     }
 #endif
@@ -1164,17 +1343,47 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     }
 
     // Releasing the selected context must clear TLS before its arenas go
-    // away. No scratch-backed operation is valid while TLS is empty, so
-    // restore the process's main context immediately after observing it.
+    // away. Direct scratch users still require a selected context; POSIX file
+    // path operations retain their prior teardown behavior with private arenas.
     ThreadContext* main_context = thread_context_selected();
     BUSTER_TEST(arguments, main_context != 0);
+    String8 contextless_path = buster_test_temporary_path(arguments->arena, S8("contextless-file"), S8(".bin"));
+    OsFileOpenResult contextless_setup = os_file_open_checked(contextless_path, (OpenFlags){.write = 1, .create = 1, .truncate = 1},
+                                                               (OpenPermissions){.read = 1, .write = 1});
+    bool contextless_setup_ok = contextless_setup.file != 0;
+    if (contextless_setup.file)
+    {
+        OsFileTransferResult written = os_file_write_checked(contextless_setup.file, BUSTER_SLICE_TO_BYTE_SLICE(S8("contextless")));
+        OsError closed = os_file_close_checked(contextless_setup.file);
+        contextless_setup_ok &= !written.error.v && written.transferred == S8("contextless").length && !closed.v;
+    }
+    BUSTER_TEST(arguments, contextless_setup_ok);
     ThreadContext* temporary_context = thread_context_allocate();
     thread_context_select(temporary_context);
     thread_context_release(temporary_context);
     bool released_context_was_cleared = thread_context_selected() == 0;
+#if !BUSTER_WINDOWS
+    bool contextless_open_ok = false;
+    bool contextless_stats_ok = false;
+    bool contextless_delete_ok = false;
+    if (released_context_was_cleared && contextless_setup_ok)
+    {
+        OsFileOpenResult opened = os_file_open_checked(contextless_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        contextless_open_ok = opened.file != 0 && !opened.error.v;
+        if (opened.file) contextless_open_ok &= !os_file_close_checked(opened.file).v;
+        FileStats stats = os_file_replacement_target_stats(contextless_path);
+        contextless_stats_ok = stats.valid && stats.kind == OS_FILE_KIND_REGULAR;
+        contextless_delete_ok = !os_file_delete_checked(contextless_path).v;
+    }
+#endif
     thread_context_select(main_context);
     BUSTER_TEST(arguments, released_context_was_cleared);
     BUSTER_TEST(arguments, thread_context_selected() == main_context);
+#if !BUSTER_WINDOWS
+    BUSTER_TEST(arguments, contextless_open_ok);
+    BUSTER_TEST(arguments, contextless_stats_ok);
+    BUSTER_TEST(arguments, contextless_delete_ok);
+#endif
 
     // Generic OS-thread teardown must unmap parked arenas before its TLS pool
     // root disappears. Run twice so this remains a reclamation regression even
@@ -1753,9 +1962,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         char8 invalid[] = {'a', 0, 'b'};
         BUSTER_TEST(arguments, !os_path_absolute(arena, (String8){invalid, sizeof(invalid)}, true).length);
         BUSTER_TEST(arguments, !os_path_absolute(arena, (String8){0}, true).length);
-        os_make_directory((String8){invalid, sizeof(invalid)});
-        os_make_directory((String8){0});
-        BUSTER_TEST(arguments, true);
+        OsDirectoryCreateResult invalid_create = os_make_directory((String8){invalid, sizeof(invalid)});
+        OsDirectoryCreateResult empty_create = os_make_directory((String8){0});
+        BUSTER_TEST(arguments, invalid_create.error.v != 0 && !invalid_create.created && !invalid_create.already_exists);
+        BUSTER_TEST(arguments, empty_create.error.v != 0 && !empty_create.created && !empty_create.already_exists);
     }
 
     // Regression: draining captured stdout/stderr sequentially deadlocked when
@@ -2324,6 +2534,23 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_thread_join(thread));
             BUSTER_TEST(arguments, os_is_only_live_thread());
             BUSTER_TEST(arguments, liveness.worker_saw_only_live_thread == 0);
+        }
+
+        u64 frame_checksum = 0;
+        u64 expected_checksum = 0;
+        for (u64 page = 0; page < OS_TEST_THREAD_STACK_FRAME_BYTES / OS_TEST_THREAD_STACK_PAGE_BYTES; page += 1)
+        {
+            expected_checksum += (u8)page;
+        }
+        OsThreadHandle* large_frame = os_thread_create((ThreadCreateOptions){
+            .callback = &os_test_thread_large_frame,
+            .argument = &frame_checksum,
+        });
+        BUSTER_TEST(arguments, large_frame != 0);
+        if (large_frame)
+        {
+            BUSTER_TEST(arguments, os_thread_join(large_frame));
+            BUSTER_TEST(arguments, frame_checksum == expected_checksum);
         }
 #endif
     }

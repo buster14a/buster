@@ -34,6 +34,26 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `c_parse_entity_kind_redeclares` in `c_parse.c` is what keeps this spelling
   and an ordinary prototype one entity, which in musl every published name
   has.
+- **Usual integer arithmetic conversions choose rank before representation.**
+  The parse-side expression typer and canonical lowering both call
+  `c_semantic_integer_arithmetic_kind` after their context's integer
+  promotions. Equal signedness selects the higher rank; mixed signedness
+  selects the unsigned operand when its rank is at least the signed rank,
+  otherwise it selects the signed type only when the target's width can
+  represent every unsigned value, or the signed type's unsigned counterpart.
+  Thus LP64 `long + long long` is `long long` in either order, LP64
+  `long long + unsigned long` is `unsigned long long`, and LLP64
+  `long + unsigned int` is `unsigned long` (C17 6.3.1.1 and 6.3.1.8,
+  issue #1246). Canonical C scalar types carry an optional numeric
+  `integer_conversion_rank`; whole-record qualified and aligned copies
+  preserve it without frontend type IDs. Synthetic IR integer carriers
+  without source rank retain their representation rule. The registered
+  `c_test_integer_conversion_rank` checks semantic typedef identities and
+  raw nonconstant CALL operand types on Linux x86-64/AArch64 and Windows
+  LLP64 in both frontend modes, plus inline native GNU17/GNU23 fixtures over
+  all allocators and O0/O2. Enumerator, static initializer, array-bound and
+  runtime `_Generic` answers agree, and `typeof`/`__auto_type` pointer
+  witnesses preserve the resulting identity.
 - **A `typeof` operand is typed twice, by two engines, and both have to
   answer.** `c_ir_sizeof_operand_type_attempt` in `c_gen.c` types the operand
   of a `typeof` written in an *expression* -- a cast, a compound literal --
@@ -150,6 +170,27 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   to reserve and materialize dynamically aligned storage. The parameter
   alignment tests inspect IR on all six native targets and use an opaque,
   separately host-compiled observer for native x86-64 callee addresses.
+- System V x86-64 padding-only eightbytes retain NO_CLASS and consume no
+  argument or result register. `ir_classify_abi_value` publishes only live
+  pieces, preserving their offsets in the complete aggregate storage image;
+  spilling still copies that complete image. Win64's indirect aggregate
+  convention is unchanged. `ir_tests` covers leading and trailing padding
+  across all ABI uses; `compiler_driver_test_sysv_padding_eightbytes` exchanges
+  aligned float/integer records in both directions with the configured host
+  compiler and available Linux GCC, including register exhaustion, aggregate
+  returns and variadic access in every native allocator/frontend form.
+  The direct SysV variadic reader consumes live ABI parts in registers while
+  retaining the complete aligned storage image in the overflow area. A record
+  containing only ignored fields has zero transport parts and currently hits
+  the frontend's unsupported zero-part signature gate; the LLVM negative
+  fixture pins that earlier refusal and absence of a produced artifact.
+- A GNU zero-size struct or union is the distinct supported zero-part SysV
+  case in the canonical native x86-64 path. It consumes no argument register,
+  stack slot, variadic cursor space or hidden result pointer. Loads preserve
+  their place provenance while moving no bytes, and stores are zero-byte
+  operations after the lvalue and value have been evaluated. Nonempty
+  all-NO_CLASS records retain the refusal above; LLVM keeps its structured
+  empty-signature refusal.
 - The generic JIT loads already-produced host-native objects and resolves
   explicit bindings. It is not a second source-language compiler and must stay
   independent of frontend semantic structures.
@@ -173,3 +214,20 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   storage through an explicit builtin-list place cast. This supports either
   header order without turning ordinary pointer typedefs into builtin types.
   The modern CRT `__crt_va_*` macros use the same bridge when already defined.
+
+## Declarator constraints
+
+Function types reject array and function return types when their declarators
+are formed, including unused prototypes, typedef return types and nested
+function-pointer declarators. Pointer return types keep their array/function
+pointees. Ordinary function declarators also reject a second array or function
+suffix instead of silently discarding it.
+
+All parameter-list paths share the void and ellipsis constraints. The void
+sentinel is sole, unnamed and unqualified, including through a void typedef;
+ellipsis terminates the list and requires a fixed parameter before C23. C23
+allows a list containing only ellipsis. Array `static` needs an expression;
+`[*]` belongs to prototype scope and is rejected in the definition's own
+parameter derivations. A nested function-pointer parameter still introduces
+its own prototype scope. The syntax/object diagnostic-equivalence corpus
+checks rejection, legal neighbors and both frontend SSA forms.

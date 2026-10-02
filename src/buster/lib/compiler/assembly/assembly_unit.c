@@ -12,15 +12,16 @@
 //                                         instruction line, each producing a
 //                                         piece of bytes in a section
 //   assembly_unit_materialize             pieces concatenated per section and
-//                                         same-section PC-relative
-//                                         relocations resolved in place
+//                                         binding-invariant same-section
+//                                         PC-relative fixups resolved in place
 //
 // Layout, in file order; each anchor is a definition to search for:
 //   assembly_unit_space ..                 text plumbing shared by the passes
 //   assembly_unit_diagnostic
 //   assembly_unit_symbol_intern ..         symbol and section tables
 //   assembly_unit_section_select
-//   assembly_unit_evaluate                 directive operand expressions
+//   assembly_unit_evaluate                 section-relative directive expressions
+//   assembly_unit_materialize_integers     final-label data evaluation
 //   assembly_unit_directive_*              the directive vocabulary
 //   assembly_unit_instruction              the assembly_encode call
 //   assembly_unit_parse, assembly_unit_encode
@@ -58,6 +59,18 @@ struct AssemblyUnitNumericLabel
 };
 
 typedef struct AssemblyUnitBuilder AssemblyUnitBuilder;
+typedef struct AssemblyUnitInteger AssemblyUnitInteger;
+struct AssemblyUnitInteger
+{
+    String8 expression;
+    String8 directive;
+    u64 offset;
+    u32 section;
+    u32 width;
+    u32 line;
+    u32 column;
+};
+
 struct AssemblyUnitBuilder
 {
     Arena* arena;
@@ -70,6 +83,9 @@ struct AssemblyUnitBuilder
     // The source line each relocation came from, kept beside the public array
     // so a displacement that does not fit can name the line that wrote it.
     u32* relocation_lines;
+    AssemblyUnitInteger* integers;
+    u32 integer_count;
+    u32 integer_capacity;
     u32 piece_count;
     u32 piece_capacity;
     u32 numeric_label_count;
@@ -113,6 +129,16 @@ BUSTER_GLOBAL_LOCAL String8 assembly_unit_trim(String8 text)
         text.length -= 1;
     }
     return text;
+}
+
+// The printer quotes ordinary symbol names and section names too.
+BUSTER_GLOBAL_LOCAL String8 assembly_unit_unquote(String8 name)
+{
+    if (name.length >= 2 && name.pointer[0] == '"' && name.pointer[name.length - 1] == '"')
+    {
+        name = string_slice(name, 1, name.length - 1);
+    }
+    return name;
 }
 
 // The first whitespace-delimited word, and the rest of the line after it.
@@ -269,8 +295,11 @@ struct AssemblyUnitValue
 {
     s64 constant;
     u32 symbol;
+    u32 subtract_symbol;
     bool has_symbol;
-    u8 reserved[3];
+    bool has_subtract_symbol;
+    bool location;
+    bool subtract_location;
 };
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_parse_number(String8 text, u64* value)
@@ -336,135 +365,127 @@ bool assembly_unit_test_parse_number(String8 text, u64* value)
 }
 #endif
 
-// One operand expression. The vocabulary is deliberately narrow: an absolute
-// constant built from `+`, `-` and `*` over numbers, the location counter `.`,
-// and a single symbol reference with a constant addend. Anything else is
-// refused by the caller with the directive named.
-BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate(AssemblyUnitBuilder* builder, String8 text, AssemblyUnitValue* value)
+// Preserve the section base of `.` until two same-section terms cancel or
+// the data writer selects S+A-P. The caller supplies this operand's location,
+// including its position in a comma-separated list. Names may be quoted, as
+// in the -S printer. At most one positive and one negative symbolic term fit
+// the relocation model; unsupported expressions are diagnosed by the caller.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate(AssemblyUnitBuilder* builder, String8 text, u64 location, AssemblyUnitValue* value)
 {
-    AssemblyUnitValue result = {.symbol = UINT32_MAX};
+    AssemblyUnitValue result = {.symbol = UINT32_MAX, .subtract_symbol = UINT32_MAX};
     u64 index = 0;
     s64 sign = 1;
     bool expect_term = true;
-    while (index < text.length)
+    bool valid = true;
+    while (index < text.length && valid)
     {
         while (index < text.length && assembly_unit_space(text.pointer[index]))
         {
             index += 1;
         }
-        if (index >= text.length)
+        if (index < text.length)
         {
-            break;
-        }
-        char8 code_unit = text.pointer[index];
-        if (!expect_term)
-        {
-            if (code_unit == '+')
+            char8 code_unit = text.pointer[index];
+            if (!expect_term)
             {
-                sign = 1;
-            }
-            else if (code_unit == '-')
-            {
-                sign = -1;
+                valid = code_unit == '+' || code_unit == '-';
+                sign = code_unit == '-' ? -1 : 1;
+                index += 1;
+                expect_term = true;
             }
             else
             {
-                return false;
+                if (code_unit == '+' || code_unit == '-')
+                {
+                    sign *= code_unit == '-' ? -1 : 1;
+                    index += 1;
+                    while (index < text.length && assembly_unit_space(text.pointer[index])) index += 1;
+                    code_unit = index < text.length ? text.pointer[index] : 0;
+                }
+                u64 start = index;
+                u32 symbol = UINT32_MAX;
+                bool symbolic = false;
+                bool dot = code_unit == '.' && (index + 1 >= text.length || !assembly_unit_name_character(text.pointer[index + 1]));
+                if (dot)
+                {
+                    symbolic = true;
+                    result.constant += sign * (s64)location;
+                    index += 1;
+                }
+                else if (assembly_unit_digit(code_unit))
+                {
+                    while (index < text.length && assembly_unit_name_character(text.pointer[index])) index += 1;
+                    u64 number = 0;
+                    valid = assembly_unit_parse_number(string_slice(text, start, index), &number);
+                    result.constant += sign * (s64)number;
+                }
+                else if (assembly_unit_name_start(code_unit) || code_unit == '"')
+                {
+                    bool quoted = code_unit == '"';
+                    index += quoted;
+                    start = index;
+                    while (index < text.length && (quoted ? text.pointer[index] != '"' : assembly_unit_name_character(text.pointer[index]))) index += 1;
+                    valid = index > start && (!quoted || index < text.length);
+                    if (valid)
+                    {
+                        symbol = assembly_unit_symbol_intern(builder, string_slice(text, start, index));
+                        valid = symbol != UINT32_MAX;
+                        symbolic = true;
+                        index += quoted;
+                    }
+                }
+                else
+                {
+                    valid = false;
+                }
+                if (valid && symbolic)
+                {
+                    if (sign > 0)
+                    {
+                        valid = !result.has_symbol;
+                        result.has_symbol = true;
+                        result.symbol = symbol;
+                        result.location = dot;
+                    }
+                    else
+                    {
+                        valid = !result.has_subtract_symbol;
+                        result.has_subtract_symbol = true;
+                        result.subtract_symbol = symbol;
+                        result.subtract_location = dot;
+                    }
+                }
+                sign = 1;
+                expect_term = false;
             }
-            index += 1;
-            expect_term = true;
-            continue;
         }
-        u64 term_start = index;
-        s64 term = 0;
-        if (code_unit == '.' && (index + 1 >= text.length || !assembly_unit_name_character(text.pointer[index + 1])))
-        {
-            if (!assembly_unit_section_current(builder))
-            {
-                return false;
-            }
-            term = (s64)builder->section_offsets[builder->current_section];
-            index += 1;
-        }
-        else if (assembly_unit_digit(code_unit))
-        {
-            while (index < text.length && (assembly_unit_digit(text.pointer[index]) ||
-                                           (text.pointer[index] >= 'a' && text.pointer[index] <= 'f') ||
-                                           (text.pointer[index] >= 'A' && text.pointer[index] <= 'F') || text.pointer[index] == 'x' ||
-                                           text.pointer[index] == 'X'))
-            {
-                index += 1;
-            }
-            u64 number = 0;
-            if (!assembly_unit_parse_number(string_slice(text, term_start, index), &number))
-            {
-                return false;
-            }
-            term = (s64)number;
-        }
-        else if (assembly_unit_name_start(code_unit))
-        {
-            while (index < text.length && assembly_unit_name_character(text.pointer[index]))
-            {
-                index += 1;
-            }
-            String8 name = string_slice(text, term_start, index);
-            if (result.has_symbol || sign < 0)
-            {
-                return false;
-            }
-            u32 symbol = assembly_unit_symbol_intern(builder, name);
-            if (symbol == UINT32_MAX)
-            {
-                return false;
-            }
-            result.has_symbol = true;
-            result.symbol = symbol;
-            expect_term = false;
-            continue;
-        }
-        else
-        {
-            return false;
-        }
-        result.constant += sign * term;
-        sign = 1;
-        expect_term = false;
     }
-    if (expect_term)
+    valid = valid && !expect_term;
+    if (valid && result.has_symbol && result.has_subtract_symbol)
     {
-        return false;
+        AssemblyUnitSymbol positive = result.location ? (AssemblyUnitSymbol){.defined = true, .section = builder->current_section}
+                                                     : builder->result.symbols[result.symbol];
+        AssemblyUnitSymbol negative = result.subtract_location ? (AssemblyUnitSymbol){.defined = true, .section = builder->current_section}
+                                                              : builder->result.symbols[result.subtract_symbol];
+        if (positive.defined && negative.defined && positive.section == negative.section && !positive.weak && !negative.weak)
+        {
+            result.constant += (s64)positive.value - (s64)negative.value;
+            result.has_symbol = false;
+            result.has_subtract_symbol = false;
+        }
     }
-    *value = result;
-    return true;
+    if (valid) *value = result;
+    return valid;
 }
 
-// `.size name,.-name` is the one location-counter form a hand-written libc
-// writes. It folds here rather than reaching the object, which has no
-// expressions.
 BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate_absolute(AssemblyUnitBuilder* builder, String8 text, s64* value)
 {
-    String8 trimmed = assembly_unit_trim(text);
-    u64 minus = string_first_code_unit(trimmed, '-');
-    if (trimmed.length > 1 && trimmed.pointer[0] == '.' && minus == 1)
-    {
-        String8 name = assembly_unit_trim(string_slice(trimmed, 2, trimmed.length));
-        u32 symbol = assembly_unit_symbol_intern(builder, name);
-        if (symbol == UINT32_MAX || !builder->result.symbols[symbol].defined ||
-            builder->result.symbols[symbol].section != builder->current_section || !assembly_unit_section_current(builder))
-        {
-            return false;
-        }
-        *value = (s64)builder->section_offsets[builder->current_section] - (s64)builder->result.symbols[symbol].value;
-        return true;
-    }
     AssemblyUnitValue evaluated = {0};
-    if (!assembly_unit_evaluate(builder, trimmed, &evaluated) || evaluated.has_symbol)
-    {
-        return false;
-    }
-    *value = evaluated.constant;
-    return true;
+    u64 location = builder->current_section < builder->result.section_count ? builder->section_offsets[builder->current_section] : 0;
+    bool valid = assembly_unit_evaluate(builder, assembly_unit_trim(text), location, &evaluated) &&
+                 !evaluated.has_symbol && !evaluated.has_subtract_symbol;
+    if (valid) *value = evaluated.constant;
+    return valid;
 }
 
 // Splits a directive operand list on top-level commas, keeping quoted text
@@ -505,7 +526,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
     {
         return false;
     }
-    String8 name = assembly_unit_word(parts[0], 0);
+    String8 name = assembly_unit_unquote(assembly_unit_word(parts[0], 0));
     AssemblyUnitSectionKind kind = ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
     bool classified = false;
     if (part_count > 1 && parts[1].length >= 2 && parts[1].pointer[0] == '"')
@@ -546,13 +567,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_symbol(AssemblyUnitBuilder* bui
     {
         return false;
     }
-    u32 symbol = assembly_unit_symbol_intern(builder, assembly_unit_word(parts[0], 0));
+    u32 symbol = assembly_unit_symbol_intern(builder, assembly_unit_unquote(assembly_unit_word(parts[0], 0)));
     if (symbol == UINT32_MAX)
     {
         return false;
     }
     AssemblyUnitSymbol* record = builder->result.symbols + symbol;
-    if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")))
+    if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".extern")))
     {
         record->global = true;
         return part_count == 1;
@@ -700,53 +721,115 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_relocation_append(AssemblyUnitBuilder* bu
     return true;
 }
 
-// `.byte`/`.short`/`.long`/`.quad`. A width that can hold an address also
-// accepts one symbol reference, which becomes an absolute relocation.
-BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_integer(AssemblyUnitBuilder* builder, u32 width, String8 operands)
+// Retain data expressions until labels and binding directives are complete.
+// Bytes reserve their final positions now; materialization evaluates each
+// expression at its own field offset, so forward differences need no pass
+// over instructions and comma-separated `.` operands do not share a place.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_integer(AssemblyUnitBuilder* builder, u32 width, String8 directive, String8 operands)
 {
     String8 parts[ASSEMBLY_UNIT_OPERAND_CAPACITY] = {0};
-    u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
-    if (part_count == UINT32_MAX || !part_count)
+    u32 count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
+    bool valid = count != UINT32_MAX && count && assembly_unit_section_current(builder);
+    valid = valid && builder->result.sections[builder->current_section].kind != ASSEMBLY_UNIT_SECTION_ZERO &&
+            count <= builder->integer_capacity - builder->integer_count;
+    // Refuse malformed expressions before reserving any bytes. Symbols and
+    // bindings are evaluated again after parsing to resolve forward differences.
+    u64 base = valid ? builder->section_offsets[builder->current_section] : 0;
+    for (u32 index = 0; index < count && valid; index += 1)
     {
-        return false;
+        AssemblyUnitValue value = {0};
+        valid = assembly_unit_evaluate(builder, parts[index], base + (u64)index * width, &value);
     }
-    if (!assembly_unit_section_current(builder))
+    if (valid)
     {
-        return false;
-    }
-    if (builder->result.sections[builder->current_section].kind == ASSEMBLY_UNIT_SECTION_ZERO)
-    {
-        return false;
-    }
-    u64 length = (u64)part_count * width;
-    u8* bytes = arena_allocate(builder->arena, u8, length);
-    u64 base = builder->section_offsets[builder->current_section];
-    for (u32 index = 0; index < part_count; index += 1)
-    {
-        AssemblyUnitValue value = {.symbol = UINT32_MAX};
-        if (!assembly_unit_evaluate(builder, parts[index], &value))
+        for (u32 index = 0; index < count; index += 1)
         {
-            return false;
+            builder->integers[builder->integer_count++] = (AssemblyUnitInteger){
+                .expression = parts[index], .directive = directive, .offset = base + (u64)index * width,
+                .section = builder->current_section, .width = width, .line = builder->line, .column = builder->column,
+            };
         }
-        u64 written = (u64)value.constant;
-        if (value.has_symbol)
+        u64 length = (u64)count * width;
+        u8* bytes = arena_allocate_zeroed(builder->arena, u8, length);
+        valid = assembly_unit_append(builder, bytes, length);
+    }
+    return valid;
+}
+
+// A private local symbol at section offset zero represents a section base.
+// It is created only when a `.` address actually needs a relocation.
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_location_symbol(AssemblyUnitBuilder* builder)
+{
+    u32 symbol = builder->result.symbol_count;
+    for (u32 index = 0; index < builder->result.symbol_count; index += 1)
+    {
+        AssemblyUnitSymbol record = builder->result.symbols[index];
+        if (record.defined && record.section == builder->current_section && !record.value && !record.global && !record.weak &&
+            string_equal(record.name, builder->result.sections[builder->current_section].name))
         {
-            AssemblyRelocationKind kind = width == 8 ? ASSEMBLY_RELOCATION_X86_ABSOLUTE64
-                                          : width == 4 ? ASSEMBLY_RELOCATION_X86_ABSOLUTE32
-                                                       : ASSEMBLY_RELOCATION_COUNT;
-            if (kind == ASSEMBLY_RELOCATION_COUNT ||
-                !assembly_unit_relocation_append(builder, value.symbol, base + (u64)index * width, value.constant, kind))
+            symbol = index;
+            break;
+        }
+    }
+    if (symbol == builder->result.symbol_count)
+    {
+        if (symbol < builder->symbol_capacity)
+        {
+            builder->result.symbols[builder->result.symbol_count++] = (AssemblyUnitSymbol){
+                .name = builder->result.sections[builder->current_section].name, .section = builder->current_section, .defined = true,
+            };
+        }
+        else
+        {
+            symbol = UINT32_MAX;
+        }
+    }
+    return symbol;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_unit_materialize_integers(AssemblyUnitBuilder* builder)
+{
+    bool valid = true;
+    for (u32 index = 0; index < builder->integer_count && valid; index += 1)
+    {
+        AssemblyUnitInteger integer = builder->integers[index];
+        builder->current_section = integer.section;
+        builder->line = integer.line;
+        builder->column = integer.column;
+        AssemblyUnitValue value = {0};
+        valid = assembly_unit_evaluate(builder, integer.expression, integer.offset, &value);
+        bool relative = value.has_symbol && value.has_subtract_symbol && value.subtract_location && !value.location;
+        valid = valid && (!value.has_subtract_symbol || relative);
+        if (valid && value.has_symbol)
+        {
+            AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
+            if (integer.width == 4 || integer.width == 8)
             {
-                return false;
+                bool aarch64 = builder->target.cpu_arch == CPU_ARCH_AARCH64;
+                kind = relative ? (integer.width == 8 ? (aarch64 ? ASSEMBLY_RELOCATION_AARCH64_PREL64 : ASSEMBLY_RELOCATION_X86_PC64)
+                                                     : (aarch64 ? ASSEMBLY_RELOCATION_AARCH64_PREL32 : ASSEMBLY_RELOCATION_X86_PC32))
+                                : (integer.width == 8 ? ASSEMBLY_RELOCATION_X86_ABSOLUTE64 : ASSEMBLY_RELOCATION_X86_ABSOLUTE32);
             }
-            written = 0;
+            u32 symbol = value.location ? assembly_unit_location_symbol(builder) : value.symbol;
+            s64 addend = value.constant + (relative ? (s64)integer.offset : 0);
+            valid = kind != ASSEMBLY_RELOCATION_COUNT && symbol != UINT32_MAX &&
+                    assembly_unit_relocation_append(builder, symbol, integer.offset, addend, kind);
         }
-        for (u32 byte_index = 0; byte_index < width; byte_index += 1)
+        else if (valid)
         {
-            bytes[(u64)index * width + byte_index] = (u8)(written >> (byte_index * 8));
+            ByteSlice bytes = builder->result.sections[integer.section].data;
+            for (u32 byte = 0; byte < integer.width; byte += 1)
+            {
+                bytes.pointer[integer.offset + byte] = (u8)((u64)value.constant >> (byte * 8));
+            }
+        }
+        if (!valid && !builder->result.diagnostic_count)
+        {
+            assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                            S8("unsupported operand for directive {S8}"), integer.directive);
         }
     }
-    return assembly_unit_append(builder, bytes, length);
+    return valid;
 }
 
 // `.ascii` and the zero-terminated `.asciz`/`.string`.
@@ -855,8 +938,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
     {
         return assembly_unit_directive_section(builder, operands);
     }
-    if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".weak")) ||
-        string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
+    if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".extern")) ||
+        string_equal(directive, S8(".weak")) || string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
     {
         return assembly_unit_directive_symbol(builder, directive, operands);
     }
@@ -870,20 +953,20 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
     }
     if (string_equal(directive, S8(".byte")))
     {
-        return assembly_unit_directive_integer(builder, 1, operands);
+        return assembly_unit_directive_integer(builder, 1, directive, operands);
     }
     if (string_equal(directive, S8(".short")) || string_equal(directive, S8(".word")) || string_equal(directive, S8(".hword")) ||
         string_equal(directive, S8(".value")))
     {
-        return assembly_unit_directive_integer(builder, 2, operands);
+        return assembly_unit_directive_integer(builder, 2, directive, operands);
     }
     if (string_equal(directive, S8(".long")) || string_equal(directive, S8(".int")))
     {
-        return assembly_unit_directive_integer(builder, 4, operands);
+        return assembly_unit_directive_integer(builder, 4, directive, operands);
     }
     if (string_equal(directive, S8(".quad")))
     {
-        return assembly_unit_directive_integer(builder, 8, operands);
+        return assembly_unit_directive_integer(builder, 8, directive, operands);
     }
     if (string_equal(directive, S8(".ascii")))
     {
@@ -911,9 +994,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
 
 // The local-label reference `1f`/`1b` and the `@PLT` suffix are the two
 // spellings the instruction layer below does not read. Both are rewritten
-// here into a plain symbol name, into a fresh copy of the line so the original
-// text stays available for diagnostics.
-BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder, String8 line, String8* rewritten)
+// here into a plain symbol name in a fresh copy, preserving the PLT request
+// beside the resulting relocation and the original text for diagnostics.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder, String8 line, String8* rewritten, String8* plt_symbol)
 {
     bool changed = false;
     for (u64 index = 0; index < line.length && !changed; index += 1)
@@ -996,14 +1079,18 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
                 suffix_end += 1;
             }
             String8 suffix = string_slice(line, index + 1, suffix_end);
-            // A static link resolves a `@PLT` call the same way it resolves a
-            // plain one, so the suffix is dropped rather than turned into a
-            // relocation family this object model does not carry.
-            if (!string_equal(suffix, S8("PLT")) && !string_equal(suffix, S8("plt")))
+            u64 name_begin = index;
+            while (name_begin && assembly_unit_name_character(line.pointer[name_begin - 1]))
+            {
+                name_begin -= 1;
+            }
+            if ((!string_equal(suffix, S8("PLT")) && !string_equal(suffix, S8("plt"))) ||
+                name_begin == index || plt_symbol->length)
             {
                 assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("unsupported symbol modifier '@{S8}'"), suffix);
                 return false;
             }
+            *plt_symbol = string_slice(line, name_begin, index);
             index = suffix_end;
             continue;
         }
@@ -1037,7 +1124,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_prefix_only(String8 line)
 BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder, String8 line)
 {
     String8 rewritten = {0};
-    if (!assembly_unit_rewrite_line(builder, line, &rewritten))
+    String8 plt_symbol = {0};
+    if (!assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol))
     {
         return false;
     }
@@ -1061,6 +1149,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
         return false;
     }
     u64 base = builder->section_offsets[builder->current_section];
+    bool plt_matched = !plt_symbol.length;
     for (u32 index = 0; index < encoded.relocation_count; index += 1)
     {
         AssemblyRelocation relocation = encoded.relocations[index];
@@ -1073,8 +1162,26 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
         {
             return false;
         }
+        bool direct_branch = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset &&
+                             (encoded.bytes.pointer[relocation.offset - 1] == 0xe8 || encoded.bytes.pointer[relocation.offset - 1] == 0xe9);
+        builder->result.relocations[builder->result.relocation_count - 1].x86_branch = direct_branch;
+        if (string_equal(encoded.symbols[relocation.symbol].name, plt_symbol))
+        {
+            plt_matched = direct_branch;
+            builder->result.relocations[builder->result.relocation_count - 1].plt = direct_branch;
+        }
     }
-    return assembly_unit_append(builder, encoded.bytes.pointer, encoded.bytes.length);
+    bool result;
+    if (plt_matched)
+    {
+        result = assembly_unit_append(builder, encoded.bytes.pointer, encoded.bytes.length);
+    }
+    else
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("@PLT requires a direct x86 call or jump with a 32-bit displacement"));
+        result = false;
+    }
+    return result;
 }
 
 // ------------------------------------------------------------ the passes
@@ -1094,6 +1201,12 @@ BUSTER_GLOBAL_LOCAL u64 assembly_unit_leading_label(String8 line)
         {
             end += 1;
         }
+    }
+    else if (line.pointer[0] == '"')
+    {
+        end = 1;
+        while (end < line.length && line.pointer[end] != '"') end += 1;
+        end += end < line.length;
     }
     else if (assembly_unit_name_start(line.pointer[0]))
     {
@@ -1181,7 +1294,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_parse(AssemblyUnitBuilder* builder, Strin
         }
         while (label)
         {
-            String8 spelling = string_slice(line, 0, label);
+            String8 spelling = assembly_unit_unquote(string_slice(line, 0, label));
             String8 name = spelling;
             if (assembly_unit_digit(spelling.pointer[0]))
             {
@@ -1255,9 +1368,9 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_parse(AssemblyUnitBuilder* builder, Strin
 }
 
 // Pieces become section bytes, and every relocation that names a symbol
-// defined in its own section with a PC-relative kind is resolved here rather
-// than handed to the linker -- exactly the branches and `lea`s a local label
-// produces.
+// defined in its own section with binding-invariant identity can be resolved
+// here. Weak definitions remain replaceable even when hidden; ELF globals
+// with default visibility remain preemptible in an external shared link.
 BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
 {
     for (u32 section = 0; section < builder->result.section_count; section += 1)
@@ -1291,7 +1404,13 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
         memcpy(record->data.pointer + filled[piece.section], piece.bytes, piece.length);
         filled[piece.section] += piece.length;
     }
+    if (!assembly_unit_materialize_integers(builder))
+    {
+        return;
+    }
     u32 kept = 0;
+    bool elf = builder->target.os == OPERATING_SYSTEM_LINUX || builder->target.os == OPERATING_SYSTEM_ANDROID ||
+               builder->target.os == OPERATING_SYSTEM_FREESTANDING;
     for (u32 index = 0; index < builder->result.relocation_count; index += 1)
     {
         AssemblyUnitRelocation relocation = builder->result.relocations[index];
@@ -1299,10 +1418,15 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
         u32 width = relocation.kind == ASSEMBLY_RELOCATION_X86_PC8    ? 1
                     : relocation.kind == ASSEMBLY_RELOCATION_X86_PC16 ? 2
                     : relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 ? 4
-                    : relocation.kind == ASSEMBLY_RELOCATION_X86_PC64 ? 8
+                    : relocation.kind == ASSEMBLY_RELOCATION_X86_PC64 || relocation.kind == ASSEMBLY_RELOCATION_AARCH64_PREL64 ? 8
+                    : relocation.kind == ASSEMBLY_RELOCATION_AARCH64_PREL32 ? 4
                                                                       : 0;
-        if (!width || !symbol.defined || symbol.section != relocation.section)
+        bool replaceable = symbol.weak || (elf && symbol.global && !symbol.hidden);
+        if (!width || !symbol.defined || symbol.section != relocation.section || replaceable)
         {
+            // A PC-relative data field can follow an opcode-valued byte. Only
+            // instruction encoding proves that this reference is a branch.
+            relocation.plt = elf && (relocation.plt || (relocation.x86_branch && !symbol.hidden && (symbol.global || !symbol.defined)));
             builder->relocation_lines[kept] = builder->relocation_lines[index];
             builder->result.relocations[kept++] = relocation;
             continue;
@@ -1388,10 +1512,12 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     // numbering, and the same columns, as the file on disk.
     char8* text = arena_allocate(arena, char8, source.length ? source.length : 1);
     u32 line_count = 1;
+    u32 comma_count = 0;
     for (u64 index = 0; index < source.length; index += 1)
     {
         text[index] = source.pointer[index];
         line_count += source.pointer[index] == '\n';
+        comma_count += source.pointer[index] == ',';
     }
     for (u64 index = 0; index + 1 < source.length;)
     {
@@ -1422,14 +1548,16 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     }
     String8 blanked = {.pointer = text, .length = source.length};
 
-    builder.symbol_capacity = line_count * 2 + 16;
-    builder.relocation_capacity = line_count + 16;
+    builder.symbol_capacity = line_count * 2 + comma_count + ASSEMBLY_UNIT_SECTION_CAPACITY;
+    builder.relocation_capacity = line_count + comma_count + 16;
+    builder.integer_capacity = line_count + comma_count + 16;
     builder.piece_capacity = line_count + 16;
     builder.numeric_label_capacity = line_count * 2 + 16;
     builder.result.sections = arena_allocate(arena, AssemblyUnitSection, ASSEMBLY_UNIT_SECTION_CAPACITY);
     builder.section_offsets = arena_allocate(arena, u64, ASSEMBLY_UNIT_SECTION_CAPACITY);
     builder.result.symbols = arena_allocate(arena, AssemblyUnitSymbol, builder.symbol_capacity);
     builder.result.relocations = arena_allocate(arena, AssemblyUnitRelocation, builder.relocation_capacity);
+    builder.integers = arena_allocate(arena, AssemblyUnitInteger, builder.integer_capacity);
     builder.relocation_lines = arena_allocate(arena, u32, builder.relocation_capacity);
     builder.pieces = arena_allocate(arena, AssemblyUnitPiece, builder.piece_capacity);
     builder.numeric_labels = arena_allocate(arena, AssemblyUnitNumericLabel, builder.numeric_label_capacity);

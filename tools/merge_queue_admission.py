@@ -30,6 +30,8 @@ import time
 import urllib.parse
 import urllib.request
 
+from native_retirement_integration import APIReadError, github_read_json
+
 SCHEMA = "buster-merge-queue-admission-v1"
 CONTEXT = "Main integration admission"
 RETIREMENT_CONTEXT = "Native retirement merge admission"
@@ -61,7 +63,7 @@ RECONSTRUCTION_MODES = frozenset(("ordinary-bound-merge-group", "trusted-integra
 QUEUE = {
     "check_response_timeout_minutes": 360,
     "grouping_strategy": "ALLGREEN",
-    "max_entries_to_build": 4,
+    "max_entries_to_build": 6,
     "max_entries_to_merge": 1,
     "merge_method": "MERGE",
     "min_entries_to_merge": 1,
@@ -98,6 +100,14 @@ POLICY_PATHS = (
 
 class AdmissionError(Exception):
     """A candidate or configuration cannot authorize main admission."""
+
+
+class GroupRetired(Exception):
+    """A successful ref read proves this exact group no longer exists."""
+
+
+class DelegatedReadError(OSError):
+    """The trusted native gate exhausted its bounded API read recovery."""
 
 
 def require(condition: bool, message: str) -> None:
@@ -245,8 +255,14 @@ def validate_ruleset(data: dict, *, read_only_response: bool = False) -> None:
         require(data["bypass_actors"] == BYPASS_ACTORS,
                 "bypass actors differ from reviewed main ruleset")
     if "current_user_can_bypass" in data:
-        require(data["current_user_can_bypass"] == "never",
-                "the admission reader must not have bypass authority")
+        if read_only_response:
+            require(data["current_user_can_bypass"] == "never",
+                    "the admission reader must not have bypass authority")
+        else:
+            # The complete reviewed inventory above scopes the offline audit.
+            # A saved response reports capability, not authenticated reader identity.
+            require(data["current_user_can_bypass"] in ("never", "always", "pull_requests_only"),
+                    "administrator reader bypass capability is invalid")
     rules = data.get("rules", [])
     require(isinstance(rules, list), "rules must be a list")
     by_type = {rule["type"]: rule for rule in rules}
@@ -330,8 +346,7 @@ class GitHub:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         })
-        with urllib.request.urlopen(request, timeout=30) as response:
-            result = json.load(response)
+        result = github_read_json(request, path, retry_404=path.startswith("git/ref/heads/gh-readonly-queue/main/"))
         return result
 
     def pages(self, path: str, field: str, **query) -> list:
@@ -351,10 +366,38 @@ class GitHub:
         return result
 
 
+def current_queue_head(api: GitHub, candidate: dict) -> str:
+    """Confirm the exact queue ref, independently of evidence collection."""
+    ref = candidate["head_ref"].removeprefix("refs/")
+    try:
+        head = api.get("git/ref/" + urllib.parse.quote(ref, safe="/"))["object"]["sha"]
+    except APIReadError as error:
+        if error.status == 404:
+            # A 404 alone could be a permission/service fault. A successful
+            # collection read must independently prove exact-ref retirement.
+            rows = api.get("git/matching-refs/" + urllib.parse.quote(ref, safe="/"))
+            require(isinstance(rows, list) and len(rows) <= MAX_QUEUE_REFS and
+                    all(isinstance(row, dict) and isinstance(row.get("ref"), str) and
+                        row["ref"].startswith(QUEUE_REF_PREFIX) and isinstance(row.get("object"), dict)
+                        for row in rows),
+                    "malformed queue-ref confirmation response")
+            for row in rows:
+                digest(row["object"].get("sha"), "confirmed queue head")
+            matches = [row for row in rows if row.get("ref") == candidate["head_ref"]]
+            require(len(matches) <= 1, "ambiguous queue-ref confirmation")
+            if not matches or digest(matches[0].get("object", {}).get("sha"), "confirmed queue head") != candidate["head"]:
+                raise GroupRetired(f"exact merge group retired: ref={candidate['head_ref']} head={candidate['head']}; "
+                                   "no admission issued; GitHub owns rebuilding") from None
+        raise
+    if digest(head, "current queue head") != candidate["head"]:
+        raise GroupRetired(f"exact merge group replaced: ref={candidate['head_ref']} head={candidate['head']} "
+                           f"current_head={head}; no admission issued; GitHub owns rebuilding")
+    return head
+
+
 def live_identity(api: GitHub, candidate: dict) -> bool:
     main = api.get("git/ref/heads/main")["object"]["sha"]
-    ref = candidate["head_ref"].removeprefix("refs/")
-    head = api.get("git/ref/" + urllib.parse.quote(ref, safe="/"))["object"]["sha"]
+    head = current_queue_head(api, candidate)
     ready = check_current(candidate, main, head)
     if not ready:
         print(f"waiting for queued predecessor: main={main} base={candidate['base']} "
@@ -403,6 +446,8 @@ def retirement_admission(arguments, candidate: dict) -> dict:
         "--base", candidate["base"], "--head", candidate["head"], "--current-main", candidate["base"],
         "--event", "merge_group", "--repository", arguments.repository,
     ], capture_output=True, text=True, check=False)
+    if result.returncode == 75:
+        raise DelegatedReadError("trusted retirement admission requires API retry: " + result.stderr.strip())
     require(result.returncode == 0, "trusted retirement admission rejected group: " + result.stderr.strip())
     retirement = json.loads(result.stdout)
     require(retirement.get("status") == "admitted", "retirement gate did not admit this group")
@@ -709,6 +754,21 @@ def reconcile(arguments) -> dict:
             group = reconcile_group(api, writer, arguments, policy, main, ref, head)
             group["native"] = reconcile_native_group(api, writer, arguments, policy, main, ref, head)
             groups.append(group)
+        except GroupRetired as error:
+            groups.append({"ref": ref, "head": head, "state": "retired", "published": False,
+                           "detail": str(error)})
+        except APIReadError as error:
+            state, detail = "retry", str(error)
+            if error.status == 404:
+                # A checks/evidence read may race retirement before identity
+                # evaluation. Confirm it; other 404s remain unresolved faults.
+                try:
+                    current_queue_head(api, {"head_ref": ref, "head": head})
+                except GroupRetired as retired:
+                    state, detail = "retired", str(retired)
+                except (AdmissionError, OSError, KeyError, TypeError, ValueError) as confirmation:
+                    detail += "; ref confirmation failed: " + str(confirmation)
+            groups.append({"ref": ref, "head": head, "state": state, "detail": detail})
         except (OSError, KeyError, TypeError, ValueError) as error:
             # Transport or response failure: publish nothing; the next event or
             # the scheduled sweep retries. Correctness failures never land here.
@@ -766,6 +826,22 @@ def main(argv=None) -> int:
             report = run_gate(arguments)
             arguments.output.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
             print(json.dumps(report, sort_keys=True))
+    except GroupRetired as error:
+        report = {"schema": SCHEMA, "mode": arguments.command, "status": "retry",
+                  "reason": "group-retired", "detail": str(error)}
+        if hasattr(arguments, "output"):
+            arguments.output.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+        print(json.dumps(report, sort_keys=True))
+        # Legacy required jobs must not turn obsolete validation green. This
+        # distinct retry outcome terminates their wait without a policy denial.
+        code = 75
+    except (APIReadError, DelegatedReadError) as error:
+        report = {"schema": SCHEMA, "mode": arguments.command, "status": "retry",
+                  "reason": "api-read", "detail": str(error)}
+        if hasattr(arguments, "output"):
+            arguments.output.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+        print(json.dumps(report, sort_keys=True))
+        code = 75
     except (AdmissionError, OSError, KeyError, TypeError, ValueError) as error:
         print("merge-queue admission failed: " + str(error), file=sys.stderr)
         code = 1
