@@ -6363,10 +6363,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_diagnostic_ownership(U
     } const cases[] = {
         {S8("static int arr[] = { [(unsigned char)256] = 1 };\n"
             "_Static_assert(sizeof(arr) == 4, \"file positive\");\n"),
-         1, 0, C_DIAGNOSTIC_KIND_COUNT, {0}},
+         1, 0, C_DIAGNOSTIC_KIND_COUNT, {{0}}},
         {S8("int f(void) { static int arr[] = { [(unsigned char)256] = 1 };\n"
             "_Static_assert(sizeof(arr) == 4, \"block positive\"); return 0; }\n"),
-         1, 0, C_DIAGNOSTIC_KIND_COUNT, {0}},
+         1, 0, C_DIAGNOSTIC_KIND_COUNT, {{0}}},
         {S8("static int arr[] = { [(unsigned char)256] = 1 };\n"
             "_Static_assert(sizeof(arr) == 8, \"file false\");\n"),
          1, 1, C_DIAGNOSTIC_STATIC_ASSERT_FAILED, {S8("static assertion failed: \"file false\"")}},
