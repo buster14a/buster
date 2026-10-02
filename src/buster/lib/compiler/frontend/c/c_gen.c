@@ -15975,10 +15975,13 @@ BUSTER_C_INTERNAL bool c_ir_lowering_branch_resumes_after_call(CIntegerIrBuilder
             if (frame->as.body.state)
             {
                 CIrLowerBodyContinuation continuation = frame->as.body.state->continuation;
+                // A GNU void return evaluates the operand like a statement.
+                // Defer noreturn termination until its expression child ends.
+                bool void_return = builder->returns_void && continuation == C_IR_LOWER_BODY_CONTINUE_RETURN;
                 result = frame->as.body.state->statement_expression_mode ||
                          (continuation != C_IR_LOWER_BODY_CONTINUE_NONE && continuation != C_IR_LOWER_BODY_CONTINUE_STATEMENT &&
-                          continuation != C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK);
-                *statement = continuation == C_IR_LOWER_BODY_CONTINUE_STATEMENT ? frame->as.body.state : 0;
+                          continuation != C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK && !void_return);
+                *statement = continuation == C_IR_LOWER_BODY_CONTINUE_STATEMENT || void_return ? frame->as.body.state : 0;
             }
             break;
         default:
@@ -27407,6 +27410,16 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
             return false;
         u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
         if (close >= end || !c_ir_vendor_result_type_attempt(builder, start, close, type_out)) return false;
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+    }
+
+    if (c_semantic_builtin_returns_void(builtin))
+    {
+        if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            return false;
+        u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close >= end) return false;
+        *type_out = builder->void_type;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 
@@ -39249,25 +39262,37 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
         }
         else if (continuation == C_IR_LOWER_BODY_CONTINUE_RETURN)
         {
-            IrValueId value = builder->lower_machine.child_result.value;
-            if (c_ir_value_contains_label_provenance(builder, value))
+            if (builder->returns_void)
             {
-                builder->failure_message = S8("a label address may not escape through a function return");
-                return false;
+                if (!builder->function->blocks[builder->current_block.value].terminated &&
+                    (!c_ir_emit_cleanup_calls(builder, tasks, task_count, C_SCOPE_ID_INVALID, UINT32_MAX, state->child_source) ||
+                     !c_ir_terminate(builder, IR_OPCODE_RETURN, 0, 0, 0, 0, state->child_source)))
+                {
+                    return false;
+                }
             }
-            value = c_ir_decay_array(builder, value, builder->return_type, state->child_source);
-            if (value.value < builder->function->value_count &&
-                !c_ir_pointer_assignment_compatible(builder, builder->return_type, builder->function->values[value.value].canonical_type))
+            else
             {
-                builder->failure_message = S8("return value has an incompatible function pointer type");
-                builder->failure_kind_plus_one = C_DIAGNOSTIC_CONFLICTING_DECLARATION + 1;
-                return false;
-            }
-            value = c_ir_emit_cast(builder, value, builder->return_type, state->child_source);
-            if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_cleanup_calls(builder, tasks, task_count, C_SCOPE_ID_INVALID, UINT32_MAX, state->child_source) ||
-                !c_ir_terminate(builder, IR_OPCODE_RETURN, &value, 1, 0, 0, state->child_source))
-            {
-                return false;
+                IrValueId value = builder->lower_machine.child_result.value;
+                if (c_ir_value_contains_label_provenance(builder, value))
+                {
+                    builder->failure_message = S8("a label address may not escape through a function return");
+                    return false;
+                }
+                value = c_ir_decay_array(builder, value, builder->return_type, state->child_source);
+                if (value.value < builder->function->value_count &&
+                    !c_ir_pointer_assignment_compatible(builder, builder->return_type, builder->function->values[value.value].canonical_type))
+                {
+                    builder->failure_message = S8("return value has an incompatible function pointer type");
+                    builder->failure_kind_plus_one = C_DIAGNOSTIC_CONFLICTING_DECLARATION + 1;
+                    return false;
+                }
+                value = c_ir_emit_cast(builder, value, builder->return_type, state->child_source);
+                if (value.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_cleanup_calls(builder, tasks, task_count, C_SCOPE_ID_INVALID, UINT32_MAX, state->child_source) ||
+                    !c_ir_terminate(builder, IR_OPCODE_RETURN, &value, 1, 0, 0, state->child_source))
+                {
+                    return false;
+                }
             }
         }
         else if (continuation == C_IR_LOWER_BODY_CONTINUE_COMPUTED_GOTO)
@@ -40455,7 +40480,16 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_RETURN))
             {
                 bool has_value = index + 1 < end;
-                if (has_value == builder->returns_void)
+                bool compatible_return = has_value != builder->returns_void;
+                if (!compatible_return && has_value && c_preprocess_dialect_is_gnu(builder->preprocess.dialect))
+                {
+                    CIrQueryFrame type_query = {0};
+                    bool typed = c_ir_query_execute(builder, (CIrQueryFrame){
+                        .start = index + 1, .end = end, .kind = C_IR_QUERY_FRAME_OPERAND_TYPE}, &type_query) && type_query.success;
+                    IrType* type = typed ? ir_type_from_id(&builder->program->types, type_query.result_type) : 0;
+                    compatible_return = type && type->kind == IR_TYPE_VOID;
+                }
+                if (!compatible_return)
                 {
                     builder->failure_message = has_value ? S8("return statement has a value but the parsed function return type is void")
                                                          : S8("return statement has no value but the parsed function return type is non-void");
@@ -50914,7 +50948,8 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
         CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
         if (generic.operation && c_semantic_vendor_builtin_supported(builder->target, name))
         {
-            u32 close = c_parse_matching_delimiter_indexed(&builder->parse, builder->preprocess, index + 1);
+            u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end,
+                C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             IrTypeId type = IR_TYPE_ID_INVALID;
             total.valid = close < end && c_ir_vendor_result_type(builder, index, close, &type);
             IrType* result = total.valid ? ir_type_from_id(&builder->program->types, type) : 0;

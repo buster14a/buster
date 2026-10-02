@@ -4148,11 +4148,24 @@ BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
                 return (CSymbolBuiltin)c_symbol_predefined[index].builtin;
             }
         }
+        if (c_semantic_bfloat16_builtin_spelling(spelling)) return C_SYMBOL_BUILTIN_NONE;
         if (c_vendor_builtin_spelling(spelling)) return C_SYMBOL_BUILTIN_VENDOR_TARGET;
         if (c_vendor_generic_builtin(spelling).operation) return C_SYMBOL_BUILTIN_VENDOR_GENERIC;
     }
 
     return C_SYMBOL_BUILTIN_NONE;
+}
+
+// These fixed builtin classes have no declaration entity. Their semantic
+// result is void even when emission uses an internal placeholder value.
+BUSTER_C_SHARED bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin)
+{
+    bool result = builtin == C_SYMBOL_BUILTIN_DEBUGTRAP || builtin == C_SYMBOL_BUILTIN_SPIN_PAUSE ||
+                  builtin == C_SYMBOL_BUILTIN_UNREACHABLE || builtin == C_SYMBOL_BUILTIN_CLEAR_CACHE ||
+                  builtin == C_SYMBOL_BUILTIN_PREFETCH || builtin == C_SYMBOL_BUILTIN_VA_START ||
+                  builtin == C_SYMBOL_BUILTIN_VA_START_C23 || builtin == C_SYMBOL_BUILTIN_VA_COPY ||
+                  builtin == C_SYMBOL_BUILTIN_VA_END;
+    return result;
 }
 
 // Fixed GNU signatures for clz/ctz/popcount. The operation kind is shared by

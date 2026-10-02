@@ -5,6 +5,74 @@ typedef unsigned int U32;
 typedef unsigned char U8;
 typedef int V4 __attribute__((vector_size(16)));
 extern int puts(const char*);
+extern int dprintf(int, const char*, ...);
+
+// Asymmetric volatile operands keep primitive checks independent of folding.
+// Expected lanes were calculated from the Intel SDM scalar operation equations;
+// the paired Clang SHA instruction run independently checks these fixed tables.
+static volatile U32 primitive_input[3][4] = {
+    {0x01234567u, 0x89abcdefu, 0xfedcba98u, 0x76543210u},
+    {0x0f1e2d3cu, 0x4b5a6978u, 0x8796a5b4u, 0xc3d2e1f0u},
+    {0x10293847u, 0x56473829u, 0xdeadbeefu, 0x76543210u},
+};
+
+static int sha_primitive_check(const char* operation, V4 const* actual, U32 const* expected)
+{
+    int result = 0;
+    for (U32 lane = 0; lane < 4; lane += 1)
+    {
+        U32 value = (U32)(*actual)[lane];
+        if (value != expected[lane])
+        {
+            dprintf(2, "sha primitive %s lane=%u got=%08x expected=%08x\n", operation, lane, value, expected[lane]);
+            result = 1;
+        }
+    }
+    return result;
+}
+
+__attribute__((target("sha,ssse3,sse4.1")))
+static int sha_primitive_probe(void)
+{
+    static U32 const expected[10][4] = {
+        {0x86b5e0d3u, 0x4a792c1fu, 0xffffffffu, 0xffffffffu},
+        {0xc54cd45du, 0x0d6bc1a7u, 0x6b0da7c1u, 0xe3852f49u},
+        {0x0f1e2d3cu, 0x4b5a6978u, 0x8796a5b4u, 0xe167ee74u},
+        {0x9ca1dae1u, 0x7cfa715cu, 0xca766be2u, 0x94db1ab9u},
+        {0xdce1d06bu, 0xca313780u, 0xae2146fau, 0x6b8829c4u},
+        {0x69c82bb2u, 0x4ee8abf4u, 0x182d1ceeu, 0x1d14e611u},
+        {0x33c405f9u, 0xfd5a1eb8u, 0x39aa8b81u, 0x29c3017du},
+        {0x3e8111b3u, 0x8a2bdf80u, 0x217eee4bu, 0x69072c4au},
+        {0x87707bf7u, 0xb6a25b1au, 0x3181a9e0u, 0xdd17d723u},
+        {0xfef5a4d2u, 0x4d17c2fcu, 0x3ce4f1ceu, 0xf12a5687u},
+    };
+    V4 first = {(int)primitive_input[0][0], (int)primitive_input[0][1], (int)primitive_input[0][2], (int)primitive_input[0][3]};
+    V4 second = {(int)primitive_input[1][0], (int)primitive_input[1][1], (int)primitive_input[1][2], (int)primitive_input[1][3]};
+    V4 words = {(int)primitive_input[2][0], (int)primitive_input[2][1], (int)primitive_input[2][2], (int)primitive_input[2][3]};
+    int result = 0;
+    V4 actual;
+    actual = __builtin_ia32_sha1msg1(first, second);
+    result |= sha_primitive_check("sha1msg1", &actual, expected[0]);
+    actual = __builtin_ia32_sha1msg2(first, second);
+    result |= sha_primitive_check("sha1msg2", &actual, expected[1]);
+    actual = __builtin_ia32_sha1nexte(first, second);
+    result |= sha_primitive_check("sha1nexte", &actual, expected[2]);
+    actual = __builtin_ia32_sha1rnds4(first, second, 0);
+    result |= sha_primitive_check("sha1rnds4/0", &actual, expected[3]);
+    actual = __builtin_ia32_sha1rnds4(first, second, 1);
+    result |= sha_primitive_check("sha1rnds4/1", &actual, expected[4]);
+    actual = __builtin_ia32_sha1rnds4(first, second, 2);
+    result |= sha_primitive_check("sha1rnds4/2", &actual, expected[5]);
+    actual = __builtin_ia32_sha1rnds4(first, second, 3);
+    result |= sha_primitive_check("sha1rnds4/3", &actual, expected[6]);
+    actual = __builtin_ia32_sha256msg1(first, second);
+    result |= sha_primitive_check("sha256msg1", &actual, expected[7]);
+    actual = __builtin_ia32_sha256msg2(first, second);
+    result |= sha_primitive_check("sha256msg2", &actual, expected[8]);
+    actual = __builtin_ia32_sha256rnds2(first, second, words);
+    result |= sha_primitive_check("sha256rnds2", &actual, expected[9]);
+    return result;
+}
 
 __attribute__((target("sha,ssse3,sse4.1")))
 static void sha_blocks(const U8* bytes, U32 length, U32* sha1, U32* sha256)
@@ -118,16 +186,28 @@ int main(void)
     };
     static U8 const first[] = "abc";
     static U8 const second[] = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
-    int result = 0;
+    int result = sha_primitive_probe();
     for (U32 test = 0; test < 2; test += 1)
     {
         U32 sha1[5] = {0x67452301u, 0xefcdab89u, 0x98badcfeu, 0x10325476u, 0xc3d2e1f0u};
         U32 sha256[8] = {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au, 0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
         sha_blocks(test ? second : first, test ? 56 : 3, sha1, sha256);
         for (U32 index = 0; index < 5; index += 1)
-            result |= sha1[index] != expected1[test][index];
+        {
+            if (sha1[index] != expected1[test][index])
+            {
+                dprintf(2, "sha NIST sha1 test=%u word=%u got=%08x expected=%08x\n", test, index, sha1[index], expected1[test][index]);
+                result = 1;
+            }
+        }
         for (U32 index = 0; index < 8; index += 1)
-            result |= sha256[index] != expected256[test][index];
+        {
+            if (sha256[index] != expected256[test][index])
+            {
+                dprintf(2, "sha NIST sha256 test=%u word=%u got=%08x expected=%08x\n", test, index, sha256[index], expected256[test][index]);
+                result = 1;
+            }
+        }
     }
     if (!result)
         puts("sha1/sha256 NIST vectors ok");

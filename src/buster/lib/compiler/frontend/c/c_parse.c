@@ -3931,6 +3931,12 @@ BUSTER_C_INTERNAL CBfloat16Builtin const* c_parse_bfloat16_builtin(String8 name)
     return result;
 }
 
+BUSTER_C_SHARED bool c_semantic_bfloat16_builtin_spelling(String8 name)
+{
+    bool result = c_parse_bfloat16_builtin(name) != 0;
+    return result;
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_bfloat16_builtin_result(CParseResult* result, CBfloat16Builtin const* builtin)
 {
     CBfloat16BuiltinType shape = builtin->types[0];
@@ -5058,6 +5064,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
                     CVendorBuiltin signature = {0};
                     return c_semantic_vendor_builtin_signature(preprocess.target, name, &signature)
                         ? c_semantic_vendor_builtin_type(result, preprocess.target, signature.types[0]) : C_TYPE_ID_INVALID;
+                }
+                if (c_semantic_builtin_returns_void(builtin))
+                {
+                    return c_parse_expression_scalar_type(result, C_TYPE_VOID);
                 }
                 if (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM)
                 {
@@ -7160,7 +7170,6 @@ struct CParseConstant
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_parse_constant_truth(CParseConstant value);
-BUSTER_C_INTERNAL u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_INTERNAL void c_parse_defer_static_assert(CPreprocessResult preprocess, CParseResult* result, CDeclaration declaration, CScopeId scope)
 {
     if (!result || result->deferred_static_assert_count >= result->deferred_static_assert_capacity)
@@ -23193,109 +23202,140 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
     CIntegerConstant constant = {.type = C_TYPE_ID_INVALID};
     if (start < end && end <= preprocess.token_count && end - start <= UINT32_MAX - 16)
     {
-        // Expression frames rewind machine scratch when they finish. Private
-        // type rows must outlive those frames, so keep their growth in the
-        // other scratch arena until the stable integer value has been read.
-        TemporalArena model_temporary = scratch_begin(&arena, 1);
-        CParseResult query = *result;
-        query.arena = model_temporary.arena;
-        query.protected_type_constant_query = true;
-        query.type_capacity = query.type_count;
-        query.array_bound_capacity = query.array_bound_count;
-        query.type_alignment_capacity = query.type_alignment_count;
-        query.noreturn_function_type_capacity = query.noreturn_function_type_count;
-        // Retained identity answers were computed in NORMAL mode. Recompute
-        // under TYPE's refusal rules, allocating the first private answer row
-        // rather than appending to the caller's shared spare capacity.
-        query.type_identity_query_count = 0;
-        query.type_identity_query_capacity = 0;
-        // Parameters, alignment operands and diagnostics use bounded append
-        // buffers rather than reserve helpers. Their existing rows remain
-        // readable, but even their unused slots must belong to this query.
-        if (query.parameter_capacity)
+        // Preserve the unit's append limits without charging its three
+        // fixed buffers against the shared 256 MiB model scratch arena.
+        // Size only these arrays; all growable query state keeps that arena.
+        u64 fixed_buffer_size = arena_minimum_position;
+        bool fixed_buffers_sized =
+            (!result->parameter_capacity ||
+             c_type_parse_buffer_size_add(&fixed_buffer_size, result->parameter_capacity, sizeof(CParameter),
+                                          BUSTER_ALIGN_OF(CParameter))) &&
+            (!result->alignment_capacity ||
+             c_type_parse_buffer_size_add(&fixed_buffer_size, result->alignment_capacity, sizeof(CAlignmentSpecifier),
+                                          BUSTER_ALIGN_OF(CAlignmentSpecifier))) &&
+            (!result->diagnostic_capacity ||
+             c_type_parse_buffer_size_add(&fixed_buffer_size, result->diagnostic_capacity, sizeof(CDiagnostic),
+                                          BUSTER_ALIGN_OF(CDiagnostic))) &&
+            fixed_buffer_size <= ARENA_MAX_RESERVATION - (BUSTER_KB(64) - 1);
+        Arena* fixed_buffer_arena = 0;
+        if (fixed_buffers_sized)
         {
-            query.parameters = arena_allocate(query.arena, CParameter, query.parameter_capacity);
-            if (query.parameter_count) memcpy(query.parameters, result->parameters, sizeof(CParameter) * query.parameter_count);
+            fixed_buffer_size = (fixed_buffer_size + BUSTER_KB(64) - 1) & ~(BUSTER_KB(64) - 1);
+            fixed_buffer_arena = arena_create((ArenaCreation){
+                .reserved_size = fixed_buffer_size,
+                .granularity = BUSTER_KB(64),
+                .initial_size = BUSTER_MIN(fixed_buffer_size, BUSTER_KB(256)),
+                .flags = {.no_pool = 1},
+            });
         }
-        if (query.alignment_capacity)
+        if (fixed_buffer_arena)
         {
-            query.alignments = arena_allocate(query.arena, CAlignmentSpecifier, query.alignment_capacity);
-            if (query.alignment_count) memcpy(query.alignments, result->alignments, sizeof(CAlignmentSpecifier) * query.alignment_count);
+            // Expression frames rewind machine scratch when they finish. Private
+            // type rows must outlive those frames, so keep their growth in the
+            // other scratch arena until the stable integer value has been read.
+            TemporalArena model_temporary = scratch_begin(&arena, 1);
+            CParseResult query = *result;
+            query.arena = model_temporary.arena;
+            query.protected_type_constant_query = true;
+            query.type_capacity = query.type_count;
+            query.array_bound_capacity = query.array_bound_count;
+            query.type_alignment_capacity = query.type_alignment_count;
+            query.noreturn_function_type_capacity = query.noreturn_function_type_count;
+            // Retained identity answers were computed in NORMAL mode. Recompute
+            // under TYPE's refusal rules, allocating the first private answer row
+            // rather than appending to the caller's shared spare capacity.
+            query.type_identity_query_count = 0;
+            query.type_identity_query_capacity = 0;
+            // Parameters, alignment operands and diagnostics use bounded append
+            // buffers rather than reserve helpers. Their existing rows remain
+            // readable, but even their unused slots must belong to this query.
+            if (query.parameter_capacity)
+            {
+                query.parameters = arena_allocate(fixed_buffer_arena, CParameter, query.parameter_capacity);
+                if (query.parameter_count) memcpy(query.parameters, result->parameters, sizeof(CParameter) * query.parameter_count);
+            }
+            if (query.alignment_capacity)
+            {
+                query.alignments = arena_allocate(fixed_buffer_arena, CAlignmentSpecifier, query.alignment_capacity);
+                if (query.alignment_count) memcpy(query.alignments, result->alignments, sizeof(CAlignmentSpecifier) * query.alignment_count);
+            }
+            if (query.diagnostic_capacity)
+            {
+                query.diagnostics = arena_allocate(fixed_buffer_arena, CDiagnostic, query.diagnostic_capacity);
+                if (query.diagnostic_count) memcpy(query.diagnostics, result->diagnostics, sizeof(CDiagnostic) * query.diagnostic_count);
+            }
+            // Stable indexes contain mutable headers, and spelling caches write
+            // shared token rows even during reads. Neither belongs to this query.
+            // An incomplete private index requests the scope-aware fallback.
+            // A null index's legacy fallback instead takes the oldest tag.
+            CAggregateLookupSlot aggregate_slot = {0};
+            CAggregateLookup aggregates = {.slots = &aggregate_slot, .slot_count = 1, .incomplete = true};
+            query.aggregate_lookup = &aggregates;
+            query.definition_index = 0;
+            query.token_classes = 0;
+            query.symbols = 0;
+            CTokenPositionIndex positions = {0};
+            if (query.position_index)
+            {
+                positions = *query.position_index;
+            }
+            query.position_index = &positions;
+            while (start + 1 < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                   c_parse_matching_delimiter_indexed(&query, preprocess, start) == end - 1)
+            {
+                start += 1;
+                end -= 1;
+            }
+            CTypeId scalar_types[C_TYPE_COUNT];
+            if (query.expression_scalar_types)
+            {
+                memcpy(scalar_types, query.expression_scalar_types, sizeof(scalar_types));
+            }
+            else
+            {
+                memset(scalar_types, 0xff, sizeof(scalar_types));
+            }
+            query.expression_scalar_types = scalar_types;
+            CTypeLayoutStatistics statistics = {0};
+            query.type_layout_statistics = &statistics;
+            bool supported = c_parse_type_constant_vector_arguments_supported(&query, preprocess, start, end);
+            bool single = end == start + 1;
+            u32 capacity = single || !supported ? 0 : end - start + 16;
+            CTypeParseMachine query_machine = {
+                .frames = capacity ? arena_allocate(arena, CTypeParseFrame, capacity) : 0,
+                .frame_checkpoints = capacity ? arena_allocate(arena, CParseResult, capacity) : 0,
+                .mutations = capacity ? arena_allocate(arena, CTypeMutation, capacity) : 0,
+                .expression_tasks = capacity ? arena_allocate(arena, CParseExpressionTypeTask, capacity) : 0,
+                .scratch_arena = arena,
+                .frame_capacity = capacity,
+                .mutation_capacity = capacity,
+                .expression_task_capacity = capacity,
+                .constant_evaluation_mode = C_CONSTANT_EVALUATION_TYPE,
+            };
+            u32 error_token = start;
+            CParseResult syntax_checkpoint = query;
+            CTokenPositionIndex syntax_positions = {0};
+            if (query.position_index) syntax_positions = *query.position_index;
+            String8 error = single || !supported ? (String8){0}
+                                  : c_parse_constant_expression_syntax_error(&query_machine, &query, preprocess, scope, start, end, &error_token);
+            // Syntax probing appended rows only to its private model. Restore
+            // those counts and scalar IDs before the value walk; model storage
+            // remains alive across the probe's independent scratch rewind.
+            query = syntax_checkpoint;
+            if (query.position_index) *query.position_index = syntax_positions;
+            if (result->expression_scalar_types) memcpy(scalar_types, result->expression_scalar_types, sizeof(scalar_types));
+            else memset(scalar_types, 0xff, sizeof(scalar_types));
+            if (syntax_error) *syntax_error = error;
+            if (syntax_token) *syntax_token = error_token;
+            if (!error.length && supported)
+            {
+                constant = c_parse_typed_integer_constant(&query_machine, arena, preprocess, &query, scope, start, end);
+                if (constant.type.value >= result->type_count) constant.type = C_TYPE_ID_INVALID;
+            }
+            scratch_end(model_temporary);
+            bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
+            BUSTER_VALIDATE(fixed_buffers_destroyed);
         }
-        if (query.diagnostic_capacity)
-        {
-            query.diagnostics = arena_allocate(query.arena, CDiagnostic, query.diagnostic_capacity);
-            if (query.diagnostic_count) memcpy(query.diagnostics, result->diagnostics, sizeof(CDiagnostic) * query.diagnostic_count);
-        }
-        // Stable indexes contain mutable headers, and spelling caches write
-        // shared token rows even during reads. Neither belongs to this query.
-        // An incomplete private index requests the scope-aware fallback.
-        // A null index's legacy fallback instead takes the oldest tag.
-        CAggregateLookupSlot aggregate_slot = {0};
-        CAggregateLookup aggregates = {.slots = &aggregate_slot, .slot_count = 1, .incomplete = true};
-        query.aggregate_lookup = &aggregates;
-        query.definition_index = 0;
-        query.token_classes = 0;
-        query.symbols = 0;
-        CTokenPositionIndex positions = {0};
-        if (query.position_index)
-        {
-            positions = *query.position_index;
-        }
-        query.position_index = &positions;
-        while (start + 1 < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-               c_parse_matching_delimiter_indexed(&query, preprocess, start) == end - 1)
-        {
-            start += 1;
-            end -= 1;
-        }
-        CTypeId scalar_types[C_TYPE_COUNT];
-        if (query.expression_scalar_types)
-        {
-            memcpy(scalar_types, query.expression_scalar_types, sizeof(scalar_types));
-        }
-        else
-        {
-            memset(scalar_types, 0xff, sizeof(scalar_types));
-        }
-        query.expression_scalar_types = scalar_types;
-        CTypeLayoutStatistics statistics = {0};
-        query.type_layout_statistics = &statistics;
-        bool supported = c_parse_type_constant_vector_arguments_supported(&query, preprocess, start, end);
-        bool single = end == start + 1;
-        u32 capacity = single || !supported ? 0 : end - start + 16;
-        CTypeParseMachine query_machine = {
-            .frames = capacity ? arena_allocate(arena, CTypeParseFrame, capacity) : 0,
-            .frame_checkpoints = capacity ? arena_allocate(arena, CParseResult, capacity) : 0,
-            .mutations = capacity ? arena_allocate(arena, CTypeMutation, capacity) : 0,
-            .expression_tasks = capacity ? arena_allocate(arena, CParseExpressionTypeTask, capacity) : 0,
-            .scratch_arena = arena,
-            .frame_capacity = capacity,
-            .mutation_capacity = capacity,
-            .expression_task_capacity = capacity,
-            .constant_evaluation_mode = C_CONSTANT_EVALUATION_TYPE,
-        };
-        u32 error_token = start;
-        CParseResult syntax_checkpoint = query;
-        CTokenPositionIndex syntax_positions = {0};
-        if (query.position_index) syntax_positions = *query.position_index;
-        String8 error = single || !supported ? (String8){0}
-                              : c_parse_constant_expression_syntax_error(&query_machine, &query, preprocess, scope, start, end, &error_token);
-        // Syntax probing appended rows only to its private model. Restore
-        // those counts and scalar IDs before the value walk; model storage
-        // remains alive across the probe's independent scratch rewind.
-        query = syntax_checkpoint;
-        if (query.position_index) *query.position_index = syntax_positions;
-        if (result->expression_scalar_types) memcpy(scalar_types, result->expression_scalar_types, sizeof(scalar_types));
-        else memset(scalar_types, 0xff, sizeof(scalar_types));
-        if (syntax_error) *syntax_error = error;
-        if (syntax_token) *syntax_token = error_token;
-        if (!error.length && supported)
-        {
-            constant = c_parse_typed_integer_constant(&query_machine, arena, preprocess, &query, scope, start, end);
-            if (constant.type.value >= result->type_count) constant.type = C_TYPE_ID_INVALID;
-        }
-        scratch_end(model_temporary);
     }
     return constant;
 }
@@ -23308,6 +23348,13 @@ BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_const
 }
 
 #if BUSTER_INCLUDE_TESTS
+CIntegerConstant c_test_type_integer_constant_read(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                   CScopeId scope, u32 start, u32 end)
+{
+    CIntegerConstant constant = c_parse_type_integer_constant(scratch, preprocess, result, scope, start, end);
+    return constant;
+}
+
 CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                    CScopeId scope, u32 start, u32 end)
 {
@@ -23479,7 +23526,7 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_expression_start(CParseResult* result, 
     return cursor;
 }
 
-BUSTER_C_INTERNAL u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
+BUSTER_C_SHARED u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
 {
     u32 cursor = start;
     bool done = false;
@@ -24368,11 +24415,10 @@ BUSTER_C_INTERNAL void c_parse_validate_return_statements(CTypeParseMachine* mac
             continue;
         }
         bool has_value = index + 1 < end && !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_SEMICOLON);
-        if (has_value == returns_void)
+        if (!has_value && !returns_void)
         {
-            String8 message = has_value ? S8("return statement has a value but the parsed function return type is void")
-                                       : S8("return statement has no value but the parsed function return type is non-void");
-            c_parse_lowering_constraint_consider(diagnostic, message, index, index);
+            c_parse_lowering_constraint_consider(diagnostic,
+                S8("return statement has no value but the parsed function return type is non-void"), index, index);
         }
         else if (has_value)
         {
@@ -24393,26 +24439,35 @@ BUSTER_C_INTERNAL void c_parse_validate_return_statements(CTypeParseMachine* mac
                     source.value < result->type_count)
                 {
                     CTypeKind source_kind = result->types[source.value].kind;
-                    bool source_aggregate = source_kind == C_TYPE_STRUCT || source_kind == C_TYPE_UNION;
-                    bool target_aggregate = return_kind == C_TYPE_STRUCT || return_kind == C_TYPE_UNION;
-                    String8 conversion_message = c_parse_assignment_conversion_message(machine, result, preprocess, scope, return_id, source,
-                                                                                        index + 1, value_end);
-                    bool incompatible_aggregate = source_aggregate && target_aggregate &&
-                        !c_parse_types_compatible(machine->scratch_arena, result, preprocess,
-                                                  c_parse_unqualified_type(result, return_id), c_parse_unqualified_type(result, source));
-                    if (source_aggregate != target_aggregate)
+                    if (returns_void)
                     {
-                        c_parse_lowering_constraint_consider(diagnostic, return_kind == C_TYPE_NULLPTR
-                            ? S8("only a value of type nullptr_t may be converted to nullptr_t")
-                            : S8("return value is incompatible with the function return type"), index, value_end);
+                        if (!c_preprocess_dialect_is_gnu(preprocess.dialect) || source_kind != C_TYPE_VOID)
+                            c_parse_lowering_constraint_consider(diagnostic,
+                                S8("return statement has a value but the parsed function return type is void"), index, index);
                     }
-                    else if (conversion_message.length)
+                    else
                     {
-                        c_parse_lowering_constraint_consider(diagnostic, conversion_message, index, value_end);
-                    }
-                    else if (incompatible_aggregate)
-                    {
-                        c_parse_lowering_constraint_consider(diagnostic, S8("return value is incompatible with the function return type"), index, value_end);
+                        bool source_aggregate = source_kind == C_TYPE_STRUCT || source_kind == C_TYPE_UNION;
+                        bool target_aggregate = return_kind == C_TYPE_STRUCT || return_kind == C_TYPE_UNION;
+                        String8 conversion_message = c_parse_assignment_conversion_message(machine, result, preprocess, scope, return_id, source,
+                                                                                            index + 1, value_end);
+                        bool incompatible_aggregate = source_aggregate && target_aggregate &&
+                            !c_parse_types_compatible(machine->scratch_arena, result, preprocess,
+                                                      c_parse_unqualified_type(result, return_id), c_parse_unqualified_type(result, source));
+                        if (source_aggregate != target_aggregate)
+                        {
+                            c_parse_lowering_constraint_consider(diagnostic, return_kind == C_TYPE_NULLPTR
+                                ? S8("only a value of type nullptr_t may be converted to nullptr_t")
+                                : S8("return value is incompatible with the function return type"), index, value_end);
+                        }
+                        else if (conversion_message.length)
+                        {
+                            c_parse_lowering_constraint_consider(diagnostic, conversion_message, index, value_end);
+                        }
+                        else if (incompatible_aggregate)
+                        {
+                            c_parse_lowering_constraint_consider(diagnostic, S8("return value is incompatible with the function return type"), index, value_end);
+                        }
                     }
                 }
             }

@@ -13954,6 +13954,9 @@ struct RaddebuggerTarget
 {
     String8 name;
     String8 source;
+    String8 register_allocator;
+    bool frontend_memory;
+    bool verify_codegen;
     bool graphical;
     bool non_graphical;
     bool external_libraries;
@@ -13992,6 +13995,9 @@ struct RaddebuggerProbe
     String8 text;
     String8 repository_source;
     String8 expected;
+    String8 register_allocator;
+    bool frontend_memory;
+    bool verify_codegen;
     RaddebuggerProbeKind kind;
     RaddebuggerProbeHardware hardware;
 };
@@ -14217,7 +14223,16 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_compile_capture(Arena* arena, String8 compi
     if (buster)
     {
         os_argument_builder_append(&builder, S8("cc"));
-        os_argument_builder_append(&builder, S8("-fregister-allocator=fast"));
+        String8 allocator = target.register_allocator.length ? target.register_allocator : S8("fast");
+        os_argument_builder_append(&builder, string_format(arena, S8("-fregister-allocator={S8}"), allocator));
+        if (target.frontend_memory)
+        {
+            os_argument_builder_append(&builder, S8("-fno-frontend-ssa"));
+        }
+        if (target.verify_codegen)
+        {
+            os_argument_builder_append(&builder, S8("-fverify-codegen"));
+        }
         // The native driver spells the same upstream CPU requirements as
         // feature overrides rather than Clang's individual -m switches.
         os_argument_builder_append(&builder, S8("-mcpu=baseline"));
@@ -14484,6 +14499,17 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
                     "    return result;\n}\n")},
         {.name = S8("intrinsic-sha-nist"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
          .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
+        // Keep the default fast/SSA result visible while these same-source
+        // diagnostic axes isolate register allocation and frontend loop state.
+        {.name = S8("intrinsic-sha-nist-mir-stack"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
+         .register_allocator = S8("mir-stack"), .verify_codegen = true,
+         .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
+        {.name = S8("intrinsic-sha-nist-none"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
+         .register_allocator = S8("none"), .verify_codegen = true,
+         .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
+        {.name = S8("intrinsic-sha-nist-memory"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
+         .frontend_memory = true, .verify_codegen = true,
+         .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
     };
     bool passed = true;
     u64 hardware_pending = 0;
@@ -14510,7 +14536,8 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
             String8 object = string_format(arena, S8("{S8}.o"), prefix);
             String8 link_prefix = string_format(arena, S8("{S8}-link"), prefix);
             String8 run_prefix = string_format(arena, S8("{S8}-run"), prefix);
-            RaddebuggerTarget target = {.name = probe.name, .source = source_name};
+            RaddebuggerTarget target = {.name = probe.name, .source = source_name, .register_allocator = probe.register_allocator,
+                                       .frontend_memory = probe.frontend_memory, .verify_codegen = probe.verify_codegen};
             RaddebuggerCommandResult compiled_command = {.wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
             bool compile_run = source_ready && !*stopped;
             bool compiled = compile_run && raddebugger_compile_capture(arena, buster ? ide : clang, buster, source_directory, output_directory, configuration,

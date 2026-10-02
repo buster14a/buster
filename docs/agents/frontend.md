@@ -254,3 +254,13 @@ the emitted scalar shifts use a bounded count. Logical shifts choose zero
 outside their lane width, while arithmetic right shifts retain sign-fill.
 Signed and unsigned integer input lanes with the required shape preserve their
 bits, and results use the signed vector type of the header prototype.
+
+In GNU dialects, a void function may return an expression whose semantic C
+type is void. The existing expression child evaluates it once before active
+cleanups and the zero-operand return. An expression that terminates control
+flow keeps its terminator.
+
+Protected type-constant queries keep growable type/cache state in model scratch.
+Their three fixed append buffers retain the full unit capacities in a separate
+private arena sized with checked allocation arithmetic and released after the
+query; published rows and caller spare slots remain unchanged.
