@@ -45087,7 +45087,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             // type; everything read and written here spans that unit.
             u64 unit = selected_field->access_size ? selected_field->access_size : child->layout.size;
             if (!c_ir_constant_evaluate(builder, value_start, value_end, &value) ||
-                !c_ir_constant_cast(builder, &value, child_type, &converted) || !c_ir_constant_type_is_integer(child) || !child->layout.resolved ||
+                !c_ir_constant_cast(builder, &value, child_type, &converted) || converted.kind != C_IR_CONSTANT_INTEGER ||
+                !c_ir_constant_type_is_integer(child) || !child->layout.resolved ||
                 selected_field->bit_width > 64 || !selected_field->bit_width || selected_field->bit_width > child->layout.size * 8 ||
                 selected_field->bit_offset + selected_field->bit_width > unit * 8 || child_offset > byte_count ||
                 unit > byte_count - child_offset)

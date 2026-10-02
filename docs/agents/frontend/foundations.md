@@ -1264,7 +1264,9 @@ remains pointer-only. Narrower destinations report truncation explicitly.
 Wider destinations, including 128-bit cross-limb relocations, remain refused;
 this implementation does not synthesize a zero-extension relocation.
 Negation, complement, masks, shifts, products and two-symbol subtraction stay
-outside the supported one-symbol-plus-addend representation.
+outside the supported one-symbol-plus-addend representation. Bit-field
+initializers also refuse symbolic carriers instead of depositing placeholder
+integer bits.
 
 The required-initializer wrapper owns and restores a biased source-token
 context. General constant probes can decline unsupported casts without
@@ -1274,7 +1276,7 @@ and main function bodies to be emitted in both forms on the two ELF targets.
 
 `compiler_driver_test_static_address_integers` is a regression-first driver
 fixture for the address-constant extension: pointer-width signed and unsigned
-integer casts followed by byte addends. Its 17 isolated sources cover scalar,
+integer casts followed by byte addends. Its original 17 isolated sources cover scalar,
 member, function, aggregate, local-static and const storage; pointer scaling
 and negative subscripts retain the #1230 controls. Both frontend forms and
 C17/GNU17 emit serialized x86-64/AArch64 ELF objects. The independent oracle

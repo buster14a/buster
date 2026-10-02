@@ -13947,6 +13947,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integers(
         { S8("int x; unsigned long long P=(unsigned long long)&x << 1;"), S8("x86_64-linux"), false },
         { S8("int x; unsigned long long P=(unsigned long long)&x * 2;"), S8("x86_64-linux"), false },
         { S8("int x,y; long long P=(long long)&x-(long long)&y;"), S8("x86_64-linux"), false },
+        { S8("int x; struct B{unsigned long long f:64;} P={(unsigned long long)&x};"), S8("x86_64-linux"), false },
     };
     // Wider destinations are an explicit residual boundary: one relocation
     // cannot supply the other limb of a 128-bit integer.
