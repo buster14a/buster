@@ -592,6 +592,17 @@ and leaves an existing output file untouched. `-v` prints the writer's exact
 work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
 `-c`. See [object emission](../object-emission.md).
 
+## ELF TLS companion lookup
+
+The x86-64 executable writers index TLSGD/TLSLD section/offset sites in link
+scratch after initializer stripping. Import classification and relocation
+planning reuse those exact identities; input relocation order and duplicate
+sites do not determine membership. Shared images retain helper calls. Empty
+cases allocate no table, scratch exhaustion fails before publication, and the
+existing encoding and relocation bounds checks remain mandatory. See the
+[link comparison package](../linker-tls-comparison.md) for work counters,
+object/archive loader controls, latency boundaries and evidence limitations.
+
 ## External ELF debug information
 
 The ELF object reader carries the DWARF 5 `.debug_addr`, `.debug_str_offsets`,

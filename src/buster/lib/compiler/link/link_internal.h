@@ -27,6 +27,9 @@ typedef enum LinkComdatState
 } LinkComdatState;
 
 #if BUSTER_INCLUDE_TESTS
+// Exact production TLS-site membership with work counters, independent of image IO.
+BUSTER_F_DECL bool link_elf_test_tls_membership(Arena* temporary, ObjectFile* object, bool* matches,
+                                             u64* build_rows, u64* queries, u64* probes);
 typedef struct LinkComdatAssociationCounts LinkComdatAssociationCounts;
 struct LinkComdatAssociationCounts
 {

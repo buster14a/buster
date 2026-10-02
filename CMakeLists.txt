@@ -1214,6 +1214,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/simd_test.h
     src/buster/tests/string_test.h
     src/buster/tests/os_test.h
+    src/buster/tests/os_capture_replay_test_internal.h
     src/buster/tests/file_test.h
     src/buster/tests/target_test.h
     src/buster/tests/truetype_test.h

@@ -51,7 +51,11 @@ definitions are outside this slice. Unsupported canonical operations fail
 with a backend diagnostic; they never select an external compiler fallback.
 
 The complete repository example is
-[`tests/gpu/direct_transform.c`](../tests/gpu/direct_transform.c). Its CPU
+[`src/buster/tests/compiler/spirv/fixtures/direct_transform.c`](../src/buster/tests/compiler/spirv/fixtures/direct_transform.c). The fixture stays beside its backend component tests, outside the frozen
+native-retirement `tests/` input inventory. Android APK and iOS bundle asset
+graphs stage this fixture at the same repository-relative path and track its
+contents and inventory, so edits or removals repackage the runtime data.
+Its CPU
 oracle is written independently in the registered compute tests rather than
 obtained by running the kernel source through another shader compiler.
 
@@ -98,7 +102,7 @@ After building `ide` through the repository build driver, a correctness
 runner with the existing SPIRV-Tools consumer can run:
 
 ```sh
-build/Release/ide cc --target=spirv-vulkan1.2-compute -c tests/gpu/direct_transform.c -o build/direct_transform.spv
+build/Release/ide cc --target=spirv-vulkan1.2-compute -c src/buster/tests/compiler/spirv/fixtures/direct_transform.c -o build/direct_transform.spv
 spirv-val --version
 spirv-val --target-env vulkan1.2 build/direct_transform.spv
 spirv-dis build/direct_transform.spv -o build/direct_transform.spvasm

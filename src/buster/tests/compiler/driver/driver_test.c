@@ -12418,6 +12418,156 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
     return result;
 }
 
+// A real TLS-heavy object workload: four host-built objects, sixteen global
+// dynamic accesses each, linked directly and through a positional archive.
+// Compiler preparation and independent consumers stay outside link timing.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_link_tls_sites(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    bool benchmark = os_get_environment_variable(S8("BUSTER_LINK_TLS_BENCH")).length != 0;
+    String8 saved = os_get_environment_variable(S8("BUSTER_LINK_TLS_OUTPUT"));
+    String8 directory = saved.length ? string_duplicate_arena(arena, saved, true)
+                                    : buster_test_temporary_path(arena, S8("buster-link-tls-sites"), S8(""));
+    os_make_directory(directory);
+    String8 archiver = executable_resolve_in_path(arena, S8("ar"));
+    String8 inspector = executable_resolve_in_path(arena, S8("readelf"));
+    if (!inspector.length) inspector = executable_resolve_in_path(arena, S8("llvm-readelf"));
+    BUSTER_TEST(arguments, archiver.length != 0 && inspector.length != 0);
+    enum { MODULE_COUNT = 4, SITES_PER_MODULE = 16, SITE_COUNT = MODULE_COUNT * SITES_PER_MODULE };
+    String8 main_parts[2 * SITE_COUNT + 3] = {0};
+    u32 main_count = 0;
+    for (u32 site = 0; site < SITE_COUNT; site += 1)
+    {
+        main_parts[main_count++] = string_format(arena, S8("int tls_site_{u32}(void);\n"), site);
+    }
+    main_parts[main_count++] = S8("__thread int linker_tls_value = 7;\nint main(void) { int failed = 0;\n");
+    for (u32 site = 0; site < SITE_COUNT; site += 1)
+    {
+        main_parts[main_count++] = string_format(arena, S8("failed |= tls_site_{u32}() != {u32};\n"), site, 7 + site);
+    }
+    main_parts[main_count++] = S8("return failed; }\n");
+    String8 main_source = string_format_z(arena, S8("{S8}/main.c"), directory);
+    String8 main_object = string_format_z(arena, S8("{S8}/main.o"), directory);
+    String8 main_text = string_join_arena(arena, (SliceString8){main_parts, main_count}, false);
+    bool prepared = file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(main_text));
+    TimeDataType preparation_start = timestamp_take();
+    String8 compile_main[] = {S8("-g"), S8("-O0"), S8("-fPIC"), S8("-c"), main_source, S8("-o"), main_object};
+    prepared = prepared && compiler_driver_test_image_host_compile(arena, compile_main, BUSTER_ARRAY_LENGTH(compile_main));
+    BUSTER_TEST(arguments, prepared);
+    u64 main_preparation_ns = timestamp_ns_between(preparation_start, timestamp_take());
+    for (u32 variant = 0; prepared && variant < 2; variant += 1)
+    {
+        TimeDataType variant_preparation_start = timestamp_take();
+        String8 objects[MODULE_COUNT] = {0};
+        u32 tls_sites = 0;
+        for (u32 module = 0; prepared && module < MODULE_COUNT; module += 1)
+        {
+            String8 parts[SITES_PER_MODULE + 1] = {0};
+            parts[0] = S8("extern __thread int linker_tls_value;\n");
+            for (u32 site = 0; site < SITES_PER_MODULE; site += 1)
+            {
+                u32 identity = module * SITES_PER_MODULE + site;
+                parts[site + 1] = string_format(arena, S8("int tls_site_{u32}(void) {{ return linker_tls_value + {u32}; }\n"), identity, identity);
+            }
+            String8 source = string_format_z(arena, S8("{S8}/module-{u32}.c"), directory, module);
+            objects[module] = string_format_z(arena, S8("{S8}/module-{u32}-{u32}.o"), directory, module, variant);
+            String8 text = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+            prepared = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text));
+            String8 compile[] = {S8("-g"), S8("-O0"), S8("-fPIC"), variant ? S8("-fno-plt") : S8("-fplt"),
+                                S8("-c"), source, S8("-o"), objects[module]};
+            prepared = prepared && compiler_driver_test_image_host_compile(arena, compile, BUSTER_ARRAY_LENGTH(compile));
+            BUSTER_TEST(arguments, prepared);
+            if (prepared)
+            {
+                FileMapRead map = file_map_read(arena, objects[module], (FileReadOptions){0});
+                ObjectFile object = object_read(arena, map.bytes, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX});
+                BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE);
+                for (u32 row = 0; object.error == OBJECT_ERROR_NONE && row < object.relocation_count; row += 1)
+                {
+                    tls_sites += object.relocations[row].kind == OBJECT_RELOCATION_X86_64_TLSGD;
+                }
+                file_map_unmap(map);
+            }
+        }
+        BUSTER_TEST(arguments, tls_sites == SITE_COUNT);
+        u64 preparation_ns = main_preparation_ns + timestamp_ns_between(variant_preparation_start, timestamp_take());
+        String8 archive = string_format_z(arena, S8("{S8}/sites-{u32}.a"), directory, variant);
+        if (prepared && archiver.length)
+        {
+            String8 command[] = {archiver, S8("rcs"), archive, objects[0], objects[1], objects[2], objects[3]};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            ProcessWaitResult waited = child.handle ? os_process_wait_deadline(arena, child, 30000000) : (ProcessWaitResult){0};
+            prepared = child.handle && !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST(arguments, prepared);
+        }
+        for (u32 use_archive = 0; prepared && use_archive < (archiver.length ? 2u : 1u); use_archive += 1)
+        {
+            for (u32 pie = 0; pie < 2; pie += 1)
+            {
+                String8 output = string_format_z(arena, S8("{S8}/buster-{u32}-{u32}-{u32}"), directory, variant, use_archive, pie);
+                String8 reference = string_format_z(arena, S8("{S8}/reference-{u32}-{u32}-{u32}"), directory, variant, use_archive, pie);
+                String8 reference_args[] = {pie ? S8("-pie") : S8("-no-pie"), main_object,
+                    use_archive ? archive : objects[0], use_archive ? S8("-g") : objects[1],
+                    use_archive ? S8("-g") : objects[2], use_archive ? S8("-g") : objects[3], S8("-o"), reference};
+                String8 transcript = {0};
+                bool oracle = compiler_driver_test_image_host_compile(arena, reference_args, BUSTER_ARRAY_LENGTH(reference_args)) &&
+                              compiler_driver_test_image_run(arguments, arena, &reference, 1, directory, &transcript);
+                BUSTER_TEST(arguments, oracle);
+                u64 first_hash = 0;
+                Arena* invocation_arena = arena_create((ArenaCreation){0});
+                u64 invocation_start = invocation_arena->position;
+                for (u32 sample = 0; sample < (benchmark ? 8u : 1u); sample += 1)
+                {
+                    String8 command[] = {S8("-g0"), pie ? S8("-pie") : S8("-no-pie"), main_object,
+                        use_archive ? archive : objects[0], use_archive ? S8("-g0") : objects[1],
+                        use_archive ? S8("-g0") : objects[2], use_archive ? S8("-g0") : objects[3], S8("-o"), output};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(invocation_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    TimeDataType start = timestamp_take();
+                    CompilerDriverResult linked = compiler_driver_execute_invocation(invocation_arena, invocation);
+                    u64 elapsed = timestamp_ns_between(start, timestamp_take());
+                    if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+                        arguments->show(arguments, S8("TLS site link: {S8}\n"), linked.diagnostic);
+                    BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                        u64 hash = buster_hash_64(bytes.pointer, bytes.length);
+                        BUSTER_TEST(arguments, bytes.length && compiler_driver_test_elf_section(bytes, S8(".debug_info")).length &&
+                            compiler_driver_test_elf_section(bytes, S8(".eh_frame")).length);
+                        BUSTER_TEST(arguments, !sample || hash == first_hash);
+                        first_hash = hash;
+                        arguments->show(arguments, S8("LINK_TLS_ARTIFACT variant={u32} archive={u32} pie={u32} sample={u32} "
+                            "compiler_ns=0 link_ns={u64} total_artifact_ns={u64} host_preparation_ns={u64} bytes={u64} hash={u64}\n"),
+                            variant, use_archive, pie, sample, elapsed, elapsed, preparation_ns, bytes.length, hash);
+                        BUSTER_TEST(arguments, compiler_driver_test_image_run(arguments, arena, &output, 1, directory, &transcript));
+                        if (inspector.length)
+                        {
+                            String8 inspect[] = {inspector, S8("-W"), S8("-h"), S8("-l"), S8("-S"), S8("-r"), S8("-s"), output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(inspect), (SliceString8){0}, (SliceString8){0},
+                                (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                     .use_process_environment = true, .search_path = true});
+                            ProcessWaitResult inspected = child.handle ? os_process_wait_deadline(arena, child, 30000000) : (ProcessWaitResult){0};
+                            BUSTER_TEST(arguments, child.handle && !inspected.timed_out && inspected.result == PROCESS_RESULT_SUCCESS);
+                            if (saved.length && child.handle)
+                            {
+                                String8 report = string_format_z(arena, S8("{S8}.readelf.txt"), output);
+                                BUSTER_TEST(arguments, file_write(report, inspected.streams[STANDARD_STREAM_OUTPUT]));
+                            }
+                        }
+                    }
+                    arena_set_position(invocation_arena, invocation_start);
+                }
+                arena_destroy(invocation_arena, 1);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // Local-dynamic TLS from foreign objects (issue 1711): GCC and Clang emit
 // R_X86_64_TLSLD plus DTPOFF32 for a file-local __thread under -fPIC -O2,
 // with the __tls_get_addr call direct, through its GOT slot (-fno-plt), and
@@ -16265,6 +16415,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_position_independent_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_dynamic_tls);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_link_tls_sites);
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
