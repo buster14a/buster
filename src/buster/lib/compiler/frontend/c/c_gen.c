@@ -48767,17 +48767,17 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
             return false;
         }
         String8 member = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]);
-        IrField* field = 0;
-        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-        {
-            if (string_equal(type->fields[field_index].name, member)) { field = type->fields + field_index; break; }
-        }
-        if (!field || offset > UINT64_MAX - field->offset)
+        // Use the same bounded promoted-member path as ordinary member
+        // access so anonymous struct/union edges contribute their offsets.
+        CIrPromotedMemberPath path = {0};
+        if (!c_ir_promoted_member_path(builder, type_id, member, &path) || !path.field || path.field->is_bit_field ||
+            offset > UINT64_MAX - path.offset)
         {
             return false;
         }
-        offset += field->offset;
-        type = ir_type_from_id(&builder->program->types, field->type);
+        offset += path.offset;
+        type_id = path.type;
+        type = ir_type_from_id(&builder->program->types, type_id);
         index += 1;
         // C11 7.19p3 lets the member designator subscript as well as select,
         // and musl's ioctl.c writes `offsetof(struct v4l2_event, ts[0])` in a
@@ -48793,12 +48793,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
             {
                 return false;
             }
+            // The index query can grow the type table. Retain the element
+            // ID before it runs, then fetch the current row afterward.
+            IrTypeId element_type = type->element_type;
             CIrConstantValue subscript = {0};
             if (!c_ir_query_constant(builder, index + 1, close, &subscript) || subscript.kind != C_IR_CONSTANT_INTEGER)
             {
                 return false;
             }
-            IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
+            IrType* element = ir_type_from_id(&builder->program->types, element_type);
             if (!element || !element->layout.resolved)
             {
                 return false;
@@ -48813,6 +48816,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
                 return false;
             }
             offset += element_offset;
+            type_id = element_type;
             type = element;
             index = close + 1;
         }

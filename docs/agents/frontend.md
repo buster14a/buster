@@ -285,3 +285,14 @@ matches a complete subobject. Record identity and existing qualified views
 determine whole-object copies. Runtime initialization and incomplete-array
 inference share the same type predicate and retain cursor advancement, string
 initializers and scalar elision.
+
+Transparent-union pointer members use the existing pointer conversion rules:
+matching pointees may gain const or volatile qualifiers, while qualifier loss,
+atomic mismatch and distinct record tags remain incompatible. The selected
+member keeps the existing first-member ABI and complete union storage.
+
+Constant `__builtin_offsetof` expressions follow promoted anonymous members
+through the existing bounded member-path query and retain the selected type
+across array subscripts. A bound builtin name is accepted in a static initializer
+only when the typed evaluator proves the complete type/member expression to be
+an integer constant; ordinary function calls retain their diagnostic.

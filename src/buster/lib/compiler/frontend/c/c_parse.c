@@ -23897,10 +23897,21 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
                 {
                     CTypeId a = from.element_type;
                     CTypeId b = result->types[field.value].element_type;
-                    compatible |= a.value < result->type_count && b.value < result->type_count &&
-                                  (result->types[a.value].kind == C_TYPE_VOID || result->types[b.value].kind == C_TYPE_VOID ||
-                                   c_parse_types_compatible(machine->scratch_arena, result, preprocess, a, b)) &&
-                                  (!result->types[a.value].is_const || result->types[b.value].is_const);
+                    if (a.value < result->type_count && b.value < result->type_count)
+                    {
+                        CType source_pointee = result->types[a.value];
+                        CType member_pointee = result->types[b.value];
+                        bool void_compatible = source_pointee.kind == C_TYPE_VOID || member_pointee.kind == C_TYPE_VOID;
+                        bool drops_qualifier = (source_pointee.is_const && !member_pointee.is_const) ||
+                                               (source_pointee.is_volatile && !member_pointee.is_volatile) ||
+                                               (source_pointee.is_restrict && !member_pointee.is_restrict);
+                        // Pointer parameters may add qualifiers to a matching
+                        // pointee. Keep atomic identity and qualifier losses
+                        // checked before the existing unqualified conversion.
+                        bool atomic_compatible = void_compatible || source_pointee.is_atomic == member_pointee.is_atomic;
+                        compatible |= !drops_qualifier && atomic_compatible &&
+                                      (void_compatible || c_parse_cleanup_pointer_conversion(machine->scratch_arena, result, preprocess, a, b));
+                    }
                 }
                 else if (!source_pointer && field_pointer)
                     compatible |= c_parse_range_is_null_pointer_constant(machine->scratch_arena, preprocess, result, scope, source, start, end);
@@ -25033,7 +25044,22 @@ BUSTER_C_INTERNAL u32 c_parse_static_initializer_call(CTypeParseMachine* machine
                     CEntity value = result->entities[entity.value];
                     if (parenthesized && value.kind == C_ENTITY_FUNCTION)
                     {
-                        bad = cursor;
+                        // A declaration can bind the builtin name. Accept only
+                        // its type/member form when the typed evaluator proves
+                        // a constant; an ordinary same-name call stays a call.
+                        bool constant_builtin = false;
+                        if (string_equal(name, S8("__builtin_offsetof")))
+                        {
+                            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor + 1);
+                            if (close < frame->end)
+                            {
+                                CParseConstant value_constant = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope,
+                                                                                       cursor, close + 1);
+                                constant_builtin = value_constant.valid && !value_constant.is_float;
+                                if (constant_builtin) frame->cursor = close + 1;
+                            }
+                        }
+                        if (!constant_builtin) bad = cursor;
                     }
                     bool automatic = (value.kind == C_ENTITY_LOCAL || value.kind == C_ENTITY_PARAMETER) && !value.is_static_storage;
                     bool address = cursor > start && c_token_is_punctuator(&preprocess.tokens[cursor - 1], C_PUNCTUATOR_AMPERSAND);
