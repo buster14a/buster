@@ -77,6 +77,9 @@ struct IrOracleRun
     u32 depth;
     u32 steps;
     u32 limit;
+    u32 last_row;
+    u32 last_opcode;
+    IrFunction* last_function;
     IrOracleStatus status;
     IrOracleValue returned;
 };
@@ -533,6 +536,9 @@ BUSTER_GLOBAL_LOCAL IrOracleRun* ir_oracle_evaluate(Arena* arena, IrProgram* pro
             else
             {
                 IrInstruction* row = current->instructions + frame->row;
+                run->last_row = frame->row;
+                run->last_opcode = row->opcode;
+                run->last_function = current;
                 IrType* type = ir_oracle_type(program, row->canonical_type);
                 IrOracleValue operands[IR_ORACLE_ARGUMENTS + 1] = {0};
                 if (row->operand_count > IR_ORACLE_ARGUMENTS + 1) run->status = IR_ORACLE_UNSUPPORTED;

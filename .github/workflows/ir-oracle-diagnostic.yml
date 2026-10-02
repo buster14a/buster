@@ -1,7 +1,8 @@
 name: IR oracle focused diagnostic
 on:
   push:
-    branches: [codex/2229-canonical-ir-oracle]
+    branches:
+      - codex/2229-canonical-ir-oracle
 permissions:
   contents: read
 jobs:

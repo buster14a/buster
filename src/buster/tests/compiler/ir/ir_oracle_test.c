@@ -408,7 +408,7 @@ BUSTER_GLOBAL_LOCAL bool ir_oracle_record_number(String8 block, u64* cursor)
         else value = value * 10 + digit;
         *cursor += 1;
     }
-    return valid && *cursor > start;
+    return valid && *cursor > start && (*cursor == start + 1 || block.pointer[start] != '0');
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_oracle_record(Arena* arena, String8 output, u32 fixture, String8* block_out)
@@ -441,6 +441,40 @@ BUSTER_GLOBAL_LOCAL bool ir_oracle_record(Arena* arena, String8 output, u32 fixt
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_report_controls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 valid = S8("IR_ORACLE_BEGIN_V1\n");
+    for (u32 i = 0; i < IR_ORACLE_INPUTS; i += 1)
+        valid = string_format(arguments->arena, S8("{S8}IR_ORACLE_V1 fixture=0 input={u32} return=0 memory=0\n"), valid, i);
+    valid = string_format(arguments->arena, S8("{S8}IR_ORACLE_END_V1\n"), valid);
+    String8 block;
+    BUSTER_TEST(arguments, ir_oracle_record(arguments->arena, valid, 0, &block) && string_equal(block, valid));
+    String8 invalid[] = {
+        S8(""), S8("IR_ORACLE_BEGIN_V1\nIR_ORACLE_END_V1\n"),
+        S8("IR_ORACLE_BEGIN_V1\nIR_ORACLE_V1 fixture=0 input=1 return=0 memory=0\nIR_ORACLE_END_V1\n"),
+        S8("IR_ORACLE_BEGIN_V1\nIR_ORACLE_V1 fixture=0 input=0 return=18446744073709551616 memory=0\nIR_ORACLE_END_V1\n"),
+        S8("IR_ORACLE_BEGIN_V1\nIR_ORACLE_V1 fixture=0 input=0 return=00 memory=0\nIR_ORACLE_END_V1\n"),
+        string_format(arguments->arena, S8("{S8}{S8}"), valid, valid),
+    };
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
+        BUSTER_TEST(arguments, !ir_oracle_record(arguments->arena, invalid[i], 0, &block));
+    ProcessWaitResult wait = {.result = PROCESS_RESULT_SUCCESS};
+    BUSTER_TEST(arguments, ir_oracle_clean(wait));
+    wait.timed_out = true;
+    BUSTER_TEST(arguments, !ir_oracle_clean(wait));
+    wait.timed_out = false;
+    wait.capture_failed = true;
+    BUSTER_TEST(arguments, !ir_oracle_clean(wait));
+    wait.capture_failed = false;
+    wait.process_group_ownership_lost = true;
+    BUSTER_TEST(arguments, !ir_oracle_clean(wait));
+    wait.process_group_ownership_lost = false;
+    wait.result = PROCESS_RESULT_FAILED;
+    BUSTER_TEST(arguments, !ir_oracle_clean(wait));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -457,8 +491,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
             {
                 IrOracleValue inputs[] = {ir_oracle_integer(ir_oracle_inputs[input][0]), ir_oracle_integer(ir_oracle_inputs[input][1])};
                 IrOracleRun* run = ir_oracle_evaluate(arguments->arena, program, program->modules, probe, inputs, 2, IR_ORACLE_STEPS);
+                if (run->status != IR_ORACLE_OK)
+                    arguments->show(arguments, S8("IR_ORACLE_REJECT_V1 fixture={u32} input={u32} status={u32} steps={u32} function={S8} row={u32} opcode={u32}\n"),
+                                    fixture, input, (u32)run->status, run->steps, run->last_function ? run->last_function->name : S8("preflight"),
+                                    run->last_row, run->last_opcode);
                 BUSTER_TEST(arguments, run->status == IR_ORACLE_OK && run->returned.defined && run->returned.kind == IR_ORACLE_INTEGER);
-                evaluated = evaluated && run->status == IR_ORACLE_OK;
                 u64 memory = 0;
                 if (run->status == IR_ORACLE_OK && program->modules->global_count == 1)
                 {
@@ -466,6 +503,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
                     memory = ir_oracle_memory(run, pointer, 8, false, 0).bits;
                     BUSTER_TEST(arguments, run->status == IR_ORACLE_OK);
                 }
+                bool observed = run->status == IR_ORACLE_OK && run->returned.defined &&
+                                run->returned.kind == IR_ORACLE_INTEGER && program->modules->global_count == 1;
+                evaluated = evaluated && observed;
                 u64 a = ir_oracle_inputs[input][0], b = ir_oracle_inputs[input][1];
                 u64 literal_return;
                 u64 literal_memory;
@@ -525,7 +565,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
                         (SliceString8){keys, count}, (SliceString8){values, count},
                         (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                            .new_process_group = true, .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL,
+                            .new_process_group = true, .search_path = true, .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL,
                             .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = 32768, [STANDARD_STREAM_ERROR] = 4096}, .total = 36864}});
                     if (BUSTER_REQUIRE(arguments, spawn.handle))
                     {
@@ -560,6 +600,7 @@ UnitTestResult ir_oracle_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, ir_oracle_scalar_controls);
     BUSTER_TEST_FIXTURE(arguments, ir_oracle_rejection_controls);
+    BUSTER_TEST_FIXTURE(arguments, ir_oracle_report_controls);
     BUSTER_TEST_FIXTURE(arguments, ir_oracle_comparison);
     return result;
 }
