@@ -610,6 +610,13 @@ without facts for identical bitcode and diagnostics.
   zeroed overwritten slots, complete-aggregate replacement and sibling
   retention across target layouts and both frontend forms, plus native runs
   through all four allocators.
+- Promoted initializer members retain the selected canonical union type and
+  union-member index separately from the outer aggregate's projection slot.
+  Clearing compares that identity and the union's object offset, so switching
+  promoted anonymous-union members resets the complete union while consecutive
+  writes into the same member preserve its other subobjects.
+  `c_test_promoted_union_initializer_overrides` covers numeric/pointer switches,
+  same-member preservation, nested anonymous promotion and named-union controls.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.

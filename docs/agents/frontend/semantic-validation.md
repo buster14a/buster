@@ -25,6 +25,9 @@ uses its for-initializer context to reject typedefs, static/extern/thread-local
 objects, function declarations, and tags or enumerators introduced by direct
 aggregate specifiers. References to existing tags and typedefs remain valid,
 as do automatic function pointers. C23 removes this contextual restriction.
+Wrapped `_Atomic` and GNU `typeof` specifiers also check their direct tag tokens
+against the existing tag index, so newly introduced incomplete tags cannot
+escape the rule merely because the specifier returns a pointer type.
 The diagnostic belongs to the declaration's first specifier; binding continues
 so uses of the rejected declaration do not create secondary name diagnostics.
 Initializer-nested expression declarations retain their separate context.
@@ -186,6 +189,20 @@ on both paths; C17 6.7.3p10 qualifies its element instead.
 The embedded modification-destination sources in `compiler_driver_tests`
 run these shapes under every allocator and both frontend forms; the
 equivalence table holds their rejected neighbours.
+
+The indexing scan distinguishes an array declarator from a subscript by its
+parsed `CArrayBound` bracket identity. One scratch bit per source token records
+the real opening brackets before body validation; synthetic inferred bounds
+have no bracket identity, and cloned bounds retain the original one. Expression
+record prebinding also recognizes leading type qualifiers before `struct` or
+`union`, so their member bounds exist before this role snapshot. The mask
+outlives each body's scratch checkpoint and skips only the declarator opener,
+so `int c; struct T { char c[8]; };` respects the separate member namespace
+(C17 6.2.3p1), while invalid subscripts inside a bound remain checked.
+`c_test_member_array_declarators` covers tag-only and object declarations,
+unions, shadowing, macros, derived members and expression neighbours through
+semantics-only analysis and both canonical frontend forms. Its runtime source
+checks member storage under all four native allocators and both forms.
 
 `c_parse_validate_label_values` walks a body's assignment, return and call
 values -- one scope-chain entity lookup per identifier -- only when

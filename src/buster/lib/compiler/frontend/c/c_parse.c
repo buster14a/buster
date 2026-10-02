@@ -18736,6 +18736,27 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             bool specifier_definition = declared.definition_start >= start && declared.definition_start < declarator_start;
             invalid |= declared.tag.length != 0 && declared.tag_scope.value == scope.value && (type_index == base.value || specifier_definition);
         }
+        // A wrapped specifier such as _Atomic(struct New *) returns a
+        // pointer base; its new incomplete tag has no definition range.
+        // Look up tag tokens only inside the direct specifier span, keeping
+        // types prepared from initializer expressions outside this check.
+        for (u32 token_index = start; !invalid && specifier_type_start < result->type_count && token_index < declarator_start; token_index += 1)
+        {
+            CToken token = preprocess.tokens[token_index];
+            if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_AGGREGATE_KEYWORDS))
+            {
+                u32 tag_index = c_parse_skip_attributes(preprocess, token_index + 1, declarator_start);
+                if (tag_index < declarator_start && preprocess.tokens[tag_index].kind == C_TOKEN_IDENTIFIER)
+                {
+                    CTypeId tagged = c_parse_tag_lookup(result, c_token_spelling(preprocess.spelling_base, preprocess.tokens[tag_index]), scope);
+                    if (tagged.value >= specifier_type_start && tagged.value < result->type_count)
+                    {
+                        CType declared = result->types[tagged.value];
+                        invalid = declared.tag_scope.value == scope.value && !declared.definition_start;
+                    }
+                }
+            }
+        }
         if (invalid)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -20578,6 +20599,13 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
             continue;
         }
         u32 keyword = index + 1;
+        CType qualifiers = {0};
+        while (keyword < body_end && c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[keyword], &qualifiers)) keyword += 1;
+        // Qualified record type names also own member declarator brackets.
+        // Keep the existing enum publication path and storage syntax intact.
+        if (keyword != index + 1 && (keyword >= body_end ||
+            !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[keyword],
+                C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION)))) continue;
         u32 close = 0;
         if (!c_parse_aggregate_definition_at(preprocess, keyword, body_end, &close))
         {
@@ -23626,7 +23654,8 @@ BUSTER_C_INTERNAL bool c_parse_assignment_identifier_is_operand(CPreprocessResul
 }
 
 BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                            CDeclaration const* declaration, u8 const* skipped, u32 first_local, u32 const* next_local, CParseLoweringConstraintDiagnostic* diagnostic)
+                                                            CDeclaration const* declaration, u8 const* skipped, u64 const* array_declarator_openers,
+                                                            u32 first_local, u32 const* next_local, CParseLoweringConstraintDiagnostic* diagnostic)
 {
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
@@ -23755,6 +23784,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             }
         }
         if (index > start && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) &&
+            !(array_declarator_openers && (array_declarator_openers[index >> 6] & (UINT64_C(1) << (index & 63)))) &&
             c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]))
         {
             u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
@@ -27292,6 +27322,34 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
                                                          S8("an identifier with variably modified type must have no linkage"));
         }
     }
+    // Member declarators share a spelling with ordinary identifiers, but their
+    // brackets are not subscript expressions. Retain only the opening token's
+    // role: expressions nested inside the bound must still be checked. Build
+    // this once outside the per-body scratch checkpoints, using parsed bounds
+    // rather than guessing from visible names or declaration token ranges.
+    u64* array_declarator_openers = 0;
+    if (result->array_bound_count && preprocess.token_count)
+    {
+        u64 word_count = (preprocess.token_count + 63) >> 6;
+        array_declarator_openers = arena_allocate(machine->scratch_arena, u64, word_count);
+        memset(array_declarator_openers, 0, sizeof(*array_declarator_openers) * word_count);
+        for (u32 bound_index = 0; bound_index < result->array_bound_count; bound_index += 1)
+        {
+            CArrayBound bound = result->array_bounds[bound_index];
+            // Synthetic inferred bounds have no source bracket. Copies of a
+            // source bound retain its coordinates and mark the same bit.
+            if (!bound.token_start || bound.token_start >= preprocess.token_count ||
+                bound.token_count >= preprocess.token_count - bound.token_start) continue;
+            u32 open = bound.token_start - 1;
+            u32 close = bound.token_start + bound.token_count;
+            if (c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_BRACKET) &&
+                c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_RIGHT_BRACKET) &&
+                c_parse_matching_delimiter_indexed(result, preprocess, open) == close)
+            {
+                array_declarator_openers[open >> 6] |= UINT64_C(1) << (open & 63);
+            }
+        }
+    }
     for (u32 declaration_index = 0; declaration_index < result->declaration_count; declaration_index += 1)
     {
         CDeclaration* declaration = result->declarations + declaration_index;
@@ -27358,7 +27416,8 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         machine->runtime_expression_constraints = true;
         c_parse_validate_generic_duplicates(machine, arena, result, preprocess, declaration, skipped, &diagnostic);
         c_parse_validate_named_call_arities(arena, result, preprocess, declaration, skipped, &diagnostic);
-        c_parse_validate_const_assignments(machine, result, preprocess, declaration, skipped, first_local[declaration_index], next_local, &diagnostic);
+        c_parse_validate_const_assignments(machine, result, preprocess, declaration, skipped, array_declarator_openers,
+                                           first_local[declaration_index], next_local, &diagnostic);
         CParseInitializerDiagnostic sizeof_operand = c_parse_validate_sizeof_operands(machine, result, preprocess, declaration->scope,
             declaration->body_start, declaration->body_start + declaration->body_token_count);
         c_parse_lowering_constraint_consider(&diagnostic, sizeof_operand.message, sizeof_operand.token, sizeof_operand.token);

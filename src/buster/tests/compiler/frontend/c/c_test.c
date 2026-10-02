@@ -3569,6 +3569,222 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_positional_initializer_relocations(Uni
     return result;
 }
 
+typedef struct CTestPromotedUnionInitializerCase CTestPromotedUnionInitializerCase;
+struct CTestPromotedUnionInitializerCase
+{
+    String8 name;
+    String8 declaration;
+    String8 runtime_check;
+    String8 relocation_names[2];
+    u32 relocation_slots[2];
+    u32 relocation_count;
+    u32 integers[4];
+    u32 integer_count;
+    u32 pointer_count;
+    bool zero_second_pointer;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 prefix = S8(
+        "int a, b, c;\n"
+        "struct UnionNumbers { union { struct { int x, y; } pair; struct { int x; short y; } other; }; };\n"
+        "struct UnionPointers { union { struct { int *p, *q; } pair; struct { int *p; int q; } other; }; };\n"
+        "struct NestedNumbers { struct { union { struct { int x, y; } pair; struct { int x; short y; } other; }; }; };\n"
+        "union NamedNumbers { struct { int x, y; } pair; struct { int x; short y; } other; };\n"
+        "union DistinctNumbers { struct UnionNumbers promoted; union NamedNumbers named; };\n"
+        "union PromotedNumbers { struct { int x,y; }; struct { int z; short w; } other; };\n");
+    // The byte images and survivor records are literal C expectations, not
+    // results computed through the promoted-member path under test.
+    CTestPromotedUnionInitializerCase cases[] = {
+        {
+            .name = S8("numbers_switch"),
+            .declaration = S8("struct UnionNumbers numbers_switch = {.pair = {7, 9}, .other.x = 3};\n"),
+            .runtime_check = S8("numbers_switch.other.x == 3 && numbers_switch.other.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("pointers_switch"),
+            .declaration = S8("struct UnionPointers pointers_switch = {.pair = {&a, &b}, .other.p = &c};\n"),
+            .runtime_check = S8("pointers_switch.other.p == &c && pointers_switch.other.q == 0"),
+            .relocation_names = {S8("c")}, .relocation_slots = {0}, .relocation_count = 1,
+            .pointer_count = 2, .zero_second_pointer = true,
+        },
+        {
+            .name = S8("numbers_preserve"),
+            .declaration = S8("struct UnionNumbers numbers_preserve = {.pair.x = 7, .pair.y = 9};\n"),
+            .runtime_check = S8("numbers_preserve.pair.x == 7 && numbers_preserve.pair.y == 9"),
+            .integers = {7, 9}, .integer_count = 2,
+        },
+        {
+            .name = S8("pointers_preserve"),
+            .declaration = S8("struct UnionPointers pointers_preserve = {.pair.p = &a, .pair.q = &b};\n"),
+            .runtime_check = S8("pointers_preserve.pair.p == &a && pointers_preserve.pair.q == &b"),
+            .relocation_names = {S8("a"), S8("b")}, .relocation_slots = {0, 1}, .relocation_count = 2, .pointer_count = 2,
+        },
+        {
+            .name = S8("nested_switch"),
+            .declaration = S8("struct NestedNumbers nested_switch = {.pair = {7, 9}, .other.x = 3};\n"),
+            .runtime_check = S8("nested_switch.other.x == 3 && nested_switch.other.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("named_switch"),
+            .declaration = S8("union NamedNumbers named_switch = {.pair = {7, 9}, .other.x = 3};\n"),
+            .runtime_check = S8("named_switch.other.x == 3 && named_switch.other.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("regions_preserve"),
+            .declaration = S8("struct UnionNumbers regions_preserve[2] = {[0].pair = {7, 9}, [1].pair.x = 3, [1].pair.y = 5};\n"),
+            .runtime_check = S8("regions_preserve[0].pair.x == 7 && regions_preserve[0].pair.y == 9 && regions_preserve[1].pair.x == 3 && regions_preserve[1].pair.y == 5"),
+            .integers = {7, 9, 3, 5}, .integer_count = 4,
+        },
+        {
+            .name = S8("distinct_switch"),
+            .declaration = S8("union DistinctNumbers distinct_switch = {.promoted.pair = {7, 9}, .named.pair.x = 3};\n"),
+            .runtime_check = S8("distinct_switch.named.pair.x == 3 && distinct_switch.named.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("anonymous_member_preserve"),
+            .declaration = S8("union PromotedNumbers anonymous_member_preserve = {.x = 7, .y = 9};\n"),
+            .runtime_check = S8("anonymous_member_preserve.x == 7 && anonymous_member_preserve.y == 9"),
+            .integers = {7, 9}, .integer_count = 2,
+        },
+        {
+            .name = S8("anonymous_member_switch"),
+            .declaration = S8("union PromotedNumbers anonymous_member_switch = {.x = 7, .y = 9, .other.z = 3};\n"),
+            .runtime_check = S8("anonymous_member_switch.other.z == 3 && anonymous_member_switch.other.w == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_WASM32, .os = OPERATING_SYSTEM_WASI},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CTestPromotedUnionInitializerCase* expected = cases + row;
+                Target target = targets[target_index];
+                String8 source = string_format(temporary.arena, S8("{S8}{S8}"), prefix, expected->declaration);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                bool valid = !tokens.diagnostic_count && !syntax.diagnostic_count && !semantic.diagnostic_count && semantic.analysis_complete;
+                String8 diagnostic = semantic.diagnostic_count ? semantic.diagnostics[0].message : S8("");
+                if (valid)
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("promoted-union-initializer.c"), tokens, semantic, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    valid = lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified && lowered.program->module_count == 1;
+                    if (lowered.diagnostic_count) diagnostic = lowered.diagnostics[0].message;
+                    if (valid)
+                    {
+                        IrModule* module = lowered.program->modules;
+                        IrGlobal* global = 0;
+                        for (u32 index = 0; index < module->global_count; index += 1)
+                        {
+                            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, module->globals[index].symbol);
+                            if (symbol && string_equal(symbol->name, expected->name)) global = module->globals + index;
+                        }
+                        u64 pointer_size = lowered.program->data_layout.pointer.size;
+                        u64 expected_size = expected->integer_count * 4 + expected->pointer_count * pointer_size;
+                        IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                        valid = global && type && type->layout.resolved && type->layout.size == expected_size &&
+                                global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.pointer && global->bytes.length == expected_size &&
+                                global->relocation_count == expected->relocation_count &&
+                                ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE;
+                        for (u32 record = 0; valid && record < expected->relocation_count; record += 1)
+                        {
+                            IrGlobalRelocation* relocation = global->relocations + record;
+                            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, relocation->symbol);
+                            valid = symbol && string_equal(symbol->name, expected->relocation_names[record]) &&
+                                    relocation->offset == expected->relocation_slots[record] * pointer_size;
+                        }
+                        for (u32 integer = 0; valid && integer < expected->integer_count; integer += 1)
+                        {
+                            u32 value = 0;
+                            for (u32 byte = 0; byte < 4; byte += 1)
+                            {
+                                u32 shift = lowered.program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte : 3 - byte;
+                                value |= (u32)global->bytes.pointer[integer * 4 + byte] << (shift * 8);
+                            }
+                            valid = value == expected->integers[integer];
+                        }
+                        if (valid && expected->zero_second_pointer)
+                        {
+                            for (u64 byte = pointer_size; valid && byte < 2 * pointer_size; byte += 1) valid = global->bytes.pointer[byte] == 0;
+                        }
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, valid,
+                    string_format(temporary.arena, S8("promoted union initializer {S8} target={u32} form={u32}: {S8}"),
+                                  expected->name, target_index, form, diagnostic));
+                scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = prefix;
+    String8 checks = S8("int main(void) { unsigned failures = 0;\n");
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        source = string_format(arguments->arena, S8("{S8}{S8}"), source, cases[row].declaration);
+        checks = string_format(arguments->arena, S8("{S8}failures += !({S8});\n"), checks, cases[row].runtime_check);
+    }
+    source = string_format(arguments->arena, S8("{S8}{S8}return failures != 0; }}\n"), source, checks);
+    String8 input = buster_test_temporary_path(arguments->arena, S8("promoted-union-initializer"), S8(".c"));
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("promoted-union-initializer-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("promoted union initializer {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("promoted union initializer runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5282,6 +5498,146 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_array_declarators(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 name;
+        String8 source;
+        u32 value;
+    } cases[] = {
+        {S8("member_tag"), S8("int member_tag(void) { int c = 7; struct T { char c[8]; }; return c; }\n"), 7},
+        {S8("member_object"), S8("int member_object(void) { int c = 4; struct T { char c[3]; } t = {{1, 2, 3}}; return c + t.c[1]; }\n"), 6},
+        {S8("member_union"), S8("int member_union(void) { unsigned c = 5; union { char c[8]; unsigned wc[2]; } t = {{1, 2, 3}}; return c + t.c[2]; }\n"), 8},
+        {S8("member_file_name"), S8("int c = 9; int member_file_name(void) { struct T { char c[8]; }; return c; }\n"), 9},
+        {S8("member_pointer"), S8("int member_pointer(void) { int value = 3; int *c = &value; struct T { char c[2]; } t = {{4, 5}}; return *c + t.c[1]; }\n"), 8},
+        {S8("member_shadow"), S8("int member_shadow(void) { int c = 2; { int c = 6; struct T { char c[8]; }; if (c != 6) return 1; } return c; }\n"), 2},
+        {S8("member_nested"), S8("int member_nested(void) { int c = 4; struct Outer { struct { union { char c[3]; int other; } u; } inner; } t = {{{{1, 2, 3}}}}; return c + t.inner.u.c[2]; }\n"), 7},
+        {S8("member_macro"), S8("#define MEMBER_ARRAY(name) char name[4]\nint member_macro(void) { int c = 5; struct T { MEMBER_ARRAY(c); } t = {{1, 2, 3, 4}}; return c + t.c[3]; }\n#undef MEMBER_ARRAY\n"), 9},
+        {S8("member_multidimensional"), S8("int member_multidimensional(void) { int c = 2; struct T { char c[2][3]; } t = {{{1, 2, 3}, {4, 5, 6}}}; return c + t.c[1][2]; }\n"), 8},
+        {S8("member_derived"), S8("static int member_add_one(int x) { return x + 1; }\nint member_derived(void) { int c = 4; struct T { int (*c[2])(int); } t = {{member_add_one, member_add_one}}; return t.c[1](c); }\n"), 5},
+        {S8("member_typedef"), S8("int member_typedef(void) { typedef char C[3]; int c = 5; struct T { C c; } t = {{1, 2, 3}}; return c + t.c[1]; }\n"), 7},
+        {S8("member_conditional"), S8("int member_conditional(void) { int c = 2; struct T { char c[1 ? 3 : 2]; } t = {{1, 2, 3}}; return c + t.c[2]; }\n"), 5},
+        {S8("member_incomplete"), S8("int member_incomplete(void) { int c = 8; struct T { int n; char c[]; }; return c; }\n"), 8},
+        {S8("member_qualified_sizeof"), S8("int member_qualified_sizeof(void) { int c = 2; return c + sizeof(const struct { char c[8]; }); }\n"), 10},
+        {S8("member_qualified_union"), S8("int member_qualified_union(void) { int c = 3; return c + sizeof(const volatile union { char c[5]; char other[2]; }); }\n"), 8},
+        {S8("member_scalar"), S8("int member_scalar(void) { int c = 4; struct T { char c; } t = {3}; return c + t.c; }\n"), 7},
+    };
+    String8 refused[] = {
+        S8("int f(void) { int c = 0; return c[8]; }\n"),
+        S8("int f(void) { int c = 0; struct T { char a[c[0]]; }; return 0; }\n"),
+        S8("int f(void) { int c = 0; struct T { char a[sizeof(c[0])]; }; return 0; }\n"),
+        S8("int f(void) { struct T { int c; } t = {0}; return t.c[0]; }\n"),
+        S8("int f(void) { struct S { int c; } s = {0}; struct T { char a[sizeof(s.c[0])]; }; return 0; }\n"),
+        S8("int f(void) { int c = 0; return sizeof(const struct { char a[sizeof(c[0])]; }); }\n"),
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
+                                    C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    Target target = targets[target_index];
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, cases[row].source,
+                        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect]});
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    bool valid = !tokens.diagnostic_count && !syntax.diagnostic_count && !semantic.diagnostic_count && semantic.analysis_complete;
+                    String8 diagnostic = tokens.diagnostic_count ? tokens.diagnostics[0].message : syntax.diagnostic_count ? syntax.diagnostics[0].message :
+                                         semantic.diagnostic_count ? semantic.diagnostics[0].message : S8("");
+                    if (valid)
+                    {
+                        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("member-array.c"), tokens, semantic, target,
+                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        valid = lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified && lowered.program->module_count == 1;
+                        if (lowered.diagnostic_count) diagnostic = lowered.diagnostics[0].message;
+                        if (valid) valid = ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE;
+                    }
+                    BUSTER_TEST_RAW(arguments, valid,
+                        string_format(temporary.arena, S8("member array {S8} target={u32} dialect={u32} form={u32}: {S8}"),
+                            cases[row].name, target_index, dialect, form, diagnostic));
+                    scratch_end(temporary);
+                }
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(refused); row += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    Target target = targets[target_index];
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, refused[row],
+                        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect]});
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("member-array-invalid.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && semantic.diagnostic_count != 0 &&
+                        lowered.diagnostic_count != 0 && lowered.program == 0,
+                        string_format(temporary.arena, S8("member array invalid row={u32} target={u32} dialect={u32} form={u32}"),
+                            row, target_index, dialect, form));
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = S8("");
+    String8 checks = S8("int main(void) { unsigned failures = 0;\n");
+    // Each result is a literal independent C expectation; runtime member
+    // indexes also ensure declarator roles do not hide real expression uses.
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        source = string_format(arguments->arena, S8("{S8}{S8}"), source, cases[row].source);
+        checks = string_format(arguments->arena, S8("{S8}failures += {S8}() != {u32};\n"), checks, cases[row].name, cases[row].value);
+    }
+    source = string_format(arguments->arena, S8("{S8}{S8}return failures != 0; }}\n"), source, checks);
+    String8 input = buster_test_temporary_path(arguments->arena, S8("member-array"), S8(".c"));
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("member-array-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("member array {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("member array runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // C23 removes the for-declaration identifier restriction. Freeze both sides
 // of that dialect boundary, independent of syntax-only/lowering agreement.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_for_declaration_constraints(UnitTestArguments* arguments)
@@ -5321,6 +5677,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_for_declaration_constraints(UnitTestAr
         {{0}, S8("int x = ((struct { int y; }){ 1 }).y"), S8("x < 2"), S8("return x;"), false},
         {{0}, S8("struct New { int x; int y; } s = { 1, 2 }"), S8("s.x < 2"), S8("return s.x + s.y;"), true},
         {{0}, S8("union New { int x; long y; } u = { 1 }"), S8("u.x < 2"), S8("return u.x;"), true},
+        {{0}, S8("_Atomic(struct Wrapped *) p = 0"), S8("0"), S8("return p != 0;"), true},
+        {{0}, S8("_Atomic(union Wrapped *) p = 0"), S8("0"), S8("return p != 0;"), true},
+        {{0}, S8("__typeof__(struct Wrapped *) p = 0"), S8("0"), S8("return p != 0;"), true},
+        {{0}, S8("__typeof__(union Wrapped *) p = 0"), S8("0"), S8("return p != 0;"), true},
+        {{0}, S8("_Atomic(__typeof__(struct Wrapped *)) p = 0"), S8("0"), S8("return p != 0;"), true},
+        {S8("#define DECLARATION _Atomic(struct MacroTag *) p = 0\n"), S8("DECLARATION"), S8("0"), S8("return p != 0;"), true},
+        {S8("struct Outer;\n"), S8("_Atomic(struct Outer *) p = 0"), S8("0"), S8("return p != 0;"), false},
+        {S8("union Outer;\n"), S8("_Atomic(union Outer *) p = 0"), S8("0"), S8("return p != 0;"), false},
+        {S8("struct Outer;\n"), S8("__typeof__(struct Outer *) p = 0"), S8("0"), S8("return p != 0;"), false},
+        {S8("union Outer;\n"), S8("__typeof__(union Outer *) p = 0"), S8("0"), S8("return p != 0;"), false},
+        {S8("struct Outer;\n"), S8("_Atomic(__typeof__(struct Outer *)) p = 0"), S8("0"), S8("return p != 0;"), false},
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
                                      C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
@@ -32169,6 +32536,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_declaration_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_constraints);
+    BUSTER_TEST_FIXTURE(arguments, c_test_member_array_declarators);
     BUSTER_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
     BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
@@ -32177,6 +32545,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_positional_initializer_relocations);
+    BUSTER_TEST_FIXTURE(arguments, c_test_promoted_union_initializer_overrides);
 
     BUSTER_TEST_FIXTURE(arguments, c_test_member_search_scratch);
     BUSTER_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
