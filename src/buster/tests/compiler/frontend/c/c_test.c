@@ -24502,6 +24502,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_integer_unary_initializers(UnitTes
     return result;
 }
 
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 c_test_x87_unary_runtime_source(Arena* arena, CTestX87UnaryCase const* cases, u32 count)
 {
     String8* parts = arena_allocate(arena, String8, count * 4 + 4);
@@ -24532,6 +24533,8 @@ BUSTER_GLOBAL_LOCAL String8 c_test_x87_unary_runtime_source(Arena* arena, CTestX
     parts[used++] = S8("return failed; }\n");
     return string_join_arena(arena, (SliceString8){.pointer = parts, .length = used}, false);
 }
+
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_integer_unary_runtime(UnitTestArguments* arguments)
 {
