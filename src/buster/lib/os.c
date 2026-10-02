@@ -1994,7 +1994,44 @@ bool os_file_test_map_unavailable(String8 path)
 }
 #endif
 
-OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermissions permissions)
+BUSTER_GLOBAL_LOCAL bool os_file_create_mode_valid(OsFileCreateMode create_mode)
+{
+    bool result = true;
+    switch (create_mode.kind)
+    {
+        case OS_FILE_CREATE_MODE_DEFAULT:
+        case OS_FILE_CREATE_MODE_PRIVATE:
+        case OS_FILE_CREATE_MODE_EXECUTABLE:
+            result = create_mode.posix_permissions == 0;
+            break;
+        case OS_FILE_CREATE_MODE_EXPLICIT_POSIX:
+            result = create_mode.posix_permissions <= 0777;
+            break;
+        default:
+            result = false;
+            break;
+    }
+    return result;
+}
+
+#if !defined(_WIN32)
+BUSTER_GLOBAL_LOCAL u32 os_file_create_mode_posix_permissions(OsFileCreateMode create_mode)
+{
+    u32 result = 0644;
+    switch (create_mode.kind)
+    {
+        case OS_FILE_CREATE_MODE_DEFAULT: result = 0644; break;
+        case OS_FILE_CREATE_MODE_PRIVATE: result = 0600; break;
+        case OS_FILE_CREATE_MODE_EXECUTABLE: result = 0755; break;
+        case OS_FILE_CREATE_MODE_EXPLICIT_POSIX: result = create_mode.posix_permissions; break;
+        default: BUSTER_UNREACHABLE();
+    }
+    return result;
+}
+#endif
+
+OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
+                                      OsFileShareFlags share_flags)
 {
     OsFileDescriptor* result = 0;
     OsError error = {0};
@@ -2002,6 +2039,14 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
     bool selected = os_file_test_state.path.length && string_equal(path, os_file_test_state.path);
     const OsFileTestStep* step = selected ? os_file_test_take(OS_FILE_TEST_OPEN) : 0;
     if (step) error.v = (u32)step->value;
+#endif
+    if (!error.v && !os_file_create_mode_valid(create_mode)) error = os_file_invalid_error();
+#if defined(_WIN32)
+    if (!error.v && flags.create && (create_mode.kind == OS_FILE_CREATE_MODE_PRIVATE ||
+                                     create_mode.kind == OS_FILE_CREATE_MODE_EXPLICIT_POSIX))
+    {
+        error.v = (u32)ERROR_NOT_SUPPORTED;
+    }
 #endif
     if (path.pointer && !error.v)
     {
@@ -2011,6 +2056,7 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
             error = os_temporary_arena_error();
         }
 #if defined(__linux__) || defined(__APPLE__)
+        BUSTER_UNUSED(share_flags);
         String8Z path_z = {0};
         if (!error.v && !string8z_copy_arena(scratch.arena, path, &path_z))
         {
@@ -2019,15 +2065,15 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
         else if (!error.v)
         {
             int o = 0;
-            if (flags.read & flags.write)
+            if (access.read & access.write)
             {
                 o = O_RDWR;
             }
-            else if (flags.read)
+            else if (access.read)
             {
                 o = O_RDONLY;
             }
-            else if (flags.write)
+            else if (access.write)
             {
                 o = O_WRONLY;
             }
@@ -2040,7 +2086,7 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
             o |= (flags.create) * O_CREAT;
             o |= (flags.directory) * O_DIRECTORY;
 
-            mode_t mode = permissions.execute ? 0755 : 0644;
+            mode_t mode = (mode_t)os_file_create_mode_posix_permissions(create_mode);
             int fd;
             do
             {
@@ -2070,34 +2116,13 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
         DWORD flags_and_attributes = 0;
         HANDLE template_file = 0;
 
-        if (flags.read)
-        {
-            desired_access |= GENERIC_READ;
-        }
+        if (access.read) desired_access |= GENERIC_READ;
+        if (access.write) desired_access |= GENERIC_WRITE;
+        if (share_flags.read) shared_mode |= FILE_SHARE_READ;
+        if (share_flags.write) shared_mode |= FILE_SHARE_WRITE;
+        if (share_flags.delete) shared_mode |= FILE_SHARE_DELETE;
 
-        if (flags.write)
-        {
-            desired_access |= GENERIC_WRITE;
-        }
-
-        if (flags.execute)
-        {
-            desired_access |= GENERIC_EXECUTE;
-        }
-
-        if (permissions.read)
-        {
-            shared_mode |= FILE_SHARE_READ;
-        }
-
-        if (permissions.write)
-        {
-            shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-        }
-
-        // The creation disposition must come from the open flags, not the share
-        // mode: mapping "writable" to CREATE_ALWAYS truncated existing files on
-        // every open with write permission.
+        // Creation disposition depends only on the operation flags.
         if (flags.create && flags.truncate)
         {
             creation_disposition = CREATE_ALWAYS;
@@ -2148,9 +2173,10 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
     return (OsFileOpenResult){result, error};
 }
 
-OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions)
+OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
+                               OsFileShareFlags share_flags)
 {
-    return os_file_open_checked(path, flags, permissions).file;
+    return os_file_open_checked(path, flags, access, create_mode, share_flags).file;
 }
 
 // Neither platform's transfer primitive takes a u64 count: WriteFile/ReadFile
@@ -2580,7 +2606,7 @@ FileStats os_file_replacement_target_stats(String8 path)
 #define OS_FILE_STAGING_ATTEMPTS 64
 BUSTER_GLOBAL_LOCAL AtomicU64 os_file_staging_counter;
 
-OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions)
+OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OsFileCreateMode create_mode, OsFileShareFlags share_flags)
 {
     OsFileStagingResult result = {0};
     u64 validation_position = arena->position;
@@ -2609,6 +2635,14 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
     const OsFileTestStep* step = selected ? os_file_test_take(OS_FILE_TEST_OPEN) : 0;
     if (step) result.error.v = (u32)step->value;
 #endif
+    if (!result.error.v && !os_file_create_mode_valid(create_mode)) result.error = os_file_invalid_error();
+#if defined(_WIN32)
+    if (!result.error.v && (create_mode.kind == OS_FILE_CREATE_MODE_PRIVATE ||
+                            create_mode.kind == OS_FILE_CREATE_MODE_EXPLICIT_POSIX))
+    {
+        result.error.v = (u32)ERROR_NOT_SUPPORTED;
+    }
+#endif
     if (!result.error.v && (!destination_valid || !destination.length || destination.length == directory_length))
     {
         result.error = os_file_invalid_error();
@@ -2624,7 +2658,8 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
                                        OS_FILE_STAGING_SUFFIX);
         OsError error = {0};
 #if defined(__linux__) || defined(__APPLE__)
-        mode_t mode = permissions.execute ? 0755 : 0644;
+        BUSTER_UNUSED(share_flags);
+        mode_t mode = (mode_t)os_file_create_mode_posix_permissions(create_mode);
         String8Z path_z = {0};
         int fd = -1;
         if (!string8z_copy_arena(arena, path, &path_z))
@@ -2651,14 +2686,9 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
             error = os_file_invalid_error();
         }
         DWORD shared_mode = 0;
-        if (permissions.read)
-        {
-            shared_mode |= FILE_SHARE_READ;
-        }
-        if (permissions.write)
-        {
-            shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-        }
+        if (share_flags.read) shared_mode |= FILE_SHARE_READ;
+        if (share_flags.write) shared_mode |= FILE_SHARE_WRITE;
+        if (share_flags.delete) shared_mode |= FILE_SHARE_DELETE;
         SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, 0};
         HANDLE handle = path_w.pointer ? CreateFileW(path_w.pointer, GENERIC_WRITE, shared_mode, &security_attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0)
                                        : INVALID_HANDLE_VALUE;
@@ -2672,7 +2702,8 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
         }
         bool collision = error.v == (u32)ERROR_FILE_EXISTS || error.v == (u32)ERROR_ALREADY_EXISTS;
 #else
-        BUSTER_UNUSED(permissions);
+        BUSTER_UNUSED(create_mode);
+        BUSTER_UNUSED(share_flags);
         error = os_file_invalid_error();
         bool collision = false;
 #endif
