@@ -8486,9 +8486,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_scalar_argument_boundari
                     (SliceString8){0}, (SliceString8){0}, spawn_options);
                 ProcessWaitResult link_wait = linked.handle ? os_process_wait_deadline(arguments->arena, linked, 30000000) : (ProcessWaitResult){0};
                 bool link_ok = linked.handle && !link_wait.timed_out && !link_wait.capture_failed && link_wait.result == PROCESS_RESULT_SUCCESS;
-                BUSTER_TEST_RAW(arguments, link_ok,
-                    (String8){.pointer = (char8*)link_wait.streams[STANDARD_STREAM_ERROR].pointer,
-                              .length = link_wait.streams[STANDARD_STREAM_ERROR].length});
+                String8 link_diagnostic = {.pointer = (char8*)link_wait.streams[STANDARD_STREAM_ERROR].pointer,
+                                           .length = link_wait.streams[STANDARD_STREAM_ERROR].length};
+                BUSTER_TEST_RAW(arguments, link_ok, link_diagnostic);
                 if (link_ok)
                 {
                     String8 run_command[] = {executable};

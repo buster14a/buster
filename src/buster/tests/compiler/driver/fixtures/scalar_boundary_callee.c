@@ -144,4 +144,3 @@ int abi_boundary_pointer8(int a0, long long a1, int a2, long long a3, int a4, lo
     abi_boundary_calls += 1;
     return bad;
 }
-
