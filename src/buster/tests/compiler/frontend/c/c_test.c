@@ -30428,7 +30428,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
             BUSTER_TEST(arguments, !tokens.diagnostic_count);
             BUSTER_TEST_RAW(arguments, parsed.diagnostic_count + lowered.diagnostic_count != 0, invalid[index]);
-            BUSTER_TEST_RAW(arguments, !lowered.certified, invalid[index]);
+            BUSTER_TEST_RAW(arguments, !lowered.canonical_ir_certified, invalid[index]);
             scratch_end(temporary);
         }
     }
