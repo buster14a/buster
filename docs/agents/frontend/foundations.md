@@ -1156,6 +1156,20 @@ member bounds keep their bindings. A header that defines no tag opens no scope.
 `c_test_controlling_expression_scope` and
 `compiler_driver_test_scoped_constant_execution` cover this (#1304).
 
+A direct, unqualified enum definition immediately following `(` in a
+function-body expression is published by that same lexical walk, including
+expression statements, return operands, casts and block static assertions.
+Its constants belong to the current block and become visible at their own
+declaration points; the enum braces do not create a child block. Ordinary
+enum declarations still take the local-declaration path so their declarators
+are retained. Publication skips an already published member and diagnoses a
+same-scope ordinary-name collision instead of appending a second entity.
+`c_test_expression_enum_scope` checks scope restoration, declaration order,
+one publication per member, refusal neighbors and both canonical frontend
+forms on Linux x86-64/AArch64 and Windows x86-64. Expression enums inside
+initializers, qualified type names and expression-defined record members
+remain separate pending cases under #1615.
+
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64, and validates canonical IR in both frontend SSA forms.
 `c_test_fixed_and_wide_enumerator_types` covers narrow fixed bases, preserved

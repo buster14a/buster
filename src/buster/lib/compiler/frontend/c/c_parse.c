@@ -18498,12 +18498,22 @@ BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine*
 
 // Declares in `scope` the enumeration constants a block-scope type parse
 // appended from `member_start` on: the specifiers of a local declaration, or
-// an enum a controlling expression defines.
-BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CScopeId scope, u32 declaration_index, u32 member_start)
+// an enum a controlling expression or direct expression type name defines.
+BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 declaration_index, u32 member_start)
 {
     for (u32 member_index = member_start; member_index < result->enum_member_count; member_index += 1)
     {
         CEnumMember* member = &result->enum_members[member_index];
+        if (member->is_published)
+        {
+            continue;
+        }
+        if (c_parse_lookup_entity_in_scope(result, scope, member->symbol, member->name).value != C_ID_UNDERLYING_INVALID)
+        {
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member->location), C_DIAGNOSTIC_REDEFINITION,
+                               string_format(result->arena, S8("redefinition of enumerator '{S8}'"), member->name));
+            continue;
+        }
         CEntityId entity = {
             .value = result->entity_count,
         };
@@ -18707,7 +18717,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     }
     CCleanupAttributeInfo declaration_cleanup = {0};
     c_parse_cleanup_attribute_scan(preprocess, start, declarator_start, true, &declaration_cleanup);
-    c_parse_publish_enum_members(result, scope, declaration_index, enum_member_start);
+    c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_member_start);
     u32 segment_start = declarator_start;
     while (segment_start < end)
     {
@@ -19920,12 +19930,18 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         // innermost scope is declared there as soon as the walk reaches it,
         // so a use earlier in the expression still binds the outer name. The
         // later c_parse_bind_expression_aggregates pass finds it registered.
+        // A direct enum type name in an ordinary body expression has the same
+        // declaration point and publishes in the current block. Its preceding
+        // `(` distinguishes it from an ordinary declaration with a declarator.
         // An enum body holds only enumerators and the constant expressions
         // the type parse has just evaluated, so it is stepped over rather than
         // read as uses. A struct or union body is walked as before, which binds
         // the names in its member bounds for the lowering's layout.
         u32 aggregate_close = 0;
-        if (shape == C_TOKEN_IDENTIFIER && index < scope_header_end[scope_count - 1] &&
+        bool expression_enum = shape == C_TOKEN_IDENTIFIER && index &&
+                               c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_ENUM) &&
+                               c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (shape == C_TOKEN_IDENTIFIER && (index < scope_header_end[scope_count - 1] || expression_enum) &&
             c_parse_aggregate_definition_at(preprocess, index, body_end, &aggregate_close))
         {
             CScopeId statement_scope = scope_stack[scope_count - 1];
@@ -19938,7 +19954,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 c_parse_scalar_type_in_scope(machine, result, preprocess, statement_scope, index, aggregate_close + 1, &declarator_start);
                 if (enumeration)
                 {
-                    c_parse_publish_enum_members(result, statement_scope, declaration_index, enum_member_start);
+                    c_parse_publish_enum_members(result, preprocess, statement_scope, declaration_index, enum_member_start);
                 }
             }
             if (enumeration)

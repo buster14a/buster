@@ -4598,6 +4598,112 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlling_expression_scope(UnitTestA
     return result;
 }
 
+// Expression enum braces do not open a block: constants enter the current
+// scope at their declaration point, exactly once (C17 6.2.1 and 6.7.2.2).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_enum_scope(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int main(void){(void)sizeof(enum{E=2,F=E+1});_Static_assert(E==2&&F==3,\"members\");return E+F-5;}"),
+        S8("int main(void){return sizeof(enum{E=2})?E-2:1;}"),
+        S8("int main(void){_Static_assert(sizeof(enum{E=1})>0,\"type\");_Static_assert(E==1,\"member\");return E-1;}"),
+        S8("int main(void){(void)(enum{E=2})E;_Static_assert(E==2,\"cast\");return E-2;}"),
+        S8("int main(void){(void)(enum{E=2}){E};_Static_assert(E==2,\"literal\");return E-2;}"),
+        S8("enum{Q=1};int main(void){int old=Q;(void)sizeof(enum{Q=Q+4,P=Q*2});"
+           "_Static_assert(Q==5&&P==10,\"order\");return old+P-11;}"),
+        S8("enum{Q=1};int main(void){int old=0,now=0;(old=Q,(void)sizeof(enum{Q=2}),now=Q);"
+           "_Static_assert(Q==2,\"after\");return old!=1||now!=2;}"),
+        S8("enum{Q=1};int main(void){{(void)sizeof(enum{Q=2});_Static_assert(Q==2,\"inner\");}"
+           "_Static_assert(Q==1,\"outer\");return Q-1;}"),
+        S8("int main(void){enum{E=2} object=E;_Static_assert(E==2,\"declaration\");return object-2;}"),
+        S8("int main(void){(void)sizeof(enum Tag{E=2});enum Tag object=E;return object-2;}"),
+        S8("enum{Q=1};int main(void){int value=0;if(sizeof(enum{Q=2}))value=Q;"
+           "_Static_assert(Q==1,\"statement end\");return value-2;}"),
+    };
+    String8 rejected[] = {
+        S8("int main(void){return E;(void)sizeof(enum{E=2});}"),
+        S8("int main(void){{(void)sizeof(enum{E=2});}return E;}"),
+        S8("int main(void){(void)sizeof(enum{E=2});(void)sizeof(enum{E=3});return 0;}"),
+        S8("int main(void){int E=2;(void)sizeof(enum{E=3});return 0;}"),
+    };
+    Target targets[] = {target_native, target_native, target_native};
+    targets[0].cpu_arch = CPU_ARCH_X86_64;
+    targets[0].os = OPERATING_SYSTEM_LINUX;
+    targets[1].cpu_arch = CPU_ARCH_AARCH64;
+    targets[1].os = OPERATING_SYSTEM_LINUX;
+    targets[2].cpu_arch = CPU_ARCH_X86_64;
+    targets[2].os = OPERATING_SYSTEM_WINDOWS;
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources) + BUSTER_ARRAY_LENGTH(rejected); fixture += 1)
+            {
+                bool accepted = fixture < BUSTER_ARRAY_LENGTH(sources);
+                u32 rejected_index = accepted ? 0 : fixture - BUSTER_ARRAY_LENGTH(sources);
+                String8 source = accepted ? sources[fixture] : rejected[rejected_index];
+                TemporalArena temporary = scratch_begin(0, 0);
+                Target target = targets[target_index];
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_C17,
+                });
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                BUSTER_TEST_RAW(arguments, accepted ? parse.diagnostic_count == 0 : parse.diagnostic_count != 0, source);
+                if (accepted && parse.diagnostic_count == 0)
+                {
+                    BUSTER_TEST(arguments, parse.entity_count <= parse.entity_capacity);
+                    for (u32 member_index = 0; member_index < parse.enum_member_count; member_index += 1)
+                    {
+                        CEnumMember const* member = parse.enum_members + member_index;
+                        BUSTER_TEST(arguments, member->is_published);
+                        u32 publications = 0;
+                        for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+                        {
+                            CEntity const* entity = parse.entities + entity_index;
+                            if (entity->kind == C_ENTITY_ENUMERATOR && entity->enum_member_plus_one == member_index + 1)
+                            {
+                                publications += 1;
+                                if (BUSTER_REQUIRE(arguments, member->enum_type.value < parse.type_count))
+                                {
+                                    BUSTER_TEST(arguments, entity->scope.value == parse.types[member->enum_type.value].tag_scope.value);
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, publications == 1);
+                    }
+                }
+                if (!accepted)
+                {
+                    CDiagnosticKind expected = rejected_index < 2 ? C_DIAGNOSTIC_UNDECLARED_IDENTIFIER : C_DIAGNOSTIC_REDEFINITION;
+                    bool diagnosed = false;
+                    for (u32 diagnostic = 0; diagnostic < parse.diagnostic_count; diagnostic += 1)
+                    {
+                        diagnosed |= parse.diagnostics[diagnostic].kind == expected;
+                    }
+                    BUSTER_TEST(arguments, diagnosed);
+                }
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("expression-enum-scope.c"), tokens, parse, target,
+                                                                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (accepted)
+                {
+                    BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, source);
+                    if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, lowered.program == 0 && lowered.diagnostic_count != 0);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_frontend(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -31518,6 +31624,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
+    BUSTER_TEST_FIXTURE(arguments, c_test_expression_enum_scope);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
