@@ -130,10 +130,29 @@ limits do not establish a general bound on all XIM protocol-library activity.
 
 `test_rendering_raster_native` exercises actual X-server XDND negotiation,
 direct/INCR transfer, decoded-path ownership, cancellation and shutdown, plus
-synthetic XIM reducer boundaries and actual poll scope teardown. Those XIM
-controls do not establish a live input-method provider: provider-mediated
-commit validation remains a separate pending gate under
-[#2197](https://github.com/buster14a/buster/issues/2197).
+synthetic XIM reducer boundaries and actual poll scope teardown. Its ordinary
+native invocation also requires a real XIM provider on a second XCB connection,
+using the server API in the already linked `libxcb-imdkit`. Two independently
+negotiated provider cycles exercise UTF-8 and Compound Text commits through
+normal bounded polling with nonzero input contexts. Independent Unicode golden
+bytes, producer-payload mutation/release, scratch clobbering and text reads after
+complete client/provider shutdown check caller-arena ownership. UTF-8 controls
+also admit 4096 raw bytes, refuse 4097 bytes and malformed input, and recover with
+a subsequent valid commit. Asynchronous commits followed by ordered XIM SYNC
+replies distinguish consumed refusals from missing provider traffic.
+
+Provider handshake, commit and teardown phases each have a 5-second deadline,
+a 2048-pass cap, and bounded work per pass (64 provider events, 32 client events).
+Missing providers or failed handshakes fail explicitly; no opt-in environment
+variable skips this gate. These fixture bounds do not bound every underlying
+X-server request or native-library allocation. The first-party fixture copies no
+external implementation and adds no production dependency: its public server
+API was inspected at [xcb-imdkit 1.0.9, commit 44f5c821](https://github.com/fcitx/xcb-imdkit/blob/44f5c8219bcae9e6afc2391dc50486efcf0bdf06/src/imdkit.h),
+whose component notice is `LGPL-2.1-only`; independent Compound Text bytes follow
+the [X Consortium Compound Text 1.1 contract](https://xorg.freedesktop.org/archive/current/doc/xorg-docs/ctext/ctext.html).
+Hosted execution remains the required evidence for the provider gate under
+[#2197](https://github.com/buster14a/buster/issues/2197); broader desktop input
+method interoperability is outside this fixture's scope.
 
 Required window-arena allocation failure releases native initialization and
 returns failure. The existing arena reservation fault seam exercises this
