@@ -8,6 +8,9 @@
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
 // process spawn/wait with deadlines, executable lookup, dynamic libraries, and
 // the crash/failure printers. Replacement publication follows os_file_close.
+// os_process_capture_step separates ordinary POSIX pipe drain transitions
+// from native observations in os_process_wait_deadline; its private replay
+// contract lives in os_internal.h, without process-group identity changes.
 // The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
@@ -3808,6 +3811,140 @@ BUSTER_GLOBAL_LOCAL void pipe_capture_append(Arena* arena, PipeCapture* capture,
     }
 }
 
+bool os_process_capture_step(OsProcessCaptureState* state, OsProcessCaptureEvent event, u64 bytes)
+{
+    bool valid = event < OS_PROCESS_CAPTURE_EVENT_COUNT &&
+        (event == OS_PROCESS_CAPTURE_READ_BYTES ? bytes && bytes <= OS_PROCESS_CAPTURE_READ_LIMIT : !bytes);
+    OsProcessCaptureState next = *state;
+    if (valid)
+    {
+        switch (event)
+        {
+            case OS_PROCESS_CAPTURE_WAIT_READY:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING;
+                next.phase = OS_PROCESS_CAPTURE_READY;
+            } break;
+            case OS_PROCESS_CAPTURE_WAIT_IDLE:
+            case OS_PROCESS_CAPTURE_WAIT_INTERRUPTED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING;
+            } break;
+            case OS_PROCESS_CAPTURE_WAIT_FAILED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING;
+                next.failed = true;
+                next.phase = OS_PROCESS_CAPTURE_CLOSING;
+            } break;
+            case OS_PROCESS_CAPTURE_READ_BYTES:
+            case OS_PROCESS_CAPTURE_READ_INTERRUPTED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_READY && bytes <= (u64)-1 - next.observed_bytes;
+                next.observed_bytes += bytes;
+                next.phase = OS_PROCESS_CAPTURE_WAITING;
+            } break;
+            case OS_PROCESS_CAPTURE_READ_EOF:
+            case OS_PROCESS_CAPTURE_READ_FAILED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_READY;
+                next.eof = event == OS_PROCESS_CAPTURE_READ_EOF;
+                next.failed |= !next.eof;
+                next.phase = OS_PROCESS_CAPTURE_CLOSING;
+            } break;
+            case OS_PROCESS_CAPTURE_STOP:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING || next.phase == OS_PROCESS_CAPTURE_READY;
+                next.failed = true;
+                next.phase = OS_PROCESS_CAPTURE_CLOSING;
+            } break;
+            case OS_PROCESS_CAPTURE_CLOSE_OK:
+            case OS_PROCESS_CAPTURE_CLOSE_FAILED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_CLOSING && !next.close_attempts;
+                next.close_attempts += 1;
+                next.close_outcome_unknown = event == OS_PROCESS_CAPTURE_CLOSE_FAILED;
+                next.failed |= next.close_outcome_unknown;
+                next.phase = OS_PROCESS_CAPTURE_CLOSED;
+            } break;
+            default: { valid = false; } break;
+        }
+    }
+    if (valid) { *state = next; }
+    return valid;
+}
+
+ProcessResult os_process_capture_result(const OsProcessCaptureState* state, ProcessResult child_result)
+{
+    ProcessResult result = state->phase == OS_PROCESS_CAPTURE_CLOSED && state->eof && !state->failed
+        ? child_result : PROCESS_RESULT_FAILED;
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsProcessCaptureEvent os_process_capture_test_failure = OS_PROCESS_CAPTURE_EVENT_COUNT;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_process_capture_test_consumed;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 os_process_capture_test_calls_remaining;
+
+void os_process_capture_test_fail_on_call(OsProcessCaptureEvent event, u32 call_index)
+{
+    BUSTER_VALIDATE(os_process_capture_test_failure == OS_PROCESS_CAPTURE_EVENT_COUNT &&
+        call_index < 16 &&
+        (event == OS_PROCESS_CAPTURE_WAIT_FAILED || event == OS_PROCESS_CAPTURE_READ_FAILED || event == OS_PROCESS_CAPTURE_CLOSE_FAILED));
+    os_process_capture_test_failure = event;
+    os_process_capture_test_consumed = false;
+    os_process_capture_test_calls_remaining = call_index;
+}
+
+bool os_process_capture_test_end(void)
+{
+    bool result = os_process_capture_test_consumed;
+    os_process_capture_test_failure = OS_PROCESS_CAPTURE_EVENT_COUNT;
+    os_process_capture_test_consumed = false;
+    os_process_capture_test_calls_remaining = 0;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_process_capture_test_take(OsProcessCaptureEvent event)
+{
+    bool result = os_process_capture_test_failure == event;
+    if (result && os_process_capture_test_calls_remaining)
+    {
+        os_process_capture_test_calls_remaining -= 1;
+        result = false;
+    }
+    else if (result)
+    {
+        os_process_capture_test_failure = OS_PROCESS_CAPTURE_EVENT_COUNT;
+        os_process_capture_test_consumed = true;
+    }
+    return result;
+}
+#endif
+
+#if !BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool os_process_capture_close(int* descriptor, OsProcessCaptureState* state)
+{
+    int close_result = close(*descriptor);
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+    if (state && os_process_capture_test_take(OS_PROCESS_CAPTURE_CLOSE_FAILED))
+    {
+        close_result = -1;
+        errno = EIO;
+    }
+#endif
+    *descriptor = -1;
+    if (state)
+    {
+        if (state->phase != OS_PROCESS_CAPTURE_CLOSING)
+        {
+            BUSTER_CHECK(os_process_capture_step(state, OS_PROCESS_CAPTURE_STOP, 0));
+        }
+        BUSTER_CHECK(os_process_capture_step(state, close_result ? OS_PROCESS_CAPTURE_CLOSE_FAILED : OS_PROCESS_CAPTURE_CLOSE_OK, 0));
+    }
+    return close_result == 0;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* capture)
 {
     u8* pointer = arena_allocate(arena, u8, capture->total_length);
@@ -5135,6 +5272,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         }
 
         int read_pipes[(u64)STANDARD_STREAM_COUNT];
+        OsProcessCaptureState capture_states[(u64)STANDARD_STREAM_COUNT] = {0};
         u64 quiescent_capture_remaining[(u64)STANDARD_STREAM_COUNT] = {0};
         u64 open_pipe_count = 0;
         bool quiescent_capture_snapshot = false;
@@ -5235,7 +5373,18 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             {
                 poll_milliseconds = 10;
             }
-            int poll_result = poll(poll_fds, poll_count, (int)poll_milliseconds);
+            int poll_result;
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+            if (!spawn.process_group && os_process_capture_test_take(OS_PROCESS_CAPTURE_WAIT_FAILED))
+            {
+                poll_result = -1;
+                errno = ENOMEM;
+            }
+            else
+#endif
+            {
+                poll_result = poll(poll_fds, poll_count, (int)poll_milliseconds);
+            }
             int poll_error = errno;
 #if BUSTER_INCLUDE_TESTS
             if (!spawn.process_group && poll_result > 0 && test_expire_deadline_after_ready)
@@ -5261,7 +5410,22 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             {
                 if (poll_error == EINTR)
                 {
+                    if (!spawn.process_group)
+                    {
+                        for (nfds_t index = 0; index < poll_count; index += 1)
+                        {
+                            BUSTER_CHECK(os_process_capture_step(capture_states + poll_streams[index], OS_PROCESS_CAPTURE_WAIT_INTERRUPTED, 0));
+                        }
+                    }
                     continue;
+                }
+                capture_failed = true;
+                if (!spawn.process_group)
+                {
+                    for (nfds_t index = 0; index < poll_count; index += 1)
+                    {
+                        BUSTER_CHECK(os_process_capture_step(capture_states + poll_streams[index], OS_PROCESS_CAPTURE_WAIT_FAILED, 0));
+                    }
                 }
                 errno = poll_error;
                 string_print(S8("Failed to poll process pipes: {EOs}\n"), os_get_last_error());
@@ -5269,31 +5433,55 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
             for (nfds_t poll_index = 0; poll_index < poll_count; poll_index += 1)
             {
-                if (!(poll_fds[poll_index].revents & (POLLIN | POLLHUP | POLLERR)))
+                u64 stream = poll_streams[poll_index];
+                OsProcessCaptureState* capture_state = spawn.process_group ? 0 : capture_states + stream;
+                if (!(poll_fds[poll_index].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
                 {
+                    if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_WAIT_IDLE, 0)); }
                     continue;
                 }
 
-                u64 stream = poll_streams[poll_index];
-                u8 buffer[16 * 1024];
-                ssize_t read_result = read(read_pipes[stream], buffer, sizeof(buffer));
+                if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_WAIT_READY, 0)); }
+                u8 buffer[OS_PROCESS_CAPTURE_READ_LIMIT];
+                ssize_t read_result;
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+                if (capture_state && os_process_capture_test_take(OS_PROCESS_CAPTURE_READ_FAILED))
+                {
+                    read_result = -1;
+                    errno = EBADF;
+                }
+                else
+#endif
+                {
+                    read_result = read(read_pipes[stream], buffer, sizeof(buffer));
+                }
+                int read_error = errno;
 
                 if (read_result > 0)
                 {
+                    if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_READ_BYTES, (u64)read_result)); }
                     pipe_capture_append(scratch.arena, &captures[stream], spawn, &result, (StandardStream)stream, buffer, (u64)read_result);
                 }
                 else
                 {
-                    if (read_result < 0 && errno != EINTR)
+                    if (read_result < 0 && read_error != EINTR)
                     {
-                        string_print(S8("Failed to read from process pipe: {EOs}\n"), os_get_last_error());
+                        capture_failed = true;
+                        string_print(S8("Failed to read from process pipe: {EOs}\n"), (OsError){.v = (u32)read_error});
                     }
 
-                    if (read_result == 0 || (read_result < 0 && errno != EINTR))
+                    if (read_result == 0 || (read_result < 0 && read_error != EINTR))
                     {
-                        close(read_pipes[stream]);
-                        read_pipes[stream] = -1;
+                        if (capture_state)
+                        {
+                            BUSTER_CHECK(os_process_capture_step(capture_state, read_result ? OS_PROCESS_CAPTURE_READ_FAILED : OS_PROCESS_CAPTURE_READ_EOF, 0));
+                        }
+                        capture_failed = !os_process_capture_close(read_pipes + stream, capture_state) || capture_failed;
                         open_pipe_count -= 1;
+                    }
+                    else if (capture_state)
+                    {
+                        BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_READ_INTERRUPTED, 0));
                     }
                 }
             }
@@ -5312,8 +5500,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
             if (read_pipes[stream] >= 0)
             {
-                close(read_pipes[stream]);
-                read_pipes[stream] = -1;
+                capture_failed = !os_process_capture_close(read_pipes + stream, spawn.process_group ? 0 : capture_states + stream) || capture_failed;
             }
         }
 
@@ -5442,6 +5629,18 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         {
             result.result = PROCESS_RESULT_FAILED;
         }
+        if (!spawn.process_group)
+        {
+            for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+            {
+                if (captured[stream])
+                {
+                    result.result = os_process_capture_result(capture_states + stream, result.result);
+                    capture_failed |= capture_states[stream].failed;
+                }
+            }
+        }
+        result.capture_failed |= capture_failed;
         if (capture_failed) { wait_failed = true; }
         if (wait_failed) { result.result = PROCESS_RESULT_FAILED; }
         result.process_group_reservation_retained = spawn.process_group && wait_result != pid;

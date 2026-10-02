@@ -120,6 +120,60 @@ failure, compare live descriptor/handle counts, exercise an unrelated
 inheritable object, an exact hostile-PATH environment, and a subprocess that
 closes descriptors 0-2 before spawning with capture.
 
+## Deterministic captured-pipe replay
+
+Ordinary POSIX `os_process_wait_deadline` drains the blocking pipes created by
+`os_process_spawn`. `os_process_capture_step` in `os_internal.h` separates
+readiness, byte progress, EOF, abandonment and close observations from native
+calls. One readiness observation admits one read. A successful short read
+advances by its exact count; an interrupted read contributes no bytes and
+returns to polling. Poll timeout/interruption can be retried. EOF stops reads;
+one close attempt ends descriptor authority, even if that attempt fails.
+A close error conservatively leaves release outcome unknown and is never
+retried: it cannot authorize reuse of a possibly recycled descriptor.
+
+Transport failure and abandoned draining remain failed after successful child
+termination. Successfully drained prefixes are retained, `capture_failed` is
+set, and the child's native status remains separately available. This does not
+authorize restarting a child whose external effects may already have happened.
+The reducer does not own process-group identity, cancellation signalling,
+descendant enumeration or the quiescent-group buffered-byte snapshot.
+
+Registered `os_tests` replay numeric `capture-replay-v1` event/count traces with
+an independent ownership/readiness/accounting oracle after every transition.
+The bounded worklist enumerates native-permitted prefixes through six events;
+deletion minimization retains admission and failure class, including the
+invariant class for discovered counterexamples. Shared poll failure is applied
+to every open stream. Traces contain no payloads, paths, command lines or user
+environment. Tests reject malformed counts, reads without readiness and reuse
+after close. They represent idle polls and EINTR, not read EAGAIN on these
+blocking pipes. The recorded `WAIT_FAILED, CLOSE_OK` regression is a minimal
+poll-resource-failure witness, conditional on a successful child exit.
+
+Read EBADF and close-after-release EIO injections are separate adapter
+robustness controls, excluded from native event generation. They test failure
+wiring, prefix preservation and uncertain-close handling; they do not prove
+that an exclusively owned anonymous pipe naturally returns these errors.
+The native fixture observes a real five-byte child's successful exit without
+reaping it, then applies a calling-thread, bounded call-index fault. Healthy
+controls before and after check real bytes and descriptor census. Existing
+real flood, deadlines and process-tree tests remain independent challenges;
+simulated success is not complete OS validation. Native fixture execution is
+desktop Linux/macOS; the reducer itself is portable C. Windows capture and
+group lifecycle are outside this replay model.
+
+Primary contracts are the Linux man-pages `read(2)`, `poll(2)`, `pipe(7)` and
+`close(2)` pages (rendered man-pages 6.19 at
+[man7.org](https://man7.org/linux/man-pages/)). Short progress, zero-byte EINTR,
+blocking-pipe EOF and poll ENOMEM are modeled; generic-file EIO examples are
+not transferred to anonymous pipes. At Apple XNU
+`f6217f891ac0bb64f3d375211650a4c1ff8ca1ea` (`xnu-12377.1.9`),
+[`pipe_close`](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/sys_pipe.c)
+returns zero. That file's header has APSL-2.0 plus John S. Dyson's custom
+redistribution terms; no code is imported. The inspected Linux documentation's
+per-page licenses/provenance and any unavailable verification remain recorded
+on the owning issue/PR rather than inferred as a repository-wide license.
+
 ## Virtual memory commitment and prefaulting
 
 `os_commit` reports commitment and nothing else. Its `prefault` argument asks
