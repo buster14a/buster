@@ -257,14 +257,15 @@ markers, checks structured diagnostic parity and refused programs, and
 independently validates accepted canonical IR. Local declaration controls
 avoid the separately tracked repeated-linkage restriction (#1562).
 
-The registered #1860 regression records two additional C17 compatibility
-requirements before their producer repair: a prototype paired with a pre-C23
-unspecified parameter list must use parameter types unchanged by default
-argument promotions, and both parameter spellings must undergo array/function
-adjustment. Documentary outer array bounds and parameter-only qualifiers
-therefore disappear from compatibility; inner bounds and pointee qualifiers
-remain. The current compatibility walk still omits these two rules, so this
-regression-only checkpoint intentionally fails on the unchanged producer.
+`c_parse_types_compatible_walk` applies two additional C17 compatibility
+requirements: a prototype paired with a pre-C23 unspecified parameter list
+must use parameter types unchanged by default argument promotions, and both
+parameter spellings undergo array/function adjustment. Documentary outer
+array bounds and parameter-only qualifiers therefore disappear from
+compatibility; inner bounds and pointee qualifiers remain. Promotion checks
+read existing parameter rows and resolve an enum's compatible integer kind;
+the shared pair stack compares adjusted pointees without creating types or
+evaluating removed outer bounds. C23's empty-list constructor is unchanged.
 
 `c_test_function_parameter_compatibility` uses 56 fixed source cases over
 C17/GNU17/C23/GNU23, six desktop target layouts and both frontend forms
@@ -278,7 +279,9 @@ qualifier/inner-bound refusals. GNU type-compatibility queries retain fixed
 answers independent of the compatibility implementation. Two further fixed
 negative declarations pair an incompatible nested callback or inner array
 bound with an otherwise compatible aggregate sibling. They require a failed
-comparison to remain failed through the existing pair-stack walk.
+comparison to remain failed through the existing pair-stack walk; the loop
+stops at the first incompatible pair, so later siblings cannot restore a
+successful verdict.
 
 `c_test_function_parameter_compatibility_runtime` keeps a literal 1,299-byte
 source with fixed results for promoted scalars and adjusted array/callback
