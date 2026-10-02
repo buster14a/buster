@@ -64,6 +64,7 @@ class FakeAPI:
         self.jobs = [job(name, SOURCE_ID) for name in inventory.COMBINATION_JOBS]
         for index, record in enumerate(self.jobs):
             record["id"] = 1000 + index
+        self.checks = []
         self.artifacts = []
         for index, (_, prefix, _) in enumerate(reuse.SOURCE_COVERAGE):
             self.artifacts.append({
@@ -93,6 +94,18 @@ class FakeAPI:
             record["id"] = 2000 + index
         self.movement = False
 
+    def add_reconciled_metadata(self, status="in_progress", conclusion=None):
+        for index, (name, prefix) in enumerate(inventory.RECONCILED_CHECK_MARKERS.items()):
+            identity = 3000 + index
+            row = {"id": identity, "name": name, "run_id": SOURCE_ID, "run_attempt": 1,
+                   "head_sha": SHA, "status": status, "conclusion": conclusion,
+                   "steps": [], "runner_id": None}
+            self.jobs.append(copy.deepcopy(row))
+            self.main_jobs.append(dict(row, run_id=CURRENT_ID))
+            self.checks.append({"id": identity, "name": name, "head_sha": SHA,
+                                "app": {"id": 15368}, "external_id": prefix + SHA,
+                                "status": status, "conclusion": conclusion})
+
     def get(self, path, **query):
         if path == f"actions/runs/{CURRENT_ID}":
             return copy.deepcopy(self.current)
@@ -106,6 +119,8 @@ class FakeAPI:
         raise AssertionError(path)
 
     def pages(self, path, field, **query):
+        if path == f"commits/{SHA}/check-runs" and field == "check_runs" and query == {"filter": "all"}:
+            return copy.deepcopy(self.checks)
         if path == f"actions/workflows/{reuse.WORKFLOW_ID}/runs" and field == "workflow_runs":
             return [copy.deepcopy(self.source)]
         if path == f"actions/runs/{SOURCE_ID}/attempts/1/jobs" and field == "jobs":
@@ -127,6 +142,96 @@ class MainCIReuseTests(unittest.TestCase):
 
     def admit(self):
         return reuse.verify_source(self.api, SHA, CURRENT_ID, BLOB, NOW)
+
+    def test_reconciled_metadata_is_proved_and_retained_in_both_reuse_readers(self):
+        for status, conclusion in (("in_progress", None), ("completed", "success"),
+                                   ("completed", "failure"), ("completed", "cancelled")):
+            with self.subTest(status=status, conclusion=conclusion):
+                self.api = FakeAPI()
+                self.api.add_reconciled_metadata(status, conclusion)
+                source_evidence, main_evidence = {}, {}
+                receipt = reuse.verify_source(self.api, SHA, CURRENT_ID, BLOB, NOW,
+                                              diagnostics=source_evidence)
+                current = reuse.verify_current_jobs(self.api, SHA, CURRENT_ID, diagnostics=main_evidence)
+                self.assertEqual(len(receipt["source_jobs"]), 19)
+                self.assertEqual(len(current), 13)
+                self.assertEqual([row["job"] for row in source_evidence["source_reconciled_checks"]],
+                                 self.api.jobs[-2:])
+                self.assertEqual([row["job"] for row in main_evidence["current_reconciled_checks"]],
+                                 self.api.main_jobs[-2:])
+                self.assertTrue(all(row["check"]["external_id"].endswith(SHA) for row in
+                                    source_evidence["source_reconciled_checks"] +
+                                    main_evidence["current_reconciled_checks"]))
+
+    def test_metadata_verdict_change_does_not_change_workload_reuse_receipt(self):
+        self.api.add_reconciled_metadata()
+        first = self.admit()
+        for row in self.api.jobs[-2:] + self.api.main_jobs[-2:] + self.api.checks:
+            row.update(status="completed", conclusion="success")
+        second = self.admit()
+        self.assertEqual(first, second)
+        self.assertEqual(reuse.receipt_digest(first), reuse.receipt_digest(second))
+
+    def test_unproved_metadata_fails_both_readers(self):
+        changes = (("id", 9999), ("name", "Unknown metadata"), ("head_sha", "d" * 40),
+                   ("app", {"id": 1}), ("external_id", "not-reviewed"))
+        for field, value in changes:
+            for source in (True, False):
+                with self.subTest(field=field, source=source):
+                    self.api = FakeAPI()
+                    self.api.add_reconciled_metadata()
+                    self.api.checks[0][field] = value
+                    with self.assertRaises(AdmissionError):
+                        if source:
+                            self.admit()
+                        else:
+                            reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+        for source in (True, False):
+            self.api = FakeAPI()
+            self.api.add_reconciled_metadata()
+            self.api.checks = []
+            with self.assertRaises(AdmissionError):
+                if source:
+                    self.admit()
+                else:
+                    reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+
+    def test_duplicate_metadata_and_missing_workloads_still_fail_both_readers(self):
+        for source in (True, False):
+            for defect in ("duplicate-job", "duplicate-check", "missing-workload", "unknown-workload"):
+                with self.subTest(source=source, defect=defect):
+                    self.api = FakeAPI()
+                    self.api.add_reconciled_metadata()
+                    rows = self.api.jobs if source else self.api.main_jobs
+                    if defect == "duplicate-job":
+                        rows.append(copy.deepcopy(rows[-2]))
+                    elif defect == "duplicate-check":
+                        self.api.checks.append(dict(self.api.checks[0], id=9999))
+                    elif defect == "missing-workload":
+                        rows.pop(0)
+                    else:
+                        rows.append(dict(rows[0], name="Unknown workload", id=9999))
+                    with self.assertRaises(AdmissionError):
+                        if source:
+                            self.admit()
+                        else:
+                            reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+
+    def test_complete_check_proof_uses_strict_pagination(self):
+        api = GitHub(reuse.REPOSITORY, "unused")
+        with mock.patch.object(api, "get", return_value={"total_count": 2, "check_runs": []}):
+            with self.assertRaises(AdmissionError):
+                api.pages(f"commits/{SHA}/check-runs", "check_runs", filter="all")
+        with mock.patch.object(api, "get", side_effect=OSError("check evidence unavailable")):
+            with self.assertRaises(OSError):
+                api.pages(f"commits/{SHA}/check-runs", "check_runs", filter="all")
+
+    def test_reuse_token_has_only_read_permission_for_check_proof(self):
+        text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
+        block = text.split("\n  reuse:\n", 1)[1].split("\n  test:\n", 1)[0]
+        permission = block.split("    permissions:\n", 1)[1].split("    runs-on:", 1)[0]
+        self.assertIn("      checks: read\n", permission)
+        self.assertNotIn("write", permission)
 
     def test_exact_commit_source_and_main_specific_jobs(self):
         receipt = self.admit()

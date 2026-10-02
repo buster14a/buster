@@ -10,6 +10,7 @@ jobs, while a proof that changes after jobs were skipped fails the aggregate.
 source_run binds finalization to the decision receipt and checks discovery for
 competing runs. Only inconclusive discovery reads retry; changed evidence never
 does. cli retains a diagnostic result even when verification fails (#2134).
+Admission metadata is independently proved and retained, never reused as work (#2388).
 """
 
 import argparse
@@ -275,9 +276,17 @@ def source_run(api, sha, *, expected=None, diagnostics=None):
     return source
 
 
-def successful_source_jobs(api, source, sha):
+def successful_source_jobs(api, source, sha, *, diagnostics=None):
+    diagnostics = {} if diagnostics is None else diagnostics
     run_id = source["id"]
     jobs = api.pages(f"actions/runs/{run_id}/attempts/1/jobs", "jobs")
+    try:
+        checks = (api.pages(f"commits/{sha}/check-runs", "check_runs", filter="all")
+                  if github_ci_time.reconciled_job_candidates(jobs) else [])
+        jobs, diagnostics["source_reconciled_checks"] = github_ci_time.separate_reconciled_jobs(
+            jobs, run_id, 1, sha, checks)
+    except ValueError as error:
+        raise AdmissionError(str(error)) from error
     jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha)
     require(not extras, "; ".join(extras))
     errors = github_ci_time.validate_required_jobs(jobs, run_id, 1, sha,
@@ -352,7 +361,7 @@ def verify_source(api, sha, current_run_id, workflow_blob, now, *, expected=None
     require(blob.get("type") == "file" and blob.get("sha") == workflow_blob,
             "workflow revision differs from exact checkout")
     diagnostics["stage"] = "source-jobs"
-    jobs = successful_source_jobs(api, source, sha)
+    jobs = successful_source_jobs(api, source, sha, diagnostics=diagnostics)
     diagnostics["stage"] = "source-artifacts"
     artifacts = retained_artifacts(api, source, now)
     diagnostics["stage"] = "source-recheck"
@@ -412,6 +421,13 @@ def verify_current_jobs(api, sha, run_id, *, diagnostics=None):
     current = api.get("actions/runs/" + str(run_id))
     exact_run(current, run_id=run_id, sha=sha, event="push", branch="main")
     rows = api.pages(f"actions/runs/{run_id}/jobs", "jobs", filter="all")
+    try:
+        checks = (api.pages(f"commits/{sha}/check-runs", "check_runs", filter="all")
+                  if github_ci_time.reconciled_job_candidates(rows) else [])
+        rows, diagnostics["current_reconciled_checks"] = github_ci_time.separate_reconciled_jobs(
+            rows, run_id, 1, sha, checks)
+    except ValueError as error:
+        raise AdmissionError(str(error)) from error
     rows = separate_skipped_jobs(rows, sha, run_id, diagnostics)
     jobs = github_ci_time.latest_run_jobs(rows, run_id, 1, sha)
     jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha, required=True)
