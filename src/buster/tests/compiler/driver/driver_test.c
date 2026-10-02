@@ -2621,6 +2621,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(void) { int x; x = \"t\"; return x; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
+        // #1388: GNU body declarations retain every comma-separated declarator.
+        {S8("int f(void) { return ({ int a = 5, b = 6; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ int a, b; a = 5; b = 6; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { int x = 4; return ({ int *p = &x, v = 2; *p + v; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("void f(void) { ({ int a = 5, b = 6; (void)(a + b); }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int setg(int); int rg(void); int f(void) { return ({ int a = setg(5), b = rg(); a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ int a = 5; int b = 6; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { int r; { int a = 5, b = 6; r = a + b; } return r; }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ int r = 0; { int a = 5, b = 6; r = a + b; } r; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("typedef int Number; int f(void) { return ({ Number a = 3, b = 4; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { int x = 0; return ({ __typeof__(x) a = 3, b = 4; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ int a = 1, b = 2; a += 4, b += 5, a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ const int a = 5, b = 6; b = 7; a + b; }); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=gnu17")},
         // Callback storage is an explicit GNU extension on admitted native targets.
         {S8("typedef int (*F)(int); void g(F f) { void *p = f; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
         {S8("typedef int (*F)(int); void g(void *p) { F f = p; }\n"), false, false, S8("incompatible pointer types"), S8("-std=c17")},
@@ -25273,11 +25286,80 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ),
     };
 
+    // #1388: complete declaration lists at the top level of a GNU body.
+    String8 c_statement_expression_declarators_source = S8(
+        "static int calls;\n"
+        "static int stored;\n"
+        "static int write_value(int value)\n"
+        "{\n"
+        "    calls += 1;\n"
+        "    stored = value;\n"
+        "    return value;\n"
+        "}\n"
+        "static int read_value(void)\n"
+        "{\n"
+        "    calls += 1;\n"
+        "    return stored + 1;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    int initialized = ({ int left = 5, right = 6; left + right; });\n"
+        "    if (initialized != 11) result = 1;\n"
+        "    int uninitialized = ({ int left, right; left = 5; right = 6; left + right; });\n"
+        "    if (uninitialized != 11) result = 2;\n"
+        "    int base = 4;\n"
+        "    int mixed = ({ int *pointer = &base, value = 2; *pointer + value; });\n"
+        "    if (mixed != 6) result = 3;\n"
+        "    stored = 0;\n"
+        "    ({ int left = 5, right = 6; stored = left + right; (void)(left + right); });\n"
+        "    if (stored != 11) result = 4;\n"
+        "    calls = 0;\n"
+        "    stored = 0;\n"
+        "    int once = ({ int left = write_value(5), right = read_value(); left + right; });\n"
+        "    if (once != 11 || calls != 2 || stored != 5) result = 5;\n"
+        "    calls = 0;\n"
+        "    stored = 0;\n"
+        "    int three = ({ int first = write_value(2), second = read_value(), third = read_value(); first + second + third; });\n"
+        "    if (three != 8 || calls != 3 || stored != 2) result = 6;\n"
+        "    int separate = ({ int left = 5; int right = 6; left + right; });\n"
+        "    if (separate != 11) result = 7;\n"
+        "    int ordinary;\n"
+        "    { int left = 5, right = 6; ordinary = left + right; }\n"
+        "    if (ordinary != 11) result = 8;\n"
+        "    int nested = ({ int sum = 0; { int left = 5, right = 6; sum = left + right; } sum; });\n"
+        "    if (nested != 11) result = 9;\n"
+        "    typedef int Number;\n"
+        "    int alias = ({ Number left = 3, right = 4; left + right; });\n"
+        "    if (alias != 7) result = 10;\n"
+        "    int inferred = ({ __typeof__(base) left = 3, right = 4; left + right; });\n"
+        "    if (inferred != 7) result = 11;\n"
+        "    int qualified = ({ const int left = 3, right = 4; left + right; });\n"
+        "    if (qualified != 7) result = 12;\n"
+        "    int array = ({ int values[2] = {2, 3}, sum = values[0] + values[1]; sum; });\n"
+        "    if (array != 5) result = 13;\n"
+        "    calls = 0;\n"
+        "    int comma_value = ({ int left = 1, right = 2; calls += 1, calls += 2, left + right + calls; });\n"
+        "    if (comma_value != 6 || calls != 3) result = 14;\n"
+        "    int comma_update = ({ int left = 1, right = 2; left += 4, right += 5, left + right; });\n"
+        "    if (comma_update != 12) result = 15;\n"
+        "    calls = 0;\n"
+        "    int loop = ({ int sum = 0; for (int index = 0; index < 3; index += 1, calls += 1) sum += index; sum; });\n"
+        "    if (loop != 3 || calls != 3) result = 16;\n"
+        "    calls = 0;\n"
+        "    stored = 0;\n"
+        "    ({ int left = write_value(5), right = read_value(); stored = left + right; (void)(left + right); });\n"
+        "    if (stored != 11 || calls != 2) result = 17;\n"
+        "    return result;\n"
+        "}\n"
+    );
     String8 c_modification_destination_sources[] = {
         string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prefix_pointer_store_parts), false),
         string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_array_parameter_update_parts), false),
+        c_statement_expression_declarators_source,
     };
-    String8 c_modification_destination_names[] = {S8("buster-c-prefix-pointer-store"), S8("buster-c-array-parameter-update")};
+    String8 c_modification_destination_names[] = {S8("buster-c-prefix-pointer-store"), S8("buster-c-array-parameter-update"),
+                                                S8("buster-c-statement-expression-declarators")};
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(c_modification_destination_sources); source_index += 1)
     {
         for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); frontend_index += 1)
@@ -25294,7 +25376,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_modification_destination_sources[source_index])));
                     bool native_allocator = !string_equal(c_lz4_regression_allocators[allocator_index], S8("-fregister-allocator=none"));
                     String8 fixture_command_line[] = {
-                        S8("-std=c17"), c_designator_optimizations[optimization_index], c_flat_initializer_frontends[frontend_index],
+                        source_index == 2 ? S8("-std=gnu17") : S8("-std=c17"), c_designator_optimizations[optimization_index], c_flat_initializer_frontends[frontend_index],
                         c_lz4_regression_allocators[allocator_index], S8("-fverify-codegen"),
                         native_allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"), S8("-o"), fixture_path, source_path,
                     };

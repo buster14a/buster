@@ -40072,23 +40072,23 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             {
                 return false;
             }
-            if (task.allow_trailing_expression)
+            bool declaration_statement =
+                first_is_typedef_name || first_is_unbound_typedef_name ||
+                (first.kind == C_TOKEN_IDENTIFIER &&
+                 (c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_DECLARATION_INTRODUCER_SET) ||
+                  c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect)));
+            // A declaration's commas separate declarators. Retain its full
+            // range for the automatic-declaration-list frame even when this
+            // task also permits a trailing statement-expression value.
+            if (task.allow_trailing_expression && !declaration_statement && first_top_level_comma != UINT32_MAX)
             {
-                if (first_top_level_comma != UINT32_MAX)
-                {
-                    end = first_top_level_comma;
-                }
+                end = first_top_level_comma;
             }
             if (statement_expression_mode && task.allow_trailing_expression && (end == task.end || end + 1 == task.end))
             {
                 bool control = first.kind == C_TOKEN_IDENTIFIER &&
                                c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_STATEMENT_KEYWORD_SET);
-                bool trailing_declaration =
-                    first_is_typedef_name || first_is_unbound_typedef_name ||
-                    (first.kind == C_TOKEN_IDENTIFIER &&
-                     (c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_DECLARATION_INTRODUCER_SET) ||
-                      c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect)));
-                if (!control && !trailing_declaration)
+                if (!control && !declaration_statement)
                 {
                     c_ir_lower_body_yield(builder, state, task, task.end, C_IR_LOWER_BODY_CONTINUE_TRAILING_EXPRESSION,
                                           (CIrLowerFrame){

@@ -92,6 +92,16 @@ Condition lowering resolves a literal left operand of `||` or `&&` before
 allocating a block for its right operand. A short-circuited arm must not
 become a disconnected source block that joins a value defined only on another
 path; selected MIR enforces dominance in unreachable code too.
+A GNU statement-expression body retains the complete range of each automatic
+declaration. Its top-level commas separate declarators and reach the existing
+automatic-declaration-list frame; only expression statements use the trailing
+comma split. `declaration_statement` is shared with trailing-value classification
+in the body walker. The embedded driver regression for #1388 checks initialized,
+uninitialized, pointer/scalar, discarded and exactly-once call initializers,
+alongside ordinary/nested blocks, typedefs, typeof and comma/loop sequencing,
+under both frontend forms and all four allocators at O0/O2. Syntax/object rows
+retain those accepted declarations and a rejected const-store neighbor.
+
 Nested GNU statement-expression body walks reuse the function's label block at
 the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The
