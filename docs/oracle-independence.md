@@ -77,4 +77,3 @@ or loses an independent oracle.
   registers tested only at RAX and R15, the two registers where "hardware
   order plus 328" agrees with the specification, could not detect the wrong
   mapping.
-
