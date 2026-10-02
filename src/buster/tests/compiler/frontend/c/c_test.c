@@ -10769,7 +10769,10 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_integer_transform_source_parts[] = {
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_transform_builtins(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source_text = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_test_integer_transform_source_parts), false);
+    String8 source_parts[BUSTER_ARRAY_LENGTH(c_test_integer_transform_source_parts)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(source_parts); index += 1)
+        source_parts[index] = c_test_integer_transform_source_parts[index];
+    String8 source_text = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
