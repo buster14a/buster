@@ -95,32 +95,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B proof-source/tools/frontend_typed_constants_proof.py --phase candidate --source-root candidate-source --expected-sha "$CANDIDATE_SOURCE_SHA" --ide candidate-source/build/frontend-proof-release/Release/ide --evidence "$RUNNER_TEMP/frontend-proof"
-      - name: Candidate Clang Release frontend module
-        if: ${{ !cancelled() && steps.clang_release.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -B proof-source/tools/frontend_typed_constants_proof.py --phase module --label clang-release --source-root candidate-source --expected-sha "$CANDIDATE_SOURCE_SHA" --ide candidate-source/build/frontend-proof-release/Release/ide --build-directory candidate-source/build/frontend-proof-release --config Release --evidence "$RUNNER_TEMP/frontend-proof"
-      - name: Candidate Clang sanitized Debug frontend module
-        if: ${{ !cancelled() && steps.clang_release.outcome == 'success' }}
-        shell: bash
-        working-directory: candidate-source
-        run: |
-          set -euo pipefail
-          set -x
-          "$RUNNER_TEMP/frontend-candidate-driver" generate --build-directory build/frontend-proof-sanitize --cc clang --ci --sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
-          "$RUNNER_TEMP/frontend-candidate-driver" build --build-directory build/frontend-proof-sanitize --config Debug -t ide
-          python3 -B ../proof-source/tools/frontend_typed_constants_proof.py --phase module --label clang-sanitized-debug --source-root . --expected-sha "$CANDIDATE_SOURCE_SHA" --ide build/frontend-proof-sanitize/Debug/ide --build-directory build/frontend-proof-sanitize --config Debug --require-fatal-sanitizers --evidence "$RUNNER_TEMP/frontend-proof"
-      - name: Candidate GCC Release frontend module
-        if: ${{ !cancelled() && steps.clang_release.outcome == 'success' }}
-        shell: bash
-        working-directory: candidate-source
-        run: |
-          set -euo pipefail
-          set -x
-          "$RUNNER_TEMP/frontend-candidate-driver" generate --build-directory build/frontend-proof-gcc --cc gcc --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
-          "$RUNNER_TEMP/frontend-candidate-driver" build --build-directory build/frontend-proof-gcc --config Release -t ide
-          python3 -B ../proof-source/tools/frontend_typed_constants_proof.py --phase module --label gcc-release --source-root . --expected-sha "$CANDIDATE_SOURCE_SHA" --ide build/frontend-proof-gcc/Release/ide --build-directory build/frontend-proof-gcc --config Release --evidence "$RUNNER_TEMP/frontend-proof"
+      # Exact-head Clang Release, sanitized Debug and GCC Release module
+      # evidence is retained in run37048170014; this rerun completes CLI probes.
       - name: Retain exact-source evidence, including failures
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

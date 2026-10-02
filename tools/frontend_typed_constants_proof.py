@@ -48,6 +48,12 @@ _Static_assert(maximum == 9223372036854775807LL && minimum == (-9223372036854775
 int main(void) {
 #if defined(__SIZEOF_INT128__)
     if (wide_positive != 44 || wide_negative != -44) return 1;
+    const volatile unsigned char *positive_bytes = (const volatile unsigned char *)&wide_positive;
+    const volatile unsigned char *negative_bytes = (const volatile unsigned char *)&wide_negative;
+    if (positive_bytes[0] != 44 || negative_bytes[0] != 212) return 1;
+    for (int byte = 1; byte < 16; byte += 1) {
+        if (positive_bytes[byte] != 0 || negative_bytes[byte] != 255) return 1;
+    }
 #endif
     return octet != 44 || signed_negative != -1 || enum_value != 4294967295LL || maximum != 9223372036854775807LL || minimum != (-9223372036854775807LL - 1); }
 '''
@@ -67,7 +73,8 @@ CASES = [
     ("constexpr-unsigned-wrap", "gnu23", "constexpr unsigned int value = 0xffffffffU + 1U; _Static_assert(value == 0, \"wrap\");\n", True, True),
     ("constexpr-dead-logical", "gnu23", "constexpr int value = 0 && (2147483647 + 1); _Static_assert(value == 0, \"dead\");\n", True, True),
     ("constexpr-dead-conditional", "gnu23", "constexpr int value = 1 ? 44 : (2147483647 + 1); _Static_assert(value == 44, \"dead\");\n", True, True),
-    ("constexpr-nested-enum-context", "gnu23", "constexpr int value = sizeof(enum Nested { LIMIT = 2147483647 + 1 }); _Static_assert(value == sizeof(int), \"enum context\");\n", True, True),
+    # Preserve Buster's inline-tag grammar; reference compilers disagree here.
+    ("constexpr-nested-enum-context", "gnu23", "constexpr int value = sizeof(enum Nested { LIMIT = 2147483647 + 1 }); _Static_assert(value == sizeof(int), \"enum context\");\n", True, False),
     ("offset-negative-index", "gnu17", "struct S { int a[2]; }; enum { value = __builtin_offsetof(struct S, a[-1]) };\n", False, False),
     ("offset-index-division-zero", "gnu17", "struct S { int a[2]; }; enum { value = __builtin_offsetof(struct S, a[1 / 0]) };\n", False, False),
     ("offset-product-overflow", "gnu17", "struct S { int a[2]; }; enum { value = __builtin_offsetof(struct S, a[4611686018427387904ULL]) };\n", False, False),
@@ -79,6 +86,7 @@ POLICY_CASES = [
     ("signed-unary-overflow", "constexpr int value = -(-2147483647 - 1);\n"),
     ("signed-multiply-overflow", "constexpr int value = 1073741824 * 2;\n"),
     ("negative-left-shift", "constexpr int value = -1 << 1;\n"),
+    ("nested-inline-enum", "constexpr int value = sizeof(enum Nested { LIMIT = 2147483647 + 1 }); _Static_assert(value == sizeof(int), \"enum context\");\n"),
 ]
 TARGETS = ["x86_64-unknown-linux-gnu", "wasm32-unknown-wasi"]
 OFFSET_OBSERVATIONS = [
