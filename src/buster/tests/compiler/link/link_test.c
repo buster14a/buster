@@ -5065,7 +5065,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_stack_contract(UnitTestArgument
         BUSTER_STRING_TEST(arguments, merged.object.executable_stack_source, S8("exec-stack.o"));
         for (u32 kind = 0; kind < NATIVE_IMAGE_COUNT; kind += 1)
         {
-            NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &merged.object, (NativeExecutableLinkOptions){.image_kind = (NativeImageKind)kind});
+            NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &merged.object, (NativeExecutableLinkOptions){.image_kind = (u8)kind});
             BUSTER_TEST(arguments, linked.error == LINK_ERROR_UNSUPPORTED_FEATURE && !linked.executable.pointer && !linked.executable.length);
             BUSTER_TEST(arguments, string_starts_with_sequence(linked.symbol, S8("exec-stack.o: executable-stack request")));
         }
