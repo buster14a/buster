@@ -5812,8 +5812,13 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         bool valid_pointer_comparison =
             (instruction->binary_operation == IR_BINARY_POINTER_EQUAL || instruction->binary_operation == IR_BINARY_POINTER_NOT_EQUAL) &&
             result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type && operand_type->kind == IR_TYPE_POINTER;
+        // Places denote storage. Arithmetic/comparison operands and results
+        // are values; LOAD supplies the value of a place before this row.
+        bool valid_categories = left && right && left->category == IR_VALUE_VALUE && right->category == IR_VALUE_VALUE &&
+                                instruction->result.value < function->value_count &&
+                                function->values[instruction->result.value].category == IR_VALUE_VALUE;
         if ((!valid_arithmetic && !valid_comparison && !valid_boolean && !valid_vector_operation && !valid_pointer_comparison) ||
-            instruction->result.value == IR_ID_UNDERLYING_INVALID)
+            !valid_categories)
         {
             error = IR_VALIDATION_OPERATION;
         }
