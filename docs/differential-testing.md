@@ -561,3 +561,10 @@ python3 tools/differential_ci_policy_test.py -v
 These controls cover comparator and reducer sensitivity without executing a
 compiler. Actual generated-program, sanitizer, mode and platform execution
 remains separate evidence.
+
+Seeded campaigns require positive `--count`, `--units` and `--jobs` plus a
+nonempty selected family list. Invalid zero-work selections fail before output
+creation or case submission. `--isolate` returns failure for any whole-case or
+isolated-unit divergence; a successful isolated check retains exit zero.
+The same registered policy suite verifies actual CLI parsing/status propagation
+with controlled case-execution boundaries, without launching a compiler.

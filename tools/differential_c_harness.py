@@ -2069,6 +2069,10 @@ def main():
     if arguments.self_test:
         exit_code = self_test()
     else:
+        if arguments.count < 1 or arguments.units < 1 or arguments.jobs < 1:
+            parser.error("--count, --units and --jobs must be positive")
+        if not arguments.isolate and not any(family.strip() for family in arguments.families.split(",")):
+            parser.error("--families must select at least one generator")
         os.chdir(REPOSITORY_ROOT)
         if not os.path.exists(arguments.ide):
             print("missing %s — build it with ./build.sh build --config Release -t ide" % arguments.ide)
@@ -2088,9 +2092,12 @@ def main():
                 os.makedirs(isolate_directory, exist_ok=True)
                 result, source_path, _ = evaluate_case(arguments, family, seed, arguments.units, isolate_directory)
                 print("whole program: %s (%s)" % (result.category, result.detail))
-                for unit_index, category, detail in divergent_units(arguments, family, seed, arguments.units, isolate_directory):
+                unit_findings = divergent_units(arguments, family, seed, arguments.units, isolate_directory)
+                for unit_index, category, detail in unit_findings:
                     print("unit %d: %s (%s)" % (unit_index, category, detail))
                 print("sources kept under %s" % isolate_directory)
+                if result.category != "ok" or unit_findings:
+                    exit_code = 2
             else:
                 families = [family.strip() for family in arguments.families.split(",") if family.strip()]
                 unknown = [family for family in families if family not in FAMILY_GENERATORS]

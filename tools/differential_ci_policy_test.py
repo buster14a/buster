@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Offline regressions for differential CI and independent oracle predicates."""
 
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
+import io
 from pathlib import Path
 import subprocess
 import tempfile
@@ -251,6 +253,83 @@ class DifferentialReducerTests(unittest.TestCase):
         })
         self.assertEqual(result[0], "invalid")
         self.assertEqual(calls, ["clang-O0", "ide", "ide-canon", "clang-O2"])
+
+
+class DifferentialCampaignTests(unittest.TestCase):
+    def run_main(self, extra=(), category="ok", units=()):
+        whole = harness.CaseResult("enum_sizeof", 7, category, "controlled outcome")
+        output = io.StringIO()
+        errors = io.StringIO()
+        argv = ["differential-c", "--count", "1", "--units", "1", "--jobs", "1",
+                "--families", "enum_sizeof", "--seed", "7", "--ide", "subject", *extra]
+        with mock.patch.object(harness.sys, "argv", argv), \
+                mock.patch.object(harness.os, "chdir"), \
+                mock.patch.object(harness.os.path, "exists", return_value=True), \
+                mock.patch.object(harness.os, "makedirs") as directories, \
+                mock.patch.object(harness, "evaluate_case",
+                                  return_value=(whole, "fixture.c", "original source")) as evaluate, \
+                mock.patch.object(harness, "divergent_units", return_value=list(units)), \
+                mock.patch.object(harness, "run_one", return_value=(whole, [])) as run, \
+                redirect_stdout(output), redirect_stderr(errors):
+            try:
+                status = harness.main()
+            except SystemExit as error:
+                status = error.code
+        return status, output.getvalue(), errors.getvalue(), directories, evaluate, run
+
+    def test_zero_or_negative_work_arguments_are_rejected_before_work(self):
+        for option in ("--count", "--units", "--jobs"):
+            for value in ("0", "-1"):
+                with self.subTest(option=option, value=value):
+                    status, _, error, directories, evaluate, run = self.run_main((option, value))
+                    self.assertEqual(status, 2)
+                    self.assertIn("must be positive", error)
+                    directories.assert_not_called()
+                    evaluate.assert_not_called()
+                    run.assert_not_called()
+
+    def test_empty_family_selection_is_rejected_before_work(self):
+        for families in ("", " , "):
+            with self.subTest(families=families):
+                status, _, error, directories, evaluate, run = self.run_main(("--families", families))
+                self.assertEqual(status, 2)
+                self.assertIn("at least one generator", error)
+                directories.assert_not_called()
+                evaluate.assert_not_called()
+                run.assert_not_called()
+
+    def test_one_real_task_selection_remains_successful(self):
+        status, output, error, _, evaluate, run = self.run_main()
+        self.assertEqual((status, error), (0, ""))
+        self.assertIn("ok=1", output)
+        evaluate.assert_not_called()
+        run.assert_called_once()
+        arguments = run.call_args.args
+        self.assertEqual(arguments[1:3], ("enum_sizeof", 7))
+        self.assertEqual(arguments[0].units, 1)
+
+    def test_isolate_success_remains_successful(self):
+        status, output, error, _, evaluate, run = self.run_main(("--isolate", "enum_sizeof:7"))
+        self.assertEqual((status, error), (0, ""))
+        self.assertIn("whole program: ok", output)
+        evaluate.assert_called_once()
+        run.assert_not_called()
+
+    def test_isolate_whole_case_failure_propagates_status(self):
+        for category in ("behavior", "rejects", "ide-crash", "run-crash", "generator"):
+            with self.subTest(category=category):
+                status, output, error, _, _, run = self.run_main(
+                    ("--isolate", "enum_sizeof:7"), category=category)
+                self.assertEqual((status, error), (2, ""))
+                self.assertIn("whole program: " + category, output)
+                run.assert_not_called()
+
+    def test_isolate_unit_only_failure_propagates_status(self):
+        status, output, error, _, _, _ = self.run_main(
+            ("--isolate", "enum_sizeof:7"), units=((0, "behavior", "wrong output"),))
+        self.assertEqual((status, error), (2, ""))
+        self.assertIn("whole program: ok", output)
+        self.assertIn("unit 0: behavior", output)
 
 
 if __name__ == "__main__":
