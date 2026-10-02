@@ -14056,6 +14056,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_addresses
                         }
                         BUSTER_TEST(arguments, os_file_delete(output));
                     }
+                    os_file_delete(output);
                     BUSTER_TEST(arguments, os_file_delete(input));
                 }
                 scratch_end(temporary);
@@ -14086,6 +14087,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_addresses
                 BUSTER_TEST_RAW(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && !refused.has_object, rejected[row]);
                 BUSTER_TEST_RAW(arguments, refused.diagnostic.length != 0, rejected[row]);
                 BUSTER_TEST_RAW(arguments, file_read(arena, output, (FileReadOptions){0}).length == 0, rejected[row]);
+                os_file_delete(output);
                 BUSTER_TEST(arguments, os_file_delete(input));
             }
             scratch_end(temporary);
@@ -14312,6 +14314,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                             }
                             BUSTER_TEST(arguments, os_file_delete(output));
                         }
+                        os_file_delete(output);
                     }
                 }
             }
@@ -14385,6 +14388,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                             BUSTER_TEST(arguments, os_file_delete(output));
                         }
                     }
+                    os_file_delete(output);
                 }
             }
         }
