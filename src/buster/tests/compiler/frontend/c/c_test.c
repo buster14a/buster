@@ -1688,7 +1688,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_constraints(UnitTestAr
                         CDiagnostic diagnostic = semantic.diagnostics[0];
                         BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH &&
                                                diagnostic.severity == C_DIAGNOSTIC_ERROR);
-                        BUSTER_STRING_TEST(arguments, diagnostic.message, cases[case_index].message);
+                        BUSTER_TEST_RAW(arguments, string_equal(diagnostic.message, cases[case_index].message),
+                            string_format(temporary.arena, S8("bit-field constraint source={S8} expected={S8} actual={S8}"),
+                                          cases[case_index].source, cases[case_index].message, diagnostic.message));
                         BUSTER_TEST_RAW(arguments, diagnostic.location.line == cases[case_index].line &&
                                                    diagnostic.location.column == cases[case_index].column, cases[case_index].source);
                     }
