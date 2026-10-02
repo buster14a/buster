@@ -644,6 +644,11 @@ one/four-byte strides. Two additional signed-i32 LOAD exports exercise -2 throug
 2 from an interior address within one five-element linear-memory region. Every
 row passes the shared commit and canonical validation gates before emission.
 
+Wasm emission normalizes each INDEX operand to its declared integer width and
+signedness before converting to the address width. Memory64 uses signed extension
+for signed i32 carriers and unsigned extension for unsigned carriers; Wasm32
+retains i64-to-i32 wrapping before the unchanged element-stride arithmetic.
+
 Each original direct module receives 534 independent engine comparisons:
 512 fixed carrier samples, 12 separately pinned address literals and ten LOAD
 results. BigInt signed/unsigned interpretation and address-width arithmetic
