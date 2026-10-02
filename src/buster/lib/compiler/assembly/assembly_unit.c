@@ -1579,8 +1579,8 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
             {
                 builder->line = builder->relocation_lines[index];
                 builder->column = builder->relocation_columns[index];
-                assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE,
-                    S8("AArch64 {S8} branch to '{S8}' is out of range or unaligned"), mnemonic, symbol.name);
+                assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE,
+                    string_format(builder->arena, S8("AArch64 {S8} branch to '{S8}' is out of range or unaligned"), mnemonic, symbol.name));
                 return;
             }
             continue;
@@ -1592,9 +1592,9 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
                                                                                            : S8("tbz/tbnz");
             builder->line = builder->relocation_lines[index];
             builder->column = builder->relocation_columns[index];
-            assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
-                S8("AArch64 {S8} branch to '{S8}' requires a binding-invariant target defined in the same section"),
-                mnemonic, symbol.name);
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                string_format(builder->arena, S8("AArch64 {S8} branch to '{S8}' requires a binding-invariant target defined in the same section"),
+                    mnemonic, symbol.name));
             return;
         }
         if (!width || !symbol.defined || symbol.section != relocation.section || replaceable)
