@@ -18,10 +18,110 @@ BUSTER_GLOBAL_LOCAL ObjectFile jit_test_object(ObjectSection* sections, u32 sect
     };
 }
 
+
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE && !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
+BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_imported_function_data_pc32(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef u64 JitTestHostFunction(void);
+    JitTestHostFunction* host_function = &jit_test_host_value;
+    void* host_address = 0;
+    BUSTER_CT_CHECK(sizeof(host_function) == sizeof(host_address));
+    memcpy(&host_address, &host_function, sizeof(host_address));
+    ObjectSectionKind kinds[] = {OBJECT_SECTION_DATA, OBJECT_SECTION_READ_ONLY};
+    s64 addends[] = {-1, 0, 1};
+    for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
+    {
+        for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(addends); addend_index += 1)
+        {
+            u8 bytes[16] = {0};
+            bytes[4] = 0x5a;
+            ObjectSection section = {
+                .name = S8("function_addresses"),
+                .data = BUSTER_ARRAY_TO_SLICE(bytes),
+                .kind = kinds[kind_index],
+                .alignment = 8,
+            };
+            ObjectSymbol imported = {
+                .name = S8("jit_test_host_value"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            };
+            ObjectRelocation relocations[] = {
+                {.addend = addends[addend_index], .kind = OBJECT_RELOCATION_X86_64_PC32},
+                {.offset = 8, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            };
+            ObjectFile object = jit_test_object(&section, 1);
+            object.symbols = &imported;
+            object.symbol_count = 1;
+            object.relocations = relocations;
+            object.relocation_count = BUSTER_ARRAY_LENGTH(relocations);
+            JitHostBinding binding = {.name = imported.name, .address = host_address, .kind = OBJECT_SYMBOL_FUNCTION};
+            JitOptions options = {.bindings = &binding, .binding_count = 1};
+            JitProgram program = jit_link_object(&object, options);
+            if (program.error == JIT_ERROR_NONE)
+            {
+                if (BUSTER_REQUIRE(arguments, program.section_addresses[0] && program.section_sizes[0] == sizeof(bytes)))
+                {
+                    s32 displacement = 0;
+                    u64 absolute = 0;
+                    memcpy(&displacement, program.section_addresses[0], sizeof(displacement));
+                    memcpy(&absolute, (u8*)program.section_addresses[0] + 8, sizeof(absolute));
+                    // Unsigned arithmetic recovers P + signed displacement - A
+                    // without overflowing when the displacement is negative.
+                    u64 reconstructed = (u64)(uintptr_t)program.section_addresses[0] + (u64)(s64)displacement -
+                                        (u64)addends[addend_index];
+                    BUSTER_TEST(arguments, reconstructed == (u64)(uintptr_t)host_address && absolute == reconstructed);
+                    BUSTER_TEST(arguments, ((u8*)program.section_addresses[0])[4] == 0x5a);
+                }
+                BUSTER_TEST(arguments, program.executable_size == 0);
+            }
+            else
+            {
+                // A real host function may be outside the signed PC32 range.
+                // Refuse the data address instead of substituting a call thunk.
+                BUSTER_TEST(arguments, program.error == JIT_ERROR_CAPACITY);
+                BUSTER_STRING_TEST(arguments, program.failing_symbol, imported.name);
+                BUSTER_TEST(arguments, !program.allocation_base && !program.allocation_size && !program.auxiliary_allocation_base &&
+                                           !program.auxiliary_allocation_size && !program.executable_size);
+                for (u32 index = 0; index < OBJECT_SECTION_COUNT; index += 1)
+                {
+                    BUSTER_TEST(arguments, !program.section_addresses[index] && !program.section_sizes[index]);
+                }
+            }
+            jit_program_release(&program);
+            BUSTER_TEST(arguments, !program.allocation_base && !program.object);
+
+            // The same import remains a valid full-width data pointer after
+            // any PC32 range refusal; this also exercises immediate reuse.
+            object.relocations = relocations + 1;
+            object.relocation_count = 1;
+            JitProgram absolute_program = jit_link_object(&object, options);
+            if (BUSTER_REQUIRE(arguments, absolute_program.error == JIT_ERROR_NONE && absolute_program.section_addresses[0]))
+            {
+                u64 absolute = 0;
+                memcpy(&absolute, (u8*)absolute_program.section_addresses[0] + 8, sizeof(absolute));
+                BUSTER_TEST(arguments, absolute == (u64)(uintptr_t)host_address && !absolute_program.executable_size);
+            }
+            jit_program_release(&absolute_program);
+            BUSTER_TEST(arguments, !absolute_program.allocation_base && !absolute_program.object);
+            u8 expected[16] = {0};
+            expected[4] = 0x5a;
+            BUSTER_TEST(arguments, memcmp(bytes, expected, sizeof(bytes)) == 0);
+        }
+    }
+    return result;
+}
+#endif
+
 UnitTestResult jit_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE && !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
+    BUSTER_TEST_FIXTURE(arguments, jit_test_imported_function_data_pc32);
+#endif
 
     JitProgram null_program = jit_link_object(0, (JitOptions){0});
     BUSTER_TEST(arguments, null_program.error == JIT_ERROR_INVALID_INPUT);

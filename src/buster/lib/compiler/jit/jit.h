@@ -72,6 +72,10 @@ struct JitProgram
     JitError error;
 };
 
+// Imported function PC32 references in text retain the call-thunk policy.
+// PC32 references in data/read-only sections use the explicit binding address,
+// like ABSOLUTE64 pointers, and fail with JIT_ERROR_CAPACITY when that signed
+// displacement cannot be represented. A call thunk is not a data address.
 // The host process must permit JIT executable memory. Apple Silicon macOS code
 // starts in a nominal RWX MAP_JIT mapping and uses
 // pthread_jit_write_protect_np around construction; the call assumes write
