@@ -1,0 +1,38 @@
+name: Frontend batch proof
+on:
+  push:
+    branches: [codex/1408-frontend-batch-proof]
+permissions:
+  contents: read
+concurrency:
+  group: frontend-batch-proof
+  cancel-in-progress: false
+jobs:
+  baseline:
+    name: Pinned baseline correctness
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 33189368c8648f3addbd9a3a8c4b9ef0ccdcdb7f
+          persist-credentials: false
+      - name: Build trusted hosted compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version
+          git rev-parse HEAD HEAD^{tree}
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/frontend-driver"
+          "$RUNNER_TEMP/frontend-driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/frontend-driver" build --config Release -t ide
+      - name: Baseline registered frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide test --ci=1 --module=c_frontend_tests
+      - name: Baseline self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/frontend-driver" test_self_host --config Release
