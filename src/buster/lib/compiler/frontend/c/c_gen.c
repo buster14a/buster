@@ -50356,7 +50356,8 @@ BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* 
 // constant query.
 BUSTER_C_INTERNAL bool c_ir_alignof_object_alignment(CIntegerIrBuilder* builder, u32 start, u32 end, u32* alignment)
 {
-    bool valid = true;
+    CScopeId scope = c_parse_scope_for_token(&builder->parse, (CScopeId){.value = 0}, start);
+    bool valid = c_semantic_alignof_member(builder->temporary_arena, builder->preprocess, &builder->parse, scope, start, end, alignment);
     while (end > start + 1 && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
     {
@@ -50366,7 +50367,7 @@ BUSTER_C_INTERNAL bool c_ir_alignof_object_alignment(CIntegerIrBuilder* builder,
     CEntityId entity = end == start + 1 && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER
                            ? c_ir_identifier_entity_or_lookup(builder, start) : C_ENTITY_ID_INVALID;
     CEntity const* object = entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
-    if (object && (object->kind == C_ENTITY_OBJECT || object->kind == C_ENTITY_LOCAL))
+    if (valid && object && (object->kind == C_ENTITY_OBJECT || object->kind == C_ENTITY_LOCAL))
     {
         u32 natural = *alignment;
         u32 cursor = 0;

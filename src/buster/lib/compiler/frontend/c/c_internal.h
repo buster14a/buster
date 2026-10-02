@@ -171,6 +171,10 @@ BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 // the entity that ends before the operand. `*cursor` starts at zero.
 BUSTER_C_EXTERN bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
                                                u32* count_out);
+// A final member expression uses its declaring aggregate's placement
+// alignment; every lookup and layout query operates on a protected model.
+BUSTER_C_EXTERN bool c_semantic_alignof_member(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                u32 start, u32 end, u32* alignment);
 BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
 // The GNU layout attributes the frontend implements, as the parser spells
 // them. `__has_attribute` answers from these same predicates so the query

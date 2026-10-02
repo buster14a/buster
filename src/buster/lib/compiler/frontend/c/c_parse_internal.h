@@ -63,6 +63,17 @@ struct CTestTypeConstantQuery
 };
 BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                                 CScopeId scope, u32 start, u32 end);
+// Direct member alignment queries must leave the published model, including
+// spare rows and the type-map input counts/pointers, byte-for-byte unchanged.
+typedef struct CTestMemberAlignmentQuery CTestMemberAlignmentQuery;
+struct CTestMemberAlignmentQuery
+{
+    u32 alignment;
+    bool valid;
+    bool model_unchanged;
+};
+BUSTER_F_DECL CTestMemberAlignmentQuery c_test_member_alignment_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                              CScopeId scope, u32 start, u32 end);
 // Whether c_parse_validate_label_values would walk this function body's
 // values; the analysis must already have built the scope index.
 BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration);
