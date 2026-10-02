@@ -15977,6 +15977,171 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_call_arguments(UnitTestAr
     return result;
 }
 
+// C23 records every `()` as a zero-parameter prototype. These expectations
+// cover the source constructors before lowering's dialect masks can hide one,
+// then check semantic rejection and independently validate accepted canonical IR.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_list_prototypes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice typeof_input = file_read(arguments->arena, S8("tests/basic_c_typeof_declaration.c"), (FileReadOptions){0});
+    String8 typeof_source = {.pointer = (char8*)typeof_input.pointer, .length = typeof_input.length};
+    BUSTER_TEST(arguments, typeof_input.length != 0);
+    typedef struct CEmptyListPrototypeCase CEmptyListPrototypeCase;
+    struct CEmptyListPrototypeCase
+    {
+        String8 name;
+        String8 source;
+        String8 message;
+        bool valid_before_c23;
+        bool valid_c23;
+        bool inspect_empty_types;
+    };
+    CEmptyListPrototypeCase cases[] = {
+        {S8("existing typeof fixture"), typeof_source, S8("conflicting declaration"), true, false, false},
+        {S8("original dispatch"), S8("static long dispatch();\n"
+            "static long dispatch(volatile void *token, long a, long b);\n"
+            "static long dispatch(volatile void *token, long a, long b) { return token ? a : b; }\n"
+            "static int widths[3];\n"
+            "int main(void) { return dispatch(widths, 7, 8) != 7 || dispatch(0, 7, 8) != 8; }\n"),
+            S8("conflicting declaration"), true, false, false},
+        {S8("empty then prototype"), S8("int f(); int f(int);\n"), S8("conflicting declaration"), true, false, false},
+        {S8("prototype then empty"), S8("int f(int); int f();\n"), S8("conflicting declaration"), true, false, false},
+        {S8("function typedef"), S8("typedef int Z(); Z f; int f(int);\n"), S8("conflicting declaration"), true, false, false},
+        {S8("pointer redeclaration"), S8("extern int (*p)(); extern int (*p)(int);\n"), S8("conflicting declaration"), true, false, false},
+        {S8("pointer typedef"), S8("typedef int (*P)(); extern P p; extern int (*p)(int);\n"), S8("conflicting declaration"), true, false, false},
+        {S8("callback parameter"), S8("int f(int (*)()); int f(int (*)(int));\n"), S8("conflicting declaration"), true, false, false},
+        {S8("returned callback"), S8("int (*f(void))(); int (*f(void))(int);\n"), S8("conflicting declaration"), true, false, false},
+        {S8("named arity"), S8("int empty(); int caller(void) { return empty(1); }\n"), S8("it declares no parameters"), true, false, false},
+        {S8("local declaration arity"), S8("int caller(void) { extern int empty(); return empty(1); }\n"),
+            S8("it declares no parameters"), true, false, false},
+        {S8("pointer arity"), S8("int (*p)(); int caller(void) { return p(1); }\n"), S8("it declares no parameters"), true, false, false},
+        {S8("typedef arity"), S8("typedef int F(); F *p; int caller(void) { return p(1); }\n"),
+            S8("it declares no parameters"), true, false, false},
+        {S8("unevaluated arity"), S8("int empty(); int caller(void) { return sizeof(empty(1)); }\n"),
+            S8("it declares no parameters"), true, false, false},
+        {S8("empty and void"), S8("int f(); int f(void); int f(void) { return 7; } int caller(void) { return f(); }\n"),
+            {0}, true, true, false},
+        {S8("void and empty"), S8("int f(void); int f(); int f(void) { return 7; } int caller(void) { return f(); }\n"),
+            {0}, true, true, false},
+        {S8("zero argument callable values"), S8("typedef int F(); int empty() { return 7; }\n"
+            "int caller(void) { int (*p)() = empty; F *q = empty; return p() + q() - 14; }\n"),
+            {0}, true, true, false},
+        {S8("explicit void control"), S8("int f(void); int caller(void) { return f(1); }\n"),
+            S8("it declares no parameters"), false, false, false},
+        {S8("prototype count control"), S8("int f(int); int f(int, int);\n"), S8("conflicting declaration"), false, false, false},
+        {S8("return type control"), S8("int f(); long f();\n"), S8("conflicting declaration"), false, false, false},
+        {S8("constructor facts"), S8("int direct_empty(); typedef int Empty(); int (*pointer_empty)();\n"
+            "struct S { int (*member_empty)(); }; int (*factory_empty())();\n"
+            "int body_empty() { extern int local_empty(); int (*local_pointer)(); return sizeof(local_pointer); }\n"),
+            {0}, true, true, true},
+        {S8("abstract void compatibility"), S8("_Static_assert(__builtin_types_compatible_p(int (*)(), int (*)(void)), \"zero parameters\");\n"),
+            {0}, true, true, false},
+        {S8("abstract count compatibility"), S8("_Static_assert(!__builtin_types_compatible_p(int (*)(), int (*)(int)), \"different parameters\");\n"),
+            S8("static assertion failed"), false, true, false},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
+                                     C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
+    Target targets[] = {target_native,
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+        {
+            bool c23 = dialect_index >= 2;
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                CEmptyListPrototypeCase item = cases[case_index];
+                bool valid = c23 ? item.valid_c23 : item.valid_before_c23;
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 label = string_format(temporary.arena, S8("{S8}: dialect {u32}, target {u32}, frontend {u32}"),
+                        item.name, dialect_index, target_index, form);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, item.source,
+                        (CPreprocessOptions){.target = targets[target_index], .data_layout = target_data_layout(targets[target_index]),
+                            .dialect = dialects[dialect_index]});
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, label);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == valid, label);
+                    bool message_found = valid;
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count; diagnostic += 1)
+                    {
+                        CDiagnostic report = semantic.diagnostics[diagnostic];
+                        if (valid)
+                        {
+                            BUSTER_TEST_RAW(arguments, false, report.message);
+                        }
+                        else
+                        {
+                            BUSTER_TEST_RAW(arguments, report.severity == C_DIAGNOSTIC_ERROR, label);
+                            message_found |= string_first_sequence(report.message, item.message) != BUSTER_STRING_NO_MATCH;
+                            if (string_equal(item.message, S8("conflicting declaration")))
+                            {
+                                BUSTER_TEST_RAW(arguments, report.kind == C_DIAGNOSTIC_CONFLICTING_DECLARATION, label);
+                            }
+                        }
+                    }
+                    BUSTER_TEST_RAW(arguments, message_found, label);
+                    if (valid)
+                    {
+                        BUSTER_TEST_RAW(arguments, semantic.analysis_complete, label);
+                        u32 empty_type_count = 0;
+                        for (u32 type_index = 0; type_index < semantic.type_count; type_index += 1)
+                        {
+                            CType type = semantic.types[type_index];
+                            if (type.kind == C_TYPE_FUNCTION)
+                            {
+                                if (c23)
+                                {
+                                    BUSTER_TEST_RAW(arguments, !type.is_unprototyped, label);
+                                }
+                                if (item.inspect_empty_types)
+                                {
+                                    BUSTER_TEST_RAW(arguments, !type.parameter_count && !type.is_variadic && type.is_unprototyped == !c23, label);
+                                    empty_type_count += 1;
+                                }
+                            }
+                        }
+                        if (item.inspect_empty_types)
+                        {
+                            BUSTER_TEST_RAW(arguments, empty_type_count >= 8, label);
+                        }
+                    }
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("c23-empty-list-prototypes.c"), tokens, syntax,
+                        targets[target_index], (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == lowered.diagnostic_count, label);
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    {
+                        CDiagnostic before = semantic.diagnostics[diagnostic];
+                        CDiagnostic after = lowered.diagnostics[diagnostic];
+                        BUSTER_TEST_RAW(arguments, before.kind == after.kind && before.severity == after.severity &&
+                            before.location.line == after.location.line && before.location.column == after.location.column, label);
+                        BUSTER_STRING_TEST(arguments, before.message, after.message);
+                    }
+                    BUSTER_TEST_RAW(arguments, (lowered.diagnostic_count == 0 && lowered.program != 0) == valid, label);
+                    if (valid && BUSTER_REQUIRE(arguments, lowered.program != 0))
+                    {
+                        BUSTER_TEST_RAW(arguments, lowered.canonical_ir_certified && lowered.program->module_count != 0, label);
+                        for (u32 module_index = 0; module_index < lowered.program->module_count; module_index += 1)
+                        {
+                            IrValidationResult validation = ir_validate_canonical_module(lowered.program, lowered.program->modules + module_index);
+                            BUSTER_TEST_RAW(arguments, validation.error == IR_VALIDATION_NONE, label);
+                        }
+                    }
+                    else if (!valid)
+                    {
+                        BUSTER_TEST_RAW(arguments, lowered.program == 0, label);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 /* An unprototyped `long add();` followed by its prototyped definition declares
    one function, and C11 6.2.7p3 makes the prototype the composite type. The
    name index resolves every call through the prototype, so the entity's one
@@ -31402,6 +31567,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_alignof_object);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
+    BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);

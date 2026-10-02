@@ -13481,15 +13481,15 @@ BUSTER_C_INTERNAL u32 c_parse_parameter_list_reserved_count(CPreprocessResult pr
     return reserved;
 }
 
-// `()` -- an empty parameter list -- declares a function with no prototype,
-// which C11 6.2.7p3 makes compatible with a non-variadic prototype; `(void)`
-// declares a prototype with zero parameters and is compatible with no other
-// list. Both produce zero parameter records, so the shape is read back off
-// the tokens: the list is empty exactly when its closing parenthesis abuts
-// its opening one.
+// Before C23, `()` leaves the parameters unspecified; `(void)` declares a
+// zero-parameter prototype. C23 makes both spellings zero-parameter
+// prototypes (N3096 6.7.6.3p13). Every function-type constructor records
+// that distinction here, before type compatibility or call checks consume it.
+// Both spellings produce zero parameter rows, so token adjacency identifies
+// the empty list.
 BUSTER_C_INTERNAL bool c_parse_parameter_list_unprototyped(CPreprocessResult preprocess, u32 list_close)
 {
-    return list_close && list_close - 1 < preprocess.token_count &&
+    return !c_preprocess_dialect_is_c23(preprocess.dialect) && list_close && list_close - 1 < preprocess.token_count &&
            c_token_is_punctuator(&preprocess.tokens[list_close - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
 }
 
@@ -16000,7 +16000,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                     if (list_end) list_close = index;
                     if (list_end && !segment_count && !written_parameter_count)
                     {
-                        unprototyped = true;
+                        unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close);
                         break;
                     }
                     if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_ELLIPSIS))
