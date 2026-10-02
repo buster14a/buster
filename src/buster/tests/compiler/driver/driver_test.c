@@ -14084,7 +14084,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                                     context, (u32)waited.result, waited.platform_status, (u32)waited.timed_out,
                                     BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
                                 BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out &&
-                                                waited.platform_status == 0, diagnostic);
+                                                !waited.capture_failed && !waited.output_truncated &&
+                                                !waited.process_tree_cleanup_failed && waited.platform_status == 0, diagnostic);
                                 BUSTER_TEST_RAW(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
                                 arguments->show(arguments, S8("ADDRESS-INTEGER native {S8} status={u32}\n"), context, waited.platform_status);
@@ -14114,6 +14115,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                     String8 text = BYTE_SLICE_TO_STRING(8, version.streams[STANDARD_STREAM_OUTPUT]);
                     bool is_clang = string_first_sequence(text, S8("clang")) != BUSTER_STRING_NO_MATCH;
                     available = version.result == PROCESS_RESULT_SUCCESS && !version.timed_out &&
+                                !version.capture_failed && !version.output_truncated && !version.process_tree_cleanup_failed &&
                                 version.platform_status == 0 && is_clang == (compiler != 0);
                     BUSTER_TEST_RAW(arguments, available, text);
                     arguments->show(arguments, S8("ADDRESS-INTEGER reference compiler={S8} version={S8}\n"), compilers[compiler], text);
@@ -14137,7 +14139,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                     if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
                     {
                         ProcessWaitResult compiled = os_process_wait_deadline(arena, spawn, 30000000);
-                        bool success = compiled.result == PROCESS_RESULT_SUCCESS && !compiled.timed_out && compiled.platform_status == 0;
+                        bool success = compiled.result == PROCESS_RESULT_SUCCESS && !compiled.timed_out &&
+                                       !compiled.capture_failed && !compiled.output_truncated &&
+                                       !compiled.process_tree_cleanup_failed && compiled.platform_status == 0;
                         BUSTER_TEST_RAW(arguments, success, string_format(arena, S8("{S8}: {S8}"), context,
                                         BYTE_SLICE_TO_STRING(8, compiled.streams[STANDARD_STREAM_ERROR])));
                         if (success)
@@ -14152,7 +14156,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                                     context, (u32)waited.result, waited.platform_status, (u32)waited.timed_out,
                                     BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
                                 BUSTER_TEST_RAW(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out &&
-                                                waited.platform_status == 0, diagnostic);
+                                                !waited.capture_failed && !waited.output_truncated &&
+                                                !waited.process_tree_cleanup_failed && waited.platform_status == 0, diagnostic);
                                 BUSTER_TEST_RAW(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
                                 arguments->show(arguments, S8("ADDRESS-INTEGER reference {S8} status={u32}\n"), context, waited.platform_status);
