@@ -1,0 +1,56 @@
+name: Buster MSVC matched debug diagnostic
+
+# Isolated issue branch only; no required check or physical-host acceptance.
+on:
+  push:
+    branches: ['codex/2277-msvc-debug-comparison']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-msvc-debug-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    env:
+      BUSTER_COMPARISON_BASE: d4ca72fb4e97ae0a410b0d03258b00495fa45e13
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          path: harness
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: d4ca72fb4e97ae0a410b0d03258b00495fa45e13
+          path: source
+      - name: Build pinned trusted compiler and measure serial pairs
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location source
+          & .\tools\ci_vs_dev_shell.ps1 -Arch amd64 -Component Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -LlvmBin "$env:ProgramFiles\LLVM\bin" -Require cl,clang,llvm-objdump,llvm-readobj -ClangArch x86_64
+          $Driver = Join-Path $env:RUNNER_TEMP 'msvc-comparison-build.exe'
+          & clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference build.c -lws2_32 -o $Driver
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver generate --cc clang --config Release --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_DEBUG_INFO=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver build --config Release -t ide
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Ide = Join-Path (Get-Location) 'build\Release\ide.exe'
+          & python ..\harness\tools\research\msvc_comparison\compare_debug.py --ide $Ide --out "$env:RUNNER_TEMP\msvc-debug-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain all evidence including failed attempts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: msvc-debug-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/msvc-debug-evidence
+          if-no-files-found: warn
+          retention-days: 14
