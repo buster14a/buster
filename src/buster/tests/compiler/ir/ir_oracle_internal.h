@@ -322,7 +322,8 @@ BUSTER_GLOBAL_LOCAL void ir_oracle_preflight(IrOracleRun* run, IrFunction* funct
                         case IR_OPCODE_FUNCTION: case IR_OPCODE_CALL: case IR_OPCODE_CAST:
                         case IR_OPCODE_ADDRESS_OF: case IR_OPCODE_DEREFERENCE: case IR_OPCODE_INDEX:
                         case IR_OPCODE_UNARY: case IR_OPCODE_BINARY:
-                        case IR_OPCODE_BRANCH: case IR_OPCODE_BRANCH_IF: case IR_OPCODE_SWITCH: case IR_OPCODE_RETURN: break;
+                        case IR_OPCODE_BRANCH: case IR_OPCODE_BRANCH_IF: case IR_OPCODE_SWITCH: case IR_OPCODE_RETURN:
+                        case IR_OPCODE_UNREACHABLE: break;
                         default: run->status = IR_ORACLE_UNSUPPORTED; break;
                     }
                     if (row->result.value < function->value_count) value_blocks[row->result.value] = block;
@@ -677,6 +678,7 @@ BUSTER_GLOBAL_LOCAL IrOracleRun* ir_oracle_evaluate(Arena* arena, IrProgram* pro
                             else if (frame->return_value.value != UINT32_MAX)
                                 run->frames[run->depth - 1].values[frame->return_value.value] = value;
                             break;
+                        case IR_OPCODE_UNREACHABLE: run->status = IR_ORACLE_INVALID; break;
                         default: run->status = IR_ORACLE_UNSUPPORTED; break;
                     }
                     if (row->opcode != IR_OPCODE_CALL && row->opcode != IR_OPCODE_RETURN && row->result.value != UINT32_MAX)

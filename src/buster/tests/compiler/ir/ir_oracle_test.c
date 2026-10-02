@@ -248,7 +248,9 @@ UnitTestResult ir_oracle_native_tests(UnitTestArguments* arguments)
             if (BUSTER_REQUIRE(arguments, probe && observe && validation.error == IR_VALIDATION_NONE))
             {
                 CodegenModule code = codegen_generate_canonical_module(arguments->arena, program, module, target_native,
-                    (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true, .record_fallbacks = true});
+                arguments->show(arguments, S8("IR_ORACLE_CODEGEN_V1 fixture={u32} mutation={u32} allocator={u32} fallback_functions={u32}\n"),
+                                fixture, mutation, mode, code.statistics.fallback_function_count);
                 if (BUSTER_REQUIRE(arguments, code.error == CODEGEN_ERROR_NONE))
                 {
                     ObjectFile object = object_from_canonical_codegen_module(arguments->arena, program, &code, target_native);
@@ -367,6 +369,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_rejection_controls(UnitTestArgument
                 break;
             }
         }
+        IrInstruction* terminator = probe->instructions + probe->blocks[0].last_instruction.value;
+        IrInstruction saved = *terminator;
+        *terminator = (IrInstruction){.opcode = IR_OPCODE_UNREACHABLE, .canonical_type = saved.canonical_type,
+            .result = IR_VALUE_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID};
+        run = ir_oracle_evaluate(arguments->arena, program, program->modules, probe, inputs, 2, IR_ORACLE_STEPS);
+        BUSTER_TEST(arguments, run->status == IR_ORACLE_INVALID);
+        *terminator = saved;
         // Canonically valid undefined return must be refused, never compared.
         IrInstruction* constant = 0;
         for (u32 i = 0; i < probe->instruction_count; i += 1)
@@ -537,20 +546,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
         {
             IrFunction* probe = ir_oracle_named(program->modules, S8("probe"));
             String8 expected = S8("IR_ORACLE_BEGIN_V1\n");
-            if (fixture == 4)
-            {
-                IrModule* module = program->modules;
-                arguments->show(arguments, S8("IR_ORACLE_MODULE_V1 globals={u32} initializers={u32} assemblies={u32} aliases={u32}\n"),
-                                module->global_count, module->initializer_count, module->assembly_count, module->alias_count);
-                for (u32 i = 0; i < module->global_count; i += 1)
-                {
-                    IrGlobal* global = module->globals + i;
-                    IrType* type = ir_oracle_type(program, global->type);
-                    arguments->show(arguments, S8("IR_ORACLE_GLOBAL_V1 index={u32} kind={u32} width={u32} size={u64} alignment={u64} initializer={u32} relocations={u32} tls={u32}\n"),
-                        i, (u32)type->kind, type->bit_width, type->layout.size, type->layout.alignment,
-                        (u32)global->initializer_kind, global->relocation_count, (u32)global->is_thread_local);
-                }
-            }
             bool evaluated = true;
             for (u32 input = 0; input < IR_ORACLE_INPUTS; input += 1)
             {
@@ -623,6 +618,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
                         arguments->show(arguments, S8("IR_ORACLE_REPORT_V1 fixture={u32} mutation={u32} allocator={u32} status={S8} timed_out={u32}\n{S8}"),
                             fixture, mutation, mode, !clean || !record ? S8("inconclusive") : mutation ? agreement ? S8("negative-control-missed") : S8("detected-discrepancy") :
                             agreement ? S8("agreement") : S8("discrepancy"), (u32)wait.timed_out, block);
+                        u64 metadata_start = string_first_sequence(output, S8("IR_ORACLE_CODEGEN_V1 "));
+                        if (metadata_start != BUSTER_STRING_NO_MATCH)
+                        {
+                            u64 metadata_end = metadata_start;
+                            while (metadata_end < output.length && output.pointer[metadata_end] != '\n') metadata_end += 1;
+                            arguments->show(arguments, S8("{S8}\n"), (String8){output.pointer + metadata_start, metadata_end - metadata_start});
+                        }
                         if (!clean) arguments->show(arguments, S8("{S8}\n"), output);
                     }
                 }

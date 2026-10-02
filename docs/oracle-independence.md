@@ -39,6 +39,7 @@ or loses an independent oracle.
 | Object writer ↔ reader/linker | `object.c` writers and readers, `link.c` | Hand-kept relocation constants | Checked against the published ELF/COFF/Mach-O values (all correct); system linkers on native lanes; `coff-extended-relocations.yml` | Conventions that only Buster reads remain untested, for example Mach-O x86-64 PC-relative data written as `BRANCH`. |
 | eBPF encoder ↔ test VM | `ebpf.c` and `ebpf_test_vm.h` | None at the opcode level: the VM uses raw literals, and every opcode matches RFC 9669 | Host C formulas | Semantic gaps the VM cannot see are #1305. |
 | Native ↔ LLVM ↔ Wasm ↔ eBPF (metamorphic) | Four backends | Canonical IR | A separately written host evaluator plus Clang/GCC at `-O0`/`-O2` | Independent. The grammar is unsigned-only. |
+| Canonical IR ↔ generated native execution | Hand-built canonical fixtures and C-lowered companions, independent bounded evaluator versus native child | Canonical records, enum contract and structural validator; C companions also share lowering | Test-only integer rules, tagged initialized byte memory, explicit frames and dominance checks in `ir_oracle_internal.h`, plus literal expectations | [Declared subset](canonical-ir-oracle.md); native Linux x86-64 slice and three isolated wrong transformations. Unsupported/invalid/timeout results refuse agreement. This route does not independently validate C lowering or the full ABI. |
 | Predefined macros ↔ layout | `c_source.c` predefines and the layout engines | `TargetDataLayout` | `clang -target T -E` | Divergences are filed as #1253. |
 
 ## Laws with an executable oracle
@@ -76,3 +77,4 @@ or loses an independent oracle.
   registers tested only at RAX and R15, the two registers where "hardware
   order plus 328" agrees with the specification, could not detect the wrong
   mapping.
+

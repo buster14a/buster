@@ -28,7 +28,7 @@ No hardware performance acceptance follows from these correctness checks.
 | Target | Little-endian, 64-bit pointers; independently checked natural scalar layouts. |
 | Integers | Boolean (one bit, one byte), 8/16/32/64-bit integers. Arithmetic wraps modulo the declared width; signed comparisons/division/right shifts use explicit two's-complement rules. Sign/zero extension, truncation and integer reinterpretation are supported. |
 | Invalid arithmetic | Division/remainder by zero, signed MIN/-1, shift counts at least the width, and zero CLZ/CTZ refuse evaluation. |
-| Control flow | Declared entry, branch, Boolean branch, integer switch and simultaneous block-parameter assignment; builder and published CFG representations. Independent operand and incoming-edge dominance checks prevent stale loop values. |
+| Control flow | Declared entry, branch, Boolean branch, integer switch and simultaneous block-parameter assignment; builder and published CFG representations. UNREACHABLE is admitted as a terminator but execution is invalid. Independent operand and incoming-edge dominance checks prevent stale loop values. |
 | Storage | Scalar LOCAL creates one fresh allocation identity per activation; executing that LOCAL again is unsupported. Locals start uninitialized. Scalar defined globals admit zero/integer initialization without relocations or TLS. |
 | Pointers | Tagged allocation identity and byte offset, never a host address. Address-of/dereference and nonnegative scalar pointer indexing; one-past formation may occur, dereference may not. Bounds, initialized bytes, natural alignment, read-only globals and activation lifetime are checked. Allocation IDs are never recycled within a run. |
 | Calls | Fixed-prototype, same-module ordinary functions with integer/Boolean parameters and integer/Boolean/void results. Explicit frames, no input-dependent host recursion or host resolver. |
@@ -54,7 +54,11 @@ routes. Interpreting incorrectly lowered C IR cannot alone validate lowering.
 
 The native child uses the existing canonical code generator and object linker;
 it has no external symbol resolver. Each child has its own process group,
-30-second deadline and bounded stdout/stderr capture. Agreement requires normal
+30-second deadline and bounded stdout/stderr capture. A deliberately looping
+fixture separately tests the 4,096-row interpreter budget and a five-second
+native-child timeout; neither result can become agreement. Requested allocator
+modes report the actual fallback-function count rather than implying that
+every function retained machine emission. Agreement requires normal
 zero exit, empty stderr, complete capture and cleanup, plus exactly six ordered,
 typed observation rows. Canonical decimal parsing rejects overflow, duplicate
 records, missing rows and malformed numbers. Output or a summary cannot replace
