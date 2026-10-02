@@ -1166,7 +1166,10 @@ are retained. Publication skips an already published member and diagnoses a
 same-scope ordinary-name collision instead of appending a second entity.
 `c_test_expression_enum_scope` checks scope restoration, declaration order,
 one publication per member, refusal neighbors and both canonical frontend
-forms on Linux x86-64/AArch64 and Windows x86-64. Expression enums inside
+forms on Linux x86-64/AArch64 and Windows x86-64. The registered
+`c_test_expression_enum_runtime` executes the same scope/order family on
+supported desktop native targets in all four allocator modes and both forms.
+Expression enums inside
 initializers, qualified type names and expression-defined record members
 remain separate pending cases under #1615.
 
