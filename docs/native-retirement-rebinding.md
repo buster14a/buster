@@ -169,14 +169,20 @@ current-main identity and GitHub Actions attestation. A main-push run
 invalidates every open integration head whose recorded base no longer equals
 current `main`, except a catch-up that is still admissible. Dispatching the
 writer again reconstructs it without requiring a manual feature-branch rebase. The independent `API migration policy` check
-continues to enforce bounded API compatibility. Configure admission as a
+continues to enforce bounded API compatibility. The PR/main admission job lives
+in `native-retirement-admission.yml`, which has no merge-group trigger; for a
+merge-group head the trusted-main reconciler (`merge_queue_admission.py
+reconcile`) publishes the same required check only after the exact base lands
+and the native gate passes twice, so no runner waits for the predecessor.
+Configure admission as a
 required GitHub Actions check (integration ID `15368`) without enabling strict
 required-status-check policy or removing any existing required check.
 On PR events, both read-only admission jobs check out independent live `main`
 and require that checkout to match the remote `main` before checking the writer's
 recorded base. The PR event's base SHA may still name the commit that was main
-when the PR opened. Merge groups keep their exact queued base SHA and wait for
-the predecessor to land before final admission.
+when the PR opened. Merge groups keep their exact queued base SHA; native
+admission stays pending in the reconciler, and the rebinding job still waits
+in-job, until the predecessor lands before final admission.
 
 Merge-conflict preflight also waits for the exact queued predecessor with the
 trusted `merge_queue_admission.py wait-base` helper (bounded to 18,000 seconds
