@@ -18,6 +18,17 @@ conventions; this page does not claim a separately installed library or stable A
 | `foundation.bytes` | [byte_writer.h](../../src/buster/lib/byte_writer.h), [hash.h](../../src/buster/lib/hash.h) | Byte construction and hashing helpers; do not infer cryptographic guarantees from a generic hash API. |
 | `foundation.simd` | [simd.h](../../src/buster/lib/simd.h) | Shared SIMD vocabulary with feature/compiler guards and fallbacks under the [SIMD guide](../agents/simd.md). |
 
+The shared unsigned bit-count helpers in [integer.h](../../src/buster/lib/integer.h)
+return the operand width for zero: 32 for `u32`, 64 for `u64`. Their focused
+`integer_bit_count_tests` fixture runs inside the registered `integer_tests`
+module. It compares leading/trailing counts with division/remainder oracles,
+exhausts all 16-bit values in low/high positions, and covers full-width bit
+boundaries, complements and alternating patterns. Run
+`build/Release/ide test --module=integer_tests --verbose=1 --ci=1` from the
+repository root after building `ide`; this checks the implementation selected
+by that build, including the scalar fallback on MSVC. Native platform and
+self-host validation remain the existing CI gates.
+
 Numeric, time and base definitions remain alongside these modules in
 [src/buster/lib](../../src/buster/lib/); the table is an entry-point index, not
 an inventory of every helper or a blanket support claim.
