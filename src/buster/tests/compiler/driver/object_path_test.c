@@ -369,7 +369,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_tls_export_single_classes(Uni
                 String8 program = string_format(arena,
                     S8("_Thread_local int single_tls __attribute__((aligned({u32}){S8})) {S8};\n"
                        "int check_single(int *, int);\n"
-                       "int main(void) { int failed = check_single(&single_tls, {u32}); return failed || single_tls != {u32}; }\n"),
+                       "int main(void) {{ int failed = check_single(&single_tls, {u32}); return failed || single_tls != {u32}; }}\n"),
                     rows[row].alignment, rows[row].weak ? S8(", weak") : S8(""), rows[row].initialized ? S8("= 42") : S8(""),
                     initial_value, initial_value + 1);
                 bool produced = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program));
