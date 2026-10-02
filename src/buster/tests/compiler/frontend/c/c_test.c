@@ -24358,16 +24358,6 @@ BUSTER_GLOBAL_LOCAL bool c_test_ext80_aggregate_bytes(IrGlobal* global, u8 const
     return bytes_match;
 }
 
-// A static x87 initializer is a constant expression over literals, and an
-// aggregate of them is one too.  These are the shapes musl's src/math needs:
-// `1/LDBL_EPSILON` in floorl.c and the coefficient tables in atanl.c.
-//
-// The expected payloads are what Clang emits for the same declarations.  What
-// they pin is that the fold rounds once per operation in the operation's own
-// format rather than accumulating through a double: `1/LDBL_EPSILON` is
-// exactly 2^63 only because LDBL_EPSILON rounds to 2^-63 first, and
-// folded_from_float and folded_from_double differ from each other and from the
-// long double nearest 0.1 for the same reason.
 typedef struct CTestX87UnaryCase CTestX87UnaryCase;
 struct CTestX87UnaryCase
 {
@@ -24651,6 +24641,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_integer_unary_runtime(UnitTestArgu
     return result;
 }
 
+// A static x87 initializer is a constant expression over literals, and an
+// aggregate of them is one too.  These are the shapes musl's src/math needs:
+// `1/LDBL_EPSILON` in floorl.c and the coefficient tables in atanl.c.
+//
+// The expected payloads are what Clang emits for the same declarations.  What
+// they pin is that the fold rounds once per operation in the operation's own
+// format rather than accumulating through a double: `1/LDBL_EPSILON` is
+// exactly 2^63 only because LDBL_EPSILON rounds to 2^-63 first, and
+// folded_from_float and folded_from_double differ from each other and from the
+// long double nearest 0.1 for the same reason.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
