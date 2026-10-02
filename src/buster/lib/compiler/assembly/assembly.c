@@ -5629,7 +5629,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
             continue;
         }
         u64 value = 0;
-        if (!token.length || token.pointer[0] != '#' || !assembly_aarch64_scalar_constant(builder, token, &value) ||
+        if (!assembly_aarch64_scalar_constant(builder, token, &value) ||
             operand_count >= BUSTER_ARRAY_LENGTH(parsed_operands))
         {
             return false;

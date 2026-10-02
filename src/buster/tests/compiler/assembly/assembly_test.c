@@ -2799,11 +2799,162 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_suffix_aliases(UnitTestArgu
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target arm_targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_IOS},
+    };
+    struct AssemblyImmediateCase
+    {
+        String8 source;
+        u32 word;
+    };
+    struct AssemblyImmediateCase const cases[] = {
+        {S8("add x0, x0, #1"), 0x91000400},
+        {S8("add x0, x0, 1"), 0x91000400},
+        {S8("sub w1, w2, #4"), 0x51001041},
+        {S8("add x0, sp, #16"), 0x910043e0},
+        {S8("mov x8, #93"), 0xd2800ba8},
+        {S8("movz x0, #5"), 0xd28000a0},
+        {S8("cmp x0, #3"), 0xf1000c1f},
+        {S8("ldr x0, [x1, #8]"), 0xf9400420},
+        {S8("add x0, x1, x2"), 0x8b020020},
+        {S8("mov x0, x1"), 0xaa0103e0},
+        {S8("add x3, x4, w5, uxtw #2"), 0x8b254883},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(arm_targets); target_index += 1)
+    {
+        Target target = arm_targets[target_index];
+        String8 separator = target_index >= 2 ? S8("%%") : S8(";");
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            u8 expected[8];
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                expected[byte] = (u8)(cases[index].word >> (8 * byte));
+                expected[byte + 4] = (u8)(0xd65f03c0u >> (8 * byte));
+            }
+            AssemblyEncodeResult instruction = assembly_encode(arguments->arena, cases[index].source,
+                (AssemblyEncodeOptions){.target = target});
+            BUSTER_TEST_RAW(arguments, !instruction.diagnostic_count && !instruction.relocation_count &&
+                assembly_test_bytes_equal(instruction.bytes, expected, 4), cases[index].source);
+            String8 source = string_format(arguments->arena, S8(".text\nf: {S8}{S8} ret\n"), cases[index].source, separator);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+            BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && unit.section_count == 1 &&
+                assembly_test_bytes_equal(unit.sections[0].data, expected, sizeof(expected)), source);
+        }
+        // Post-index is outside the current scalar-memory grammar. Retaining
+        // its immediate must refuse the complete form, never erase writeback.
+        AssemblyUnitResult refused = assembly_unit_encode(arguments->arena, S8(".text\nldr x1, [x2], #8\n"),
+            (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, refused.diagnostic_count == 1);
+        AssemblyEncodeResult symbolic = assembly_encode(arguments->arena, S8("add x0, x0, unresolved"),
+            (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, symbolic.diagnostic_count == 1 && !symbolic.symbol_count && !symbolic.bytes.length);
+        AssemblyUnitResult comment = assembly_unit_encode(arguments->arena,
+            target_index >= 2 ? S8(".text\nnop; ret /* unmatched quote \"\nret\n")
+                              : S8(".text\nnop // ret; /* unmatched quote \"\nret\n"),
+            (AssemblyEncodeOptions){.target = target});
+        u8 const nop_ret[] = {0x1f, 0x20, 0x03, 0xd5, 0xc0, 0x03, 0x5f, 0xd6};
+        BUSTER_TEST(arguments, !comment.diagnostic_count && comment.section_count == 1 &&
+            assembly_test_bytes_equal(comment.sections[0].data, nop_ret, sizeof(nop_ret)));
+        String8 invalid = string_format(arguments->arena, S8(".text\nnop{S8} bogus\n"), separator);
+        AssemblyUnitResult diagnostic = assembly_unit_encode(arguments->arena, invalid, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, diagnostic.diagnostic_count == 1);
+        if (diagnostic.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, diagnostic.diagnostics[0].line == 2 && diagnostic.diagnostics[0].column == (target_index >= 2 ? 7u : 6u));
+        }
+        char8 many[256];
+        u64 length = 0;
+        for (u32 index = 0; index < 40; index += 1)
+        {
+            memcpy(many + length, "nop", 3);
+            length += 3;
+            memcpy(many + length, separator.pointer, separator.length);
+            length += separator.length;
+        }
+        String8 many_source = string_format(arguments->arena, S8(".text\n{S8}"), (String8){.pointer = many, .length = length});
+        AssemblyUnitResult population = assembly_unit_encode(arguments->arena, many_source, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, !population.diagnostic_count && population.section_count == 1 && population.sections[0].data.length == 160);
+        if (!population.diagnostic_count && population.section_count == 1 && population.sections[0].data.length == 160)
+        {
+            for (u32 index = 0; index < 40; index += 1)
+            {
+                BUSTER_TEST(arguments, !memcmp(population.sections[0].data.pointer + index * 4, nop_ret, 4));
+            }
+        }
+        String8 quoted_source = S8(".data\n.ascii \"#;/*keep*/ //%%\", \"\\\"#;/*q*/\"\n"
+                                  "/* comment\n; # %% */ .byte 7\n");
+        String8 quoted_expected = S8("#;/*keep*/ //%%\"#;/*q*/\007");
+        AssemblyUnitResult quoted = assembly_unit_encode(arguments->arena, quoted_source, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, !quoted.diagnostic_count && quoted.section_count == 1 &&
+            assembly_test_bytes_equal(quoted.sections[0].data, (u8 const*)quoted_expected.pointer, quoted_expected.length));
+    }
+    Target x86_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(x86_targets); target_index += 1)
+    {
+        Target target = x86_targets[target_index];
+        AssemblyUnitResult intel = assembly_unit_encode(arguments->arena, S8(".text\nnop; ret # ignored\n"),
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 const intel_expected[] = {0x90, 0xc3};
+        BUSTER_TEST(arguments, !intel.diagnostic_count && intel.section_count == 1 &&
+            assembly_test_bytes_equal(intel.sections[0].data, intel_expected, sizeof(intel_expected)));
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena,
+            S8(".text\nxor %eax, %eax; inc %eax; ret # ; inc %eax /* \"\n"),
+            (AssemblyEncodeOptions){.target = target});
+        u8 const expected[] = {0x31, 0xc0, 0xff, 0xc0, 0xc3};
+        BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count == 1 &&
+            assembly_test_bytes_equal(unit.sections[0].data, expected, sizeof(expected)));
+        AssemblyUnitResult labels = assembly_unit_encode(arguments->arena,
+            S8(".text\n1: nop; loop 1b; jmp 1f; 1: nop; loop 1b; ret\n"),
+            (AssemblyEncodeOptions){.target = target});
+        u8 const label_bytes[] = {0x90, 0xe2, 0xfd, 0xe9, 0, 0, 0, 0, 0x90, 0xe2, 0xfd, 0xc3};
+        BUSTER_TEST(arguments, !labels.diagnostic_count && !labels.symbol_count && !labels.relocation_count &&
+            labels.section_count == 1 && assembly_test_bytes_equal(labels.sections[0].data, label_bytes, sizeof(label_bytes)));
+        AssemblyUnitResult diagnostic = assembly_unit_encode(arguments->arena, S8(".text\nnop; bogus\n"),
+            (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, diagnostic.diagnostic_count == 1);
+        if (diagnostic.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, diagnostic.diagnostics[0].line == 2 && diagnostic.diagnostics[0].column == 6);
+        }
+        AssemblyUnitResult quoted = assembly_unit_encode(arguments->arena, S8(".data\n.ascii \"#;/*keep*/ //%%\"\n"),
+            (AssemblyEncodeOptions){.target = target});
+        String8 quoted_expected = S8("#;/*keep*/ //%%");
+        BUSTER_TEST(arguments, !quoted.diagnostic_count && quoted.section_count == 1 &&
+            assembly_test_bytes_equal(quoted.sections[0].data, (u8 const*)quoted_expected.pointer, quoted_expected.length));
+        String8 escaped_sources[] = {
+            S8(".data\n.ascii \"\\\\\", \"x\"\n"),
+            S8(".data\n.ascii \"\\\\\\\"\", \"x\"\n"),
+        };
+        String8 escaped_expected[] = {S8("\\x"), S8("\\\"x")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(escaped_sources); index += 1)
+        {
+            AssemblyUnitResult escaped = assembly_unit_encode(arguments->arena, escaped_sources[index],
+                (AssemblyEncodeOptions){.target = target});
+            BUSTER_TEST(arguments, !escaped.diagnostic_count && escaped.section_count == 1 &&
+                assembly_test_bytes_equal(escaped.sections[0].data, (u8 const*)escaped_expected[index].pointer, escaped_expected[index].length));
+        }
+    }
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
     UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
     result.succeeded_test_count += suffix_aliases.succeeded_test_count;
     result.test_count += suffix_aliases.test_count;

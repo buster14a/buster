@@ -254,6 +254,17 @@ does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
 
+Statement boundaries follow the target: x86-64 and non-Apple AArch64 use
+`;` between statements; Apple AArch64 uses `%%` and treats `;` as a line
+comment. `#` starts an x86-64 comment and remains part of AArch64 immediates.
+`//` comments are accepted on both architectures. Quoted strings retain these
+markers and block-comment text, including escaped quotes. Diagnostics keep
+physical lines/columns after a separator; numeric labels resolve by statement
+order even when their definitions share one physical line. Scalar AArch64
+constant operands accept an optional `#` through the existing constant parser.
+Unsupported post-index memory operands are refused with their full spelling,
+so their writeback cannot silently disappear during comment handling.
+
 Integer data expressions retain `.` as the current field's section-relative
 address, including each separate operand in a comma-separated directive.
 `.long symbol - .` and `.quad symbol - .` use ELF PC32/PC64 on x86-64 and

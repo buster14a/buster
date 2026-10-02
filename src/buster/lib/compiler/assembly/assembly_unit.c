@@ -4,7 +4,7 @@
 // it and is called once per instruction line; everything a whole file has that
 // a single statement does not lives here.
 //
-// Three passes over an AssemblyUnitBuilder sized from the line count:
+// Three passes over an AssemblyUnitBuilder sized from the statement count:
 //   assembly_unit_collect_numeric_labels  local `1:` definitions in source
 //                                         order, so `1f`/`1b` can name one
 //   assembly_unit_parse                   labels, directives, and one
@@ -24,6 +24,7 @@
 //   assembly_unit_materialize_integers     final-label data evaluation
 //   assembly_unit_directive_*              the directive vocabulary
 //   assembly_unit_instruction              the assembly_encode call
+//   assembly_unit_statement                target comments/separators and positions
 //   assembly_unit_parse, assembly_unit_encode
 //
 // Anything the vocabulary does not cover is refused with a diagnostic naming
@@ -55,6 +56,14 @@ struct AssemblyUnitNumericLabel
 {
     String8 name;
     u64 value;
+    u64 statement;
+};
+
+typedef struct AssemblyUnitSourceCursor AssemblyUnitSourceCursor;
+struct AssemblyUnitSourceCursor
+{
+    u64 offset;
+    u64 line_start;
     u32 line;
 };
 
@@ -95,6 +104,7 @@ struct AssemblyUnitBuilder
     u32 current_section;
     u32 line;
     u32 column;
+    u64 statement;
 };
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_space(char8 value)
@@ -497,7 +507,12 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_split_operands(String8 text, String8* oper
     bool quoted = false;
     for (u64 index = 0; index <= text.length; index += 1)
     {
-        if (index < text.length && text.pointer[index] == '"' && (!index || text.pointer[index - 1] != '\\'))
+        if (index < text.length && quoted && text.pointer[index] == '\\' && index + 1 < text.length)
+        {
+            index += 1;
+            continue;
+        }
+        if (index < text.length && text.pointer[index] == '"')
         {
             quoted = !quoted;
             continue;
@@ -1040,11 +1055,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
                     {
                         continue;
                     }
-                    if (direction == 'b' && candidate.line <= builder->line)
+                    if (direction == 'b' && candidate.statement <= builder->statement)
                     {
                         name = candidate.name;
                     }
-                    if (direction == 'f' && candidate.line > builder->line && !name.length)
+                    if (direction == 'f' && candidate.statement > builder->statement && !name.length)
                     {
                         name = candidate.name;
                     }
@@ -1218,43 +1233,115 @@ BUSTER_GLOBAL_LOCAL u64 assembly_unit_leading_label(String8 line)
     return end && end < line.length && line.pointer[end] == ':' ? end : 0;
 }
 
-// Every source line, with block comments already blanked. Line comments are
-// stripped here so the two label passes and the instruction layer all see the
-// same text.
-BUSTER_GLOBAL_LOCAL String8 assembly_unit_statement(String8 source, u64* cursor, u32* column)
+// Apple AArch64 uses ';' for comments and '%%' between statements. The other
+// supported targets use ';' between statements; '#' is an x86 comment only.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_apple_aarch64(Target target)
 {
-    u64 start = *cursor;
-    char8 const* line_start = source.pointer + start;
-    u64 end = start;
-    while (end < source.length && source.pointer[end] != '\n')
+    return target.cpu_arch == CPU_ARCH_AARCH64 &&
+           (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS);
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_unit_line_comment(Target target, String8 source, u64 index)
+{
+    char8 value = source.pointer[index];
+    return (value == '#' && target.cpu_arch == CPU_ARCH_X86_64) ||
+           (value == ';' && assembly_unit_apple_aarch64(target)) ||
+           (value == '/' && index + 1 < source.length && source.pointer[index + 1] == '/');
+}
+
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_separator_length(Target target, String8 source, u64 index)
+{
+    u32 length;
+    if (assembly_unit_apple_aarch64(target))
     {
-        end += 1;
+        length = source.pointer[index] == '%' && index + 1 < source.length && source.pointer[index + 1] == '%' ? 2 : 0;
     }
-    *cursor = end < source.length ? end + 1 : source.length;
-    String8 line = string_slice(source, start, end);
-    for (u64 index = 0; index < line.length; index += 1)
+    else
     {
-        if (line.pointer[index] == '#' || line.pointer[index] == ';' ||
-            (line.pointer[index] == '/' && index + 1 < line.length && line.pointer[index + 1] == '/'))
+        length = source.pointer[index] == ';' ? 1 : 0;
+    }
+    return length;
+}
+
+// Block comments have already been blanked. Both passes consume this same
+// target-aware stream; physical positions stay separate from statement order.
+BUSTER_GLOBAL_LOCAL String8 assembly_unit_statement(Target target, String8 source, AssemblyUnitSourceCursor* cursor, u32* line_number, u32* column)
+{
+    u64 start = cursor->offset;
+    u64 line_start = cursor->line_start;
+    u64 end = start;
+    char8 quote = 0;
+    bool done = false;
+    *line_number = cursor->line;
+    while (end < source.length && !done)
+    {
+        char8 value = source.pointer[end];
+        if (value == '\n')
         {
-            line.length = index;
-            break;
+            cursor->offset = end + 1;
+            cursor->line_start = end + 1;
+            cursor->line += 1;
+            done = true;
+        }
+        else if (quote)
+        {
+            if (value == '\\' && end + 1 < source.length && source.pointer[end + 1] != '\n')
+            {
+                end += 2;
+            }
+            else
+            {
+                if (value == quote) quote = 0;
+                end += 1;
+            }
+        }
+        else if (value == '"' || value == '\'')
+        {
+            quote = value;
+            end += 1;
+        }
+        else if (assembly_unit_line_comment(target, source, end))
+        {
+            cursor->offset = end;
+            while (cursor->offset < source.length && source.pointer[cursor->offset] != '\n') cursor->offset += 1;
+            if (cursor->offset < source.length)
+            {
+                cursor->offset += 1;
+                cursor->line_start = cursor->offset;
+                cursor->line += 1;
+            }
+            done = true;
+        }
+        else
+        {
+            u32 separator_length = assembly_unit_separator_length(target, source, end);
+            if (separator_length)
+            {
+                cursor->offset = end + separator_length;
+                done = true;
+            }
+            else
+            {
+                end += 1;
+            }
         }
     }
-    String8 trimmed = assembly_unit_trim(line);
-    *column = trimmed.length ? (u32)((u64)(trimmed.pointer - line_start) + 1) : 1;
+    if (!done) cursor->offset = end;
+    String8 trimmed = assembly_unit_trim(string_slice(source, start, end));
+    *column = trimmed.length ? (u32)((u64)(trimmed.pointer - source.pointer) - line_start + 1) : 1;
     return trimmed;
 }
 
 BUSTER_GLOBAL_LOCAL void assembly_unit_collect_numeric_labels(AssemblyUnitBuilder* builder, String8 source)
 {
-    u64 cursor = 0;
-    u32 line_number = 0;
-    while (cursor < source.length)
+    AssemblyUnitSourceCursor cursor = {.line = 1};
+    u64 statement = 0;
+    while (cursor.offset < source.length)
     {
         u32 column = 0;
-        String8 line = assembly_unit_statement(source, &cursor, &column);
-        line_number += 1;
+        u32 line_number = 0;
+        String8 line = assembly_unit_statement(builder->target, source, &cursor, &line_number, &column);
+        statement += 1;
         u64 label = assembly_unit_leading_label(line);
         while (label)
         {
@@ -1266,7 +1353,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_collect_numeric_labels(AssemblyUnitBuilde
                 builder->numeric_labels[builder->numeric_label_count] = (AssemblyUnitNumericLabel){
                     .name = string_format(builder->arena, S8(".Lnum.{u64}.{u32}"), value, builder->numeric_label_count),
                     .value = value,
-                    .line = line_number,
+                    .statement = statement,
                 };
                 builder->numeric_label_count += 1;
             }
@@ -1278,13 +1365,13 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_collect_numeric_labels(AssemblyUnitBuilde
 
 BUSTER_GLOBAL_LOCAL void assembly_unit_parse(AssemblyUnitBuilder* builder, String8 source)
 {
-    u64 cursor = 0;
+    AssemblyUnitSourceCursor cursor = {.line = 1};
     u32 numeric_index = 0;
     String8 pending_prefix = {0};
-    while (cursor < source.length && builder->result.diagnostic_count < ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY)
+    while (cursor.offset < source.length && builder->result.diagnostic_count < ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY)
     {
-        String8 line = assembly_unit_statement(source, &cursor, &builder->column);
-        builder->line += 1;
+        String8 line = assembly_unit_statement(builder->target, source, &cursor, &builder->line, &builder->column);
+        builder->statement += 1;
         u64 label = assembly_unit_leading_label(line);
         if (pending_prefix.length && (label || (line.length && line.pointer[0] == '.')))
         {
@@ -1511,20 +1598,59 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     // anything else reads the text: every pass then sees the same line
     // numbering, and the same columns, as the file on disk.
     char8* text = arena_allocate(arena, char8, source.length ? source.length : 1);
-    u32 line_count = 1;
+    u32 statement_count = 1;
     u32 comma_count = 0;
     for (u64 index = 0; index < source.length; index += 1)
     {
         text[index] = source.pointer[index];
-        line_count += source.pointer[index] == '\n';
+        statement_count += source.pointer[index] == '\n';
         comma_count += source.pointer[index] == ',';
     }
-    for (u64 index = 0; index + 1 < source.length;)
+    char8 quote = 0;
+    for (u64 index = 0; index < source.length;)
     {
+        char8 value = source.pointer[index];
+        if (value == '\n')
+        {
+            quote = 0;
+            index += 1;
+            continue;
+        }
+        if (quote)
+        {
+            if (value == '\\' && index + 1 < source.length && source.pointer[index + 1] != '\n')
+            {
+                index += 2;
+            }
+            else
+            {
+                if (value == quote) quote = 0;
+                index += 1;
+            }
+            continue;
+        }
+        if (value == '"' || value == '\'')
+        {
+            quote = value;
+            index += 1;
+            continue;
+        }
+        if (assembly_unit_line_comment(options.target, source, index))
+        {
+            while (index < source.length && source.pointer[index] != '\n') index += 1;
+            continue;
+        }
+        u32 separator_length = assembly_unit_separator_length(options.target, source, index);
+        if (separator_length)
+        {
+            statement_count += 1;
+            index += separator_length;
+            continue;
+        }
         // The scan reads `source` rather than `text`: `text` is being blanked
         // as it goes, so a closing `*/` looked for there would never be found
         // and the whole file after the first comment would disappear.
-        if (source.pointer[index] != '/' || source.pointer[index + 1] != '*')
+        if (value != '/' || index + 1 >= source.length || source.pointer[index + 1] != '*')
         {
             index += 1;
             continue;
@@ -1548,11 +1674,11 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     }
     String8 blanked = {.pointer = text, .length = source.length};
 
-    builder.symbol_capacity = line_count * 2 + comma_count + ASSEMBLY_UNIT_SECTION_CAPACITY;
-    builder.relocation_capacity = line_count + comma_count + 16;
-    builder.integer_capacity = line_count + comma_count + 16;
-    builder.piece_capacity = line_count + 16;
-    builder.numeric_label_capacity = line_count * 2 + 16;
+    builder.symbol_capacity = statement_count * 2 + comma_count + ASSEMBLY_UNIT_SECTION_CAPACITY;
+    builder.relocation_capacity = statement_count + comma_count + 16;
+    builder.integer_capacity = statement_count + comma_count + 16;
+    builder.piece_capacity = statement_count + 16;
+    builder.numeric_label_capacity = statement_count * 2 + 16;
     builder.result.sections = arena_allocate(arena, AssemblyUnitSection, ASSEMBLY_UNIT_SECTION_CAPACITY);
     builder.section_offsets = arena_allocate(arena, u64, ASSEMBLY_UNIT_SECTION_CAPACITY);
     builder.result.symbols = arena_allocate(arena, AssemblyUnitSymbol, builder.symbol_capacity);

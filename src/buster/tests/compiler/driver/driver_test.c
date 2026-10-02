@@ -3937,9 +3937,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitT
     return result;
 }
 
+// Assemble through both suffix inference and explicit -x selection, serialize
+// the objects, and compare the complete text against independent literal words.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_statements(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+    String8 sources[] = {
+        S8(".text\n.globl statements_entry\nstatements_entry: xor %eax, %eax; inc %eax; ret # ; ignored\n"),
+        S8(".text\n.globl statements_entry\nstatements_entry: add x0, x0, #1; add x0, x0, 1; sub w1, w2, #4; "
+           "add x0, sp, #16; mov x8, #93; movz x0, #5; cmp x0, #3; ldr x0, [x1, #8]; "
+           "add x0, x1, x2; mov x0, x1; add x3, x4, w5, uxtw #2; ret\n"),
+    };
+    u8 const x86_bytes[] = {0x31, 0xc0, 0xff, 0xc0, 0xc3};
+    u32 const arm_words[] = {0x91000400, 0x91000400, 0x51001041, 0x910043e0, 0xd2800ba8, 0xd28000a0,
+                             0xf1000c1f, 0xf9400420, 0x8b020020, 0xaa0103e0, 0x8b254883, 0xd65f03c0};
+    u8 arm_bytes[sizeof(arm_words)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(arm_words); index += 1)
+    {
+        for (u32 byte = 0; byte < 4; byte += 1) arm_bytes[index * 4 + byte] = (u8)(arm_words[index] >> (byte * 8));
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 explicit_language = 0; explicit_language < 2; explicit_language += 1)
+        {
+            String8 input = buster_test_temporary_path(arena, S8("assembly-statements"), explicit_language ? S8(".input") : S8(".s"));
+            String8 output = buster_test_temporary_path(arena, S8("assembly-statements"), S8(".o"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[target_index]))))
+            {
+                String8 inferred_command[] = {S8("-target"), targets[target_index], S8("-c"), input, S8("-o"), output};
+                String8 explicit_command[] = {S8("-target"), targets[target_index], S8("-c"), S8("-x"), S8("assembler"), input, S8("-o"), output};
+                SliceString8 command = explicit_language ? (SliceString8)BUSTER_ARRAY_TO_SLICE(explicit_command)
+                                                        : (SliceString8)BUSTER_ARRAY_TO_SLICE(inferred_command);
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+                    compiler_driver_parse_arguments(arena, command));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+                {
+                    FileMapRead object_map = file_map_read(arena, output, (FileReadOptions){0});
+                    ObjectFile round_trip = object_read(arena, object_map.bytes, compiled.object.target);
+                    if (BUSTER_REQUIRE(arguments, round_trip.error == OBJECT_ERROR_NONE))
+                    {
+                        ObjectSymbol const* symbol = compiler_driver_test_object_symbol(&round_trip, S8("statements_entry"));
+                        if (BUSTER_REQUIRE(arguments, symbol && symbol->section < round_trip.section_count))
+                        {
+                            ByteSlice text = round_trip.sections[symbol->section].data;
+                            u8 const* expected = target_index ? arm_bytes : x86_bytes;
+                            u64 expected_length = target_index ? sizeof(arm_bytes) : sizeof(x86_bytes);
+                            BUSTER_TEST(arguments, symbol->value == 0 && text.length == expected_length &&
+                                !memcmp(text.pointer, expected, expected_length));
+                        }
+                    }
+                    file_map_unmap(object_map);
+                }
+            }
+            os_file_delete(input);
+            os_file_delete(output);
+        }
+    }
+    String8 input = buster_test_temporary_path(arena, S8("assembly-postindex-refusal"), S8(".s"));
+    String8 output = buster_test_temporary_path(arena, S8("assembly-postindex-refusal"), S8(".o"));
+    String8 sentinel = S8("existing object stays intact");
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8(".text\nldr x1, [x2], #8\n"))) &&
+        file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+    {
+        String8 command[] = {S8("-target"), targets[1], S8("-c"), input, S8("-o"), output};
+        CompilerDriverResult refused = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && !refused.has_object && refused.diagnostic.length != 0);
+        BUSTER_TEST(arguments, string_equal(BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0})), sentinel));
+    }
+    os_file_delete(input);
+    os_file_delete(output);
+    scratch_end(temporary);
+    return result;
+}
 // A fresh `cc` process fills the x86-64 metadata string lengths one offset at
 // a time on first read and never decodes the coverage rows; this process has
-// prepared every table (the harness prewarms for its gangs).  Both must write
+// prepared every table (the harness prewarms for its gangs). Both must write
 // the same object bytes, debug information included, and a child that runs
 // the opt-in unit gang -- which prepares every table before its workers
 // start -- must link the same program as the serial child.
@@ -16326,6 +16403,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_constant_short_circuit_verification);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_pointer_addresses);
