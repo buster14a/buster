@@ -16382,6 +16382,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
             scratch_end(temporary);
         }
     }
+    // Both scratch arenas can be legitimate shared-query owners. Repeated
+    // deep queries must retain neither role buffers nor a third-scratch need.
+    String8 deep_start = S8("int aligned(void); int helper(int); int probe(void) { int value __attribute__((aligned(");
+    String8 deep_parts[22];
+    u32 deep_count = 0;
+    deep_parts[deep_count++] = deep_start;
+    for (u32 depth = 0; depth < 9; depth += 1)
+    {
+        deep_parts[deep_count++] = S8("sizeof(int __attribute__((aligned(");
+    }
+    deep_parts[deep_count++] = S8("sizeof(helper(1))");
+    for (u32 depth = 0; depth < 9; depth += 1)
+    {
+        deep_parts[deep_count++] = S8("))))");
+    }
+    deep_parts[deep_count++] = S8("))) = 3; return value; }");
+    String8 deep_source = string_join_arena(arguments->arena, (SliceString8){.pointer = deep_parts, .length = deep_count}, false);
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        TemporalArena model_temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(model_temporary.arena, deep_source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect],
+        });
+        CParseResult model = c_parse(model_temporary.arena, tokens);
+        c_parse_position_index_ensure(&model, tokens);
+        TemporalArena message_temporary = scratch_begin(&model_temporary.arena, 1);
+        BUSTER_TEST(arguments, model_temporary.arena != message_temporary.arena);
+        u64 model_position = model_temporary.arena->position;
+        u64 message_position = message_temporary.arena->position;
+        for (u32 repetition = 0; repetition < 16; repetition += 1)
+        {
+            CDiagnostic checked = c_test_check_named_call_arities(message_temporary.arena, &model, tokens, 0, (u32)tokens.token_count);
+            BUSTER_TEST_RAW(arguments, !checked.message.length, deep_source);
+            BUSTER_TEST(arguments, model_temporary.arena->position == model_position && message_temporary.arena->position == message_position);
+        }
+        scratch_end(message_temporary);
+        scratch_end(model_temporary);
+    }
     typedef struct CTestAttributeRefusal CTestAttributeRefusal;
     struct CTestAttributeRefusal
     {
