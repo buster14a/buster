@@ -580,6 +580,10 @@ def separate_reconciled_jobs(jobs, run_id, run_attempt, head_sha, checks):
     if candidates:
         if not isinstance(checks, list) or not all(isinstance(check, dict) for check in checks):
             raise ValueError("Malformed reconciler check inventory")
+        check_ids = [check.get("id") for check in checks]
+        if (not all(type(identity) is int and identity > 0 for identity in check_ids) or
+                len(set(check_ids)) != len(check_ids)):
+            raise ValueError("Reconciler check snapshot IDs are malformed or duplicated")
         identities = [job.get("id") for job in jobs]
         names = Counter(job["name"] for job in candidates)
         for job in candidates:

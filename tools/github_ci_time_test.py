@@ -124,6 +124,15 @@ class ReconciledInventoryTests(unittest.TestCase):
                        self.checks + [dict(self.checks[0], id=9999)]):
             self.assertFalse(self.gate(checks=checks)["success"])
 
+    def test_unrelated_check_rows_cannot_hide_omissions_with_duplicate_or_malformed_ids(self):
+        duplicate = self.checks + [{"id": 9998, "name": "Other first"},
+                                   {"id": 9998, "name": "Other second"}]
+        self.assertFalse(self.gate(checks=duplicate)["success"])
+        for identity in (None, True, "9998", {"bad": 1}, 0, -1):
+            with self.subTest(identity=identity):
+                self.assertFalse(self.gate(checks=self.checks + [{"id": identity, "name": "Other"}])["success"])
+        self.assertTrue(self.gate(checks=self.checks + [{"id": 9998, "name": "Other"}])["success"])
+
     def test_wrong_run_attempt_execution_and_duplicate_rows_remain_failures(self):
         for field, value in (("id", None), ("id", True), ("id", {"bad": 1}),
                              ("run_id", 1), ("head_sha", "b" * 40), ("run_attempt", 2),

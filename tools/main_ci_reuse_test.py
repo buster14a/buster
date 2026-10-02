@@ -217,6 +217,23 @@ class MainCIReuseTests(unittest.TestCase):
                         else:
                             reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
 
+    def test_unrelated_duplicate_or_malformed_check_ids_fail_both_reuse_readers(self):
+        for source in (True, False):
+            for identity in (None, True, "9998", {"bad": 1}, 0, -1, "duplicate"):
+                with self.subTest(source=source, identity=identity):
+                    self.api = FakeAPI()
+                    self.api.add_reconciled_metadata()
+                    if identity == "duplicate":
+                        self.api.checks += [{"id": 9998, "name": "Other first"},
+                                            {"id": 9998, "name": "Other second"}]
+                    else:
+                        self.api.checks.append({"id": identity, "name": "Other"})
+                    with self.assertRaises(AdmissionError):
+                        if source:
+                            self.admit()
+                        else:
+                            reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+
     def test_complete_check_proof_uses_strict_pagination(self):
         api = GitHub(reuse.REPOSITORY, "unused")
         cases = (({"total_count": 2, "check_runs": []},),
