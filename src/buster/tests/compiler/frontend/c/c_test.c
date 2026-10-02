@@ -30242,7 +30242,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* 
                                 symbol->linkage == (rows[row].internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL) &&
                                 function->state == (rows[row].definition ? IR_FUNCTION_LOWERED : IR_FUNCTION_DECLARATION) &&
                                 (rows[row].definition ? function->instruction_count != 0 : function->instruction_count == 0);
-                            BUSTER_TEST_RAW(arguments, correct, context);
+                            BUSTER_TEST_RAW(arguments, correct,
+                                string_format(temporary.arena, S8("{S8}: symbol={u32} definition={u32} linkage={u32} state={u32} instructions={u32}"),
+                                    context, (u32)(symbol != 0), (u32)(symbol && symbol->is_definition),
+                                    symbol ? (u32)symbol->linkage : UINT32_MAX, (u32)function->state, function->instruction_count));
                         }
                         BUSTER_TEST_RAW(arguments, found == 1, context);
                     }
