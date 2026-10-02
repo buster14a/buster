@@ -83,6 +83,12 @@ static void test_service_output_share(char const* root)
 }
 #endif
 
+enum
+{
+    TEST_BUNDLE_DISTINCT_ARTIFACTS = 12,
+    TEST_BUNDLE_NO_FUNCTION_COUNT = 13
+};
+
 static int test_bundle(char const* root, unsigned scenario)
 {
     int ok = tp_mkdirs(root) && test_text(root, "metadata.json", "{\"synthetic_test_fixture\":true}\n") &&
@@ -118,6 +124,12 @@ static int test_bundle(char const* root, unsigned scenario)
                     for (unsigned i = 0; i < TP_COUNTERS; ++i) row.process.counters[i] = NAN;
                     row.output_bytes = 4; row.source_bytes = 16; row.source_lines = 2; row.source_functions = 1;
                     memset(row.output_hash, '0', 64); row.output_hash[64] = 0;
+                    if (scenario == TEST_BUNDLE_DISTINCT_ARTIFACTS)
+                    {
+                        row.output_bytes += variant;
+                        row.output_hash[0] = variant ? '1' : '0';
+                    }
+                    if (scenario == TEST_BUNDLE_NO_FUNCTION_COUNT) row.source_functions = 0;
                     if (variant && (scenario == 1 || (scenario == 2 && round == 0))) row.process.wall_seconds = 1.3;
                     if (scenario == 3) row.process.wall_seconds = variant ? 0.0013 : 0.001;
                     if (variant && scenario == 4) row.process.wall_seconds = pair & 1 ? 1.5 : 0.8;
@@ -1428,6 +1440,69 @@ static void test_summaries(char const* root, int expected)
     }
 }
 
+/* Reseal each independently inconsistent probe so rejection tests semantic
+ * work identity rather than the evidence checksum. Artifact equality is
+ * per variant; unknown self-host function counts remain valid zeroes. */
+static void test_probe_identity(char const* root)
+{
+    enum { NEGATIVE_CASES = 8, DISTINCT_ARTIFACTS_CASE = 8, NO_FUNCTION_COUNT_CASE = 9, CASES = 10 };
+    for (unsigned scenario = 0; scenario < CASES; ++scenario)
+    {
+        char directory[TP_PATH_CAP], path[TP_PATH_CAP], leaf[128];
+        snprintf(leaf, sizeof(leaf), "probe-identity-%u", scenario);
+        unsigned bundle = scenario == DISTINCT_ARTIFACTS_CASE ? TEST_BUNDLE_DISTINCT_ARTIFACTS :
+                          scenario == NO_FUNCTION_COUNT_CASE ? TEST_BUNDLE_NO_FUNCTION_COUNT : 0;
+        int paths_ok = tp_path(directory, root, leaf) && test_bundle(directory, bundle) &&
+                       tp_path(path, directory, "telemetry.csv");
+        CHECK(paths_ok);
+        FILE* file = paths_ok ? fopen(path, "wb") : NULL;
+        CHECK(file != NULL);
+        if (file)
+        {
+            fputs(TP_RAW_HEADER, file);
+            for (unsigned kind = 0; kind < 2; ++kind)
+            {
+                for (unsigned repeat = 0; repeat < 3; ++repeat)
+                {
+                    for (unsigned variant = 0; variant < 2; ++variant)
+                    {
+                        TpRow row = {0};
+                        row.process.wall_seconds = 1.0;
+                        row.process.peak_rss_bytes = 67108864.0;
+                        for (unsigned i = 0; i < TP_COUNTERS; ++i) row.process.counters[i] = NAN;
+                        row.arena_calls = kind ? 3.0 : NAN;
+                        row.arena_bytes = kind ? 15.0 : NAN;
+                        row.output_bytes = 4; row.source_bytes = 16; row.source_lines = 2; row.source_functions = 1;
+                        memset(row.output_hash, '0', 64); row.output_hash[64] = 0;
+                        if (scenario == DISTINCT_ARTIFACTS_CASE)
+                        {
+                            row.output_bytes += variant;
+                            row.output_hash[0] = variant ? '1' : '0';
+                        }
+                        if (scenario == NO_FUNCTION_COUNT_CASE) row.source_functions = 0;
+                        /* 2 kinds x 2 omitted fields x 2 variants; mutate only
+                         * the final repeat, preserving parser-valid values. */
+                        if (scenario < NEGATIVE_CASES && kind == scenario / 4 && variant == scenario % 2 && repeat == 2)
+                        {
+                            if ((scenario / 2) % 2) ++row.source_functions;
+                            else ++row.output_bytes;
+                        }
+                        CHECK(tp_sample_csv(file, kind, repeat, variant, variant, 0, &row));
+                    }
+                }
+            }
+            CHECK(fclose(file) == 0);
+            CHECK(tp_completion(directory, 1, 20, 1, 1));
+            CHECK(tp_completion(directory, 1, 20, 1, 0));
+            CHECK(test_text(directory, tp_summary_names[0], "stale verdict\n"));
+            CHECK(test_text(directory, tp_summary_names[1], "stale verdict\n"));
+            CHECK(tp_compare(directory) == (scenario < NEGATIVE_CASES ? 2 : 0));
+            test_summaries(directory, scenario >= NEGATIVE_CASES);
+            CHECK(tp_completion(directory, 1, 20, 1, 0));
+        }
+    }
+}
+
 static void test_summary_cleanup(char const* root)
 {
     char directory[TP_PATH_CAP], blocked[TP_PATH_CAP], path[TP_PATH_CAP];
@@ -1828,6 +1903,7 @@ int main(int argc, char** argv)
 #endif
         test_process_fields(root);
         test_diagnostic_probes(root);
+        test_probe_identity(root);
         test_legacy_schema(executable, root);
         test_compile_options();
 #ifdef __linux__
