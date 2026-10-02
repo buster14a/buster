@@ -13173,11 +13173,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_arguments(Un
     UnitTestResult result = {0};
     TemporalArena temporary = arena_begin_temporal(arguments->arena);
     Arena* arena = temporary.arena;
+    typedef struct PicTargetCase PicTargetCase;
     struct PicTargetCase
     {
         String8 triple;
         bool refuse;
-    } targets[] = {
+    };
+    PicTargetCase targets[] = {
         {S8("aarch64-linux"), true}, {S8("aarch64-linux-android"), true},
         {S8("aarch64-unknown-freestanding"), true},
         {S8("x86_64-linux"), false}, {S8("x86_64-linux-android"), false},
@@ -13188,12 +13190,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_arguments(Un
         {S8("wasm32-unknown-freestanding"), false}, {S8("wasm32-wasip1"), false},
         {S8("wasm64-unknown-freestanding"), false}, {S8("bpfel-unknown-linux"), false},
     };
+    typedef struct PicOrderCase PicOrderCase;
     struct PicOrderCase
     {
         String8 first;
         String8 second;
         String8 surviving;
-    } orders[] = {
+    };
+    PicOrderCase orders[] = {
         {S8("-fPIC"), S8("-g0"), S8("-fPIC")}, {S8("-fpic"), S8("-g0"), S8("-fpic")},
         {S8("-fPIE"), S8("-g0"), S8("-fPIE")}, {S8("-fpie"), S8("-g0"), S8("-fpie")},
         {S8("-fPIC"), S8("-fno-pic"), {0}}, {S8("-fPIE"), S8("-fno-pie"), {0}},
