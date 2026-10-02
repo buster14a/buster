@@ -1,0 +1,163 @@
+GNU objdump (GNU Binutils) 2.47
+Copyright (C) 2026 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) any later version.
+This program has absolutely no warranty.
+
+Command: ['objdump', '-d', '--disassemble=choose', 'switch-probe/evidence/x86_64/w8-s0-v1-c0.o', 'switch-probe/evidence/x86_64/w8-s0-v1-c1.o', 'switch-probe/evidence/x86_64/w8-s0-v1-c2.o', 'switch-probe/evidence/x86_64/w8-s0-v1-c3.o', 'switch-probe/evidence/x86_64/w8-s0-v1-c4.exe']
+
+
+Can't get contents for section '.debug_info'.
+
+switch-probe/evidence/x86_64/w8-s0-v1-c0.o:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <choose>:
+   0:	55                   	push   %rbp
+   1:	48 89 e5             	mov    %rsp,%rbp
+   4:	48 83 ec 30          	sub    $0x30,%rsp
+   8:	f6 04 24 00          	testb  $0x0,(%rsp)
+   c:	40 0f b6 ff          	movzbl %dil,%edi
+  10:	48 89 7d f0          	mov    %rdi,-0x10(%rbp)
+  14:	48 8b 45 f0          	mov    -0x10(%rbp),%rax
+  18:	48 89 45 f8          	mov    %rax,-0x8(%rbp)
+  1c:	48 8b 45 f8          	mov    -0x8(%rbp),%rax
+  20:	48 89 45 e8          	mov    %rax,-0x18(%rbp)
+  24:	0f b6 c0             	movzbl %al,%eax
+  27:	48 89 45 e0          	mov    %rax,-0x20(%rbp)
+  2b:	48 8b 45 f0          	mov    -0x10(%rbp),%rax
+  2f:	b9 07 01 00 00       	mov    $0x107,%ecx
+  34:	39 c8                	cmp    %ecx,%eax
+  36:	0f 84 07 00 00 00    	je     43 <choose+0x43>
+  3c:	e9 11 00 00 00       	jmp    52 <choose+0x52>
+  41:	0f 0b                	ud2
+  43:	b8 0b 00 00 00       	mov    $0xb,%eax
+  48:	48 89 45 d8          	mov    %rax,-0x28(%rbp)
+  4c:	48 8b 45 d8          	mov    -0x28(%rbp),%rax
+  50:	c9                   	leave
+  51:	c3                   	ret
+  52:	b8 16 00 00 00       	mov    $0x16,%eax
+  57:	48 89 45 d0          	mov    %rax,-0x30(%rbp)
+  5b:	48 8b 45 d0          	mov    -0x30(%rbp),%rax
+  5f:	c9                   	leave
+  60:	c3                   	ret
+
+switch-probe/evidence/x86_64/w8-s0-v1-c1.o:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <choose>:
+   0:	55                   	push   %rbp
+   1:	48 89 e5             	mov    %rsp,%rbp
+   4:	48 83 ec 40          	sub    $0x40,%rsp
+   8:	f6 04 24 00          	testb  $0x0,(%rsp)
+   c:	48 89 f8             	mov    %rdi,%rax
+   f:	48 89 45 f8          	mov    %rax,-0x8(%rbp)
+  13:	48 8b 4d f8          	mov    -0x8(%rbp),%rcx
+  17:	48 0f b6 c1          	movzbq %cl,%rax
+  1b:	48 89 45 d0          	mov    %rax,-0x30(%rbp)
+  1f:	48 8b 4d d0          	mov    -0x30(%rbp),%rcx
+  23:	48 89 8d c8 ff ff ff 	mov    %rcx,-0x38(%rbp)
+  2a:	48 8b 85 c8 ff ff ff 	mov    -0x38(%rbp),%rax
+  31:	48 89 45 f0          	mov    %rax,-0x10(%rbp)
+  35:	48 8b 4d f0          	mov    -0x10(%rbp),%rcx
+  39:	48 0f b6 c1          	movzbq %cl,%rax
+  3d:	48 89 45 f0          	mov    %rax,-0x10(%rbp)
+  41:	48 8b 4d f0          	mov    -0x10(%rbp),%rcx
+  45:	48 0f b6 c1          	movzbq %cl,%rax
+  49:	48 89 45 e8          	mov    %rax,-0x18(%rbp)
+  4d:	48 8b 45 d0          	mov    -0x30(%rbp),%rax
+  51:	b9 07 01 00 00       	mov    $0x107,%ecx
+  56:	39 c1                	cmp    %eax,%ecx
+  58:	0f 84 07 00 00 00    	je     65 <choose+0x65>
+  5e:	e9 0d 00 00 00       	jmp    70 <choose+0x70>
+  63:	0f 0b                	ud2
+  65:	b8 0b 00 00 00       	mov    $0xb,%eax
+  6a:	48 89 45 e0          	mov    %rax,-0x20(%rbp)
+  6e:	c9                   	leave
+  6f:	c3                   	ret
+  70:	b8 16 00 00 00       	mov    $0x16,%eax
+  75:	48 89 45 d8          	mov    %rax,-0x28(%rbp)
+  79:	c9                   	leave
+  7a:	c3                   	ret
+
+switch-probe/evidence/x86_64/w8-s0-v1-c2.o:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <choose>:
+   0:	55                   	push   %rbp
+   1:	48 89 e5             	mov    %rsp,%rbp
+   4:	48 83 ec 10          	sub    $0x10,%rsp
+   8:	f6 04 24 00          	testb  $0x0,(%rsp)
+   c:	48 0f b6 c7          	movzbq %dil,%rax
+  10:	48 89 85 f8 ff ff ff 	mov    %rax,-0x8(%rbp)
+  17:	48 8b 8d f8 ff ff ff 	mov    -0x8(%rbp),%rcx
+  1e:	48 0f b6 d1          	movzbq %cl,%rdx
+  22:	48 0f b6 ca          	movzbq %dl,%rcx
+  26:	b9 07 01 00 00       	mov    $0x107,%ecx
+  2b:	39 c1                	cmp    %eax,%ecx
+  2d:	0f 84 07 00 00 00    	je     3a <choose+0x3a>
+  33:	e9 09 00 00 00       	jmp    41 <choose+0x41>
+  38:	0f 0b                	ud2
+  3a:	b8 0b 00 00 00       	mov    $0xb,%eax
+  3f:	c9                   	leave
+  40:	c3                   	ret
+  41:	b8 16 00 00 00       	mov    $0x16,%eax
+  46:	c9                   	leave
+  47:	c3                   	ret
+
+switch-probe/evidence/x86_64/w8-s0-v1-c3.o:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <choose>:
+   0:	55                   	push   %rbp
+   1:	48 89 e5             	mov    %rsp,%rbp
+   4:	48 83 ec 10          	sub    $0x10,%rsp
+   8:	f6 04 24 00          	testb  $0x0,(%rsp)
+   c:	48 0f b6 c7          	movzbq %dil,%rax
+  10:	48 89 85 f8 ff ff ff 	mov    %rax,-0x8(%rbp)
+  17:	48 8b 8d f8 ff ff ff 	mov    -0x8(%rbp),%rcx
+  1e:	48 0f b6 d1          	movzbq %cl,%rdx
+  22:	48 0f b6 ca          	movzbq %dl,%rcx
+  26:	b9 07 01 00 00       	mov    $0x107,%ecx
+  2b:	39 c1                	cmp    %eax,%ecx
+  2d:	0f 84 07 00 00 00    	je     3a <choose+0x3a>
+  33:	e9 09 00 00 00       	jmp    41 <choose+0x41>
+  38:	0f 0b                	ud2
+  3a:	b8 0b 00 00 00       	mov    $0xb,%eax
+  3f:	c9                   	leave
+  40:	c3                   	ret
+  41:	b8 16 00 00 00       	mov    $0x16,%eax
+  46:	c9                   	leave
+  47:	c3                   	ret
+
+switch-probe/evidence/x86_64/w8-s0-v1-c4.exe:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .text:
+
+0000000000401170 <choose>:
+  401170:	40 88 f8             	mov    %dil,%al
+  401173:	88 44 24 ff          	mov    %al,-0x1(%rsp)
+  401177:	2c 07                	sub    $0x7,%al
+  401179:	75 08                	jne    401183 <choose+0x13>
+  40117b:	eb 00                	jmp    40117d <choose+0xd>
+  40117d:	b8 0b 00 00 00       	mov    $0xb,%eax
+  401182:	c3                   	ret
+  401183:	b8 16 00 00 00       	mov    $0x16,%eax
+  401188:	c3                   	ret
+
+Disassembly of section .fini:
+
+STDERR:

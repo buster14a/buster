@@ -1,0 +1,240 @@
+LLVM (http://llvm.org/):
+  LLVM version 23.1.1
+  Optimized build.
+
+
+  Registered Targets:
+    aarch64     - AArch64 (little endian)
+    aarch64_32  - AArch64 (little endian ILP32)
+    aarch64_be  - AArch64 (big endian)
+    amdgcn      - legacy name for amdgpu
+    amdgpu      - AMDGPU gfx6+
+    arm         - ARM
+    arm64       - ARM64 (little endian)
+    arm64_32    - ARM64 (little endian ILP32)
+    armeb       - ARM (big endian)
+    avr         - Atmel AVR Microcontroller
+    bpf         - BPF (host endian)
+    bpfeb       - BPF (big endian)
+    bpfel       - BPF (little endian)
+    hexagon     - Hexagon
+    lanai       - Lanai
+    loongarch32 - 32-bit LoongArch
+    loongarch64 - 64-bit LoongArch
+    mips        - MIPS (32-bit big endian)
+    mips64      - MIPS (64-bit big endian)
+    mips64el    - MIPS (64-bit little endian)
+    mipsel      - MIPS (32-bit little endian)
+    msp430      - MSP430 [experimental]
+    nvptx       - NVIDIA PTX 32-bit
+    nvptx64     - NVIDIA PTX 64-bit
+    ppc32       - PowerPC 32
+    ppc32le     - PowerPC 32 LE
+    ppc64       - PowerPC 64
+    ppc64le     - PowerPC 64 LE
+    r600        - AMD GPUs HD2XXX-HD6XXX
+    riscv32     - 32-bit RISC-V
+    riscv32be   - 32-bit big endian RISC-V
+    riscv64     - 64-bit RISC-V
+    riscv64be   - 64-bit big endian RISC-V
+    sparc       - Sparc
+    sparcel     - Sparc LE
+    sparcv9     - Sparc V9
+    spirv       - SPIR-V Logical
+    spirv32     - SPIR-V 32-bit
+    spirv64     - SPIR-V 64-bit
+    systemz     - SystemZ
+    thumb       - Thumb
+    thumbeb     - Thumb (big endian)
+    ve          - VE
+    wasm32      - WebAssembly 32-bit
+    wasm64      - WebAssembly 64-bit
+    x86         - 32-bit X86: Pentium-Pro and above
+    x86-64      - 64-bit X86: EM64T and AMD64
+    xcore       - XCore
+
+Command: ['llvm-objdump', '-d', '--disassemble-symbols=choose', 'switch-probe/evidence/aarch64/w8-s0-v1-c0.o', 'switch-probe/evidence/aarch64/w8-s0-v1-c1.o', 'switch-probe/evidence/aarch64/w8-s0-v1-c2.o', 'switch-probe/evidence/aarch64/w8-s0-v1-c3.o', 'switch-probe/evidence/aarch64/w8-s0-v1-c4.exe']
+
+
+switch-probe/evidence/aarch64/w8-s0-v1-c0.o:	file format elf64-littleaarch64
+
+Disassembly of section .text:
+
+0000000000000000 <choose>:
+       0: a9bf7bfd     	stp	x29, x30, [sp, #-0x10]!
+       4: 910003fd     	mov	x29, sp
+       8: d10103ff     	sub	sp, sp, #0x40
+       c: f90003ff     	str	xzr, [sp]
+      10: f9001bfc     	str	x28, [sp, #0x30]
+      14: 910003fc     	mov	x28, sp
+      18: 53001c00     	uxtb	w0, w0
+      1c: f9000780     	str	x0, [x28, #0x8]
+      20: f9400789     	ldr	x9, [x28, #0x8]
+      24: f9000389     	str	x9, [x28]
+      28: f9400389     	ldr	x9, [x28]
+      2c: f9000b89     	str	x9, [x28, #0x10]
+      30: f9400b89     	ldr	x9, [x28, #0x10]
+      34: 53001d29     	uxtb	w9, w9
+      38: f9000f89     	str	x9, [x28, #0x18]
+      3c: f9400789     	ldr	x9, [x28, #0x8]
+      40: d28020ea     	mov	x10, #0x107             // =263
+      44: f2a0000a     	movk	x10, #0x0, lsl #16
+      48: f2c0000a     	movk	x10, #0x0, lsl #32
+      4c: f2e0000a     	movk	x10, #0x0, lsl #48
+      50: 6b0a013f     	cmp	w9, w10
+      54: 54000041     	b.ne	0x5c <choose+0x5c>
+      58: 14000003     	b	0x64 <choose+0x64>
+      5c: 1400000b     	b	0x88 <choose+0x88>
+      60: d4200000     	brk	#0
+      64: 52800169     	mov	w9, #0xb                // =11
+      68: 72a00009     	movk	w9, #0x0, lsl #16
+      6c: f9001389     	str	x9, [x28, #0x20]
+      70: f9401380     	ldr	x0, [x28, #0x20]
+      74: 9100039f     	mov	sp, x28
+      78: f9401bfc     	ldr	x28, [sp, #0x30]
+      7c: 910103ff     	add	sp, sp, #0x40
+      80: a8c17bfd     	ldp	x29, x30, [sp], #0x10
+      84: d65f03c0     	ret
+      88: 528002c9     	mov	w9, #0x16               // =22
+      8c: 72a00009     	movk	w9, #0x0, lsl #16
+      90: f9001789     	str	x9, [x28, #0x28]
+      94: f9401780     	ldr	x0, [x28, #0x28]
+      98: 9100039f     	mov	sp, x28
+      9c: f9401bfc     	ldr	x28, [sp, #0x30]
+      a0: 910103ff     	add	sp, sp, #0x40
+      a4: a8c17bfd     	ldp	x29, x30, [sp], #0x10
+      a8: d65f03c0     	ret
+
+switch-probe/evidence/aarch64/w8-s0-v1-c1.o:	file format elf64-littleaarch64
+
+Disassembly of section .text:
+
+0000000000000000 <choose>:
+       0: a9bf7bfd     	stp	x29, x30, [sp, #-0x10]!
+       4: 910003fd     	mov	x29, sp
+       8: d10143ff     	sub	sp, sp, #0x50
+       c: f90003ff     	str	xzr, [sp]
+      10: f90023fc     	str	x28, [sp, #0x40]
+      14: 910003fc     	mov	x28, sp
+      18: aa0003e9     	mov	x9, x0
+      1c: f9001f89     	str	x9, [x28, #0x38]
+      20: f9401f8a     	ldr	x10, [x28, #0x38]
+      24: 53001d49     	uxtb	w9, w10
+      28: f9000b89     	str	x9, [x28, #0x10]
+      2c: f9400b8a     	ldr	x10, [x28, #0x10]
+      30: f900078a     	str	x10, [x28, #0x8]
+      34: f9400789     	ldr	x9, [x28, #0x8]
+      38: f9001b89     	str	x9, [x28, #0x30]
+      3c: f9401b8a     	ldr	x10, [x28, #0x30]
+      40: 53001d49     	uxtb	w9, w10
+      44: f9001789     	str	x9, [x28, #0x28]
+      48: f9400b89     	ldr	x9, [x28, #0x10]
+      4c: d28020f1     	mov	x17, #0x107             // =263
+      50: 6b11013f     	cmp	w9, w17
+      54: 54000060     	b.eq	0x60 <choose+0x60>
+      58: 1400000a     	b	0x80 <choose+0x80>
+      5c: d4200000     	brk	#0
+      60: d2800169     	mov	x9, #0xb                // =11
+      64: f9001389     	str	x9, [x28, #0x20]
+      68: f9401380     	ldr	x0, [x28, #0x20]
+      6c: 9100039f     	mov	sp, x28
+      70: f94023fc     	ldr	x28, [sp, #0x40]
+      74: 910143ff     	add	sp, sp, #0x50
+      78: a8c17bfd     	ldp	x29, x30, [sp], #0x10
+      7c: d65f03c0     	ret
+      80: d28002c9     	mov	x9, #0x16               // =22
+      84: f9000f89     	str	x9, [x28, #0x18]
+      88: f9400f80     	ldr	x0, [x28, #0x18]
+      8c: 9100039f     	mov	sp, x28
+      90: f94023fc     	ldr	x28, [sp, #0x40]
+      94: 910143ff     	add	sp, sp, #0x50
+      98: a8c17bfd     	ldp	x29, x30, [sp], #0x10
+      9c: d65f03c0     	ret
+
+switch-probe/evidence/aarch64/w8-s0-v1-c2.o:	file format elf64-littleaarch64
+
+Disassembly of section .text:
+
+0000000000000000 <choose>:
+       0: a9bf7bfd     	stp	x29, x30, [sp, #-0x10]!
+       4: 910003fd     	mov	x29, sp
+       8: d10083ff     	sub	sp, sp, #0x20
+       c: f90003ff     	str	xzr, [sp]
+      10: f9000bfc     	str	x28, [sp, #0x10]
+      14: 910003fc     	mov	x28, sp
+      18: 53001c01     	uxtb	w1, w0
+      1c: f9000781     	str	x1, [x28, #0x8]
+      20: f9400782     	ldr	x2, [x28, #0x8]
+      24: 53001c43     	uxtb	w3, w2
+      28: aa0103e9     	mov	x9, x1
+      2c: d28020f1     	mov	x17, #0x107             // =263
+      30: 6b11013f     	cmp	w9, w17
+      34: 54000060     	b.eq	0x40 <choose+0x40>
+      38: 14000008     	b	0x58 <choose+0x58>
+      3c: d4200000     	brk	#0
+      40: d2800160     	mov	x0, #0xb                // =11
+      44: 9100039f     	mov	sp, x28
+      48: f9400bfc     	ldr	x28, [sp, #0x10]
+      4c: 910083ff     	add	sp, sp, #0x20
+      50: a8c17bfd     	ldp	x29, x30, [sp], #0x10
+      54: d65f03c0     	ret
+      58: d28002c0     	mov	x0, #0x16               // =22
+      5c: 9100039f     	mov	sp, x28
+      60: f9400bfc     	ldr	x28, [sp, #0x10]
+      64: 910083ff     	add	sp, sp, #0x20
+      68: a8c17bfd     	ldp	x29, x30, [sp], #0x10
+      6c: d65f03c0     	ret
+
+switch-probe/evidence/aarch64/w8-s0-v1-c3.o:	file format elf64-littleaarch64
+
+Disassembly of section .text:
+
+0000000000000000 <choose>:
+       0: a9bf7bfd     	stp	x29, x30, [sp, #-0x10]!
+       4: 910003fd     	mov	x29, sp
+       8: d10083ff     	sub	sp, sp, #0x20
+       c: f90003ff     	str	xzr, [sp]
+      10: f9000bfc     	str	x28, [sp, #0x10]
+      14: 910003fc     	mov	x28, sp
+      18: 53001c01     	uxtb	w1, w0
+      1c: f9000781     	str	x1, [x28, #0x8]
+      20: f9400782     	ldr	x2, [x28, #0x8]
+      24: 53001c43     	uxtb	w3, w2
+      28: aa0103e9     	mov	x9, x1
+      2c: d28020f1     	mov	x17, #0x107             // =263
+      30: 6b11013f     	cmp	w9, w17
+      34: 54000060     	b.eq	0x40 <choose+0x40>
+      38: 14000008     	b	0x58 <choose+0x58>
+      3c: d4200000     	brk	#0
+      40: d2800160     	mov	x0, #0xb                // =11
+      44: 9100039f     	mov	sp, x28
+      48: f9400bfc     	ldr	x28, [sp, #0x10]
+      4c: 910083ff     	add	sp, sp, #0x20
+      50: a8c17bfd     	ldp	x29, x30, [sp], #0x10
+      54: d65f03c0     	ret
+      58: d28002c0     	mov	x0, #0x16               // =22
+      5c: 9100039f     	mov	sp, x28
+      60: f9400bfc     	ldr	x28, [sp, #0x10]
+      64: 910083ff     	add	sp, sp, #0x20
+      68: a8c17bfd     	ldp	x29, x30, [sp], #0x10
+      6c: d65f03c0     	ret
+
+switch-probe/evidence/aarch64/w8-s0-v1-c4.exe:	file format elf64-littleaarch64
+
+Disassembly of section .text:
+
+00000000004006ec <choose>:
+  4006ec: d10043ff     	sub	sp, sp, #0x10
+  4006f0: 39003fe0     	strb	w0, [sp, #0xf]
+  4006f4: 12001c08     	and	w8, w0, #0xff
+  4006f8: 71001d08     	subs	w8, w8, #0x7
+  4006fc: 540000a1     	b.ne	0x400710 <choose+0x24>
+  400700: 14000001     	b	0x400704 <choose+0x18>
+  400704: 52800160     	mov	w0, #0xb                // =11
+  400708: 910043ff     	add	sp, sp, #0x10
+  40070c: d65f03c0     	ret
+  400710: 528002c0     	mov	w0, #0x16               // =22
+  400714: 910043ff     	add	sp, sp, #0x10
+  400718: d65f03c0     	ret
+
+STDERR:

@@ -2227,14 +2227,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_reused_home_bounda
 }
 
 
-#include <buster/tests/compiler/codegen/switch_key_probe.c>
-
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_symbols(arguments);
-    UnitTestResult switch_probe = switch_key_probe(arguments);
-    result.succeeded_test_count += switch_probe.succeeded_test_count;
-    result.test_count += switch_probe.test_count;
     UnitTestResult machine_debug = codegen_test_machine_debug_locations(arguments);
     result.succeeded_test_count += machine_debug.succeeded_test_count;
     result.test_count += machine_debug.test_count;
