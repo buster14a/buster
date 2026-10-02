@@ -91,7 +91,7 @@ BUSTER_GLOBAL_LOCAL CaptureReplay os_capture_replay(const CaptureTrace* trace)
             }
             if (step.event == OS_PROCESS_CAPTURE_READ_EOF) { eof = true; }
             if (step.event == OS_PROCESS_CAPTURE_WAIT_FAILED || step.event == OS_PROCESS_CAPTURE_READ_FAILED ||
-                step.event == OS_PROCESS_CAPTURE_STOP || step.event == OS_PROCESS_CAPTURE_CLOSE_FAILED) { failed = true; }
+                step.event == OS_PROCESS_CAPTURE_CLOSE_FAILED) { failed = true; }
             if (step.event == OS_PROCESS_CAPTURE_WAIT_FAILED || step.event == OS_PROCESS_CAPTURE_READ_EOF ||
                 step.event == OS_PROCESS_CAPTURE_READ_FAILED || step.event == OS_PROCESS_CAPTURE_STOP) { closing = true; }
             if (close_event)
@@ -204,6 +204,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_replay(UnitTestArguments* arg
     CaptureReplay completed = os_capture_replay(seeds);
     BUSTER_TEST(arguments, os_process_capture_result(&completed.state, PROCESS_RESULT_SUCCESS) == PROCESS_RESULT_SUCCESS);
     BUSTER_TEST(arguments, os_process_capture_result(&completed.state, PROCESS_RESULT_CRASH) == PROCESS_RESULT_CRASH);
+
+    // Abandonment is an unsuccessful operation without a transport failure.
+    // Keep the distinction required by the Wasm pre-readiness timeout policy;
+    // only that consumer decides whether a fresh child may safely be retried.
+    const CaptureTrace abandoned[] = {
+        {.steps = {{OS_PROCESS_CAPTURE_STOP, 0}, {OS_PROCESS_CAPTURE_CLOSE_OK, 0}}, .count = 2},
+        {.steps = {{OS_PROCESS_CAPTURE_WAIT_READY, 0}, {OS_PROCESS_CAPTURE_STOP, 0},
+                   {OS_PROCESS_CAPTURE_CLOSE_OK, 0}}, .count = 3},
+        {.steps = {{OS_PROCESS_CAPTURE_WAIT_READY, 0}, {OS_PROCESS_CAPTURE_READ_BYTES, 7},
+                   {OS_PROCESS_CAPTURE_STOP, 0}, {OS_PROCESS_CAPTURE_CLOSE_OK, 0}}, .count = 4},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(abandoned); index += 1)
+    {
+        CaptureReplay replay = os_capture_replay(abandoned + index);
+        if (!replay.admitted || !replay.invariants) { os_capture_counterexample_print(abandoned[index]); }
+        BUSTER_TEST(arguments, replay.admitted && replay.invariants);
+        BUSTER_TEST(arguments, replay.state.phase == OS_PROCESS_CAPTURE_CLOSED && replay.state.close_attempts == 1);
+        BUSTER_TEST(arguments, !replay.state.failed && !replay.state.eof && !replay.state.close_outcome_unknown);
+        BUSTER_TEST(arguments, replay.state.observed_bytes == (index == 2 ? 7u : 0u));
+        BUSTER_TEST(arguments, os_process_capture_result(&replay.state, PROCESS_RESULT_SUCCESS) == PROCESS_RESULT_FAILED);
+    }
 
     const CaptureTrace malformed[] = {
         {.steps = {{OS_PROCESS_CAPTURE_WAIT_READY, 0}, {OS_PROCESS_CAPTURE_READ_BYTES, 0}}, .count = 2},

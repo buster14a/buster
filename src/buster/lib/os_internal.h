@@ -42,6 +42,8 @@ struct OsProcessCaptureState
     OsProcessCapturePhase phase;
     u64 observed_bytes;
     u32 close_attempts;
+    // Transport/cleanup failure, independent of abandonment without EOF.
+    // A timeout alone must not suppress a consumer's permitted fresh-child retry.
     bool failed;
     bool eof;
     // A close error ends our authority to use/retry that descriptor. It does

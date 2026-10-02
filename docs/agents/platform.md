@@ -133,9 +133,12 @@ A close error conservatively leaves release outcome unknown and is never
 retried: it cannot authorize reuse of a possibly recycled descriptor.
 
 Transport failure and abandoned draining remain failed after successful child
-termination. Successfully drained prefixes are retained, `capture_failed` is
-set, and the child's native status remains separately available. This does not
-authorize restarting a child whose external effects may already have happened.
+termination. Successfully drained prefixes are retained and the child's native
+status remains separately available. `capture_failed` reports transport/cleanup
+failure; abandonment without EOF remains unsuccessful without setting that bit.
+A timeout alone preserves the Wasm consumer's existing pre-readiness retry
+eligibility. The reducer does not authorize restarting a child whose external
+effects may already have happened.
 The reducer does not own process-group identity, cancellation signalling,
 descendant enumeration or the quiescent-group buffered-byte snapshot.
 

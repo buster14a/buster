@@ -3854,7 +3854,6 @@ bool os_process_capture_step(OsProcessCaptureState* state, OsProcessCaptureEvent
             case OS_PROCESS_CAPTURE_STOP:
             {
                 valid = next.phase == OS_PROCESS_CAPTURE_WAITING || next.phase == OS_PROCESS_CAPTURE_READY;
-                next.failed = true;
                 next.phase = OS_PROCESS_CAPTURE_CLOSING;
             } break;
             case OS_PROCESS_CAPTURE_CLOSE_OK:

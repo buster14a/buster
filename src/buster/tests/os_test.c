@@ -2195,6 +2195,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 ProcessWaitResult wait_result = os_process_wait_deadline(arena, spawn, deadline_cases[i].timeout_microseconds);
                 BUSTER_TEST(arguments, (wait_result.timed_out != 0) == deadline_cases[i].expected_timeout);
                 BUSTER_TEST(arguments, wait_result.result == (deadline_cases[i].expected_timeout ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));
+                BUSTER_TEST(arguments, !wait_result.capture_failed);
                 BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length == deadline_cases[i].expected_output_length);
             }
         }
