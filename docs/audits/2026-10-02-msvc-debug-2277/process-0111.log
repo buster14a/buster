@@ -1,0 +1,1544 @@
+
+File: D:\a\_temp\msvc-debug-evidence\kernels-buster-debug-8.obj
+Format: COFF-x86-64
+Arch: x86_64
+AddressSize: 64bit
+CodeViewTypes [
+  Section: .debug$T (19)
+  Magic: 0x4
+  Modifier (0x1000) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: void (0x3)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1001) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: int (0x74)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1002) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned char (0x20)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1003) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned char (0x20)
+    Modifiers [ (0x0)
+    ]
+  }
+  Pointer (0x1004) {
+    TypeLeafKind: LF_POINTER (0x1002)
+    PointeeType: int (0x74)
+    PtrType: Near64 (0xC)
+    PtrMode: Pointer (0x0)
+    IsFlat: 0
+    IsConst: 0
+    IsVolatile: 0
+    IsUnaligned: 0
+    IsRestrict: 0
+    IsThisPtr&: 0
+    IsThisPtr&&: 0
+    SizeOf: 0
+  }
+  Modifier (0x1005) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned short (0x21)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1006) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: float (0x40)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1007) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned __int64 (0x77)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1008) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned __int64 (0x77)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1009) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: signed char (0x10)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x100A) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned char (0x20)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x100B) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: short (0x11)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x100C) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned short (0x21)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x100D) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned (0x75)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x100E) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: int (0x74)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x100F) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned (0x75)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1010) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: __int64 (0x76)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1011) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned __int64 (0x77)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1012) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: __int64 (0x76)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1013) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned __int64 (0x77)
+    Modifiers [ (0x0)
+    ]
+  }
+  Modifier (0x1014) {
+    TypeLeafKind: LF_MODIFIER (0x1001)
+    ModifiedType: unsigned short (0x21)
+    Modifiers [ (0x0)
+    ]
+  }
+  Struct (0x1015) {
+    TypeLeafKind: LF_STRUCTURE (0x1505)
+    MemberCount: 2
+    Properties [ (0x0)
+    ]
+    FieldList: <field list> (0x101F)
+    DerivedFrom: 0x0
+    VShape: 0x0
+    SizeOf: 4
+    Name: _Float16 _Complex
+  }
+  Struct (0x1016) {
+    TypeLeafKind: LF_STRUCTURE (0x1505)
+    MemberCount: 2
+    Properties [ (0x0)
+    ]
+    FieldList: <field list> (0x1020)
+    DerivedFrom: 0x0
+    VShape: 0x0
+    SizeOf: 8
+    Name: float _Complex
+  }
+  Struct (0x1017) {
+    TypeLeafKind: LF_STRUCTURE (0x1505)
+    MemberCount: 2
+    Properties [ (0x0)
+    ]
+    FieldList: <field list> (0x1021)
+    DerivedFrom: 0x0
+    VShape: 0x0
+    SizeOf: 16
+    Name: double _Complex
+  }
+  Struct (0x1018) {
+    TypeLeafKind: LF_STRUCTURE (0x1505)
+    MemberCount: 2
+    Properties [ (0x0)
+    ]
+    FieldList: <field list> (0x1022)
+    DerivedFrom: 0x0
+    VShape: 0x0
+    SizeOf: 16
+    Name: long double _Complex
+  }
+  Procedure (0x1019) {
+    TypeLeafKind: LF_PROCEDURE (0x1008)
+    ReturnType: unsigned (0x100D)
+    CallingConvention: NearC (0x0)
+    FunctionOptions [ (0x0)
+    ]
+    NumParameters: 1
+    ArgListType: (unsigned) (0x1023)
+  }
+  Pointer (0x101A) {
+    TypeLeafKind: LF_POINTER (0x1002)
+    PointeeType: unsigned (0x100D)
+    PtrType: Near64 (0xC)
+    PtrMode: Pointer (0x0)
+    IsFlat: 0
+    IsConst: 0
+    IsVolatile: 0
+    IsUnaligned: 0
+    IsRestrict: 0
+    IsThisPtr&: 0
+    IsThisPtr&&: 0
+    SizeOf: 0
+  }
+  Procedure (0x101B) {
+    TypeLeafKind: LF_PROCEDURE (0x1008)
+    ReturnType: unsigned (0x100D)
+    CallingConvention: NearC (0x0)
+    FunctionOptions [ (0x0)
+    ]
+    NumParameters: 4
+    ArgListType: (unsigned*, unsigned*, unsigned, unsigned) (0x1024)
+  }
+  Procedure (0x101C) {
+    TypeLeafKind: LF_PROCEDURE (0x1008)
+    ReturnType: unsigned (0x100D)
+    CallingConvention: NearC (0x0)
+    FunctionOptions [ (0x0)
+    ]
+    NumParameters: 4
+    ArgListType: (unsigned*, unsigned*, unsigned, unsigned) (0x1025)
+  }
+  Procedure (0x101D) {
+    TypeLeafKind: LF_PROCEDURE (0x1008)
+    ReturnType: unsigned (0x100D)
+    CallingConvention: NearC (0x0)
+    FunctionOptions [ (0x0)
+    ]
+    NumParameters: 4
+    ArgListType: (unsigned*, unsigned*, unsigned, unsigned) (0x1026)
+  }
+  Procedure (0x101E) {
+    TypeLeafKind: LF_PROCEDURE (0x1008)
+    ReturnType: unsigned (0x100D)
+    CallingConvention: NearC (0x0)
+    FunctionOptions [ (0x0)
+    ]
+    NumParameters: 4
+    ArgListType: (unsigned*, unsigned*, unsigned, unsigned) (0x1027)
+  }
+  FieldList (0x101F) {
+    TypeLeafKind: LF_FIELDLIST (0x1203)
+    DataMember {
+      TypeLeafKind: LF_MEMBER (0x150D)
+      AccessSpecifier: None (0x0)
+      Type: unsigned short (0x1005)
+      FieldOffset: 0x0
+      Name: __real
+    }
+    DataMember {
+      TypeLeafKind: LF_MEMBER (0x150D)
+      AccessSpecifier: None (0x0)
+      Type: unsigned short (0x1005)
+      FieldOffset: 0x2
+      Name: __imag
+    }
+  }
+  FieldList (0x1020) {
+    TypeLeafKind: LF_FIELDLIST (0x1203)
+    DataMember {
+      TypeLeafKind: LF_MEMBER (0x150D)
+      AccessSpecifier: None (0x0)
+      Type: float (0x1006)
+      FieldOffset: 0x0
+      Name: __real
+    }
+    DataMember {
+      TypeLeafKind: LF_MEMBER (0x150D)
+      AccessSpecifier: None (0x0)
+      Type: float (0x1006)
+      FieldOffset: 0x4
+      Name: __imag
+    }
+  }
+  FieldList (0x1021) {
+    TypeLeafKind: LF_FIELDLIST (0x1203)
+    DataMember {
+      TypeLeafKind: LF_MEMBER (0x150D)
+      AccessSpecifier: None (0x0)
+      Type: unsigned __int64 (0x1007)
+      FieldOffset: 0x0
+      Name: __real
+    }
+    DataMember {
+      TypeLeafKind: LF_MEMBER (0x150D)
+      AccessSpecifier: None (0x0)
+      Type: unsigned __int64 (0x1007)
+      FieldOffset: 0x8
+      Name: __imag
+    }
+  }
+  FieldList (0x1022) {
+    TypeLeafKind: LF_FIELDLIST (0x1203)
+    DataMember {
+      TypeLeafKind: LF_MEMBER (0x150D)
+      AccessSpecifier: None (0x0)
+      Type: unsigned __int64 (0x1008)
+      FieldOffset: 0x0
+      Name: __real
+    }
+    DataMember {
+      TypeLeafKind: LF_MEMBER (0x150D)
+      AccessSpecifier: None (0x0)
+      Type: unsigned __int64 (0x1008)
+      FieldOffset: 0x8
+      Name: __imag
+    }
+  }
+  ArgList (0x1023) {
+    TypeLeafKind: LF_ARGLIST (0x1201)
+    NumArgs: 1
+    Arguments [
+      ArgType: unsigned (0x100D)
+    ]
+  }
+  ArgList (0x1024) {
+    TypeLeafKind: LF_ARGLIST (0x1201)
+    NumArgs: 4
+    Arguments [
+      ArgType: unsigned* (0x101A)
+      ArgType: unsigned* (0x101A)
+      ArgType: unsigned (0x100D)
+      ArgType: unsigned (0x100D)
+    ]
+  }
+  ArgList (0x1025) {
+    TypeLeafKind: LF_ARGLIST (0x1201)
+    NumArgs: 4
+    Arguments [
+      ArgType: unsigned* (0x101A)
+      ArgType: unsigned* (0x101A)
+      ArgType: unsigned (0x100D)
+      ArgType: unsigned (0x100D)
+    ]
+  }
+  ArgList (0x1026) {
+    TypeLeafKind: LF_ARGLIST (0x1201)
+    NumArgs: 4
+    Arguments [
+      ArgType: unsigned* (0x101A)
+      ArgType: unsigned* (0x101A)
+      ArgType: unsigned (0x100D)
+      ArgType: unsigned (0x100D)
+    ]
+  }
+  ArgList (0x1027) {
+    TypeLeafKind: LF_ARGLIST (0x1201)
+    NumArgs: 4
+    Arguments [
+      ArgType: unsigned* (0x101A)
+      ArgType: unsigned* (0x101A)
+      ArgType: unsigned (0x100D)
+      ArgType: unsigned (0x100D)
+    ]
+  }
+]
+CodeViewDebugInfo [
+  Section: .debug$S (18)
+  Magic: 0x4
+  Subsection [
+    SubSectionType: Symbols (0xF1)
+    SubSectionSize: 0x58
+    ObjNameSym {
+      Kind: S_OBJNAME (0x1101)
+      Signature: 0x0
+      ObjectName: D:\a\_temp\msvc-debug-evidence\kernels.c
+    }
+    Compile3Sym {
+      Kind: S_COMPILE3 (0x113C)
+      Language: C (0x0)
+      Flags [ (0x0)
+      ]
+      Machine: X64 (0xD0)
+      FrontendVersion: 0.0.0.0
+      BackendVersion: 0.0.0.0
+      VersionName: buster
+    }
+  ]
+  Subsection [
+    SubSectionType: Symbols (0xF1)
+    SubSectionSize: 0x50
+    GlobalProcSym {
+      Kind: S_GPROC32 (0x1110)
+      PtrParent: 0x0
+      PtrEnd: 0x0
+      PtrNext: 0x0
+      CodeSize: 0x48
+      DbgStart: 0x0
+      DbgEnd: 0x48
+      FunctionType: unsigned (unsigned) (0x1019)
+      CodeOffset: helper+0x0
+      Segment: 0x0
+      Flags [ (0x0)
+      ]
+      DisplayName: helper
+      LinkageName: helper
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: x
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RCX (0x14A)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: helper+0xC
+        ISectStart: 0x0
+        Range: 0x18
+      }
+    }
+    ScopeEndSym {
+      Kind: S_END (0x6)
+    }
+  ]
+  Subsection [
+    SubSectionType: Lines (0xF2)
+    SubSectionSize: 0x50
+    LinkageName: helper
+  ]
+  Subsection [
+    SubSectionType: Symbols (0xF1)
+    SubSectionSize: 0x14C
+    GlobalProcSym {
+      Kind: S_GPROC32 (0x1110)
+      PtrParent: 0x0
+      PtrEnd: 0x0
+      PtrNext: 0x0
+      CodeSize: 0xD4
+      DbgStart: 0x0
+      DbgEnd: 0xD4
+      FunctionType: unsigned (unsigned*, unsigned*, unsigned, unsigned) (0x101B)
+      CodeOffset: sum_scale+0x0
+      Segment: 0x0
+      Flags [ (0x0)
+      ]
+      DisplayName: sum_scale
+      LinkageName: sum_scale
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned* (0x101A)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: a
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RCX (0x14A)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: sum_scale+0xC
+        ISectStart: 0x0
+        Range: 0x2D
+      }
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -24
+      LocalVariableAddrRange {
+        OffsetStart: sum_scale+0x39
+        ISectStart: 0x0
+        Range: 0x17
+      }
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RCX (0x14A)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: sum_scale+0x50
+        ISectStart: 0x0
+        Range: 0x43
+      }
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -24
+      LocalVariableAddrRange {
+        OffsetStart: sum_scale+0x93
+        ISectStart: 0x0
+        Range: 0x41
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned* (0x101A)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: b
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RDX (0x14B)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: sum_scale+0xC
+        ISectStart: 0x0
+        Range: 0x2D
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: n
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: R8 (0x150)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: sum_scale+0xC
+        ISectStart: 0x0
+        Range: 0x2D
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: salt
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: R9 (0x151)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: sum_scale+0xC
+        ISectStart: 0x0
+        Range: 0x2D
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x0)
+      ]
+      VarName: result
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -16
+      LocalVariableAddrRange {
+        OffsetStart: sum_scale+0x39
+        ISectStart: 0x0
+        Range: 0x10
+      }
+    }
+    BlockSym {
+      Kind: S_BLOCK32 (0x1103)
+      PtrParent: 0x0
+      PtrEnd: 0x0
+      CodeSize: 0xD4
+      CodeOffset: sum_scale+0x0
+      Segment: 0x0
+      BlockName: scope
+      LinkageName: sum_scale
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x0)
+      ]
+      VarName: i
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -8
+      LocalVariableAddrRange {
+        OffsetStart: sum_scale+0x39
+        ISectStart: 0x0
+        Range: 0xA
+      }
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RAX (0x148)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: sum_scale+0x43
+        ISectStart: 0x0
+        Range: 0x6
+      }
+    }
+    ScopeEndSym {
+      Kind: S_END (0x6)
+    }
+    ScopeEndSym {
+      Kind: S_END (0x6)
+    }
+  ]
+  Subsection [
+    SubSectionType: Lines (0xF2)
+    SubSectionSize: 0x88
+    LinkageName: sum_scale
+  ]
+  Subsection [
+    SubSectionType: Symbols (0xF1)
+    SubSectionSize: 0x148
+    GlobalProcSym {
+      Kind: S_GPROC32 (0x1110)
+      PtrParent: 0x0
+      PtrEnd: 0x0
+      PtrNext: 0x0
+      CodeSize: 0xCE
+      DbgStart: 0x0
+      DbgEnd: 0xCE
+      FunctionType: unsigned (unsigned*, unsigned*, unsigned, unsigned) (0x101C)
+      CodeOffset: divide7+0x0
+      Segment: 0x0
+      Flags [ (0x0)
+      ]
+      DisplayName: divide7
+      LinkageName: divide7
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned* (0x101A)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: a
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RCX (0x14A)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: divide7+0xC
+        ISectStart: 0x0
+        Range: 0x2F
+      }
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -24
+      LocalVariableAddrRange {
+        OffsetStart: divide7+0x3B
+        ISectStart: 0x0
+        Range: 0x17
+      }
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RCX (0x14A)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: divide7+0x52
+        ISectStart: 0x0
+        Range: 0x26
+      }
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -24
+      LocalVariableAddrRange {
+        OffsetStart: divide7+0x7F
+        ISectStart: 0x0
+        Range: 0x4F
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned* (0x101A)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: b
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RDX (0x14B)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: divide7+0xC
+        ISectStart: 0x0
+        Range: 0x9
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: n
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: R8 (0x150)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: divide7+0xC
+        ISectStart: 0x0
+        Range: 0x2F
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: salt
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: R9 (0x151)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: divide7+0xC
+        ISectStart: 0x0
+        Range: 0x2F
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x0)
+      ]
+      VarName: result
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -16
+      LocalVariableAddrRange {
+        OffsetStart: divide7+0x3B
+        ISectStart: 0x0
+        Range: 0x10
+      }
+    }
+    BlockSym {
+      Kind: S_BLOCK32 (0x1103)
+      PtrParent: 0x0
+      PtrEnd: 0x0
+      CodeSize: 0xCE
+      CodeOffset: divide7+0x0
+      Segment: 0x0
+      BlockName: scope
+      LinkageName: divide7
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x0)
+      ]
+      VarName: i
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -8
+      LocalVariableAddrRange {
+        OffsetStart: divide7+0x3B
+        ISectStart: 0x0
+        Range: 0xA
+      }
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RAX (0x148)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: divide7+0x45
+        ISectStart: 0x0
+        Range: 0x6
+      }
+    }
+    ScopeEndSym {
+      Kind: S_END (0x6)
+    }
+    ScopeEndSym {
+      Kind: S_END (0x6)
+    }
+  ]
+  Subsection [
+    SubSectionType: Lines (0xF2)
+    SubSectionSize: 0x88
+    LinkageName: divide7
+  ]
+  Subsection [
+    SubSectionType: Symbols (0xF1)
+    SubSectionSize: 0x174
+    GlobalProcSym {
+      Kind: S_GPROC32 (0x1110)
+      PtrParent: 0x0
+      PtrEnd: 0x0
+      PtrNext: 0x0
+      CodeSize: 0xDD
+      DbgStart: 0x0
+      DbgEnd: 0xDD
+      FunctionType: unsigned (unsigned*, unsigned*, unsigned, unsigned) (0x101D)
+      CodeOffset: dot+0x0
+      Segment: 0x0
+      Flags [ (0x0)
+      ]
+      DisplayName: dot
+      LinkageName: dot
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned* (0x101A)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: a
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RCX (0x14A)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: dot+0xC
+        ISectStart: 0x0
+        Range: 0x31
+      }
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -24
+      LocalVariableAddrRange {
+        OffsetStart: dot+0x3D
+        ISectStart: 0x0
+        Range: 0x17
+      }
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RCX (0x14A)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: dot+0x54
+        ISectStart: 0x0
+        Range: 0x49
+      }
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -24
+      LocalVariableAddrRange {
+        OffsetStart: dot+0x9D
+        ISectStart: 0x0
+        Range: 0x40
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned* (0x101A)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: b
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RDX (0x14B)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: dot+0xC
+        ISectStart: 0x0
+        Range: 0x31
+      }
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -32
+      LocalVariableAddrRange {
+        OffsetStart: dot+0x3D
+        ISectStart: 0x0
+        Range: 0x35
+      }
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: R9 (0x151)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: dot+0x72
+        ISectStart: 0x0
+        Range: 0x2B
+      }
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -32
+      LocalVariableAddrRange {
+        OffsetStart: dot+0x9D
+        ISectStart: 0x0
+        Range: 0x40
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: n
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: R8 (0x150)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: dot+0xC
+        ISectStart: 0x0
+        Range: 0x31
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: salt
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: R9 (0x151)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: dot+0xC
+        ISectStart: 0x0
+        Range: 0x31
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x0)
+      ]
+      VarName: result
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -16
+      LocalVariableAddrRange {
+        OffsetStart: dot+0x3D
+        ISectStart: 0x0
+        Range: 0x10
+      }
+    }
+    BlockSym {
+      Kind: S_BLOCK32 (0x1103)
+      PtrParent: 0x0
+      PtrEnd: 0x0
+      CodeSize: 0xDD
+      CodeOffset: dot+0x0
+      Segment: 0x0
+      BlockName: scope
+      LinkageName: dot
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x0)
+      ]
+      VarName: i
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -8
+      LocalVariableAddrRange {
+        OffsetStart: dot+0x3D
+        ISectStart: 0x0
+        Range: 0xA
+      }
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RAX (0x148)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: dot+0x47
+        ISectStart: 0x0
+        Range: 0x6
+      }
+    }
+    ScopeEndSym {
+      Kind: S_END (0x6)
+    }
+    ScopeEndSym {
+      Kind: S_END (0x6)
+    }
+  ]
+  Subsection [
+    SubSectionType: Lines (0xF2)
+    SubSectionSize: 0x78
+    LinkageName: dot
+  ]
+  Subsection [
+    SubSectionType: Symbols (0xF1)
+    SubSectionSize: 0x148
+    GlobalProcSym {
+      Kind: S_GPROC32 (0x1110)
+      PtrParent: 0x0
+      PtrEnd: 0x0
+      PtrNext: 0x0
+      CodeSize: 0xCD
+      DbgStart: 0x0
+      DbgEnd: 0xCD
+      FunctionType: unsigned (unsigned*, unsigned*, unsigned, unsigned) (0x101E)
+      CodeOffset: calls+0x0
+      Segment: 0x0
+      Flags [ (0x0)
+      ]
+      DisplayName: calls
+      LinkageName: calls
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned* (0x101A)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: a
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RCX (0x14A)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: calls+0xC
+        ISectStart: 0x0
+        Range: 0x2F
+      }
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -24
+      LocalVariableAddrRange {
+        OffsetStart: calls+0x3B
+        ISectStart: 0x0
+        Range: 0x17
+      }
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RCX (0x14A)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: calls+0x52
+        ISectStart: 0x0
+        Range: 0x20
+      }
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -24
+      LocalVariableAddrRange {
+        OffsetStart: calls+0x79
+        ISectStart: 0x0
+        Range: 0x54
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned* (0x101A)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: b
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RDX (0x14B)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: calls+0xC
+        ISectStart: 0x0
+        Range: 0x9
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: n
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: R8 (0x150)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: calls+0xC
+        ISectStart: 0x0
+        Range: 0x2F
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x1)
+        IsParameter (0x1)
+      ]
+      VarName: salt
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: R9 (0x151)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: calls+0xC
+        ISectStart: 0x0
+        Range: 0x2F
+      }
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x0)
+      ]
+      VarName: result
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -16
+      LocalVariableAddrRange {
+        OffsetStart: calls+0x3B
+        ISectStart: 0x0
+        Range: 0x10
+      }
+    }
+    BlockSym {
+      Kind: S_BLOCK32 (0x1103)
+      PtrParent: 0x0
+      PtrEnd: 0x0
+      CodeSize: 0xCD
+      CodeOffset: calls+0x0
+      Segment: 0x0
+      BlockName: scope
+      LinkageName: calls
+    }
+    LocalSym {
+      Kind: S_LOCAL (0x113E)
+      Type: unsigned (0x100D)
+      Flags [ (0x0)
+      ]
+      VarName: i
+    }
+    DefRangeFramePointerRelSym {
+      Kind: S_DEFRANGE_FRAMEPOINTER_REL (0x1142)
+      Offset: -8
+      LocalVariableAddrRange {
+        OffsetStart: calls+0x3B
+        ISectStart: 0x0
+        Range: 0xA
+      }
+    }
+    DefRangeRegisterSym {
+      Kind: S_DEFRANGE_REGISTER (0x1141)
+      Register: RAX (0x148)
+      MayHaveNoName: 0
+      LocalVariableAddrRange {
+        OffsetStart: calls+0x45
+        ISectStart: 0x0
+        Range: 0x6
+      }
+    }
+    ScopeEndSym {
+      Kind: S_END (0x6)
+    }
+    ScopeEndSym {
+      Kind: S_END (0x6)
+    }
+  ]
+  Subsection [
+    SubSectionType: Lines (0xF2)
+    SubSectionSize: 0x80
+    LinkageName: calls
+  ]
+  Subsection [
+    SubSectionType: FileChecksums (0xF4)
+    SubSectionSize: 0x8
+    FileChecksum {
+      Filename: D:\a\_temp\msvc-debug-evidence\kernels.c (0x1)
+      ChecksumSize: 0x0
+      ChecksumKind: None (0x0)
+      ChecksumBytes: ()
+    }
+  ]
+  Subsection [
+    SubSectionType: StringTable (0xF3)
+    SubSectionSize: 0x2A
+  ]
+  FunctionLineTable [
+    LinkageName: helper
+    Flags: 0x0
+    CodeSize: 0x48
+    FilenameSegment [
+      Filename: D:\a\_temp\msvc-debug-evidence\kernels.c (0x0)
+      +0x0 [
+        LineNumberStart: 5
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0xE [
+        LineNumberStart: 5
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x13 [
+        LineNumberStart: 5
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x1A [
+        LineNumberStart: 5
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x20 [
+        LineNumberStart: 5
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x30 [
+        LineNumberStart: 5
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x3E [
+        LineNumberStart: 5
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+    ]
+  ]
+  FunctionLineTable [
+    LinkageName: sum_scale
+    Flags: 0x0
+    CodeSize: 0xD4
+    FilenameSegment [
+      Filename: D:\a\_temp\msvc-debug-evidence\kernels.c (0x0)
+      +0x0 [
+        LineNumberStart: 6
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x12 [
+        LineNumberStart: 6
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x15 [
+        LineNumberStart: 6
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x39 [
+        LineNumberStart: 10
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x49 [
+        LineNumberStart: 10
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x67 [
+        LineNumberStart: 10
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x6D [
+        LineNumberStart: 10
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x76 [
+        LineNumberStart: 10
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x7C [
+        LineNumberStart: 10
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x85 [
+        LineNumberStart: 10
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x93 [
+        LineNumberStart: 6
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x98 [
+        LineNumberStart: 10
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0xA5 [
+        LineNumberStart: 6
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0xCA [
+        LineNumberStart: 11
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+    ]
+  ]
+  FunctionLineTable [
+    LinkageName: divide7
+    Flags: 0x0
+    CodeSize: 0xCE
+    FilenameSegment [
+      Filename: D:\a\_temp\msvc-debug-evidence\kernels.c (0x0)
+      +0x0 [
+        LineNumberStart: 13
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x12 [
+        LineNumberStart: 13
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x15 [
+        LineNumberStart: 17
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x17 [
+        LineNumberStart: 13
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x3B [
+        LineNumberStart: 17
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x4B [
+        LineNumberStart: 17
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x69 [
+        LineNumberStart: 17
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x72 [
+        LineNumberStart: 17
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x78 [
+        LineNumberStart: 17
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x7F [
+        LineNumberStart: 17
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x8D [
+        LineNumberStart: 13
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x92 [
+        LineNumberStart: 17
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x9F [
+        LineNumberStart: 13
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0xC4 [
+        LineNumberStart: 18
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+    ]
+  ]
+  FunctionLineTable [
+    LinkageName: dot
+    Flags: 0x0
+    CodeSize: 0xDD
+    FilenameSegment [
+      Filename: D:\a\_temp\msvc-debug-evidence\kernels.c (0x0)
+      +0x0 [
+        LineNumberStart: 20
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x12 [
+        LineNumberStart: 20
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x15 [
+        LineNumberStart: 20
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x3D [
+        LineNumberStart: 23
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x4D [
+        LineNumberStart: 23
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x6B [
+        LineNumberStart: 23
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x86 [
+        LineNumberStart: 23
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x8F [
+        LineNumberStart: 23
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x9D [
+        LineNumberStart: 20
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0xA2 [
+        LineNumberStart: 23
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0xAE [
+        LineNumberStart: 20
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0xD3 [
+        LineNumberStart: 24
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+    ]
+  ]
+  FunctionLineTable [
+    LinkageName: calls
+    Flags: 0x0
+    CodeSize: 0xCD
+    FilenameSegment [
+      Filename: D:\a\_temp\msvc-debug-evidence\kernels.c (0x0)
+      +0x0 [
+        LineNumberStart: 26
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x12 [
+        LineNumberStart: 26
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x15 [
+        LineNumberStart: 30
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x17 [
+        LineNumberStart: 26
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x3B [
+        LineNumberStart: 30
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x4B [
+        LineNumberStart: 30
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x69 [
+        LineNumberStart: 30
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x72 [
+        LineNumberStart: 30
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x7E [
+        LineNumberStart: 30
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x8C [
+        LineNumberStart: 26
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x91 [
+        LineNumberStart: 30
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0x9E [
+        LineNumberStart: 26
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+      +0xC3 [
+        LineNumberStart: 31
+        LineNumberEndDelta: 0
+        IsStatement: Yes
+      ]
+    ]
+  ]
+]

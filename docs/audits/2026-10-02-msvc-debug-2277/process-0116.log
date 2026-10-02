@@ -1,0 +1,340 @@
+
+D:\a\_temp\msvc-debug-evidence\kernels-msvc-optimized-debug-8.obj:	file format coff-x86-64
+
+Disassembly of section .text$mn:
+
+0000000000000000 <calls>:
+       0: 48 89 5c 24 10               	movq	%rbx, 0x10(%rsp)
+       5: 48 89 74 24 18               	movq	%rsi, 0x18(%rsp)
+       a: 57                           	pushq	%rdi
+       b: 45 33 db                     	xorl	%r11d, %r11d
+       e: 66 41 0f 6e d9               	movd	%r9d, %xmm3
+      13: 66 0f 70 db 00               	pshufd	$0x0, %xmm3, %xmm3      # xmm3 = xmm3[0,0,0,0]
+      18: 41 8b f9                     	movl	%r9d, %edi
+      1b: 41 8b f0                     	movl	%r8d, %esi
+      1e: 48 8b d9                     	movq	%rcx, %rbx
+      21: 45 85 c0                     	testl	%r8d, %r8d
+      24: 0f 84 21 01 00 00            	je	0x14b <calls+0x14b>
+      2a: 33 c0                        	xorl	%eax, %eax
+      2c: 41 83 f8 08                  	cmpl	$0x8, %r8d
+      30: 0f 82 98 00 00 00            	jb	0xce <calls+0xce>
+      36: 83 3d 00 00 00 00 02         	cmpl	$0x2, (%rip)            # 0x3d <calls+0x3d>
+		0000000000000038:  IMAGE_REL_AMD64_REL32_1	__isa_available
+      3d: 0f 8c 8b 00 00 00            	jl	0xce <calls+0xce>
+      43: 66 0f 6f 2d 00 00 00 00      	movdqa	(%rip), %xmm5           # 0x4b <calls+0x4b>
+		0000000000000047:  IMAGE_REL_AMD64_REL32	__xmm@00000021000000210000002100000021
+      4b: 41 83 e0 f8                  	andl	$-0x8, %r8d
+      4f: 0f 57 e4                     	xorps	%xmm4, %xmm4
+      52: 0f 57 d2                     	xorps	%xmm2, %xmm2
+      55: 66 66 66 0f 1f 84 00 00 00 00 00     	nopw	(%rax,%rax)
+      60: f3 0f 6f 04 83               	movdqu	(%rbx,%rax,4), %xmm0
+      65: 8d 48 04                     	leal	0x4(%rax), %ecx
+      68: 83 c0 08                     	addl	$0x8, %eax
+      6b: 66 0f fe c3                  	paddd	%xmm3, %xmm0
+      6f: 66 0f 6f c8                  	movdqa	%xmm0, %xmm1
+      73: 66 0f 72 d0 07               	psrld	$0x7, %xmm0
+      78: 66 0f 38 40 cd               	pmulld	%xmm5, %xmm1
+      7d: 0f 57 c8                     	xorps	%xmm0, %xmm1
+      80: 66 0f fe e1                  	paddd	%xmm1, %xmm4
+      84: f3 0f 6f 0c 8b               	movdqu	(%rbx,%rcx,4), %xmm1
+      89: 66 0f fe cb                  	paddd	%xmm3, %xmm1
+      8d: 66 0f 6f c1                  	movdqa	%xmm1, %xmm0
+      91: 66 0f 72 d1 07               	psrld	$0x7, %xmm1
+      96: 66 0f 38 40 c5               	pmulld	%xmm5, %xmm0
+      9b: 0f 57 c1                     	xorps	%xmm1, %xmm0
+      9e: 66 0f fe d0                  	paddd	%xmm0, %xmm2
+      a2: 41 3b c0                     	cmpl	%r8d, %eax
+      a5: 72 b9                        	jb	0x60 <calls+0x60>
+      a7: 66 0f fe d4                  	paddd	%xmm4, %xmm2
+      ab: 66 0f 6f c2                  	movdqa	%xmm2, %xmm0
+      af: 66 0f 73 d8 08               	psrldq	$0x8, %xmm0             # xmm0 = xmm0[8,9,10,11,12,13,14,15],zero,zero,zero,zero,zero,zero,zero,zero
+      b4: 66 0f fe d0                  	paddd	%xmm0, %xmm2
+      b8: 66 0f 6f c2                  	movdqa	%xmm2, %xmm0
+      bc: 66 0f 73 d8 04               	psrldq	$0x4, %xmm0             # xmm0 = xmm0[4,5,6,7,8,9,10,11,12,13,14,15],zero,zero,zero,zero
+      c1: 66 0f fe d0                  	paddd	%xmm0, %xmm2
+      c5: 66 41 0f 7e d3               	movd	%xmm2, %r11d
+      ca: 3b c6                        	cmpl	%esi, %eax
+      cc: 73 7d                        	jae	0x14b <calls+0x14b>
+      ce: 8b ce                        	movl	%esi, %ecx
+      d0: 45 33 c9                     	xorl	%r9d, %r9d
+      d3: 2b c8                        	subl	%eax, %ecx
+      d5: 45 33 d2                     	xorl	%r10d, %r10d
+      d8: 83 f9 02                     	cmpl	$0x2, %ecx
+      db: 72 4b                        	jb	0x128 <calls+0x128>
+      dd: 48 89 6c 24 10               	movq	%rbp, 0x10(%rsp)
+      e2: 8d 6e ff                     	leal	-0x1(%rsi), %ebp
+      e5: 66 66 66 0f 1f 84 00 00 00 00 00     	nopw	(%rax,%rax)
+      f0: 44 8b 04 83                  	movl	(%rbx,%rax,4), %r8d
+      f4: 44 03 c7                     	addl	%edi, %r8d
+      f7: 41 6b c8 21                  	imull	$0x21, %r8d, %ecx
+      fb: 41 c1 e8 07                  	shrl	$0x7, %r8d
+      ff: 41 33 c8                     	xorl	%r8d, %ecx
+     102: 44 03 c9                     	addl	%ecx, %r9d
+     105: 8d 48 01                     	leal	0x1(%rax), %ecx
+     108: 83 c0 02                     	addl	$0x2, %eax
+     10b: 8b 14 8b                     	movl	(%rbx,%rcx,4), %edx
+     10e: 03 d7                        	addl	%edi, %edx
+     110: 6b ca 21                     	imull	$0x21, %edx, %ecx
+     113: c1 ea 07                     	shrl	$0x7, %edx
+     116: 33 ca                        	xorl	%edx, %ecx
+     118: 44 03 d1                     	addl	%ecx, %r10d
+     11b: 3b c5                        	cmpl	%ebp, %eax
+     11d: 72 d1                        	jb	0xf0 <calls+0xf0>
+     11f: 48 8b 6c 24 10               	movq	0x10(%rsp), %rbp
+     124: 3b c6                        	cmpl	%esi, %eax
+     126: 73 10                        	jae	0x138 <calls+0x138>
+     128: 8b 0c 83                     	movl	(%rbx,%rax,4), %ecx
+     12b: 03 cf                        	addl	%edi, %ecx
+     12d: 6b d1 21                     	imull	$0x21, %ecx, %edx
+     130: c1 e9 07                     	shrl	$0x7, %ecx
+     133: 33 d1                        	xorl	%ecx, %edx
+     135: 44 03 da                     	addl	%edx, %r11d
+     138: 43 8d 04 0a                  	leal	(%r10,%r9), %eax
+     13c: 41 03 c3                     	addl	%r11d, %eax
+     13f: 48 8b 5c 24 18               	movq	0x18(%rsp), %rbx
+     144: 48 8b 74 24 20               	movq	0x20(%rsp), %rsi
+     149: 5f                           	popq	%rdi
+     14a: c3                           	retq
+     14b: 48 8b 5c 24 18               	movq	0x18(%rsp), %rbx
+     150: 41 8b c3                     	movl	%r11d, %eax
+     153: 48 8b 74 24 20               	movq	0x20(%rsp), %rsi
+     158: 5f                           	popq	%rdi
+     159: c3                           	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <divide7>:
+       0: 40 53                        	pushq	%rbx
+       2: 55                           	pushq	%rbp
+       3: 56                           	pushq	%rsi
+       4: 57                           	pushq	%rdi
+       5: 48 83 ec 18                  	subq	$0x18, %rsp
+       9: 33 db                        	xorl	%ebx, %ebx
+       b: 66 41 0f 6e e1               	movd	%r9d, %xmm4
+      10: 66 0f 70 e4 00               	pshufd	$0x0, %xmm4, %xmm4      # xmm4 = xmm4[0,0,0,0]
+      15: 41 8b f1                     	movl	%r9d, %esi
+      18: 41 8b e8                     	movl	%r8d, %ebp
+      1b: 48 8b f9                     	movq	%rcx, %rdi
+      1e: 45 85 c0                     	testl	%r8d, %r8d
+      21: 0f 84 6e 01 00 00            	je	0x195 <divide7+0x195>
+      27: 45 33 d2                     	xorl	%r10d, %r10d
+      2a: 41 83 f8 08                  	cmpl	$0x8, %r8d
+      2e: 0f 82 d3 00 00 00            	jb	0x107 <divide7+0x107>
+      34: 41 8b d0                     	movl	%r8d, %edx
+      37: 0f 29 34 24                  	movaps	%xmm6, (%rsp)
+      3b: 66 0f 6f 35 00 00 00 00      	movdqa	(%rip), %xmm6           # 0x43 <divide7+0x43>
+		000000000000003f:  IMAGE_REL_AMD64_REL32	__xmm@24924925249249252492492524924925
+      43: 83 e2 f8                     	andl	$-0x8, %edx
+      46: 0f 57 ed                     	xorps	%xmm5, %xmm5
+      49: 0f 57 db                     	xorps	%xmm3, %xmm3
+      4c: 0f 1f 40 00                  	nopl	(%rax)
+      50: f3 42 0f 6f 14 91            	movdqu	(%rcx,%r10,4), %xmm2
+      56: 41 8d 42 04                  	leal	0x4(%r10), %eax
+      5a: 41 83 c2 08                  	addl	$0x8, %r10d
+      5e: 66 0f fe d4                  	paddd	%xmm4, %xmm2
+      62: 66 0f 6f ca                  	movdqa	%xmm2, %xmm1
+      66: 66 0f 6f c2                  	movdqa	%xmm2, %xmm0
+      6a: 66 0f 62 ca                  	punpckldq	%xmm2, %xmm1    # xmm1 = xmm1[0],xmm2[0],xmm1[1],xmm2[1]
+      6e: 66 0f 6a c2                  	punpckhdq	%xmm2, %xmm0    # xmm0 = xmm0[2],xmm2[2],xmm0[3],xmm2[3]
+      72: 66 0f f4 ce                  	pmuludq	%xmm6, %xmm1
+      76: 66 0f f4 c6                  	pmuludq	%xmm6, %xmm0
+      7a: 0f c6 c8 dd                  	shufps	$0xdd, %xmm0, %xmm1     # xmm1 = xmm1[1,3],xmm0[1,3]
+      7e: 66 0f fa d1                  	psubd	%xmm1, %xmm2
+      82: 66 0f 72 d2 01               	psrld	$0x1, %xmm2
+      87: 66 0f fe d1                  	paddd	%xmm1, %xmm2
+      8b: 66 0f 72 d2 02               	psrld	$0x2, %xmm2
+      90: 66 0f fe ea                  	paddd	%xmm2, %xmm5
+      94: f3 0f 6f 14 81               	movdqu	(%rcx,%rax,4), %xmm2
+      99: 66 0f fe d4                  	paddd	%xmm4, %xmm2
+      9d: 66 0f 6f ca                  	movdqa	%xmm2, %xmm1
+      a1: 66 0f 6f c2                  	movdqa	%xmm2, %xmm0
+      a5: 66 0f 62 ca                  	punpckldq	%xmm2, %xmm1    # xmm1 = xmm1[0],xmm2[0],xmm1[1],xmm2[1]
+      a9: 66 0f 6a c2                  	punpckhdq	%xmm2, %xmm0    # xmm0 = xmm0[2],xmm2[2],xmm0[3],xmm2[3]
+      ad: 66 0f f4 ce                  	pmuludq	%xmm6, %xmm1
+      b1: 66 0f f4 c6                  	pmuludq	%xmm6, %xmm0
+      b5: 0f c6 c8 dd                  	shufps	$0xdd, %xmm0, %xmm1     # xmm1 = xmm1[1,3],xmm0[1,3]
+      b9: 66 0f fa d1                  	psubd	%xmm1, %xmm2
+      bd: 66 0f 72 d2 01               	psrld	$0x1, %xmm2
+      c2: 66 0f fe d1                  	paddd	%xmm1, %xmm2
+      c6: 66 0f 72 d2 02               	psrld	$0x2, %xmm2
+      cb: 66 0f fe da                  	paddd	%xmm2, %xmm3
+      cf: 44 3b d2                     	cmpl	%edx, %r10d
+      d2: 0f 82 78 ff ff ff            	jb	0x50 <divide7+0x50>
+      d8: 0f 28 34 24                  	movaps	(%rsp), %xmm6
+      dc: 66 0f fe dd                  	paddd	%xmm5, %xmm3
+      e0: 66 0f 6f c3                  	movdqa	%xmm3, %xmm0
+      e4: 66 0f 73 d8 08               	psrldq	$0x8, %xmm0             # xmm0 = xmm0[8,9,10,11,12,13,14,15],zero,zero,zero,zero,zero,zero,zero,zero
+      e9: 66 0f fe d8                  	paddd	%xmm0, %xmm3
+      ed: 66 0f 6f c3                  	movdqa	%xmm3, %xmm0
+      f1: 66 0f 73 d8 04               	psrldq	$0x4, %xmm0             # xmm0 = xmm0[4,5,6,7,8,9,10,11,12,13,14,15],zero,zero,zero,zero
+      f6: 66 0f fe d8                  	paddd	%xmm0, %xmm3
+      fa: 66 0f 7e db                  	movd	%xmm3, %ebx
+      fe: 44 3b d5                     	cmpl	%ebp, %r10d
+     101: 0f 83 8e 00 00 00            	jae	0x195 <divide7+0x195>
+     107: 8b c5                        	movl	%ebp, %eax
+     109: 45 33 c9                     	xorl	%r9d, %r9d
+     10c: 41 2b c2                     	subl	%r10d, %eax
+     10f: 45 33 db                     	xorl	%r11d, %r11d
+     112: 83 f8 02                     	cmpl	$0x2, %eax
+     115: 72 57                        	jb	0x16e <divide7+0x16e>
+     117: 4c 89 74 24 40               	movq	%r14, 0x40(%rsp)
+     11c: 45 8d 70 ff                  	leal	-0x1(%r8), %r14d
+     120: 46 8b 04 97                  	movl	(%rdi,%r10,4), %r8d
+     124: b8 25 49 92 24               	movl	$0x24924925, %eax       # imm = 0x24924925
+     129: 44 03 c6                     	addl	%esi, %r8d
+     12c: 41 f7 e0                     	mull	%r8d
+     12f: 41 8d 42 01                  	leal	0x1(%r10), %eax
+     133: 41 83 c2 02                  	addl	$0x2, %r10d
+     137: 44 2b c2                     	subl	%edx, %r8d
+     13a: 41 d1 e8                     	shrl	%r8d
+     13d: 44 03 c2                     	addl	%edx, %r8d
+     140: 8b 0c 87                     	movl	(%rdi,%rax,4), %ecx
+     143: b8 25 49 92 24               	movl	$0x24924925, %eax       # imm = 0x24924925
+     148: 03 ce                        	addl	%esi, %ecx
+     14a: 41 c1 e8 02                  	shrl	$0x2, %r8d
+     14e: f7 e1                        	mull	%ecx
+     150: 45 03 c8                     	addl	%r8d, %r9d
+     153: 2b ca                        	subl	%edx, %ecx
+     155: d1 e9                        	shrl	%ecx
+     157: 03 ca                        	addl	%edx, %ecx
+     159: c1 e9 02                     	shrl	$0x2, %ecx
+     15c: 44 03 d9                     	addl	%ecx, %r11d
+     15f: 45 3b d6                     	cmpl	%r14d, %r10d
+     162: 72 bc                        	jb	0x120 <divide7+0x120>
+     164: 4c 8b 74 24 40               	movq	0x40(%rsp), %r14
+     169: 44 3b d5                     	cmpl	%ebp, %r10d
+     16c: 73 18                        	jae	0x186 <divide7+0x186>
+     16e: 42 8b 0c 97                  	movl	(%rdi,%r10,4), %ecx
+     172: b8 25 49 92 24               	movl	$0x24924925, %eax       # imm = 0x24924925
+     177: 03 ce                        	addl	%esi, %ecx
+     179: f7 e1                        	mull	%ecx
+     17b: 2b ca                        	subl	%edx, %ecx
+     17d: d1 e9                        	shrl	%ecx
+     17f: 03 ca                        	addl	%edx, %ecx
+     181: c1 e9 02                     	shrl	$0x2, %ecx
+     184: 03 d9                        	addl	%ecx, %ebx
+     186: 43 8d 04 0b                  	leal	(%r11,%r9), %eax
+     18a: 03 c3                        	addl	%ebx, %eax
+     18c: 48 83 c4 18                  	addq	$0x18, %rsp
+     190: 5f                           	popq	%rdi
+     191: 5e                           	popq	%rsi
+     192: 5d                           	popq	%rbp
+     193: 5b                           	popq	%rbx
+     194: c3                           	retq
+     195: 8b c3                        	movl	%ebx, %eax
+     197: 48 83 c4 18                  	addq	$0x18, %rsp
+     19b: 5f                           	popq	%rdi
+     19c: 5e                           	popq	%rsi
+     19d: 5d                           	popq	%rbp
+     19e: 5b                           	popq	%rbx
+     19f: c3                           	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <dot>:
+       0: 48 89 5c 24 10               	movq	%rbx, 0x10(%rsp)
+       5: 57                           	pushq	%rdi
+       6: 41 8b d9                     	movl	%r9d, %ebx
+       9: 41 8b f8                     	movl	%r8d, %edi
+       c: 4c 8b d2                     	movq	%rdx, %r10
+       f: 4c 8b d9                     	movq	%rcx, %r11
+      12: 45 85 c0                     	testl	%r8d, %r8d
+      15: 0f 84 ea 00 00 00            	je	0x105 <dot+0x105>
+      1b: 33 c0                        	xorl	%eax, %eax
+      1d: 41 83 f8 08                  	cmpl	$0x8, %r8d
+      21: 0f 82 7f 00 00 00            	jb	0xa6 <dot+0xa6>
+      27: 83 3d 00 00 00 00 02         	cmpl	$0x2, (%rip)            # 0x2e <dot+0x2e>
+		0000000000000029:  IMAGE_REL_AMD64_REL32_1	__isa_available
+      2e: 7c 76                        	jl	0xa6 <dot+0xa6>
+      30: 41 83 e0 f8                  	andl	$-0x8, %r8d
+      34: 0f 57 db                     	xorps	%xmm3, %xmm3
+      37: 0f 57 d2                     	xorps	%xmm2, %xmm2
+      3a: 66 0f 1f 44 00 00            	nopw	(%rax,%rax)
+      40: f3 0f 6f 04 82               	movdqu	(%rdx,%rax,4), %xmm0
+      45: 8d 48 04                     	leal	0x4(%rax), %ecx
+      48: f3 41 0f 6f 0c 83            	movdqu	(%r11,%rax,4), %xmm1
+      4e: 83 c0 08                     	addl	$0x8, %eax
+      51: 66 0f 38 40 c8               	pmulld	%xmm0, %xmm1
+      56: 66 0f fe d9                  	paddd	%xmm1, %xmm3
+      5a: f3 41 0f 6f 0c 8b            	movdqu	(%r11,%rcx,4), %xmm1
+      60: f3 0f 6f 04 8a               	movdqu	(%rdx,%rcx,4), %xmm0
+      65: 66 0f 38 40 c8               	pmulld	%xmm0, %xmm1
+      6a: 66 0f fe d1                  	paddd	%xmm1, %xmm2
+      6e: 41 3b c0                     	cmpl	%r8d, %eax
+      71: 72 cd                        	jb	0x40 <dot+0x40>
+      73: 66 0f fe d3                  	paddd	%xmm3, %xmm2
+      77: 66 0f 6f c2                  	movdqa	%xmm2, %xmm0
+      7b: 66 0f 73 d8 08               	psrldq	$0x8, %xmm0             # xmm0 = xmm0[8,9,10,11,12,13,14,15],zero,zero,zero,zero,zero,zero,zero,zero
+      80: 66 0f fe d0                  	paddd	%xmm0, %xmm2
+      84: 66 0f 6f c2                  	movdqa	%xmm2, %xmm0
+      88: 66 0f 73 d8 04               	psrldq	$0x4, %xmm0             # xmm0 = xmm0[4,5,6,7,8,9,10,11,12,13,14,15],zero,zero,zero,zero
+      8d: 66 0f fe d0                  	paddd	%xmm0, %xmm2
+      91: 66 0f 7e d1                  	movd	%xmm2, %ecx
+      95: 03 cb                        	addl	%ebx, %ecx
+      97: 8b d9                        	movl	%ecx, %ebx
+      99: 3b c7                        	cmpl	%edi, %eax
+      9b: 72 09                        	jb	0xa6 <dot+0xa6>
+      9d: 8b c1                        	movl	%ecx, %eax
+      9f: 48 8b 5c 24 18               	movq	0x18(%rsp), %rbx
+      a4: 5f                           	popq	%rdi
+      a5: c3                           	retq
+      a6: 8b cf                        	movl	%edi, %ecx
+      a8: 45 33 c0                     	xorl	%r8d, %r8d
+      ab: 2b c8                        	subl	%eax, %ecx
+      ad: 45 33 c9                     	xorl	%r9d, %r9d
+      b0: 83 f9 02                     	cmpl	$0x2, %ecx
+      b3: 72 38                        	jb	0xed <dot+0xed>
+      b5: 48 89 74 24 10               	movq	%rsi, 0x10(%rsp)
+      ba: 8d 77 ff                     	leal	-0x1(%rdi), %esi
+      bd: 0f 1f 00                     	nopl	(%rax)
+      c0: 41 8b 14 82                  	movl	(%r10,%rax,4), %edx
+      c4: 8d 48 01                     	leal	0x1(%rax), %ecx
+      c7: 41 0f af 14 83               	imull	(%r11,%rax,4), %edx
+      cc: 83 c0 02                     	addl	$0x2, %eax
+      cf: 44 03 c2                     	addl	%edx, %r8d
+      d2: 8b d1                        	movl	%ecx, %edx
+      d4: 41 8b 0c 8a                  	movl	(%r10,%rcx,4), %ecx
+      d8: 41 0f af 0c 93               	imull	(%r11,%rdx,4), %ecx
+      dd: 44 03 c9                     	addl	%ecx, %r9d
+      e0: 3b c6                        	cmpl	%esi, %eax
+      e2: 72 dc                        	jb	0xc0 <dot+0xc0>
+      e4: 48 8b 74 24 10               	movq	0x10(%rsp), %rsi
+      e9: 3b c7                        	cmpl	%edi, %eax
+      eb: 73 0b                        	jae	0xf8 <dot+0xf8>
+      ed: 41 8b 14 83                  	movl	(%r11,%rax,4), %edx
+      f1: 41 0f af 14 82               	imull	(%r10,%rax,4), %edx
+      f6: 03 da                        	addl	%edx, %ebx
+      f8: 43 8d 04 01                  	leal	(%r9,%r8), %eax
+      fc: 03 c3                        	addl	%ebx, %eax
+      fe: 48 8b 5c 24 18               	movq	0x18(%rsp), %rbx
+     103: 5f                           	popq	%rdi
+     104: c3                           	retq
+     105: 8b c3                        	movl	%ebx, %eax
+     107: 48 8b 5c 24 18               	movq	0x18(%rsp), %rbx
+     10c: 5f                           	popq	%rdi
+     10d: c3                           	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <helper>:
+       0: 6b c1 21                     	imull	$0x21, %ecx, %eax
+       3: c1 e9 07                     	shrl	$0x7, %ecx
+       6: 33 c1                        	xorl	%ecx, %eax
+       8: c3                           	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <sum_scale>:
+       0: 33 d2                        	xorl	%edx, %edx
+       2: 41 8b c1                     	movl	%r9d, %eax
+       5: 45 85 c0                     	testl	%r8d, %r8d
+       8: 74 20                        	je	0x2a <sum_scale+0x2a>
+       a: 66 0f 1f 44 00 00            	nopw	(%rax,%rax)
+      10: 44 8b 14 91                  	movl	(%rcx,%rdx,4), %r10d
+      14: ff c2                        	incl	%edx
+      16: 46 8d 0c 10                  	leal	(%rax,%r10), %r9d
+      1a: 42 8d 04 55 07 00 00 00      	leal	0x7(,%r10,2), %eax
+      22: 41 03 c1                     	addl	%r9d, %eax
+      25: 41 3b d0                     	cmpl	%r8d, %edx
+      28: 72 e6                        	jb	0x10 <sum_scale+0x10>
+      2a: c3                           	retq

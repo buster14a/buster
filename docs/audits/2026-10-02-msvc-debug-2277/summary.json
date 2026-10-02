@@ -1,0 +1,318 @@
+{
+  "identity": {
+    "schema": "BUSTER_MSVC_DEBUG_DIAGNOSTIC_V2",
+    "buster_source": "d4ca72fb4e97ae0a410b0d03258b00495fa45e13",
+    "buster_binary_sha256": "8d614e1802e4ffee3023f948fe401c1da69d7cf7e90e6d264f51bd0c74b43403",
+    "platform": "Windows-2025Server-10.0.26100-SP0",
+    "cpu": "Intel64 Family 6 Model 106 Stepping 6, GenuineIntel",
+    "logical_cpus": 4,
+    "image_version": "20260925.250.1",
+    "image_os": "win25-vs2026",
+    "runner_name": "GitHub Actions 1000206219",
+    "cl_path": "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\cl.EXE",
+    "cl_sha256": "b0a1818ebae6da7f18230a84e76ce839212584ac4c2ab55b97a0d5268085da57",
+    "workflow_sha": "5dafc4dcf94a730007b097254ca700a5cf86acf9",
+    "qualified_performance_acceptance": false,
+    "producer_configuration": "trusted Clang-built Release; distinct from subject-program Debug",
+    "primary_comparison": "buster-debug versus msvc-debug, both with embedded CodeView",
+    "secondary_gap": "same buster-debug versus msvc-optimized-debug, both with embedded CodeView",
+    "sensitivity_control": "buster-transforms-off disables optional transforms without changing backend",
+    "memory_and_cpu_accounting": "not measured: no complete child-tree accounting",
+    "license_buster": "First-party license grant missing/unresolved; LICENSES/README.md",
+    "license_msvc": "Proprietary Microsoft Visual Studio/Build Tools terms"
+  },
+  "compile": [
+    {
+      "workload": "kernels",
+      "variant": "buster-debug",
+      "source_bytes": 1004,
+      "median_ms": 27.23115,
+      "min_ms": 26.7169,
+      "max_ms": 27.8933,
+      "text_section_bytes": 941,
+      "debug_section_bytes": 3132,
+      "unwind_section_bytes": 100,
+      "object_bytes": 6771
+    },
+    {
+      "workload": "kernels",
+      "variant": "buster-transforms-off",
+      "source_bytes": 1004,
+      "median_ms": 27.2432,
+      "min_ms": 26.6934,
+      "max_ms": 27.7215,
+      "text_section_bytes": 1148,
+      "debug_section_bytes": 3260,
+      "unwind_section_bytes": 100,
+      "object_bytes": 6727
+    },
+    {
+      "workload": "kernels",
+      "variant": "msvc-debug",
+      "source_bytes": 1004,
+      "median_ms": 41.4374,
+      "min_ms": 40.1205,
+      "max_ms": 45.6506,
+      "text_section_bytes": 476,
+      "debug_section_bytes": 2864,
+      "unwind_section_bytes": 80,
+      "object_bytes": 4957
+    },
+    {
+      "workload": "kernels",
+      "variant": "msvc-optimized-debug",
+      "source_bytes": 1004,
+      "median_ms": 52.88665,
+      "min_ms": 50.628,
+      "max_ms": 53.8116,
+      "text_section_bytes": 1084,
+      "debug_section_bytes": 4308,
+      "unwind_section_bytes": 320,
+      "object_bytes": 12381
+    },
+    {
+      "workload": "tiny",
+      "variant": "buster-debug",
+      "source_bytes": 56,
+      "median_ms": 26.504849999999998,
+      "min_ms": 25.8271,
+      "max_ms": 28.1877,
+      "text_section_bytes": 36,
+      "debug_section_bytes": 1004,
+      "unwind_section_bytes": 20,
+      "object_bytes": 2365
+    },
+    {
+      "workload": "tiny",
+      "variant": "buster-transforms-off",
+      "source_bytes": 56,
+      "median_ms": 26.50265,
+      "min_ms": 26.3677,
+      "max_ms": 27.1925,
+      "text_section_bytes": 69,
+      "debug_section_bytes": 1036,
+      "unwind_section_bytes": 20,
+      "object_bytes": 2433
+    },
+    {
+      "workload": "tiny",
+      "variant": "msvc-debug",
+      "source_bytes": 56,
+      "median_ms": 40.959500000000006,
+      "min_ms": 39.7363,
+      "max_ms": 42.8938,
+      "text_section_bytes": 21,
+      "debug_section_bytes": 1560,
+      "unwind_section_bytes": 0,
+      "object_bytes": 2166
+    },
+    {
+      "workload": "tiny",
+      "variant": "msvc-optimized-debug",
+      "source_bytes": 56,
+      "median_ms": 42.00635,
+      "min_ms": 41.0365,
+      "max_ms": 44.2551,
+      "text_section_bytes": 4,
+      "debug_section_bytes": 1628,
+      "unwind_section_bytes": 0,
+      "object_bytes": 2341
+    },
+    {
+      "workload": "functions256",
+      "variant": "buster-debug",
+      "source_bytes": 37586,
+      "median_ms": 38.9433,
+      "min_ms": 38.2947,
+      "max_ms": 43.655,
+      "text_section_bytes": 57155,
+      "debug_section_bytes": 122528,
+      "unwind_section_bytes": 5120,
+      "object_bytes": 259709
+    },
+    {
+      "workload": "functions256",
+      "variant": "buster-transforms-off",
+      "source_bytes": 37586,
+      "median_ms": 38.79315,
+      "min_ms": 38.1325,
+      "max_ms": 39.0479,
+      "text_section_bytes": 65507,
+      "debug_section_bytes": 126784,
+      "unwind_section_bytes": 5120,
+      "object_bytes": 251837
+    },
+    {
+      "workload": "functions256",
+      "variant": "msvc-debug",
+      "source_bytes": 37586,
+      "median_ms": 53.2466,
+      "min_ms": 52.4621,
+      "max_ms": 56.0461,
+      "text_section_bytes": 24569,
+      "debug_section_bytes": 66572,
+      "unwind_section_bytes": 5120,
+      "object_bytes": 144608
+    },
+    {
+      "workload": "functions256",
+      "variant": "msvc-optimized-debug",
+      "source_bytes": 37586,
+      "median_ms": 240.7893,
+      "min_ms": 236.3033,
+      "max_ms": 254.0554,
+      "text_section_bytes": 16690,
+      "debug_section_bytes": 96132,
+      "unwind_section_bytes": 2264,
+      "object_bytes": 235726
+    }
+  ],
+  "runtime": [
+    {
+      "kind": "sum_scale",
+      "variant": "buster-debug",
+      "median_ms": 158.551,
+      "min_ms": 158.1674,
+      "max_ms": 158.9
+    },
+    {
+      "kind": "sum_scale",
+      "variant": "buster-transforms-off",
+      "median_ms": 83.47550000000001,
+      "min_ms": 83.1267,
+      "max_ms": 84.1848
+    },
+    {
+      "kind": "sum_scale",
+      "variant": "msvc-debug",
+      "median_ms": 70.3772,
+      "min_ms": 69.2482,
+      "max_ms": 73.6738
+    },
+    {
+      "kind": "sum_scale",
+      "variant": "msvc-optimized-debug",
+      "median_ms": 19.46415,
+      "min_ms": 19.3941,
+      "max_ms": 21.5103
+    },
+    {
+      "kind": "divide7",
+      "variant": "buster-debug",
+      "median_ms": 125.6518,
+      "min_ms": 122.0492,
+      "max_ms": 134.9525
+    },
+    {
+      "kind": "divide7",
+      "variant": "buster-transforms-off",
+      "median_ms": 84.9011,
+      "min_ms": 84.6872,
+      "max_ms": 102.93
+    },
+    {
+      "kind": "divide7",
+      "variant": "msvc-debug",
+      "median_ms": 68.84815,
+      "min_ms": 67.3378,
+      "max_ms": 70.1198
+    },
+    {
+      "kind": "divide7",
+      "variant": "msvc-optimized-debug",
+      "median_ms": 10.521,
+      "min_ms": 10.4984,
+      "max_ms": 21.1575
+    },
+    {
+      "kind": "dot",
+      "variant": "buster-debug",
+      "median_ms": 158.1456,
+      "min_ms": 157.1075,
+      "max_ms": 158.8114
+    },
+    {
+      "kind": "dot",
+      "variant": "buster-transforms-off",
+      "median_ms": 88.78219999999999,
+      "min_ms": 87.5884,
+      "max_ms": 90.307
+    },
+    {
+      "kind": "dot",
+      "variant": "msvc-debug",
+      "median_ms": 66.8828,
+      "min_ms": 66.6468,
+      "max_ms": 71.0054
+    },
+    {
+      "kind": "dot",
+      "variant": "msvc-optimized-debug",
+      "median_ms": 3.748,
+      "min_ms": 3.7067,
+      "max_ms": 3.7893
+    },
+    {
+      "kind": "calls",
+      "variant": "buster-debug",
+      "median_ms": 175.94485,
+      "min_ms": 175.4672,
+      "max_ms": 176.8193
+    },
+    {
+      "kind": "calls",
+      "variant": "buster-transforms-off",
+      "median_ms": 132.20555000000002,
+      "min_ms": 131.9964,
+      "max_ms": 143.6609
+    },
+    {
+      "kind": "calls",
+      "variant": "msvc-debug",
+      "median_ms": 83.62045,
+      "min_ms": 83.5312,
+      "max_ms": 84.0057
+    },
+    {
+      "kind": "calls",
+      "variant": "msvc-optimized-debug",
+      "median_ms": 5.524,
+      "min_ms": 5.492,
+      "max_ms": 11.9357
+    }
+  ],
+  "linked_artifacts": [
+    {
+      "variant": "buster-debug",
+      "executable_bytes": 563200,
+      "pdb_bytes": 6197248,
+      "executable_sha256": "a3437ceba38090fbd9697fa11b30722372df85f8a10ef5c349859c5507c1fcce",
+      "pdb_sha256": "a17c00a9503a8dcff96285db550c36c13d7af338c528ab40e0fe337ca1e69119"
+    },
+    {
+      "variant": "buster-transforms-off",
+      "executable_bytes": 563200,
+      "pdb_bytes": 6197248,
+      "executable_sha256": "9f87e2d40a10a45d51b33e1973913eddc06634f8683e8f266fda3ba6e457e83e",
+      "pdb_sha256": "52e550778e6e2fe00d34f782de7b8a5debfa435c96c5ac3861ab11c5c28f58eb"
+    },
+    {
+      "variant": "msvc-debug",
+      "executable_bytes": 562688,
+      "pdb_bytes": 6205440,
+      "executable_sha256": "01032b4801387019b802853be1572189649f12068a25613962d8688a60d120bb",
+      "pdb_sha256": "fd0282ea963783e3556bddaaed8d2df36a4f27c07a4f934b9a753dddb09947e3"
+    },
+    {
+      "variant": "msvc-optimized-debug",
+      "executable_bytes": 563200,
+      "pdb_bytes": 6205440,
+      "executable_sha256": "86c2ff48d6a6d15477a5b116930952b0c05ec08901b01105acc108060ec620cc",
+      "pdb_sha256": "2945a7fcfc4cb8534fb61d9a1da3cd80d2ce5fdcb44008b5eb159bd3c72c6718"
+    }
+  ],
+  "measured_trials_per_cell": 8,
+  "ordering": "Williams balanced blocks, two complete four-order blocks",
+  "negative_control": "rejected with observed value mismatch",
+  "validation": "108 unsigned edge/length checks before each runtime observation, cross-variant checksum equality, stable per-variant text hashes, CodeView sections present, llvm-readobj decoding; debugger usability not executed"
+}

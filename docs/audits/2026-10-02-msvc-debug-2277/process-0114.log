@@ -1,0 +1,178 @@
+
+D:\a\_temp\msvc-debug-evidence\kernels-msvc-debug-8.obj:	file format coff-x86-64
+
+Disassembly of section .text$mn:
+
+0000000000000000 <helper>:
+       0: 89 4c 24 08                  	movl	%ecx, 0x8(%rsp)
+       4: 6b 44 24 08 21               	imull	$0x21, 0x8(%rsp), %eax
+       9: 8b 4c 24 08                  	movl	0x8(%rsp), %ecx
+       d: c1 e9 07                     	shrl	$0x7, %ecx
+      10: 33 c1                        	xorl	%ecx, %eax
+      12: c3                           	retq
+      13: cc                           	int3
+      14: cc                           	int3
+      15: cc                           	int3
+      16: cc                           	int3
+      17: cc                           	int3
+      18: cc                           	int3
+      19: cc                           	int3
+      1a: cc                           	int3
+      1b: cc                           	int3
+      1c: cc                           	int3
+      1d: cc                           	int3
+      1e: cc                           	int3
+      1f: cc                           	int3
+
+0000000000000020 <sum_scale>:
+      20: 44 89 4c 24 20               	movl	%r9d, 0x20(%rsp)
+      25: 44 89 44 24 18               	movl	%r8d, 0x18(%rsp)
+      2a: 48 89 54 24 10               	movq	%rdx, 0x10(%rsp)
+      2f: 48 89 4c 24 08               	movq	%rcx, 0x8(%rsp)
+      34: 48 83 ec 18                  	subq	$0x18, %rsp
+      38: 8b 44 24 38                  	movl	0x38(%rsp), %eax
+      3c: 89 44 24 04                  	movl	%eax, 0x4(%rsp)
+      40: c7 04 24 00 00 00 00         	movl	$0x0, (%rsp)
+      47: eb 08                        	jmp	0x51 <sum_scale+0x31>
+      49: 8b 04 24                     	movl	(%rsp), %eax
+      4c: ff c0                        	incl	%eax
+      4e: 89 04 24                     	movl	%eax, (%rsp)
+      51: 8b 44 24 30                  	movl	0x30(%rsp), %eax
+      55: 39 04 24                     	cmpl	%eax, (%rsp)
+      58: 73 1a                        	jae	0x74 <sum_scale+0x54>
+      5a: 8b 04 24                     	movl	(%rsp), %eax
+      5d: 48 8b 4c 24 20               	movq	0x20(%rsp), %rcx
+      62: 6b 04 81 03                  	imull	$0x3, (%rcx,%rax,4), %eax
+      66: 8b 4c 24 04                  	movl	0x4(%rsp), %ecx
+      6a: 8d 44 01 07                  	leal	0x7(%rcx,%rax), %eax
+      6e: 89 44 24 04                  	movl	%eax, 0x4(%rsp)
+      72: eb d5                        	jmp	0x49 <sum_scale+0x29>
+      74: 8b 44 24 04                  	movl	0x4(%rsp), %eax
+      78: 48 83 c4 18                  	addq	$0x18, %rsp
+      7c: c3                           	retq
+      7d: cc                           	int3
+      7e: cc                           	int3
+      7f: cc                           	int3
+      80: cc                           	int3
+      81: cc                           	int3
+      82: cc                           	int3
+      83: cc                           	int3
+      84: cc                           	int3
+      85: cc                           	int3
+      86: cc                           	int3
+      87: cc                           	int3
+      88: cc                           	int3
+      89: cc                           	int3
+      8a: cc                           	int3
+      8b: cc                           	int3
+      8c: cc                           	int3
+      8d: cc                           	int3
+      8e: cc                           	int3
+      8f: cc                           	int3
+
+0000000000000090 <divide7>:
+      90: 44 89 4c 24 20               	movl	%r9d, 0x20(%rsp)
+      95: 44 89 44 24 18               	movl	%r8d, 0x18(%rsp)
+      9a: 48 89 54 24 10               	movq	%rdx, 0x10(%rsp)
+      9f: 48 89 4c 24 08               	movq	%rcx, 0x8(%rsp)
+      a4: 48 83 ec 18                  	subq	$0x18, %rsp
+      a8: c7 44 24 04 00 00 00 00      	movl	$0x0, 0x4(%rsp)
+      b0: c7 04 24 00 00 00 00         	movl	$0x0, (%rsp)
+      b7: eb 08                        	jmp	0xc1 <divide7+0x31>
+      b9: 8b 04 24                     	movl	(%rsp), %eax
+      bc: ff c0                        	incl	%eax
+      be: 89 04 24                     	movl	%eax, (%rsp)
+      c1: 8b 44 24 30                  	movl	0x30(%rsp), %eax
+      c5: 39 04 24                     	cmpl	%eax, (%rsp)
+      c8: 73 26                        	jae	0xf0 <divide7+0x60>
+      ca: 8b 04 24                     	movl	(%rsp), %eax
+      cd: 48 8b 4c 24 20               	movq	0x20(%rsp), %rcx
+      d2: 8b 04 81                     	movl	(%rcx,%rax,4), %eax
+      d5: 03 44 24 38                  	addl	0x38(%rsp), %eax
+      d9: 33 d2                        	xorl	%edx, %edx
+      db: b9 07 00 00 00               	movl	$0x7, %ecx
+      e0: f7 f1                        	divl	%ecx
+      e2: 8b 4c 24 04                  	movl	0x4(%rsp), %ecx
+      e6: 03 c8                        	addl	%eax, %ecx
+      e8: 8b c1                        	movl	%ecx, %eax
+      ea: 89 44 24 04                  	movl	%eax, 0x4(%rsp)
+      ee: eb c9                        	jmp	0xb9 <divide7+0x29>
+      f0: 8b 44 24 04                  	movl	0x4(%rsp), %eax
+      f4: 48 83 c4 18                  	addq	$0x18, %rsp
+      f8: c3                           	retq
+      f9: cc                           	int3
+      fa: cc                           	int3
+      fb: cc                           	int3
+      fc: cc                           	int3
+      fd: cc                           	int3
+      fe: cc                           	int3
+      ff: cc                           	int3
+
+0000000000000100 <dot>:
+     100: 44 89 4c 24 20               	movl	%r9d, 0x20(%rsp)
+     105: 44 89 44 24 18               	movl	%r8d, 0x18(%rsp)
+     10a: 48 89 54 24 10               	movq	%rdx, 0x10(%rsp)
+     10f: 48 89 4c 24 08               	movq	%rcx, 0x8(%rsp)
+     114: 48 83 ec 18                  	subq	$0x18, %rsp
+     118: 8b 44 24 38                  	movl	0x38(%rsp), %eax
+     11c: 89 44 24 04                  	movl	%eax, 0x4(%rsp)
+     120: c7 04 24 00 00 00 00         	movl	$0x0, (%rsp)
+     127: eb 08                        	jmp	0x131 <dot+0x31>
+     129: 8b 04 24                     	movl	(%rsp), %eax
+     12c: ff c0                        	incl	%eax
+     12e: 89 04 24                     	movl	%eax, (%rsp)
+     131: 8b 44 24 30                  	movl	0x30(%rsp), %eax
+     135: 39 04 24                     	cmpl	%eax, (%rsp)
+     138: 73 26                        	jae	0x160 <dot+0x60>
+     13a: 8b 04 24                     	movl	(%rsp), %eax
+     13d: 8b 0c 24                     	movl	(%rsp), %ecx
+     140: 48 8b 54 24 20               	movq	0x20(%rsp), %rdx
+     145: 4c 8b 44 24 28               	movq	0x28(%rsp), %r8
+     14a: 8b 04 82                     	movl	(%rdx,%rax,4), %eax
+     14d: 41 0f af 04 88               	imull	(%r8,%rcx,4), %eax
+     152: 8b 4c 24 04                  	movl	0x4(%rsp), %ecx
+     156: 03 c8                        	addl	%eax, %ecx
+     158: 8b c1                        	movl	%ecx, %eax
+     15a: 89 44 24 04                  	movl	%eax, 0x4(%rsp)
+     15e: eb c9                        	jmp	0x129 <dot+0x29>
+     160: 8b 44 24 04                  	movl	0x4(%rsp), %eax
+     164: 48 83 c4 18                  	addq	$0x18, %rsp
+     168: c3                           	retq
+     169: cc                           	int3
+     16a: cc                           	int3
+     16b: cc                           	int3
+     16c: cc                           	int3
+     16d: cc                           	int3
+     16e: cc                           	int3
+     16f: cc                           	int3
+
+0000000000000170 <calls>:
+     170: 44 89 4c 24 20               	movl	%r9d, 0x20(%rsp)
+     175: 44 89 44 24 18               	movl	%r8d, 0x18(%rsp)
+     17a: 48 89 54 24 10               	movq	%rdx, 0x10(%rsp)
+     17f: 48 89 4c 24 08               	movq	%rcx, 0x8(%rsp)
+     184: 48 83 ec 38                  	subq	$0x38, %rsp
+     188: c7 44 24 24 00 00 00 00      	movl	$0x0, 0x24(%rsp)
+     190: c7 44 24 20 00 00 00 00      	movl	$0x0, 0x20(%rsp)
+     198: eb 0a                        	jmp	0x1a4 <calls+0x34>
+     19a: 8b 44 24 20                  	movl	0x20(%rsp), %eax
+     19e: ff c0                        	incl	%eax
+     1a0: 89 44 24 20                  	movl	%eax, 0x20(%rsp)
+     1a4: 8b 44 24 50                  	movl	0x50(%rsp), %eax
+     1a8: 39 44 24 20                  	cmpl	%eax, 0x20(%rsp)
+     1ac: 73 25                        	jae	0x1d3 <calls+0x63>
+     1ae: 8b 44 24 20                  	movl	0x20(%rsp), %eax
+     1b2: 48 8b 4c 24 40               	movq	0x40(%rsp), %rcx
+     1b7: 8b 04 81                     	movl	(%rcx,%rax,4), %eax
+     1ba: 03 44 24 58                  	addl	0x58(%rsp), %eax
+     1be: 8b c8                        	movl	%eax, %ecx
+     1c0: e8 00 00 00 00               	callq	0x1c5 <calls+0x55>
+		00000000000001c1:  IMAGE_REL_AMD64_REL32	helper
+     1c5: 8b 4c 24 24                  	movl	0x24(%rsp), %ecx
+     1c9: 03 c8                        	addl	%eax, %ecx
+     1cb: 8b c1                        	movl	%ecx, %eax
+     1cd: 89 44 24 24                  	movl	%eax, 0x24(%rsp)
+     1d1: eb c7                        	jmp	0x19a <calls+0x2a>
+     1d3: 8b 44 24 24                  	movl	0x24(%rsp), %eax
+     1d7: 48 83 c4 38                  	addq	$0x38, %rsp
+     1db: c3                           	retq
