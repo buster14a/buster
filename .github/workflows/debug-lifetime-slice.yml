@@ -50,10 +50,10 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/debug-build"
           mkdir -p build
-          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/slice-driver
-          build/slice-driver generate --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
-          build/slice-driver build --config Release -t ide
-          build/slice-driver test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/debug-evidence/baseline-self-host.txt"
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/slice-driver"
+          "$RUNNER_TEMP/slice-driver" generate --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/slice-driver" build --config Release -t ide
+          "$RUNNER_TEMP/slice-driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/debug-evidence/baseline-self-host.txt"
       - name: Executed baseline debugger reproduction
         shell: bash
         run: |
