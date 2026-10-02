@@ -1,0 +1,69 @@
+name: x86 condition independent oracle
+on:
+  push:
+    branches: [codex/267-condition-oracle-validation]
+permissions:
+  contents: read
+jobs:
+  oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: d94bc762efb0579dd751dca7964757dab8b8107d
+          persist-credentials: false
+      - name: Verify exact source and independent tool identities
+        run: |
+          test "$(git rev-parse HEAD)" = "d94bc762efb0579dd751dca7964757dab8b8107d"
+          git rev-parse HEAD
+          as --version
+          clang --version
+          objcopy --version
+          dpkg-query -W binutils clang
+          python3 - <<'PY'
+          from pathlib import Path
+          for path in [Path('/usr/share/doc/binutils/copyright'), Path('/usr/share/doc/clang/copyright')]:
+              print('TOOL_LICENSE_FILE', path, 'available=', path.exists())
+              if path.exists():
+                  text = path.read_text()
+                  print('\n'.join(line for line in text.splitlines() if 'License:' in line or 'Source:' in line))
+          PY
+      - name: Assemble original witnesses independently and check explicit bytes
+        run: |
+          set -euo pipefail
+          as --64 docs/x86-64-condition-oracle.s -o gas.o
+          clang --target=x86_64-linux-gnu -c docs/x86-64-condition-oracle.s -o llvm.o
+          objcopy -O binary --only-section=.text gas.o gas.bin
+          objcopy -O binary --only-section=.text llvm.o llvm.bin
+          cmp gas.bin llvm.bin
+          objdump -dr -Mintel gas.o
+          objdump -dr -Mintel llvm.o
+          python3 - <<'PY'
+          import pathlib, re, subprocess
+          # Independent factual witnesses; no production table or generated metadata read.
+          conditions = [0,1,2,2,2,3,3,3,4,4,5,5,6,6,7,7,8,9,10,10,11,11,12,12,13,13,14,14,15,15]
+          expected = b''.join(bytes([0x70+c,0]) for c in conditions)
+          expected += b''.join(bytes([0x0f,0x90+c,0xc3]) for c in conditions)
+          expected += b''.join(bytes([0x0f,0x40+c,0xc1]) for c in conditions)
+          expected += bytes.fromhex('66 0f 4d c1 48 0f 4d c1 0f 95 c4 41 0f 95 c0 0f 95 00 0f 44 45 00 2e 74 fd')
+          expected += bytes.fromhex('0f 84 00 00 00 00 0f 85 00 00 00 00')
+          expected += bytes.fromhex('48 0f 44 c1 48 0f 4d c1 66 0f 4d c1')
+          for name in ['gas','llvm']:
+              actual = pathlib.Path(name+'.bin').read_bytes()
+              assert actual == expected, (name,len(actual),len(expected),actual.hex())
+              relocations = subprocess.check_output(['readelf','-Wr',name+'.o'], text=True)
+              rows = [line for line in relocations.splitlines() if 'buster_condition_oracle_external' in line]
+              assert len(rows) == 2, (name,rows)
+              assert [int(row.split()[0],16) for row in rows] == [267,273], (name,rows)
+              assert all('R_X86_64_PC32' in row and row.rstrip().endswith('- 4') for row in rows), (name,rows)
+          # Independently assemble a semantic neighbor. A common wrong alias
+          # mapping must disagree with the unchanged original byte inventory.
+          source = pathlib.Path('docs/x86-64-condition-oracle.s').read_text()
+          assert source.count('    seto bl') == 1
+          pathlib.Path('neighbor.s').write_text(source.replace('    seto bl','    setno bl'))
+          subprocess.run(['as','--64','neighbor.s','-o','neighbor.o'],check=True)
+          subprocess.run(['objcopy','-O','binary','--only-section=.text','neighbor.o','neighbor.bin'],check=True)
+          assert pathlib.Path('neighbor.bin').read_bytes() != expected
+          print('INDEPENDENT_CONDITION_ORACLE aliases=90 bytes='+str(len(expected))+' relocations=2 negative_neighbor=detected status=pass')
+          PY
