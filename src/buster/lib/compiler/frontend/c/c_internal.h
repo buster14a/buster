@@ -707,6 +707,7 @@ struct CIntegerTransformBuiltin
 
 BUSTER_C_EXTERN CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, String8 name);
 BUSTER_C_EXTERN u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 count);
+BUSTER_C_EXTERN bool c_semantic_vendor_builtin_signature(Target target, String8 name, CVendorBuiltin* signature);
 BUSTER_C_EXTERN CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Target target, CVendorBuiltinType descriptor);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_supported(Target target, String8 name);
 BUSTER_C_EXTERN u64 c_semantic_vendor_immediate_limit(String8 name, u32 argument);

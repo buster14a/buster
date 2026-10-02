@@ -169,7 +169,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vendor_vector_type(CIntegerIrBuilder* builder, I
     }
     if (valid && result.value == IR_ID_UNDERLYING_INVALID)
     {
-        u64 alignment = 1;
+        u32 alignment = 1;
         while (alignment < size)
         {
             alignment *= 2;

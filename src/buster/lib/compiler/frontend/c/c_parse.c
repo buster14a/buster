@@ -4872,6 +4872,22 @@ BUSTER_C_INTERNAL u32 c_parse_expression_operator_precedence(CToken token)
     return 0;
 }
 
+BUSTER_C_SHARED bool c_semantic_vendor_builtin_signature(Target target, String8 name, CVendorBuiltin* signature)
+{
+    CIrSse2ImmediateShiftBuiltin shift = {0};
+    bool legacy_shift = c_semantic_sse2_immediate_shift_builtin(name, &shift);
+    bool valid = legacy_shift || c_vendor_builtin_lookup(target, name, signature);
+    if (legacy_shift)
+    {
+        CTypeKind lane = shift.lane_width == 64 ? C_TYPE_LONG_LONG : C_TYPE_INT;
+        *signature = (CVendorBuiltin){.parameter_count = 2};
+        signature->types[0] = (CVendorBuiltinType){.kind = lane, .lanes = shift.lane_count};
+        signature->types[1] = signature->types[0];
+        signature->types[2] = (CVendorBuiltinType){.kind = C_TYPE_INT};
+    }
+    return valid;
+}
+
 BUSTER_C_SHARED CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Target target, CVendorBuiltinType descriptor)
 {
     CTypeId type = c_parse_expression_scalar_type(result, descriptor.kind);
@@ -5037,10 +5053,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
             {
                 String8 name = c_token_spelling(preprocess.spelling_base, first);
                 CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
-                if (builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET)
+                if (builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT)
                 {
                     CVendorBuiltin signature = {0};
-                    return c_vendor_builtin_lookup(preprocess.target, name, &signature)
+                    return c_semantic_vendor_builtin_signature(preprocess.target, name, &signature)
                         ? c_semantic_vendor_builtin_type(result, preprocess.target, signature.types[0]) : C_TYPE_ID_INVALID;
                 }
                 if (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM)
@@ -11686,11 +11702,12 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
         c_token_is_punctuator(&frame->preprocess->tokens[frame->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         String8 name = c_token_spelling(frame->preprocess->spelling_base, frame->preprocess->tokens[frame->start]);
-        if (c_symbol_builtin_from_spelling(name) == C_SYMBOL_BUILTIN_VENDOR_TARGET)
+        CSymbolBuiltin kind = c_symbol_builtin_from_spelling(name);
+        if (kind == C_SYMBOL_BUILTIN_VENDOR_TARGET || kind == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT)
         {
             CVendorBuiltin signature = {0};
             u32 close = c_parse_matching_delimiter_indexed(frame->result, *frame->preprocess, frame->start + 1);
-            CTypeId type = close < frame->end && c_vendor_builtin_lookup(frame->preprocess->target, name, &signature)
+            CTypeId type = close < frame->end && c_semantic_vendor_builtin_signature(frame->preprocess->target, name, &signature)
                 ? c_semantic_vendor_builtin_type(frame->result, frame->preprocess->target, signature.types[0]) : C_TYPE_ID_INVALID;
             if (type.value < frame->result->type_count)
                 type = c_parse_direct_expression_postfix(frame->arena, *frame->preprocess, frame->result, type, close + 1, frame->end);
@@ -26252,7 +26269,8 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
         CSymbolBuiltin kind = token.kind == C_TOKEN_IDENTIFIER ? c_symbol_builtin_from_spelling(name) : C_SYMBOL_BUILTIN_NONE;
         bool member = index && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
                                 c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
-        if (member || (kind != C_SYMBOL_BUILTIN_VENDOR_TARGET && kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC) ||
+        if (member || (kind != C_SYMBOL_BUILTIN_VENDOR_TARGET && kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC &&
+                       kind != C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
         CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, index);
         CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
@@ -26285,8 +26303,8 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
         u32 location = close;
         CVendorBuiltin signature = {0};
         CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
-        bool fixed = kind == C_SYMBOL_BUILTIN_VENDOR_TARGET;
-        bool found = !fixed || c_vendor_builtin_lookup(preprocess.target, name, &signature);
+        bool fixed = kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC;
+        bool found = !fixed || c_semantic_vendor_builtin_signature(preprocess.target, name, &signature);
         u32 minimum = fixed ? signature.parameter_count : generic.minimum_arguments;
         u32 maximum = fixed ? minimum : generic.maximum_arguments == UINT8_MAX ? UINT32_MAX : generic.maximum_arguments;
         if (!found)
@@ -26312,8 +26330,18 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
             if (fixed && !message.length)
             {
                 CTypeId expected = c_semantic_vendor_builtin_type(result, preprocess.target, signature.types[argument + 1]);
-                if (!c_parse_vendor_argument_compatible(machine, result, preprocess, scope, expected, types[argument],
-                                                       starts[argument], ends[argument]))
+                bool compatible = c_parse_vendor_argument_compatible(machine, result, preprocess, scope, expected, types[argument],
+                                                                       starts[argument], ends[argument]);
+                if (kind == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && argument == 0)
+                {
+                    CType vector = result->types[types[0].value];
+                    IrType element = c_parse_constant_scalar_type(result, preprocess.target, vector.element_type);
+                    CIrSse2ImmediateShiftBuiltin shift = {0};
+                    compatible = c_semantic_sse2_immediate_shift_builtin(name, &shift) &&
+                        vector.kind == C_TYPE_VECTOR && vector.vector_byte_size == 16 &&
+                        element.kind == IR_TYPE_INTEGER && element.bit_width == shift.lane_width;
+                }
+                if (!compatible)
                     message = string_format(result->arena, S8("argument {u32} of {S8} has an incompatible type"), argument + 1, name);
                 if (!message.length && (signature.constant_arguments & (1u << argument)))
                 {
@@ -26458,7 +26486,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         }
         CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
         if (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM || builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET ||
-            builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) continue;
+            builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC || builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT) continue;
         if (builtin == C_SYMBOL_BUILTIN_NONE || close >= end)
         {
             if (builtin == C_SYMBOL_BUILTIN_NONE && string_starts_with_sequence(name, S8("__builtin_")) &&
@@ -26546,42 +26574,6 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             {
                 message = string_format(result->arena, S8("{S8} requires one arithmetic scalar argument"), name);
                 location = starts[0];
-            }
-        }
-        if (builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT)
-        {
-            CIrSse2ImmediateShiftBuiltin shift = {0};
-            if (c_semantic_sse2_immediate_shift_builtin(name, &shift))
-            {
-                if (count != 2)
-                {
-                    message = string_format(result->arena, S8("{S8} takes 2 arguments"), name);
-                    location = index + 1;
-                }
-                else
-                {
-                    CTypeId type = C_TYPE_ID_INVALID;
-                    c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, starts[0], ends[0], &type);
-                    CType vector = type.value < result->type_count ? result->types[type.value] : (CType){0};
-                    IrType element = c_parse_constant_scalar_type(result, preprocess.target, vector.element_type);
-                    if (vector.kind != C_TYPE_VECTOR || vector.vector_byte_size != 16 ||
-                        element.kind != IR_TYPE_INTEGER || element.bit_width != shift.lane_width)
-                    {
-                        message = string_format(result->arena,
-                            S8("argument 1 of {S8} must be a 16-byte integer vector with {u32} lanes of {u32} bits"),
-                            name, (u32)shift.lane_count, (u32)shift.lane_width);
-                        location = starts[0];
-                    }
-                    else
-                    {
-                        CParseConstant immediate = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, starts[1], ends[1]);
-                        if (!immediate.valid || immediate.is_float)
-                        {
-                            message = string_format(result->arena, S8("argument 2 of {S8} must be an integer constant"), name);
-                            location = starts[1];
-                        }
-                    }
-                }
             }
         }
         if (builtin == C_SYMBOL_BUILTIN_SIMD)

@@ -2335,8 +2335,8 @@ BUSTER_C_INTERNAL CIrMemoryBuiltin c_ir_memory_builtin(String8 name)
 
 // The Intel header spellings are frontend aliases, not target instructions:
 // each one selects an ordinary canonical vector operation and a required
-// 128-bit lane shape. Keeping the count as a folded immediate preserves the
-// intrinsic contract while allowing every vector-capable backend to lower it.
+// 128-bit lane shape. The ordinary int count is evaluated once; the lowering
+// preserves zero/sign-fill behavior for counts outside the lane width.
 BUSTER_C_INTERNAL CIrSse2ImmediateShiftBuiltin const c_ir_sse2_immediate_shift_builtins[] = {
     {S8_INITIALIZER("__builtin_ia32_pslldi128"), IR_BINARY_VECTOR_SHIFT_LEFT, 32, 4, {0}},
     {S8_INITIALIZER("__builtin_ia32_psllqi128"), IR_BINARY_VECTOR_SHIFT_LEFT, 64, 2, {0}},
@@ -2372,6 +2372,9 @@ BUSTER_C_SHARED bool c_semantic_sse2_immediate_shift_builtin(String8 name, CIrSs
 
 BUSTER_C_INTERNAL IrValueId c_ir_vector_splat(CIntegerIrBuilder* builder, IrValueId value, IrTypeId vector_type,
                                                IrSourceRange source);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_sse2_runtime_shift(CIntegerIrBuilder* builder,
+                                                        CIrSse2ImmediateShiftBuiltin entry,
+                                                        IrValueId input, IrValueId count, CToken token);
 
 // What each position of a SIMD builtin's argument list has to be. Anything but
 // IMMEDIATE is an ordinary expression that gets lowered and then checked (and
@@ -14233,6 +14236,7 @@ typedef enum CIrPreparedCallContinuation
     C_IR_PREPARED_CALL_CONTINUATION_IDENTITY,
     C_IR_PREPARED_CALL_CONTINUATION_LIBRARY_ARGUMENT,
     C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT,
+    C_IR_PREPARED_CALL_CONTINUATION_SSE2_COUNT,
     C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE,
     C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT,
 } CIrPreparedCallContinuation;
@@ -18852,7 +18856,7 @@ BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builde
     CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
     IrTypeId type = IR_TYPE_ID_INVALID;
     bool valid = true;
-    if (c_vendor_builtin_lookup(builder->target, name, &signature))
+    if (c_semantic_vendor_builtin_signature(builder->target, name, &signature))
         type = c_ir_vendor_signature_type(builder, signature.types[0]);
     else if (generic.operation)
     {
@@ -20926,7 +20930,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     string_format(builder->arena, S8("{S8} takes 2 arguments"), entry.name);
                 return C_IR_PREPARED_CALL_STEP_FAILED;
             }
-            if (continuation != C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT)
+            if (continuation != C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT &&
+                continuation != C_IR_PREPARED_CALL_CONTINUATION_SSE2_COUNT)
             {
                 return c_ir_prepared_call_request_expression(builder, frame,
                                                              C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT,
@@ -20936,68 +20941,36 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 return C_IR_PREPARED_CALL_STEP_FAILED;
             }
-            IrTypeId vector_type = child_value.value < builder->function->value_count
-                                       ? builder->function->values[child_value.value].canonical_type
-                                       : IR_TYPE_ID_INVALID;
-            IrType* vector = ir_type_from_id(&builder->program->types, vector_type);
-            IrType* element = vector && vector->kind == IR_TYPE_VECTOR
-                                  ? ir_type_from_id(&builder->program->types, vector->element_type)
-                                  : 0;
-            bool valid_type = vector && vector->kind == IR_TYPE_VECTOR && vector->layout.resolved &&
-                              vector->layout.size == 16 && vector->element_count == entry.lane_count &&
-                              element && element->kind == IR_TYPE_INTEGER &&
-                              element->bit_width == entry.lane_width;
-            if (!valid_type)
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT)
             {
-                builder->failure_token_index = starts[0];
-                builder->failure_message =
-                    string_format(builder->arena,
-                                  S8("argument 1 of {S8} must be a 16-byte integer vector with {u32} lanes of {u32} bits"),
-                                  entry.name, (u32)entry.lane_count, (u32)entry.lane_width);
-                return C_IR_PREPARED_CALL_STEP_FAILED;
-            }
-            u64 immediate = 0;
-            if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[1], ends[1], &immediate))
-            {
-                builder->failure_token_index = starts[1];
-                builder->failure_message =
-                    string_format(builder->arena, S8("argument 2 of {S8} must be an integer constant"), entry.name);
-                return C_IR_PREPARED_CALL_STEP_FAILED;
-            }
-            IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
-            IrValueId result = IR_VALUE_ID_INVALID;
-            bool arithmetic_right = entry.operation == IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT;
-            if (immediate >= entry.lane_width && !arithmetic_right)
-            {
-                IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, vector->element_type);
-                result = zero.value != IR_ID_UNDERLYING_INVALID
-                             ? c_ir_vector_splat(builder, zero, vector_type, instruction_source)
-                             : IR_VALUE_ID_INVALID;
-            }
-            else
-            {
-                if (immediate >= entry.lane_width)
+                IrTypeId vector_type = child_value.value < builder->function->value_count
+                                           ? builder->function->values[child_value.value].canonical_type
+                                           : IR_TYPE_ID_INVALID;
+                IrType* vector = ir_type_from_id(&builder->program->types, vector_type);
+                IrType* element = vector && vector->kind == IR_TYPE_VECTOR
+                                      ? ir_type_from_id(&builder->program->types, vector->element_type)
+                                      : 0;
+                bool valid_type = vector && vector->kind == IR_TYPE_VECTOR && vector->layout.resolved &&
+                                  vector->layout.size == 16 && vector->element_count == entry.lane_count &&
+                                  element && element->kind == IR_TYPE_INTEGER &&
+                                  element->bit_width == entry.lane_width;
+                if (!valid_type)
                 {
-                    immediate = (u64)entry.lane_width - 1;
+                    builder->failure_token_index = starts[0];
+                    builder->failure_message =
+                        string_format(builder->arena,
+                                      S8("argument 1 of {S8} must be a 16-byte integer vector with {u32} lanes of {u32} bits"),
+                                      entry.name, (u32)entry.lane_count, (u32)entry.lane_width);
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
                 }
-                IrValueId count =
-                    c_ir_emit_integer_value_typed(builder, immediate, false, token, vector->element_type);
-                IrValueId count_vector = count.value != IR_ID_UNDERLYING_INVALID
-                                             ? c_ir_vector_splat(builder, count, vector_type, instruction_source)
-                                             : IR_VALUE_ID_INVALID;
-                if (count_vector.value != IR_ID_UNDERLYING_INVALID)
-                {
-                    result = c_ir_add_result(builder, vector_type);
-                    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_BINARY, vector_type);
-                    instruction.operands = arena_allocate(builder->arena, IrValueId, 2);
-                    instruction.operands[0] = child_value;
-                    instruction.operands[1] = count_vector;
-                    instruction.operand_count = 2;
-                    instruction.binary_operation = (u8)entry.operation;
-                    instruction.result = result;
-                    c_ir_append_instruction(builder, instruction, instruction_source);
-                }
+                frame->as.prepared_call.state->first = child_value;
+                return c_ir_prepared_call_request_expression(builder, frame,
+                                                             C_IR_PREPARED_CALL_CONTINUATION_SSE2_COUNT,
+                                                             starts[1], ends[1], false);
             }
+            builder->failure_token_index = starts[1];
+            IrValueId result = c_ir_emit_sse2_runtime_shift(builder, entry,
+                                                          frame->as.prepared_call.state->first, child_value, token);
             if (result.value == IR_ID_UNDERLYING_INVALID)
             {
                 return C_IR_PREPARED_CALL_STEP_FAILED;
@@ -21120,7 +21093,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
             CVendorBuiltin signature = {0};
             bool fixed = selected->builtin_vendor_target;
-            if (fixed && (!c_vendor_builtin_lookup(builder->target, name, &signature) || count != signature.parameter_count))
+            if (fixed && (!c_semantic_vendor_builtin_signature(builder->target, name, &signature) || count != signature.parameter_count))
                 return C_IR_PREPARED_CALL_STEP_FAILED;
             if (!fixed && generic.operation == C_VENDOR_GENERIC_SHUFFLE_VECTOR && count == 2)
             {
@@ -27427,7 +27400,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     u32 chain_start = start + 1;
 
     CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, token);
-    if (builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC)
+    if (builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC ||
+        builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
             return false;
@@ -27528,10 +27502,13 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
                 CTypeId element = declared->element_type;
                 CType const* record = c_type_from_id(&builder->parse, element);
                 IrTypeId canonical = record ? builder->c_type_ir_map[element.value] : IR_TYPE_ID_INVALID;
-                while (canonical.value == IR_ID_UNDERLYING_INVALID && record && record->kind == C_TYPE_ARRAY)
+                if (canonical.value == IR_ID_UNDERLYING_INVALID)
                 {
-                    element = record->element_type;
-                    record = c_type_from_id(&builder->parse, element);
+                    while (record && record->kind == C_TYPE_ARRAY)
+                    {
+                        element = record->element_type;
+                        record = c_type_from_id(&builder->parse, element);
+                    }
                     canonical = record ? builder->c_type_ir_map[element.value] : IR_TYPE_ID_INVALID;
                 }
                 type = canonical.value != IR_ID_UNDERLYING_INVALID
@@ -30794,6 +30771,7 @@ BUSTER_C_INTERNAL bool c_ir_terminate(CIntegerIrBuilder* builder, IrOpcode opcod
 }
 
 #include "c_vendor_lowering.c"
+#include "c_vendor_sse2_shift.c"
 #include "c_vendor_sha.c"
 #include "c_vendor_x86_query.c"
 #include "c_vendor_generic.c"
@@ -50929,6 +50907,10 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
             !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
         String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
         CVendorBuiltinBudget budget = c_ir_vendor_builtin_budget(name);
+        CVendorBuiltinBudget shift_budget = c_ir_sse2_runtime_shift_budget(name);
+        budget.instructions += shift_budget.instructions;
+        budget.values += shift_budget.values;
+        budget.blocks += shift_budget.blocks;
         CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
         if (generic.operation && c_semantic_vendor_builtin_supported(builder->target, name))
         {

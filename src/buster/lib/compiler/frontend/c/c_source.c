@@ -3972,7 +3972,7 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     // unresolved symbol behind.
     { S8_INITIALIZER("_mm_pause"), C_SYMBOL_BUILTIN_SPIN_PAUSE },
     { S8_INITIALIZER("__builtin_ia32_pause"), C_SYMBOL_BUILTIN_SPIN_PAUSE },
-    // Clang's SSE2 headers lower immediate vector shifts through these
+    // Clang's SSE2 headers lower scalar-count vector shifts through these
     // compiler-owned spellings. Their implementation is canonical vector
     // IR and is therefore independent of the selected native backend.
     { S8_INITIALIZER("__builtin_ia32_pslldi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },

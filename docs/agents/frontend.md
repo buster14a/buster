@@ -235,8 +235,8 @@ object representations, including arrays. Nondeterministic-value operands are
 unevaluated; the canonical emitter chooses a defined zero of the requested
 scalar/vector type.
 
-`c_vendor_lowering.c`, `c_vendor_sha.c`, `c_vendor_x86_query.c` and
-`c_vendor_generic.c` expand the implemented subset through existing scalar,
+`c_vendor_lowering.c`, `c_vendor_sha.c`, `c_vendor_x86_query.c`,
+`c_vendor_generic.c` and `c_vendor_sse2_shift.c` expand the implemented subset through existing scalar,
 vector, memory, CFG and fixed-register assembly contracts. Reachability uses
 the existing function dependency worklist after semantic validation. A reached
 unsupported intrinsic produces a diagnostic containing its exact name.
@@ -247,3 +247,10 @@ SSA parameters at their joins for ambient named locals and function
 parameters. Generic lane conversions reserve the existing software floating
 conversion paths. Every sum/product is checked against the canonical row
 limits; unused wrapper bodies receive no expansion reservation.
+
+The five preexisting SSE2 scalar-count shift spellings accept ordinary `int`
+arguments. Both operands are evaluated once, including count copy conversion;
+the emitted scalar shifts use a bounded count. Logical shifts choose zero
+outside their lane width, while arithmetic right shifts retain sign-fill.
+Signed and unsigned integer input lanes with the required shape preserve their
+bits, and results use the signed vector type of the header prototype.
