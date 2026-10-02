@@ -76,7 +76,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_semantic_host(UnitTestArguments* ar
     if (result)
     {
         ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawned, 30000000);
-        result = waited.result == PROCESS_RESULT_SUCCESS;
+        result = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS;
         if (!result) arguments->show(arguments, S8("ELF semantics host compiler failed: {S8}\n"), BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
     }
     return result;
@@ -87,7 +87,12 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_semantic_run(Arena* arena, String8 
     String8 command[] = {executable};
     ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
         (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
-    bool result = spawned.handle && os_process_wait_deadline(arena, spawned, 30000000).result == PROCESS_RESULT_SUCCESS;
+    bool result = spawned.handle != 0;
+    if (result)
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
+        result = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS;
+    }
     return result;
 }
 
