@@ -1,0 +1,30 @@
+name: Publish complete MSVC matched-debug evidence
+on:
+  push:
+    branches: ['codex/2277-msvc-debug-publication']
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: research-msvc-debug-evidence-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          path: harness
+      - name: Verify original artifact and publish single archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_EXPECTED_HEAD: 8db5f698862b88929776f071aded311032eca546
+        run: python harness/tools/research/msvc_comparison/publish_debug_evidence.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: msvc-debug-publication-result
+          path: publication-result.json
+          if-no-files-found: warn
