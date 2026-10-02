@@ -8075,7 +8075,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_dynamic_stack(UnitTe
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source = S8(
+    // Keep each literal below the portable 4095-byte translation limit.
+    String8 source_parts[] = {
+        S8(
         "extern void *malloc(__SIZE_TYPE__);\n"
         "extern void free(void *);\n"
         "static int calls;\n"
@@ -8182,6 +8184,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
         "    else fail = 1;\n"
         "    return fail;\n"
         "}\n"
+        ),
+        S8(
         "static int declarator_lists(void)\n"
         "{\n"
         "    int fail = 0, n = 3;\n"
@@ -8228,7 +8232,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vla_runtime_types(UnitTe
         "    fail |= heap_and_cast() << 3;\n"
         "    fail |= declarator_lists() << 4;\n"
         "    return fail;\n"
-        "}\n");
+        "}\n"
+        ),
+    };
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-vla-runtime-types"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
