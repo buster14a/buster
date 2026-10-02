@@ -439,14 +439,19 @@ packed; incidental address alignment does not raise the answer.
 Lookup and layout run on the protected TYPE query's private model. Address-of
 and qualified-array traversal may append temporary pointer/qualified types, so
 they must never run against the published canonical type-map input. Only the
-final alignment number escapes. The query bypasses committed type-layout rows
+final alignment number escapes. Unevaluated named calls pass the existing
+argument-count checker against the private model before that number is exported.
+The query bypasses committed type-layout rows
 to visit the selected placement; its alignment requests use the protected typed
 integer query in their original source scopes. Other layout solves retain their
 existing evaluation path. Member-query nesting uses the same fixed limit of
 four with a thread-local sticky refusal, including across private models. Member
 answers precede the enum-only natural-layout reader, which cannot type promoted
-or address-derived operands. The canonical constant fold consults object
-alignment only for alignof spellings; sizeof retains its natural size path.
+or address-derived operands. Canonical constants likewise read a final member's
+alignment before natural operand typing, which can refuse a selected generic
+aggregate's member even when the protected semantic query has its answer.
+The canonical constant fold consults object alignment only for alignof
+spellings; sizeof retains its natural size path.
 
 The grammar check applies declaration alignment only to an outer final member
 expression. Unary, arithmetic, assignment, comma and conditional values keep

@@ -23112,6 +23112,14 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
                         c_token_spelling(preprocess.spelling_base, preprocess.tokens[end - 1]), 0, &aggregate, &member);
                     valid = field.value < query.type_count && member < query.member_count && !query.members[member].is_bit_field;
                 }
+                if (valid)
+                {
+                    // Direct prefix typing gives a call's return type without
+                    // checking its arguments. Validate the unevaluated named
+                    // calls against this private model before exporting a fact.
+                    CCallArityDiagnostic checked = c_semantic_check_named_call_arities(arena, &query, preprocess, start, end);
+                    valid = !checked.message.length;
+                }
                 u64 size = 0;
                 u64 offset = 0;
                 u32 aggregate_alignment = 0;

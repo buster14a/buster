@@ -48564,6 +48564,27 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 u32 operand_start = literal ? index + 1 : index + 2;
                 u32 operand_end = literal ? literal_end : close;
                 u32 consumed_index = literal ? literal_end - 1 : close;
+                // A final member's declaration alignment is already a shared
+                // semantic answer. Resolve it before natural operand typing,
+                // which can refuse a generic-selection member expression.
+                bool is_alignof = c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token));
+                u32 member_alignment = 0;
+                if (is_alignof)
+                {
+                    CScopeId scope = c_parse_scope_for_token(&builder->parse, (CScopeId){.value = 0}, operand_start);
+                    if (!c_semantic_alignof_member(builder->temporary_arena, builder->preprocess, &builder->parse, scope,
+                                                  operand_start, operand_end, &member_alignment))
+                    {
+                        return false;
+                    }
+                    if (member_alignment)
+                    {
+                        values[value_count++] = c_ir_constant_integer(builder->size_type, member_alignment);
+                        expect_operand = false;
+                        index = consumed_index;
+                        continue;
+                    }
+                }
                 builder->queries->value_count = value_start + value_count;
                 builder->queries->operator_count = operator_start + operator_count;
                 IrTypeId type_id = IR_TYPE_ID_INVALID;
@@ -48587,12 +48608,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 {
                     return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
                 }
-                if (c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)) &&
-                    type_id.value == IR_ID_UNDERLYING_INVALID && !c_ir_alignof_object_alignment(builder, operand_start, operand_end, &alignment))
+                if (is_alignof && type_id.value == IR_ID_UNDERLYING_INVALID &&
+                    !c_ir_alignof_object_alignment(builder, operand_start, operand_end, &alignment))
                 {
                     return false;
                 }
-                values[value_count++] = c_ir_constant_integer(builder->size_type, c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)) ? alignment : size);
+                values[value_count++] = c_ir_constant_integer(builder->size_type, is_alignof ? alignment : size);
                 expect_operand = false;
                 index = consumed_index;
                 continue;

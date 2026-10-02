@@ -15690,6 +15690,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             "#pragma pack(pop)\n"
             "static volatile int calls;\n"
             "static struct S2 *next(void) { calls += 1; return &s2; }\n"
+            "static struct S2 *pick(int value) { calls += value; return &s2; }\n"
             "enum {\n"
             "    E_X = __alignof__(s2.x), E_Y = _Alignof(s2.y), E_PACKED = __alignof__(p.i),\n"
             "    E_MEMBER_PACKED = __alignof__(mp.i), E_REQUEST = __alignof__(rp.i), E_RAISED = __alignof__(raised.i),\n"
@@ -15718,7 +15719,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             "_Static_assert(__alignof__((0, s2.x)) == 4 && __alignof__(1 ? s2.x : s2.x) == 4 && __alignof__(array_member.values[0]) == 4, \"other values\");\n"
             "_Static_assert(__alignof__((((0, s2)).x)) == 16 && __alignof__((1 ? &s2 : &s2)->x) == 16, \"grouped aggregate expressions\");\n"
             "_Static_assert(__alignof__(_Generic(0, int: s2, default: s2).x) == 16, \"generic aggregate expression\");\n"
-            "_Static_assert(__alignof__(((struct S2){.x = ++calls}).x) == 16 && __alignof__(next()->x) == 16, \"unevaluated operands\");\n"
+            "_Static_assert(__alignof__(((struct S2){.x = ++calls}).x) == 16 && __alignof__(next()->x) == 16 && __alignof__(pick(++calls)->x) == 16, \"unevaluated operands\");\n"
             "int scope_control(void) {\n"
             "    enum { REQUEST = 32 };\n"
             "    struct Local { char c; int x __attribute__((aligned(REQUEST))); } local;\n"
@@ -15733,9 +15734,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
             "    failed |= __alignof__(outer.inner.x) != 8 || __alignof__(promoted.x) != 16 || __alignof__(array_member.values) != 16;\n"
             "    failed |= __alignof__((&au)->x) != 16 || __alignof__(groups[0].x) != 16 || folded_member_alignment != 16;\n"
             "    failed |= __alignof__(request_expression.x) != 8 || __alignof__(cast_request.x) != 8 || __alignof__(chained.x) != 16;\n"
+            "    failed |= __alignof__(_Generic(0, int: s2, default: s2).x) != 16;\n"
             "    failed |= __alignof__(pragma_object.requested) != PRAGMA_REQUEST || __alignof__(pragma_object.plain) != 1;\n"
             "    failed |= __alignof__(derived) != 16 || sizeof member_bound != 16 || __alignof__(incidental.c) != 1;\n"
-            "    failed |= __alignof__(++s2.x) != 4 || __alignof__(((struct S2){.x = ++calls}).x) != 16 || __alignof__(next()->x) != 16;\n"
+            "    failed |= __alignof__(++s2.x) != 4 || __alignof__(((struct S2){.x = ++calls}).x) != 16 || __alignof__(next()->x) != 16 || __alignof__(pick(++calls)->x) != 16;\n"
             "    failed |= s2.x != 1 || calls != 0 || scope_control() != 0; return failed;\n"
             "}\n"
         )
@@ -15824,6 +15826,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
                     if (BUSTER_REQUIRE(arguments, main_function != 0))
                     {
                         BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, main_function, S8("next")) == 0);
+                        BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, main_function, S8("pick")) == 0);
                     }
                 }
                 scratch_end(temporary);
@@ -15882,6 +15885,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
            "struct E { int x __attribute__((aligned(__alignof__(d.x)))); } e;"
            "struct F { int x __attribute__((aligned(__alignof__(e.x)))); } f;"
            "int g(void) { return __alignof__(f.x); }"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "_Static_assert(__alignof__(_Generic(0, int: 1, default: s).x) == 16, \"selected scalar has no member\");"),
+        S8("struct S { int x __attribute__((aligned(16))); }; struct S *pick(int);"
+           "_Static_assert(__alignof__(pick()->x) == 16, \"missing argument\");"),
+        S8("struct S { int x __attribute__((aligned(16))); }; struct S *pick(int);"
+           "enum { E = __alignof__(pick()->x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); }; struct S *pick(int);"
+           "_Static_assert(__alignof__(pick(1, 2)->x) == 16, \"extra argument\");"),
+        S8("struct S { int x __attribute__((aligned(16))); }; struct S *pick(int);"
+           "enum { E = __alignof__(pick(1, 2)->x) };"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
     {
