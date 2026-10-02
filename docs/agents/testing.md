@@ -62,6 +62,13 @@
   `if (BUSTER_REQUIRE(arguments, prerequisite))`. It records the prerequisite
   with normal assertion accounting, evaluates it once, and skips only the
   guarded body when it fails; unrelated fixtures and modules continue.
+- With a debugger attached, assertion failures stop through `os_fail()` after
+  reporting the diagnostic. The arena, fixture-timing, and prerequisite harness
+  self-tests set `UnitTestArguments.suppress_debugger_break` only around their
+  deliberately failed assertions and clear it before any dependent body or
+  later assertion. Failure counts and diagnostics remain unchanged.
+  `test_debugger_failure_self_test` checks debugger-present/absent decisions,
+  restoration, and argument-free failures without changing registered totals.
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
