@@ -47371,6 +47371,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CCo
                 // Unary plus preserves S+A. Negation and complement cannot
                 // be represented by one absolute symbol relocation.
                 success = operation == C_CONDITIONAL_UNARY_PLUS;
+                if (success)
+                {
+                    IrTypeId promoted = c_ir_constant_common_type(builder, value->type, value->type);
+                    success = c_ir_constant_cast(builder, value, promoted, value);
+                }
             }
             else if (c_ir_constant_type_is_integer(type))
             {
