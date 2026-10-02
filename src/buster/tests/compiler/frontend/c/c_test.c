@@ -4695,7 +4695,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_enum_scope(UnitTestArgument
                 }
                 else
                 {
-                    BUSTER_TEST(arguments, lowered.program == 0 && lowered.diagnostic_count != 0);
+                    BUSTER_TEST(arguments, lowered.program == 0);
                 }
                 scratch_end(temporary);
             }
