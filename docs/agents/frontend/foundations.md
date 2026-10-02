@@ -1253,7 +1253,24 @@ the aligned-base case against Clang. `c_test_enum_runtime` runs these two source
 and the bit-field source in all four native allocator modes with strict codegen
 verification, rejecting machine fallback outside NONE.
 
-## Static address-to-integer initializer regressions (#1273)
+## Static address-to-integer initializers (#1273)
+
+The constant folder carries an address cast to an integer of exactly pointer
+width as a symbol and signed byte addend, retaining the integer's C type.
+Integer addition/subtraction uses byte scale one; casting back to a pointer
+restores that pointer's ordinary element scaling. Scalar and aggregate integer
+storage use BYTES with IrGlobalRelocation entries; canonical SYMBOL_ADDRESS
+remains pointer-only. Narrower destinations report truncation explicitly.
+Wider destinations, including 128-bit cross-limb relocations, remain refused;
+this implementation does not synthesize a zero-extension relocation.
+Negation, complement, masks, shifts, products and two-symbol subtraction stay
+outside the supported one-symbol-plus-addend representation.
+
+The required-initializer wrapper owns and restores a biased source-token
+context. General constant probes can decline unsupported casts without
+setting a new initializer diagnostic. A separate driver control makes two
+such probes precede a dynamic binary16 conversion and requires both probe
+and main function bodies to be emitted in both forms on the two ELF targets.
 
 `compiler_driver_test_static_address_integers` is a regression-first driver
 fixture for the address-constant extension: pointer-width signed and unsigned
@@ -1274,5 +1291,6 @@ storage through volatile reads with runtime addresses plus literal byte
 addends, then separately reads the const integer normally. The identical
 source runs with both frontend forms, all four allocators and O0/O2 in
 C17/GNU17 on desktop hosts. Linux requires configured GCC and Clang GNU17/
-GNU2x O0/O2 compile-and-run references. These tests establish the intended
-contract; a regression-only commit does not claim production support.
+GNU2x O0/O2 compile-and-run references. Two additional object controls cover
+integer-to-pointer recasting and unary plus; explicit wider-integer controls
+retain the unsupported boundary.

@@ -13876,6 +13876,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integers(
         { S8("pointer-control"), S8("int *P=arr+2;"), {S8("arr")}, {8}, {0}, 8, 1, false },
         { S8("numeric-control"), S8("U P=0x1122334455667788ULL;"), {0}, {0}, {0}, 8, 0, false },
         { S8("lp64-long"), S8("long P=(long)&x+3;"), {S8("x")}, {3}, {0}, 8, 1, false },
+        { S8("integer-to-pointer"), S8("U P=(U)((int*)((U)&arr+4)+2);"), {S8("arr")}, {12}, {0}, 8, 1, false },
+        { S8("unary-plus"), S8("U P=+(U)&x+2;"), {S8("x")}, {2}, {0}, 8, 1, false },
     };
     String8 targets[] = { S8("x86_64-linux"), S8("aarch64-linux") };
     String8 dialects[] = { S8("-std=c17"), S8("-std=gnu17") };
@@ -13946,6 +13948,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integers(
         { S8("int x; unsigned long long P=(unsigned long long)&x * 2;"), S8("x86_64-linux"), false },
         { S8("int x,y; long long P=(long long)&x-(long long)&y;"), S8("x86_64-linux"), false },
     };
+    // Wider destinations are an explicit residual boundary: one relocation
+    // cannot supply the other limb of a 128-bit integer.
+    String8 wider[] = {
+        S8("int x; unsigned __int128 P=(unsigned __int128)&x;"),
+        S8("int x; __int128 P=(__int128)(unsigned long long)&x+3;"),
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(wider); row += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 name = string_format(arena, S8("buster-address-integer-wide-{u32}-{u32}"), row, form);
+            String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+            String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(wider[row]))))
+            {
+                String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), S8("x86_64-linux"), forms[form], S8("-o"), output, input};
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && !refused.has_object, wider[row]);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(refused.diagnostic, S8("integer type exactly as wide as pointer")) !=
+                                BUSTER_STRING_NO_MATCH, refused.diagnostic);
+                FileStats stats = os_file_replacement_target_stats(output);
+                BUSTER_TEST(arguments, stats.valid && stats.kind == OS_FILE_KIND_MISSING);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
     String8 sentinel = S8("address-integer refusal sentinel\n");
     for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
     {
@@ -13990,6 +14023,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integers(
                 os_file_delete(input);
                 scratch_end(temporary);
             }
+        }
+    }
+    return result;
+}
+
+// Unsupported conversions inside a benign probe must leave the builder ready
+// for a later dynamic binary16 conversion. The functions must be emitted.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_address_integer_probe_state(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "int x;\n"
+        "int probe(float f){\n"
+        "unsigned a=__builtin_constant_p((unsigned)&x);\n"
+        "unsigned b=__builtin_constant_p((unsigned __int128)&x);\n"
+        "_Float16 half=(_Float16)f;\n"
+        "return a || b || (float)half!=f;}\n"
+        "int main(void){volatile float f=1.5f;return probe(f);}\n");
+    String8 targets[] = {S8("x86_64-linux"), S8("aarch64-linux")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 name = string_format(arena, S8("buster-address-integer-probe-{u32}-{u32}"), target, form);
+            String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+            String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-c"), S8("-std=gnu17"), S8("-target"), targets[target], forms[form],
+                                    S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverResult built = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 context = string_format(arena, S8("address-integer probe target={S8} form={S8}: {S8}"), targets[target], forms[form], built.diagnostic);
+                BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, context);
+                if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object)
+                {
+                    ObjectSymbol* probe = compiler_driver_test_symbol_by_name(&built.object, S8("probe"));
+                    ObjectSymbol* main_function = compiler_driver_test_symbol_by_name(&built.object, S8("main"));
+                    BUSTER_TEST_RAW(arguments, probe && probe->kind == OBJECT_SYMBOL_FUNCTION && probe->size != 0, context);
+                    BUSTER_TEST_RAW(arguments, main_function && main_function->kind == OBJECT_SYMBOL_FUNCTION && main_function->size != 0, context);
+                }
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
         }
     }
     return result;
@@ -16980,6 +17061,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_address_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_address_integer_native);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_address_integer_probe_state);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_pointer_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unknown_type_names);
