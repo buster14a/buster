@@ -5583,7 +5583,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
         {
             CToken replacement = definition->replacement[replacement_index];
             bool replacement_space = replacement_index ? !definition_spaces || definition_spaces[replacement_index] != 0 : invocation.preceded_by_space;
-            if (definition->function_like && c_token_is_punctuator(&replacement, C_PUNCTUATOR_HASH) &&
+            if (arguments && definition->function_like && c_token_is_punctuator(&replacement, C_PUNCTUATOR_HASH) &&
                 replacement_index + 1 < definition->replacement_count)
             {
                 u32 parameter_index = parameter_indices[replacement_index + 1];
