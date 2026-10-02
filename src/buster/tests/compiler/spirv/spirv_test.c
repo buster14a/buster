@@ -277,7 +277,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_transform(UnitTestArguments* argum
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
     {
-        CompilerDriverResult compiled = spirv_test_compile(arena, S8("tests/gpu/direct_transform.c"), output, forms[form]);
+        CompilerDriverResult compiled = spirv_test_compile(arena, S8("src/buster/tests/compiler/spirv/fixtures/direct_transform.c"), output, forms[form]);
         if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("direct SPIR-V form={u32}: {S8}\n"), form, compiled.diagnostic);
         if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_spirv && compiled.spirv.success))
         {
@@ -285,7 +285,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_transform(UnitTestArguments* argum
             ByteSlice bytes = compiled.spirv.bytes;
             ByteSlice written = file_read(arena, output, (FileReadOptions){0});
             BUSTER_TEST(arguments, written.pointer && written.length == bytes.length && memory_compare(written.pointer, bytes.pointer, bytes.length));
-            CompilerDriverResult repeated = spirv_test_compile(arena, S8("tests/gpu/direct_transform.c"), output, forms[form]);
+            CompilerDriverResult repeated = spirv_test_compile(arena, S8("src/buster/tests/compiler/spirv/fixtures/direct_transform.c"), output, forms[form]);
             BUSTER_TEST(arguments, repeated.error == COMPILER_DRIVER_ERROR_NONE && repeated.spirv.bytes.length == bytes.length &&
                                    memory_compare(repeated.spirv.bytes.pointer, bytes.pointer, bytes.length));
             SpirvTestModule module = spirv_test_inspect(bytes);
@@ -416,7 +416,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_invocation_rejections(UnitTestArgu
         if (BUSTER_REQUIRE(arguments, file_write(output, sentinel)))
         {
             String8 command[] = {S8("-nostdinc"), S8("-target"), S8("spirv-vulkan1.2-compute"), S8("-c"),
-                                 S8("-o"), output, options[index], S8("tests/gpu/direct_transform.c")};
+                                 S8("-o"), output, options[index], S8("src/buster/tests/compiler/spirv/fixtures/direct_transform.c")};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
             CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, invocation);
             BUSTER_TEST(arguments, rejected.error != COMPILER_DRIVER_ERROR_NONE && rejected.diagnostic.length && !rejected.has_spirv && !rejected.has_gpu);
@@ -425,7 +425,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_invocation_rejections(UnitTestArgu
         }
     }
     String8 assembly = buster_test_temporary_path(arena, S8("buster-direct-assembly-suffix"), S8(".S"));
-    String8 paths[] = {S8("tests/gpu/direct_transform.c"), S8("tests/gpu/direct_transform.c")};
+    String8 paths[] = {S8("src/buster/tests/compiler/spirv/fixtures/direct_transform.c"), S8("src/buster/tests/compiler/spirv/fixtures/direct_transform.c")};
     if (BUSTER_REQUIRE(arguments, file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(S8("void kernel(unsigned *b,unsigned i){b[i]=1u;}\n")))))
     {
         for (u32 index = 0; index < 7; index += 1)
@@ -455,7 +455,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_invalid_ir(UnitTestArguments* argu
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
-    String8 command[] = {S8("-nostdinc"), S8("-target"), S8("spirv-vulkan1.2-compute"), S8("-c"), S8("tests/gpu/direct_transform.c")};
+    String8 command[] = {S8("-nostdinc"), S8("-target"), S8("spirv-vulkan1.2-compute"), S8("-c"), S8("src/buster/tests/compiler/spirv/fixtures/direct_transform.c")};
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
     String8 source = S8("void kernel(unsigned *buffer,unsigned index){ buffer[index]=buffer[index]+1u; }\n");
     CPreprocessResult preprocessed = c_preprocess(arena, source, (CPreprocessOptions){.source_path = S8("spirv-invalid-ir.c"),

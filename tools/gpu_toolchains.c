@@ -24,7 +24,7 @@ BUSTER_GLOBAL_LOCAL GpuToolsFixture const gpu_tools_fixtures[] = {
     {S8_INITIALIZER("tests/gpu/smoke.cl"), S8_INITIALIZER("4af41171a25c6b0a93e405910ac2f2f9035414fb74f91c262c7350d67d8f75ac")},
     {S8_INITIALIZER("tests/gpu/smoke.metal"), S8_INITIALIZER("f519a92229ec74c8841b772f173a79a5481503330660bf6a182f07f1b302b7e7")},
     {S8_INITIALIZER("tests/gpu/metal_reader.c"), S8_INITIALIZER("a9013aae35ebfed695f4a4cca4dcb3ee6a78e4cee86091efafd5ea6cfe87ef0b")},
-    {S8_INITIALIZER("tests/gpu/direct_transform.c"), S8_INITIALIZER("218047a0faf10c2a68b6b38917c9126f36a7bd1b55274631795ffb4bbf327d50")}};
+    {S8_INITIALIZER("src/buster/tests/compiler/spirv/fixtures/direct_transform.c"), S8_INITIALIZER("218047a0faf10c2a68b6b38917c9126f36a7bd1b55274631795ffb4bbf327d50")}};
 
 typedef struct GpuTools GpuTools;
 struct GpuTools

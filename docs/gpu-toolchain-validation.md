@@ -1,7 +1,7 @@
 # GPU toolchain acceptance
 
 The `spirv-direct-vulkan1.2` profile compiles
-`tests/gpu/direct_transform.c` through Buster's direct canonical C backend and
+`src/buster/tests/compiler/spirv/fixtures/direct_transform.c` through Buster's direct canonical C backend and
 validates the resulting SPIR-V 1.5 module with the admitted `spirv-val` under
 Vulkan 1.2. It preserves the header-only malformed module control and additionally
 requires rejection of the independently accepted module after changing its
