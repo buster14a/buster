@@ -30700,6 +30700,136 @@ BUSTER_GLOBAL_LOCAL bool c_test_inline_linkage_spawn(Arena* arena, SliceString8 
 #endif
 
 // Needed Windows header-inline bodies retain their shared external identity.
+typedef struct CTestWindowsVaStartCase CTestWindowsVaStartCase;
+struct CTestWindowsVaStartCase
+{
+    String8 name;
+    String8 source;
+    CTypeKind cursor_kind;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_semantics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTestWindowsVaStartCase cases[] = {
+        {S8("public-direct"),
+         S8("typedef char *public_list;\n"
+            "__inline int unused_va_start(int last, ...) { public_list cursor; __va_start(&cursor, last); return last; }\n"
+            "int main(void) { return 0; }\n"), C_TYPE_POINTER},
+        {S8("builtin-direct"),
+         S8("__inline int unused_va_start(int last, ...) { __builtin_va_list cursor; __va_start(&cursor, last); return last; }\n"
+            "int main(void) { return 0; }\n"), C_TYPE_VA_LIST},
+        {S8("public-bridge"),
+         S8("typedef char *public_list;\n"
+            "__inline int unused_va_start(int last, ...) { public_list cursor; __builtin_va_start(*((__builtin_va_list *)&cursor), last); return last; }\n"
+            "int main(void) { return 0; }\n"), C_TYPE_POINTER},
+        {S8("crt-before-stdarg"),
+         S8("#define _VA_LIST_DEFINED\ntypedef char *va_list;\n"
+            "#define __crt_va_start(ap, last) __va_start(&(ap), last)\n"
+            "#include <stdarg.h>\n"
+            "__inline int unused_va_start(int last, ...) { va_list cursor; __crt_va_start(cursor, last); return last; }\n"
+            "int main(void) { return 0; }\n"), C_TYPE_POINTER},
+        {S8("crt-after-stdarg"),
+         S8("#include <stdarg.h>\n"
+            "#define __crt_va_start(ap, last) __va_start(&(ap), last)\n"
+            "__inline int unused_va_start(int last, ...) { va_list cursor; __crt_va_start(cursor, last); return last; }\n"
+            "int main(void) { return 0; }\n"), C_TYPE_POINTER},
+    };
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        Target target = target_native;
+        target.os = OPERATING_SYSTEM_WINDOWS;
+        target.cpu_arch = architecture ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_C17,
+            });
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count, cases[case_index].name);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            CType* cursor = 0;
+            CType* signature = 0;
+            CDeclaration* wrapper = 0;
+            for (u32 index = 0; index < analysis.declaration_count; index += 1)
+            {
+                CDeclaration* declaration = analysis.declarations + index;
+                if (declaration->kind == C_DECLARATION_FUNCTION && string_equal(declaration->name, S8("unused_va_start")))
+                {
+                    wrapper = declaration;
+                    signature = c_type_from_id(&analysis, declaration->type);
+                }
+            }
+            u32 cursor_count = 0;
+            for (u32 index = 0; index < analysis.entity_count; index += 1)
+            {
+                CEntity* entity = analysis.entities + index;
+                if (entity->kind == C_ENTITY_LOCAL && string_equal(entity->name, S8("cursor")))
+                {
+                    cursor_count += 1;
+                    cursor = c_type_from_id(&analysis, entity->type);
+                }
+            }
+            String8 builtin = {0};
+            u32 argument_count = 0;
+            if (wrapper)
+            {
+                u32 end = wrapper->body_start + wrapper->body_token_count;
+                for (u32 index = wrapper->body_start; index + 1 < end && !builtin.length; index += 1)
+                {
+                    String8 spelling = c_token_spelling(tokens.spelling_base, tokens.tokens[index]);
+                    if ((string_equal(spelling, S8("__va_start")) || string_equal(spelling, S8("__builtin_va_start"))) &&
+                        c_token_is_punctuator(&tokens.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        builtin = spelling;
+                        u32 depth = 0;
+                        argument_count = 1;
+                        for (u32 operand = index + 2; operand < end; operand += 1)
+                        {
+                            CToken* token = tokens.tokens + operand;
+                            if (c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && !depth)
+                            {
+                                break;
+                            }
+                            if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS)) depth += 1;
+                            else if (c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_PARENTHESIS)) depth -= 1;
+                            else if (!depth && c_token_is_punctuator(token, C_PUNCTUATOR_COMMA)) argument_count += 1;
+                        }
+                    }
+                }
+            }
+            String8 diagnostic = analysis.diagnostic_count ? analysis.diagnostics[0].message : S8("none");
+            String8 context = string_format(temporary.arena,
+                S8("WINDOWS_VA_START_FACTS case={S8} arch={u32} builtin={S8} arguments={u32} variadic={u32} "
+                   "cursor_count={u32} cursor_kind={u32} expected_kind={u32} const={u32} atomic={u32} "
+                   "semantic_diagnostics={u32} message={S8}"),
+                cases[case_index].name, architecture, builtin, argument_count, (u32)(signature && signature->is_variadic),
+                cursor_count, (u32)(cursor ? cursor->kind : C_TYPE_INVALID), (u32)cases[case_index].cursor_kind,
+                (u32)(cursor && cursor->is_const), (u32)(cursor && cursor->is_atomic), analysis.diagnostic_count, diagnostic);
+            string_print(S8("{S8}\n"), context);
+            BUSTER_TEST_RAW(arguments, wrapper && signature && signature->kind == C_TYPE_FUNCTION && signature->is_variadic, context);
+            BUSTER_TEST_RAW(arguments, cursor_count == 1 && cursor && cursor->kind == cases[case_index].cursor_kind &&
+                !cursor->is_const && !cursor->is_atomic && argument_count == 2, context);
+            BUSTER_TEST_RAW(arguments, analysis.analysis_complete && !analysis.diagnostic_count, context);
+            CParseResult compatibility = c_parse(temporary.arena, tokens);
+            CIRLowerResult reference = c_lower_to_ir(temporary.arena, S8("windows-va-start-reference.c"), tokens, compatibility, target);
+            BUSTER_TEST_RAW(arguments, !compatibility.diagnostic_count && reference.program && !reference.diagnostic_count &&
+                reference.canonical_ir_certified, context);
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                CIRLowerResult production = c_analyze_with_options(temporary.arena, S8("windows-va-start-semantics.c"), tokens, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, production.program && production.canonical_ir_certified && !production.diagnostic_count,
+                    string_format(temporary.arena, S8("{S8} form={u32} production_message={S8}"), context, form,
+                        production.diagnostic_count ? production.diagnostics[0].message : S8("none")));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_inline_bodies(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -32321,6 +32451,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_windows_va_start_semantics);
     BUSTER_TEST_FIXTURE(arguments, c_test_windows_inline_bodies);
     BUSTER_TEST_FIXTURE(arguments, c_test_c99_inline_linkage);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);
