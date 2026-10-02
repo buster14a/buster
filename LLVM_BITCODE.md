@@ -186,9 +186,14 @@ LLVM i1 and the same bool policy; that field cannot turn BOOLEAN into INTEGER.
 The x86-64 aggregate rows retain typed hidden-result and by-value attributes,
 alignment and shifted parameter indices. Fixed narrow parameters of variadic
 signatures retain their attributes; anonymous promoted i32 operands gain none.
-Repeated emission must remain byte-identical. These are regression expectations,
-not a claim that missing scalar attributes tracked by
-[#1335](https://github.com/buster14a/buster/issues/1335) have been repaired.
+Repeated emission must remain byte-identical. The signature cache now adds
+source-scalar extension groups to return index zero and fixed parameter indices,
+including the hidden-result shift. Declarations, definitions and direct/indirect
+calls share that attribute list. Enum attributes use their own four-operand wire
+record; typed byval/sret and alignment records retain their existing encoding.
+Enum scalars use their compatible integer type and effective signedness. Ordinary
+Win64 integer i1 is not the BOOLEAN exception. The architecture guard does not
+expand the existing explicit AArch64 calling-convention support.
 
 `llvm_bitcode_test_scalar_abi_runtime` executes on native Linux x86-64 and
 AArch64. It writes three original, distinct C translation units and requires
