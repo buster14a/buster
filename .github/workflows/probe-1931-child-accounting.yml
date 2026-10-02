@@ -1,0 +1,63 @@
+name: Orphan child accounting diagnostic
+on:
+  push:
+    branches: [codex/1931-orphan-process-accounting-probe]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/codex/1931-orphan-process-accounting-probe'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Record hosted source and compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/revision.txt
+          clang --version | tee evidence/clang.txt
+          uname -a | tee evidence/host.txt
+          sha256sum tools/throughput/platform.h tools/throughput/throughput.c tools/research/child-accounting/probe.c > evidence/inputs.sha256
+      - name: Build and run bounded native process witness
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -Isrc -DBUSTER_SINGLE_THREADED=1 tools/research/child-accounting/probe.c tools/throughput/shared.c -lm -o evidence/probe
+          evidence/probe evidence | tee evidence/result.txt
+          sha256sum evidence/probe > evidence/binary.sha256
+      - name: Retain and expose the completed 2366 proof archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, io, os, pathlib, urllib.request, zipfile
+          url = 'https://api.github.com/repos/buster14a/buster/actions/artifacts/11236575361/zip'
+          request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
+          data = urllib.request.urlopen(request, timeout=45).read()
+          expected = 'a8b2d2fb03a37b3feb75401bbcf0dce4347ebf0db4cdec617e22636a147421b0'
+          assert hashlib.sha256(data).hexdigest() == expected
+          archive = zipfile.ZipFile(io.BytesIO(data))
+          assert archive.testzip() is None and len(archive.infolist()) == 250
+          pathlib.Path('evidence/telemetry-2366-proof.zip').write_bytes(data)
+          for name in ['clang.txt', 'host.txt', 'executables.sha256', 'candidate-inputs.sha256', 'verification.json']:
+              print('PROOF2366_FILE_BEGIN ' + name)
+              print(archive.read(name).decode())
+              print('PROOF2366_FILE_END')
+          encoded = base64.b64encode(data).decode()
+          for offset in range(0, len(encoded), 120):
+              print('ARCHIVE2366:' + encoded[offset:offset + 120])
+          print('ARCHIVE2366_SHA256 ' + expected)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: child-accounting-1931-and-proof-2366
+          path: evidence
+          retention-days: 30
