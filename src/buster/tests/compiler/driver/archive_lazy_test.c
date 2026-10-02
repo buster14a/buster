@@ -245,7 +245,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_refusal_record(CompilerDriverRe
         CompilerDiagnostic* record = result->diagnostics;
         valid = string_equal(record->code, S8("driver.object")) && string_equal(record->message, result->diagnostic) &&
                 record->severity == COMPILER_DIAGNOSTIC_ERROR && !record->primary.has_range &&
-                record->primary.range.source == IR_SOURCE_ID_INVALID && !record->primary.position.line &&
+                record->primary.range.source.value == IR_ID_UNDERLYING_INVALID && !record->primary.position.line &&
                 !record->primary.original_position.line;
     }
     return valid;
