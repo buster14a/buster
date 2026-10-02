@@ -2622,6 +2622,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
         // #1388: GNU body declarations retain every comma-separated declarator.
+        {S8("int f(void) { return ({ static int a = 3, b = 4; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("int f(void) { return ({ volatile int a = 3, b = 4; a += 1, b += 2, a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
+        {S8("typedef int T; int f(void) { return ({ int T = 2; int x = 3; T += 4, x += 5, T + x; }); }\n"), true, false, {0}, S8("-std=gnu17")},
         {S8("int f(void) { return ({ int a = 5, b = 6; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
         {S8("int f(void) { return ({ int a, b; a = 5; b = 6; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
         {S8("int f(void) { int x = 4; return ({ int *p = &x, v = 2; *p + v; }); }\n"), true, false, {0}, S8("-std=gnu17")},
@@ -25350,6 +25353,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         "    stored = 0;\n"
         "    ({ int left = write_value(5), right = read_value(); stored = left + right; (void)(left + right); });\n"
         "    if (stored != 11 || calls != 2) result = 17;\n"
+        "    int static_objects = ({ static int left = 3, right = 4; left + right; });\n"
+        "    if (static_objects != 7) result = 18;\n"
+        "    int volatile_objects = ({ volatile int left = 3, right = 4; left += 1, right += 2, left + right; });\n"
+        "    if (volatile_objects != 10) result = 19;\n"
+        "    typedef int Shadow;\n"
+        "    int shadowed = ({ int Shadow = 2; int other = 3; Shadow += 4, other += 5, Shadow + other; });\n"
+        "    if (shadowed != 14) result = 20;\n"
         "    return result;\n"
         "}\n"
     );

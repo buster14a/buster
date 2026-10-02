@@ -40072,11 +40072,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             {
                 return false;
             }
-            bool declaration_statement =
-                first_is_typedef_name || first_is_unbound_typedef_name ||
-                (first.kind == C_TOKEN_IDENTIFIER &&
-                 (c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_DECLARATION_INTRODUCER_SET) ||
-                  c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect)));
+            bool declaration_statement = task.allow_trailing_expression &&
+                (first_is_typedef_name || first_is_unbound_typedef_name ||
+                 (first.kind == C_TOKEN_IDENTIFIER &&
+                  (c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_DECLARATION_INTRODUCER_SET) ||
+                   c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect))));
             // A declaration's commas separate declarators. Retain its full
             // range for the automatic-declaration-list frame even when this
             // task also permits a trailing statement-expression value.
