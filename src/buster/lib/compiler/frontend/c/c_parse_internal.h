@@ -7,6 +7,8 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 
 #if BUSTER_INCLUDE_TESTS
+// Directional reads of the immutable pair table, including clipped ranges.
+BUSTER_F_DECL u32 c_test_parse_delimiter_match(CParseResult* result, CPreprocessResult preprocess, u32 token, u32 start, bool reverse);
 BUSTER_F_DECL CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess,
                                                         u32 start, u32 end);
 BUSTER_F_DECL bool c_test_validate_constexpr_declaration(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
