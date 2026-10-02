@@ -11,6 +11,8 @@
 // counted once in statistics.fallback_reason_counts with selection opcodes
 // retained in fallback_opcode_counts. codegen_statistics_add preserves the
 // full census across driver translation units.
+// Optional investigation_record snapshots one named function after a retained
+// machine encoding, before scratch release; ordinary options have no sink.
 //
 // codegen_layout_globals owns the per-attempt data images and global
 // descriptors; codegen_plan_module_capacity computes the reservation bound
@@ -60,6 +62,7 @@
 
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/codegen/bootstrap_trace.h>
+#include <buster/lib/compiler/codegen/investigation.h>
 
 bool codegen_module_relocation_kind_valid(u8 kind)
 {
@@ -12981,6 +12984,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                                 machine_function_emitted = true;
+                                if (options.investigation)
+                                {
+                                    investigation_record(arena, options.investigation, program, function, &selected.function,
+                                                         encoded.row_offsets, encoded.bytes, encoded.byte_count, descriptor->code_offset);
+                                }
                                 if (label_address_relocation_count)
                                 {
                                     machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
@@ -13176,6 +13184,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 descriptor->prolog_size = machine_prologue_cursor;
                                 descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                                 machine_function_emitted = true;
+                                if (options.investigation)
+                                {
+                                    investigation_record(arena, options.investigation, program, function, &selected.function,
+                                                         encoded.row_offsets, encoded.bytes, encoded.byte_count, descriptor->code_offset);
+                                }
                                 if (label_address_relocation_count)
                                 {
                                     machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
@@ -24322,6 +24335,17 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
     for (u64 capacity_scale = 1;; capacity_scale *= 2)
     {
         bool code_buffer_exhausted = false;
+        if (options.investigation)
+        {
+            // A retry rewinds all attempt-owned arrays and bytes. Publish
+            // only the final retained attempt's provenance.
+            options.investigation->found = false;
+            options.investigation->diagnostic = (String8){0};
+            options.investigation->rows = 0;
+            options.investigation->marks = 0;
+            options.investigation->code = (ByteSlice){0};
+            options.investigation->capture_ns = 0;
+        }
         if (bootstrap_trace)
         {
             bootstrap_trace_string(bootstrap_trace, S8("codegen attempt"));
