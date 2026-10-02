@@ -390,7 +390,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `ELF_ADD_LO12` object kinds (AAELF64 relocations 275/277). The reader keeps
   RELA's explicit addend and clears the encoded immediate. REL ADRP's initial
   addend is its **unscaled signed imm21**, unlike the executed displacement
-  or the Mach-O contract; REL ADD uses the unshifted unsigned imm12. Reject
+  or the Mach-O contract; REL ADD sign-extends its unshifted imm12 (2047,
+  2048 and 4095 become 2047, -2048 and -1). REL-to-RELA rewrites preserve
+  that signed canonical addend even when low12 truncation leaves linked
+  instruction bytes unchanged. Reject
   misaligned sites, wrong instruction classes and shifted ADD forms.
   `object_aarch64_elf_page_relocate` shares checked address arithmetic with
   in-memory and native ELF linking, and the generated A64 ADD plan owns the
@@ -399,6 +402,15 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   symbol's copy-slot address, including aliases. Untyped exported AArch64
   ELF text labels can serve as assembly entry points; explicit object types
   remain data. Mach-O, PE and TLS relocation contracts remain separate.
+
+- AArch64 ELF `ELF_GOT_PAGE21`/`ELF_GOT_LD64_LO12` (types 311/312)
+  use `GDAT(S)` and require zero addends under AAELF64. The importer rejects
+  nonzero REL instruction fields and nonzero RELA addends; canonical ELF
+  writing, assembly printing and the shared image patcher enforce the same
+  rule. A valid pair relaxes to ADRP/ADD of the symbol, including an imported
+  data symbol's copy slot; an undefined weak zero target becomes MOVZ/ADD
+  zero. Direct ADRP/ADD and scaled memory relocations retain their distinct
+  signed-addend rules. See [AAELF64 addends and relocation definitions](https://github.com/ARM-software/abi-aa/blob/a5e86d3fec7342719f3bd1f939ec1b8ac6438c4f/aaelf64/aaelf64.rst).
 
 - Direct AArch64 ELF unsigned-immediate memory references use distinct
   `ELF_LDST8_LO12`, `ELF_LDST16_LO12`, `ELF_LDST32_LO12`, `ELF_LDST64_LO12`

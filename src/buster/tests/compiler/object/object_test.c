@@ -3828,16 +3828,19 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     }
     relocation.addend = 0;
 
-    // ELF page relocations retain explicit RELA addends; REL ADRP carries
-    // an unscaled signed literal, while ADD carries an unsigned low twelve.
-    // The GOT pair follows: its ADRP reads like the direct one, and its
-    // 64-bit LDR carries a REL addend scaled by eight.
-    u32 elf_page_words[] = {UINT32_C(0xb0000008), UINT32_C(0xf0ffffe8), UINT32_C(0x913ffd08), UINT32_C(0x11000517),
-                            UINT32_C(0xb0000008), UINT32_C(0xf9400528)};
-    u32 elf_page_canonical[] = {UINT32_C(0x90000008), UINT32_C(0x90000008), UINT32_C(0x91000108), UINT32_C(0x11000117),
+    // ELF direct page relocations retain explicit RELA addends; REL ADRP
+    // carries an unscaled signed imm21 and ADD a signed imm12. GDAT's GOT
+    // pair admits only zero addends in either representation.
+    u32 elf_page_words[] = {UINT32_C(0xb0000008), UINT32_C(0xf0ffffe8),
+                            UINT32_C(0x91000108), UINT32_C(0x91000508), UINT32_C(0x911ffd08), UINT32_C(0x91200108), UINT32_C(0x913ffd08), UINT32_C(0x11000517),
+                            UINT32_C(0x90000008), UINT32_C(0xf9400128)};
+    u32 elf_page_canonical[] = {UINT32_C(0x90000008), UINT32_C(0x90000008),
+                                UINT32_C(0x91000108), UINT32_C(0x91000108), UINT32_C(0x91000108), UINT32_C(0x91000108), UINT32_C(0x91000108), UINT32_C(0x11000117),
                                 UINT32_C(0x90000008), UINT32_C(0xf9400128)};
-    s64 elf_page_implicit[] = {1, -1, 4095, 1, 1, 8};
+    s64 elf_page_implicit[] = {1, -1, 0, 1, 2047, -2048, -1, 1, 0, 0};
     ObjectRelocationKind elf_page_kinds[] = {OBJECT_RELOCATION_AARCH64_ELF_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_PAGE21,
+                                             OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12,
+                                             OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12,
                                              OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12,
                                              OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12};
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(elf_page_words); case_index += 1)
@@ -3847,11 +3850,34 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         u32 page_text[] = {elf_page_words[case_index], UINT32_C(0xd65f03c0), 0, 0, 0, 0};
         page_sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = (u8*)page_text, .length = sizeof(page_text)};
         page_sections[OBJECT_SECTION_TEXT].virtual_size = sizeof(page_text);
-        ObjectRelocation page_relocation = {.section = OBJECT_SECTION_TEXT, .symbol = 1, .addend = -17,
+        bool got = elf_page_kinds[case_index] == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 ||
+                   elf_page_kinds[case_index] == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12;
+        ObjectRelocation page_relocation = {.section = OBJECT_SECTION_TEXT, .symbol = 1, .addend = got ? 0 : -17,
             .kind = elf_page_kinds[case_index]};
         ObjectFile page_object = object;
         page_object.sections = page_sections;
         page_object.relocations = &page_relocation;
+        if (got)
+        {
+            // The canonical writer, assembly front door and shared image
+            // patcher all refuse the obsolete GDAT(S+A) interpretation.
+            s64 forbidden_addends[] = {-17, -1, 1, 8, 32760};
+            for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(forbidden_addends); addend_index += 1)
+            {
+                page_relocation.addend = forbidden_addends[addend_index];
+                ObjectArtifact refused = object_write(arguments->arena, &page_object, OBJECT_FORMAT_ELF64);
+                BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_UNSUPPORTED_TARGET && !refused.bytes.pointer && !refused.bytes.length);
+                String8 refused_assembly = object_print_assembly(arguments->arena, &page_object);
+                BUSTER_TEST(arguments, !refused_assembly.pointer && !refused_assembly.length);
+                u32 unchanged = UINT32_C(0xdeadbeef);
+                BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(page_relocation.kind, elf_page_words[case_index], 0, 0x3000,
+                    page_relocation.addend, &unchanged) && unchanged == UINT32_C(0xdeadbeef));
+            }
+            page_relocation.addend = 0;
+            String8 assembly = object_print_assembly(arguments->arena, &page_object);
+            String8 expected_modifier = page_relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 ? S8(":got:object_callee") : S8(":got_lo12:object_callee");
+            BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(assembly), expected_modifier));
+        }
         for (u32 implicit = 0; implicit < 2; implicit += 1)
         {
             ObjectArtifact artifact = object_write(arguments->arena, &page_object, OBJECT_FORMAT_ELF64);
@@ -3904,7 +3930,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             if (valid)
             {
                 BUSTER_TEST(arguments, imported.relocations[0].kind == page_relocation.kind);
-                BUSTER_TEST(arguments, imported.relocations[0].addend == (implicit ? elf_page_implicit[case_index] : -17));
+                BUSTER_TEST(arguments, imported.relocations[0].addend == (implicit ? elf_page_implicit[case_index] : page_relocation.addend));
                 BUSTER_STRING_TEST(arguments, imported.symbols[imported.relocations[0].symbol].name, S8("object_callee"));
                 u32 canonical = 0;
                 memcpy(&canonical, imported.sections[OBJECT_SECTION_TEXT].data.pointer, sizeof(canonical));
@@ -3913,6 +3939,70 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                 ObjectFile roundtrip = object_read(arguments->arena, rewritten.bytes, page_object.target);
                 BUSTER_TEST(arguments, rewritten.error == OBJECT_ERROR_NONE && roundtrip.error == OBJECT_ERROR_NONE &&
                                        roundtrip.relocation_count == 1 && roundtrip.relocations[0].addend == imported.relocations[0].addend);
+                u64 rewritten_header = 0;
+                u64 rewritten_text = 0;
+                bool rewritten_offsets = rewritten.error == OBJECT_ERROR_NONE &&
+                    object_test_elf_relocation_offsets(rewritten.bytes, &rewritten_header, &rewritten_text);
+                BUSTER_TEST(arguments, rewritten_offsets);
+                if (rewritten_offsets)
+                {
+                    u32 section_type = 0;
+                    u64 relocation_data = 0;
+                    s64 raw_addend = 0;
+                    memcpy(&section_type, rewritten.bytes.pointer + rewritten_header + 4, sizeof(section_type));
+                    memcpy(&relocation_data, rewritten.bytes.pointer + rewritten_header + 24, sizeof(relocation_data));
+                    memcpy(&raw_addend, rewritten.bytes.pointer + relocation_data + 16, sizeof(raw_addend));
+                    BUSTER_TEST(arguments, section_type == 4 && raw_addend == (implicit ? elf_page_implicit[case_index] : page_relocation.addend));
+                }
+                if (page_relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12 && imported.relocations[0].addend < 0)
+                {
+                    u32 unchanged = UINT32_C(0xdeadbeef);
+                    BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(page_relocation.kind, canonical, 0, 0,
+                        imported.relocations[0].addend, &unchanged) && unchanged == UINT32_C(0xdeadbeef));
+                }
+            }
+            if (got && offsets_valid)
+            {
+                // Mutate a valid zero-addend object independently of the
+                // canonical writer, so a writer refusal cannot hide import.
+                if (implicit)
+                {
+                    u32 nonzero_page[] = {UINT32_C(0xb0000008), UINT32_C(0xf0ffffe8)};
+                    u32 nonzero_load[] = {UINT32_C(0xf9400528), UINT32_C(0xf9600128), UINT32_C(0xf97ffd28)};
+                    bool load = page_relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12;
+                    u32* nonzero = load ? nonzero_load : nonzero_page;
+                    u32 count = load ? BUSTER_ARRAY_LENGTH(nonzero_load) : BUSTER_ARRAY_LENGTH(nonzero_page);
+                    for (u32 word_index = 0; word_index < count; word_index += 1)
+                    {
+                        object_test_write_u32(artifact.bytes, target_data, nonzero[word_index]);
+                        BUSTER_TEST(arguments, object_read(arguments->arena, artifact.bytes, page_object.target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                    }
+                    object_test_write_u32(artifact.bytes, target_data, elf_page_words[case_index]);
+                }
+                else
+                {
+                    u64 relocation_data = 0;
+                    memcpy(&relocation_data, artifact.bytes.pointer + relocation_section + 24, sizeof(relocation_data));
+                    s64 nonzero[] = {-17, -1, 1, 8, 32760};
+                    for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(nonzero); addend_index += 1)
+                    {
+                        object_test_write_u64(artifact.bytes, relocation_data + 16, (u64)nonzero[addend_index]);
+                        BUSTER_TEST(arguments, object_read(arguments->arena, artifact.bytes, page_object.target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                    }
+                    object_test_write_u64(artifact.bytes, relocation_data + 16, 0);
+                    u32 nonzero_word = page_relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 ? UINT32_C(0xb0000008) : UINT32_C(0xf97ffd28);
+                    object_test_write_u32(artifact.bytes, target_data, nonzero_word);
+                    ObjectFile explicit_zero = object_read(arguments->arena, artifact.bytes, page_object.target);
+                    bool explicit_valid = explicit_zero.error == OBJECT_ERROR_NONE && explicit_zero.relocation_count == 1;
+                    BUSTER_TEST(arguments, explicit_valid && explicit_zero.relocations[0].addend == 0);
+                    if (explicit_valid)
+                    {
+                        u32 canonical = 0;
+                        memcpy(&canonical, explicit_zero.sections[OBJECT_SECTION_TEXT].data.pointer, sizeof(canonical));
+                        BUSTER_TEST(arguments, canonical == elf_page_canonical[case_index]);
+                    }
+                    object_test_write_u32(artifact.bytes, target_data, elf_page_words[case_index]);
+                }
             }
             if (offsets_valid)
             {
@@ -3945,6 +4035,8 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                                          0x2008, 0x2fff, 1, &page_patched) && page_patched == UINT32_C(0x91000108));
     BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, UINT32_C(0x91000108),
                                                          0x2008, 0x3000, -1, &page_patched) && page_patched == UINT32_C(0x913ffd08));
+    BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, UINT32_C(0x91000108),
+                                                         0x2008, 0x4000, -2048, &page_patched) && page_patched == UINT32_C(0x91200108));
     BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_PAGE21, UINT32_C(0x90000008),
                                                           0, UINT64_C(0x100000000), 0, &page_patched));
     BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_PAGE21, UINT32_C(0x90000008),
@@ -3958,7 +4050,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     // The GOT pair relaxes to ADRP/ADD of the symbol; a symbol at zero, an
     // absent weak one, becomes MOVZ #0 and ADD #0.
     BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21, UINT32_C(0x90000008),
-                                                         0x2004, 0x2fff, 1, &page_patched) && page_patched == UINT32_C(0xb0000008));
+                                                         0x2004, 0x3000, 0, &page_patched) && page_patched == UINT32_C(0xb0000008));
     BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21, UINT32_C(0x90000008),
                                                          UINT64_C(0x100001000), 0, 0, &page_patched) && page_patched == UINT32_C(0xd2800008));
     BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12, UINT32_C(0xf9400128),

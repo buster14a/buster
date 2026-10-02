@@ -488,9 +488,15 @@ bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKind kind)
            object_relocation_kind_is_aarch64_elf_ldst(kind);
 }
 
+// AAELF64 GDAT relocations name a GOT entry for S and require zero addends.
+BUSTER_GLOBAL_LOCAL bool object_aarch64_elf_got_addend_valid(ObjectRelocationKind kind, s64 addend)
+{
+    return addend == 0 || (kind != OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 && kind != OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12);
+}
+
 // R_AARCH64_LD64_GOT_LO12_NC names `LDR Xt, [Xn, #imm]`, 64-bit unsigned
-// offset.  Its scaled offset is the REL addend; Rt 31 is XZR, which the ADD
-// the relaxation writes would read as SP, so that load is refused.
+// offset. Rt 31 is XZR, which the ADD relaxation would read as SP, so that
+// load is refused. A REL field is inspected before enforcing zero addend.
 BUSTER_GLOBAL_LOCAL bool object_aarch64_got_load_read(u32 word, u32* offset)
 {
     bool valid = (word & OBJECT_AARCH64_LDR_X_UNSIGNED_MASK) == OBJECT_AARCH64_LDR_X_UNSIGNED && (word & 31) != 31;
@@ -506,18 +512,18 @@ BUSTER_GLOBAL_LOCAL bool object_aarch64_got_load_read(u32 word, u32* offset)
 // Share the checked address arithmetic and instruction authority between
 // the in-memory linker and both native ELF executable writers.
 //
-// 311/312 name G(GDAT(S+A)): the page of, and a load from, a GOT slot
-// holding S+A.  No image this toolchain writes carries such a slot; the
-// pair is relaxed instead to ADRP of Page(S+A) and `ADD Xt, Xn, #lo12(S+A)`,
-// which leaves S+A in Xt without the load.  That is sound because a
-// producer cannot know where the linker puts any slot, so an ADRP for one
-// symbol's slot page can only feed that symbol's slot loads.  A weak symbol
-// nothing defines is S = 0 here, which reads as the zero slot would; its
+// 311/312 name G(GDAT(S)): the page of, and a load from, a GOT slot
+// holding S. No image this toolchain writes carries such a slot; the
+// zero-addend pair is relaxed to ADRP of Page(S) and `ADD Xt, Xn, #lo12(S)`,
+// which leaves S in Xt without the load. General GOT relaxation eligibility
+// is separate from the addend contract checked here. A weak symbol nothing
+// defines is S = 0 here, which reads as the zero slot would; its
 // ADRP becomes `MOVZ Xd, #0` so no image address limits that reach.
 bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched)
 {
     u64 address = 0;
-    bool valid = patched && !(place & 3) && object_address_addend(target, addend, &address);
+    bool valid = patched && !(place & 3) && object_aarch64_elf_got_addend_valid(kind, addend) &&
+                 object_address_addend(target, addend, &address);
     if (valid && kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12)
     {
         valid = object_aarch64_got_load_read(word, 0);
@@ -4203,6 +4209,11 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
         }
         valid = valid && object->relocation_count <= (UINT64_MAX - capacity) / 256;
         if (valid) capacity += (u64)object->relocation_count * 256;
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count && valid; relocation_index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + relocation_index;
+            valid = object_aarch64_elf_got_addend_valid(relocation->kind, relocation->addend);
+        }
     }
     if (valid)
     {
@@ -5779,7 +5790,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 // unlike its executed displacement and Mach-O's rule.
                                 if (section_type == 9)
                                 {
-                                    if (object_relocation_kind_is_aarch64_elf_ldst(kind))
+                                    if (object_relocation_kind_is_aarch64_elf_ldst(kind) || kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
                                     {
                                         // AAELF64 REL instruction addends are
                                         // sign-extended after access-size scaling.
@@ -5790,9 +5801,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                         addend = page ? decoded.operands[1].value / 4096 : (s64)immediate;
                                     }
                                 }
-                                memcpy(target_section_data->data.pointer + instruction_offset, &canonical, sizeof(canonical));
+                                read_ok = read_ok && object_aarch64_elf_got_addend_valid(kind, addend);
+                                if (read_ok)
+                                {
+                                    memcpy(target_section_data->data.pointer + instruction_offset, &canonical, sizeof(canonical));
+                                }
                             }
-                            else
+                            if (!read_ok)
                             {
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                             }
@@ -14550,6 +14565,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
             u64 validation_target = object_relocation_kind_is_aarch64_elf_ldst(source->kind) ? 0 : source->offset;
             if (format != OBJECT_FORMAT_ELF64 || object->target.cpu_arch != CPU_ARCH_AARCH64 ||
                 object->sections[source->section].alignment < 4 ||
+                !object_aarch64_elf_got_addend_valid(source->kind, source->addend) ||
                 !object_aarch64_elf_page_relocate(source->kind, word, source->offset, validation_target, 0, &canonical))
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
