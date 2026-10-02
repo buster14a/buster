@@ -31217,7 +31217,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_work_and_scratch(UnitTestArgum
         CParseResult parsed = c_parse(temporary.arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-invalid-child.c"), tokens, parsed, target_native,
             (CIRLowerOptions){.disable_direct_ssa = form != 0});
-        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && lowered.diagnostic_count != 0);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !lowered.program);
+        // Identifier binding rejects this selected value before lowering. The
+        // invalid semantic result must not become a successful partial module.
+        if (BUSTER_REQUIRE(arguments, parsed.diagnostic_count != 0))
+        {
+            BUSTER_TEST(arguments, parsed.diagnostics[0].kind == C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+            BUSTER_TEST(arguments, parsed.diagnostics[0].message.length != 0);
+        }
         scratch_end(temporary);
     }
     return result;
