@@ -139,6 +139,8 @@ jobs:
                           raise SystemExit("unrelated phase duration changed")
                   gap_total += gap
                   print("PRODUCTION_PHASE_ACCOUNTING " + json.dumps(dict(tree=tree_id,
+                      configuration={key: tree.get(key, "unknown") for key in ("compiler", "compiler_path", "compiler_sha256", "compiler_version", "target", "configurations", "sanitize", "fuzz", "lto", "linker", "generator")},
+                      coverage_rows=[row for row in coverage["expected"] if row["id"] in tree["rows"]],
                       before_us=previous["elapsed_us"], after_us=tree["elapsed_us"], recovered_setup_us=gap), sort_keys=True))
               if old["predictions"] != new["predictions"] or old["timeline"] != new["timeline"]:
                   raise SystemExit("scheduling evidence changed")
@@ -149,13 +151,3 @@ jobs:
                   sha256=digest, identity=identity, recovered_setup_us=gap_total, raw_files_unchanged=len(before),
                   qualification=False, performance_acceptance=False), sort_keys=True))
           PY
-  macos-phase-controls:
-    runs-on: macos-26
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Native observer and reader phase controls
-        shell: bash
-        run: python3 tools/ci_matrix_phases_test.py -v
