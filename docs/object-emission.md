@@ -70,6 +70,34 @@ adversarial objects. Retire the oracle when an intended ELF output change
 lands (for example [#1288](https://github.com/buster14a/buster/issues/1288)'s
 empty-section removal), replacing byte comparison with a read-back comparison.
 
+## ELF64 import semantics
+
+`object_read_elf64` accepts allocated PROGBITS/NOBITS payloads, supported
+unwind records and init/fini/preinit arrays. Preinit entries run before all
+normal initializers. It refuses allocated sections whose type or name carries
+runtime semantics the object model cannot preserve: unsupported section types,
+legacy `.ctors`/`.dtors` and their priority families, `.init`/`.fini` fragments,
+and exception tables the reader previously discarded. An unsupported allocated
+note is refused too; its contract must be understood before it can be dropped.
+Unallocated unknown metadata and unsupported debug section types retain their
+skip policy. Supported DWARF payloads still pass through without DIE decoding.
+
+Ordinary NOTYPE/OBJECT/FUNC/SECTION/TLS symbols keep their existing mapping.
+STT_FILE records are metadata and may use SHN_ABS. Other reserved section
+definitions (including absolute/common values and extended indexes) and
+unsupported runtime symbol types, including GNU IFUNC, are refused. Calling an
+IFUNC resolver as a normal function or dropping a weak absolute definition
+would produce a successful link with different behavior.
+
+These failures return `OBJECT_ERROR_UNSUPPORTED_TARGET` with a diagnostic naming
+the section or symbol and its numeric type/index. The driver includes the input
+path, or archive/member path, in the import error and publishes no output image.
+`object_test_elf_semantic_refusals` uses independent raw ELF records on both
+architectures. `compiler_driver_elf_semantic_tests` imports host-compiled inputs
+on Linux x86-64/AArch64, checks attributable refusal and no artifact, and requires
+the host linker/runtime to preserve each input's meaning. A preinit control
+continues to link and run through both linkers.
+
 ## The work ledger: `ObjectWriteStatistics`
 
 Every `ObjectArtifact` carries `ObjectWriteStatistics`, counted where the work

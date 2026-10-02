@@ -7,6 +7,8 @@
 // string is bounds-checked before use, and malformed bytes produce an
 // invalid ObjectFile, never a crash — object_fuzz_test_input keeps that
 // honest.
+// object_read_elf64 also refuses allocated section/symbol semantics the model
+// cannot preserve, with a named diagnostic; unallocated metadata stays skippable.
 //
 // The three formats spell "this definition may be dropped for another one"
 // differently. ELF STB_WEAK and Mach-O N_WEAK_DEF read into ObjectSymbol.weak.
@@ -5094,11 +5096,26 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             ObjectSectionKind debug_kind = {0};
             if (read_ok)
             {
-                debug_kind = flags & 0x2 ? OBJECT_SECTION_COUNT : object_debug_section_kind_from_name(name);
-                if ((!(flags & 0x2) && debug_kind == OBJECT_SECTION_COUNT) ||
-                    (unwind ? !unwind_type : !initializer_array && section_type != 1 && section_type != 8) || ignored)
+                bool allocated = (flags & 0x2) != 0;
+                bool supported_type = unwind ? unwind_type : initializer_array || section_type == 1 || section_type == 8;
+                debug_kind = allocated ? OBJECT_SECTION_COUNT : object_debug_section_kind_from_name(name);
+                if (!allocated && (debug_kind == OBJECT_SECTION_COUNT || !supported_type || ignored))
                 {
                     continue;
+                }
+                // These names carry execution/ordering semantics that ordinary
+                // text/data cannot preserve. Unallocated metadata remains skippable.
+                bool legacy_lifecycle = allocated && (string_equal(name, S8(".ctors")) || string_starts_with_sequence(name, S8(".ctors.")) ||
+                                        string_equal(name, S8(".dtors")) || string_starts_with_sequence(name, S8(".dtors.")) ||
+                                        string_equal(name, S8(".init")) || string_equal(name, S8(".fini")));
+                if (!supported_type || ignored || legacy_lifecycle)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    {
+                        result.diagnostic = string_format(arena, S8("unsupported ELF section {S8} (type {u32})"), name, section_type);
+                    }
+                    read_ok = false;
                 }
                 if (!alignment)
                 {
@@ -5395,15 +5412,22 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     continue;
                 }
-                // Absolute, common, processor-specific, and SHN_XINDEX symbols do
-                // not identify one of the ordinary section headers represented by an
-                // ObjectFile.  Keep them unsupported-but-skippable, as the previous
-                // reader did, while still rejecting malformed ordinary indexes.
-                if (section_index >= ELF_SHN_LORESERVE)
+                if (!object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
                 {
-                    continue;
+                    read_ok = false;
                 }
-                if (section_index != 0 && section_index >= section_count)
+                // Absolute/common values and extended indexes need representation;
+                // dropping their definitions turns weak references into zero.
+                if (read_ok && section_index >= ELF_SHN_LORESERVE)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    {
+                        result.diagnostic = string_format(arena, S8("unsupported ELF symbol {S8} (section index {u32})"), name, (u32)section_index);
+                    }
+                    read_ok = false;
+                }
+                if (read_ok && section_index != 0 && section_index >= section_count)
                 {
                     read_ok = false;
                 }
@@ -5411,11 +5435,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     continue;
                 }
-            }
-            if (read_ok)
-            {
-                if (!object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
+                // NOTYPE, OBJECT, FUNC, SECTION and TLS are represented. IFUNC
+                // resolves through a resolver, never a direct call to its value.
+                if (read_ok && symbol_type != 0 && symbol_type != 1 && symbol_type != 2 && symbol_type != 3 && symbol_type != 6)
                 {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    {
+                        result.diagnostic = string_format(arena, S8("unsupported ELF symbol {S8} (type {u32})"), name, (u32)symbol_type);
+                    }
                     read_ok = false;
                 }
             }
@@ -9291,6 +9319,13 @@ BUSTER_GLOBAL_LOCAL ObjectArchive object_archive_read_core(Arena* arena, ByteSli
                             if (object.error != OBJECT_ERROR_NONE || result.object_count == member_capacity)
                             {
                                 result.error = object.error;
+                                result.failed_member = result.object_count;
+                                if (object.diagnostic.length && member_name.length <= UINT64_MAX - 128 &&
+                                    object.diagnostic.length <= UINT64_MAX - member_name.length - 128 &&
+                                    object_reader_arena_can_allocate_bytes(arena, member_name.length + object.diagnostic.length + 128, BUSTER_ALIGN_OF(char8)))
+                                {
+                                    result.diagnostic = string_format(arena, S8("member {S8}: {S8}"), member_name, object.diagnostic);
+                                }
                                 return result;
                             }
                             if (lazy)

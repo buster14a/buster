@@ -60,9 +60,206 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_object_path_test_process_success(Arena*
 }
 #endif
 
+#if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_semantic_host(UnitTestArguments* arguments, SliceString8 options)
+{
+    String8 command[16] = {S8(BUSTER_HOST_C_COMPILER)};
+    u32 count = 1;
+    String8 argument = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    if (argument.length) command[count++] = argument;
+    BUSTER_CHECK(options.length <= BUSTER_ARRAY_LENGTH(command) - count);
+    for (u64 index = 0; index < options.length; index += 1) command[count++] = options.pointer[index];
+    ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0},
+        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
+                              .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+    bool result = spawned.handle != 0;
+    if (result)
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawned, 30000000);
+        result = waited.result == PROCESS_RESULT_SUCCESS;
+        if (!result) arguments->show(arguments, S8("ELF semantics host compiler failed: {S8}\n"), BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_semantic_run(Arena* arena, String8 executable)
+{
+    String8 command[] = {executable};
+    ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+    bool result = spawned.handle && os_process_wait_deadline(arena, spawned, 30000000).result == PROCESS_RESULT_SUCCESS;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_semantic_archive(Arena* arena, ByteSlice member)
+{
+    u64 padding = member.length & 1;
+    ByteSlice bytes = {.pointer = arena_allocate(arena, u8, 8 + 60 + member.length + padding), .length = 8 + 60 + member.length + padding};
+    memcpy(bytes.pointer, "!<arch>\n", 8);
+    memset(bytes.pointer + 8, ' ', 60);
+    memcpy(bytes.pointer + 8, "semantic.o/", 11);
+    bytes.pointer[8 + 16] = '0';
+    bytes.pointer[8 + 28] = '0';
+    bytes.pointer[8 + 34] = '0';
+    memcpy(bytes.pointer + 8 + 40, "644", 3);
+    String8 size = string_format(arena, S8("{u64}"), member.length);
+    BUSTER_CHECK(size.length <= 10);
+    memcpy(bytes.pointer + 8 + 48, size.pointer, size.length);
+    memcpy(bytes.pointer + 8 + 58, "`\n", 2);
+    memcpy(bytes.pointer + 68, member.pointer, member.length);
+    if (padding) bytes.pointer[bytes.length - 1] = '\n';
+    return bytes;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang")) || string_equal(compiler, S8("AppleClang"));
+    if (supported)
+    {
+        typedef struct ElfSemanticCase ElfSemanticCase;
+        struct ElfSemanticCase
+        {
+            String8 name;
+            String8 program;
+            String8 diagnostic;
+        };
+        ElfSemanticCase cases[] = {
+            {S8("ifunc"), S8("static int implementation(int x) { return x * 3; }\n"
+                "static int (*resolve_scale(void))(int) { return implementation; }\n"
+                "int scale(int) __attribute__((ifunc(\"resolve_scale\")));\n"
+                "int main(void) { return scale(7) != 21; }\n"), S8("unsupported ELF symbol scale (type 10)")},
+            {S8("ctors"), S8("static int ran; static void hook(void) { ran = 1; }\n"
+                "__attribute__((section(\".ctors\"), used)) static void (*entry)(void) = hook;\n"
+                "int main(void) { return ran != 1; }\n"), S8("unsupported ELF section .ctors (type 1)")},
+            {S8("dtors"), S8("extern void _Exit(int); static void hook(void) { _Exit(0); }\n"
+                "__attribute__((section(\".dtors\"), used)) static void (*entry)(void) = hook;\n"
+                "int main(void) { return 1; }\n"), S8("unsupported ELF section .dtors (type 1)")},
+#if BUSTER_CPU_ARCH_X86_64
+            {S8("init"), S8("static int ran; void semantic_hook(void) { ran = 1; }\n"
+                "__asm__(\".pushsection .init,\\\"ax\\\",@progbits\\ncall semantic_hook\\n.popsection\");\n"
+                "int main(void) { return ran != 1; }\n"), S8("unsupported ELF section .init (type 1)")},
+            {S8("fini"), S8("extern void _Exit(int); void semantic_hook(void) { _Exit(0); }\n"
+                "__asm__(\".pushsection .fini,\\\"ax\\\",@progbits\\ncall semantic_hook\\n.popsection\");\n"
+                "int main(void) { return 1; }\n"), S8("unsupported ELF section .fini (type 1)")},
+            {S8("allocated-note"), S8("__asm__(\".pushsection .note.vendor,\\\"a\\\",@note\\n.balign 4\\n.long 4,4,1\\n.asciz \\\"VND\\\"\\n.long 0\\n.popsection\");\n"
+                "int main(void) { return 0; }\n"), S8("unsupported ELF section .note.vendor (type 7)")},
+#else
+            {S8("init"), S8("static int ran; void semantic_hook(void) { ran = 1; }\n"
+                "__asm__(\".pushsection .init,\\\"ax\\\",%progbits\\nbl semantic_hook\\n.popsection\");\n"
+                "int main(void) { return ran != 1; }\n"), S8("unsupported ELF section .init (type 1)")},
+            {S8("fini"), S8("extern void _Exit(int); void semantic_hook(void) { _Exit(0); }\n"
+                "__asm__(\".pushsection .fini,\\\"ax\\\",%progbits\\nbl semantic_hook\\n.popsection\");\n"
+                "int main(void) { return 1; }\n"), S8("unsupported ELF section .fini (type 1)")},
+            {S8("allocated-note"), S8("__asm__(\".pushsection .note.vendor,\\\"a\\\",%note\\n.balign 4\\n.long 4,4,1\\n.asciz \\\"VND\\\"\\n.long 0\\n.popsection\");\n"
+                "int main(void) { return 0; }\n"), S8("unsupported ELF section .note.vendor (type 7)")},
+#endif
+            {S8("absolute"), S8("extern char semantic_absolute;\n"
+                "__asm__(\".globl semantic_absolute\\n.set semantic_absolute,0x1234\");\n"
+                "int main(void) { return (unsigned long)&semantic_absolute != 0x1234; }\n"),
+                S8("unsupported ELF symbol semantic_absolute (section index 65521)")},
+            {S8("weak-absolute"), S8("extern char semantic_absolute __attribute__((weak));\n"
+                "__asm__(\".weak semantic_absolute\\n.set semantic_absolute,0x1234\");\n"
+                "int main(void) { return (unsigned long)&semantic_absolute != 0x1234; }\n"),
+                S8("unsupported ELF symbol semantic_absolute (section index 65521)")},
+            {S8("preinit-control"), S8("static int ran; static void preinit(void) { ran = 1; }\n"
+                "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(void) = preinit;\n"
+                "__attribute__((constructor)) static void constructor(void) { ran = ran == 1 ? 2 : 9; }\n"
+                "int main(void) { return ran != 2; }\n"), {0}},
+        };
+        String8 root = buster_test_temporary_path(arena, S8("buster-elf-semantic-inputs"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, !created.error);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            ElfSemanticCase test = cases[index];
+            String8 source = string_format_z(arena, S8("{S8}/{S8}.c"), root, test.name);
+            String8 object = string_format_z(arena, S8("{S8}/{S8}.o"), root, test.name);
+            String8 oracle = string_format_z(arena, S8("{S8}/{S8}-oracle"), root, test.name);
+            String8 output = string_format_z(arena, S8("{S8}/{S8}-buster"), root, test.name);
+            BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(test.program)));
+            String8 compile[] = {S8("-O2"), S8("-fno-pie"), S8("-c"), source, S8("-o"), object};
+            bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+            BUSTER_TEST(arguments, produced);
+            if (produced)
+            {
+                // The independent linker must preserve the input's runtime meaning.
+                String8 host_link[] = {S8("-no-pie"), object, S8("-o"), oracle};
+                bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+                BUSTER_TEST(arguments, linked);
+                if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+                ObjectFile read = object_read(arena, file_read(arena, object, (FileReadOptions){0}), target_native);
+                String8 command[] = {S8("-no-pie"), object, S8("-o"), output};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                if (test.diagnostic.length)
+                {
+                    BUSTER_TEST(arguments, read.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                    BUSTER_STRING_TEST(arguments, read.diagnostic, test.diagnostic);
+                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_OBJECT && compiled.object_error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                    BUSTER_STRING_TEST(arguments, compiled.diagnostic, string_format(arena, S8("could not read object {S8}: {S8}"), object, test.diagnostic));
+                    BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(output));
+                    BUSTER_TEST(arguments, !compiled.native_link.executable.pointer && !compiled.native_link.executable.length);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+                }
+                if (index == 0)
+                {
+                    ByteSlice member = file_read(arena, object, (FileReadOptions){0});
+                    ByteSlice archive_bytes = compiler_driver_elf_semantic_archive(arena, member);
+                    ObjectArchive eager = object_archive_read(arena, archive_bytes, target_native);
+                    BUSTER_TEST(arguments, eager.error == OBJECT_ERROR_UNSUPPORTED_TARGET && eager.failed_member == 0);
+                    BUSTER_STRING_TEST(arguments, eager.diagnostic, S8("member semantic.o: unsupported ELF symbol scale (type 10)"));
+                    ObjectArchive lazy = object_archive_read_link(arena, archive_bytes, target_native);
+                    BUSTER_TEST(arguments, lazy.error == OBJECT_ERROR_NONE && lazy.object_count == 1);
+                    String8 archive = string_format_z(arena, S8("{S8}/ifunc.a"), root);
+                    String8 caller = string_format_z(arena, S8("{S8}/caller.c"), root);
+                    BUSTER_TEST(arguments, file_write(archive, archive_bytes));
+                    for (u32 selected = 0; selected < 2; selected += 1)
+                    {
+                        String8 program = selected ? S8("int scale(int); int main(void) { return scale(7) != 21; }\n")
+                                                   : S8("int main(void) { return 0; }\n");
+                        BUSTER_TEST(arguments, file_write(caller, BUSTER_SLICE_TO_BYTE_SLICE(program)));
+                        String8 image = string_format_z(arena, S8("{S8}/archive-{u32}"), root, selected);
+                        String8 link[] = {S8("-no-pie"), caller, archive, S8("-o"), image};
+                        invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link));
+                        CompilerDriverResult archived = compiler_driver_execute_invocation(arena, invocation);
+                        if (selected)
+                        {
+                            BUSTER_TEST(arguments, archived.error == COMPILER_DRIVER_ERROR_OBJECT && archived.object_error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                            String8 cpu = cpu_arch_to_string_os(target_native.cpu_arch);
+                            String8 os = operating_system_to_string_os(target_native.os);
+                            BUSTER_STRING_TEST(arguments, archived.diagnostic, string_format(arena,
+                                S8("could not read archive {S8}: selected member semantic.o ({S8}-{S8}) for {S8}-{S8}: unsupported ELF symbol scale (type 10); error {u32}"),
+                                archive, cpu, os, cpu, os, (u32)OBJECT_ERROR_UNSUPPORTED_TARGET));
+                            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(image));
+                        }
+                        else
+                        {
+                            BUSTER_TEST(arguments, archived.error == COMPILER_DRIVER_ERROR_NONE);
+                            if (archived.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, image));
+                        }
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+#if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_semantic_tests);
+#endif
 #if BUSTER_ANDROID || BUSTER_IOS
     BUSTER_UNUSED(arguments);
 #else
