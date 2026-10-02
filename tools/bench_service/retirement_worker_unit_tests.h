@@ -156,22 +156,22 @@
 
 /* The #437 A/A admission receipt stand-in the fixture build's producer
  * presents (retirement_worker_campaign.c declares it under
- * BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA): the validator's AA_SCHEMA (v2)
- * keys in sorted order with test identities, a test policy digest and band,
+ * BQ_RETIREMENT_UNIT_CAMPAIGN_FIXTURE_AA): the validator's AA_SCHEMA (v3)
+ * keys in sorted order with test identities and the fixed band,
  * over the driver's family, the campaign's CPU and the coordinator's real
  * AA_MEASURED receipt digest (#1021); its identities are the
  * ones the fixture's binding context binds
- * (retirement_binding_context_fixture.py). It is test data, not a #426
- * decision: the production receipt comes from bq_retirement_aa_admission_decide. */
-#define BQ_PREP_WORKER_UNIT_AA_POLICY_SHA256 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+ * (retirement_binding_context_fixture.py). It is test data, not an in-job
+ * A/A decision: the production receipt comes from
+ * bq_retirement_aa_admission_decide. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_campaign_fixture_receipt(BqRetirementUnitCampaign const* driver,
     TpRetirementCampaign const* campaign, char const phase_receipt[SHA256_HEX_CAPACITY],
     char receipt[BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX], u32* length, char digest[SHA256_HEX_CAPACITY])
 {
     int written = driver && campaign && phase_receipt ? snprintf(receipt, BQ_RETIREMENT_UNIT_CAMPAIGN_AA_RECEIPT_BYTES_MAX,
-        "{\"aa_decision\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "\",\"aa_policy_sha256\":\""
-        BQ_PREP_WORKER_UNIT_AA_POLICY_SHA256 "\",\"admitted\":true,\"baseline_source_commit\":\"%040d\","
-        "\"baseline_source_tree\":\"%040d\",\"equivalence_band\":{\"lower\":\"0.98\",\"upper\":\"1.02\"},"
+        "{\"aa_decision\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "\",\"admitted\":true,"
+        "\"baseline_source_commit\":\"%040d\",\"baseline_source_tree\":\"%040d\","
+        "\"equivalence_band\":" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND ","
         "\"family_sha256\":\"%s\",\"lease_protocol\":\"server-authoritative-supervisor-lease-v1\","
         "\"logical_cpu\":%d,\"machine_id\":\"fixture-machine\",\"native_only\":true,"
         "\"native_target\":\"x86_64-unknown-linux-gnu\",\"phase_receipt_sha256\":\"%s\","
@@ -1278,11 +1278,7 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_worker_unit_composition(BqPrepOracleFixture* fi
                                      BQ_RETIREMENT_WORKER_BINDING_CONTEXT_PIN, pin);
     free(bytes);
     size_t used = strlen(pins);
-    /* The A/A policy pin a complete profile needs (#426 plan step 6): the
-     * fixture's test digest, which its receipt stand-in also names; no policy
-     * is installed, since the fixture build admits through the stand-in. */
-    int appended = ok ? snprintf(pins + used, capacity - used, "adapter-sha256=%s\n%saa-policy-sha256="
-                                 BQ_PREP_WORKER_UNIT_AA_POLICY_SHA256 "\n", adapter, pin) : -1;
+    int appended = ok ? snprintf(pins + used, capacity - used, "adapter-sha256=%s\n%s", adapter, pin) : -1;
     ok = ok && appended > 0 && (size_t)appended < capacity - used;
     return ok;
 }

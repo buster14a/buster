@@ -95,18 +95,30 @@ python3 -B tools/zen5_calibration_handoff_test.py
 
 `descriptive-complete` means all three records replay under one frozen plan;
 `invalid` retains reasons. In **both** cases `ab_authorized` is false and
-`physical_admission` and `candidate_decision` are `not-evaluated`. The
-authenticated service receipt and a reviewed, versioned empirical A/A
-eligibility calculation remain necessary before #1022 can authorize A/B. An
+`physical_admission` and `candidate_decision` are `not-evaluated`. A/B is
+authorized only by the #881 campaign's own in-job A/A gate (below) over
+service-authenticated rows; a calibration bundle never authorizes it. An
 accepted A/B result from this same job is never an input to its preceding A/A
 decision. The existing #619/#511 consumer then assesses complete candidate
 samples only after the independent post-A/A decision and service phase receipt.
 
 ## A/A policy evaluator (#426 plan step 4)
 
+**No longer an #881 prerequisite.** The repository owner dropped the #426
+64-attempt eligibility window as a prerequisite for
+`native-retirement-performance-v1`. Admission into A/B is gated only by the
+per-campaign in-job A/A: P = 60 pairs per round, runtime rows U = R, and
+every member of the #619 family, in each round and pooled, inside the fixed
+equivalence band `[0.98, 1.02]`, computed from the authenticated BQPHASE2
+`AA_MEASURED` (phase 6) rows (`tools/bench_service/retirement_aa_admission.c`,
+receipt `buster-native-retirement-aa-admission-v3`). No `aa-policy-sha256=`
+pin exists and no policy document is installed; see
+[the production A/A admission](../tools/bench_service/RETIREMENT_PREPARATION.md).
+The evaluator remains an offline calibration tool, and its windows below are
+historical evidence.
+
 `tools/zen5_aa_evaluator.py` turns retained `zen5-calibration-v1` attempt
-bundles into the canonical A/A policy document that a later
-`aa-policy-sha256=` recipe-profile pin binds. It implements the family
+bundles into a canonical A/A policy document. It implements the family
 proposed by #1188 with the inputs decided on
 [#36](https://github.com/buster14a/buster/issues/36#issuecomment-5919407135):
 q = 0.90, a 42-member family with 0.05 Bonferroni allocation (so a finite bound
@@ -139,7 +151,8 @@ There are two inputs and two digests:
   taken from the authenticated service channel, never from the bundle (see
   below).
 - **Policy document** (`buster-zen5-aa-policy-v1`). The canonical JSON bytes
-  are hashed, and that SHA-256 is the future `aa-policy-sha256=` value. The
+  are hashed, and the evaluator prints that SHA-256 as `aa-policy-sha256=`
+  (a historical label; no recipe profile pins it). The
   document embeds the protocol, the method, every attempt with its validity
   reasons, the family result, and the evaluator source digests. It does not
   record the interpreter version: the analyzers use `math.fsum` since #2110,

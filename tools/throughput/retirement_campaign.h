@@ -847,7 +847,7 @@ static inline int tp_retirement_campaign_finish_stage(TpRetirementCampaign* camp
 
 /* The production transition into A/B (#426 plan step 6, #1021). The caller
  * (bq_retirement_unit_campaign_admit) supplies the admission the producer's
- * pinned #426 policy decided and the A/A stage digest the service attested
+ * in-job A/A gate decided and the A/A stage digest the service attested
  * over its private phase channel (AA_MEASURED, acknowledged only after the
  * coordinator rehashed the published A/A shards). That attested digest must
  * still be the finished A/A stage's raw numeric digest, so A/B starts only

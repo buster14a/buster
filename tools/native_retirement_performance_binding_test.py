@@ -474,7 +474,7 @@ class BindingTests(unittest.TestCase):
         })
         aa_admission = json_artifact("execution/aa-admission.json", {
             "schema": binding.AA_SCHEMA, "version": binding.AA_VERSION,
-            "aa_decision": binding.AA_DECISION, "aa_policy_sha256": "8" * 64,
+            "aa_decision": binding.AA_DECISION,
             "equivalence_band": {"lower": "0.98", "upper": "1.02"},
             "phase_receipt_sha256": "9" * 64,
             "machine_id": "zen5-9700x-01", "profile_id": "zen5-9700x-native",
@@ -2207,24 +2207,29 @@ class BindingTests(unittest.TestCase):
                         ValueError, "statistical family|family_sha256|missing fields"):
                     binding._check_execution_evidence(root, candidate)
 
-    def test_aa_admission_v2_binds_policy_band_and_decision(self):
-        # (#426 plan step 6) The receipt is version 2 only: v1, a missing or
-        # malformed policy digest, a band outside 0 < lower < 1 < upper or not
-        # in the evaluator's decimal form, any decision but "admitted", and
-        # (#1021) a missing or malformed phase receipt digest are refused.
+    def test_aa_admission_v3_binds_fixed_band_and_decision(self):
+        # (#881) The receipt is version 3 only: v1, v2 (which named a pinned
+        # #426 policy) and any policy digest field, a band other than exactly
+        # the fixed in-job {"lower": "0.98", "upper": "1.02"}, any decision but
+        # "admitted", and (#1021) a missing or malformed phase receipt digest
+        # are refused.
+        self.assertEqual(binding.AA_EQUIVALENCE_BAND, {"lower": "0.98", "upper": "1.02"})
         record, contents = self.make_record()
         mutations = {
             "v1 schema": lambda value: value.update(
                 schema="buster-native-retirement-aa-admission-v1", version=1),
-            "v1 version": lambda value: value.update(version=1),
-            "float version": lambda value: value.update(version=2.0),
-            "no policy digest": lambda value: value.pop("aa_policy_sha256"),
-            "short policy digest": lambda value: value.update(aa_policy_sha256="8" * 63),
-            "upper-case policy digest": lambda value: value.update(aa_policy_sha256="A" * 64),
+            "v2 schema": lambda value: value.update(
+                schema="buster-native-retirement-aa-admission-v2", version=2),
+            "v2 version": lambda value: value.update(version=2),
+            "float version": lambda value: value.update(version=3.0),
+            "policy digest": lambda value: value.update(aa_policy_sha256="8" * 64),
             "no band": lambda value: value.pop("equivalence_band"),
             "band field": lambda value: value["equivalence_band"].update(width="0.04"),
             "numeric band": lambda value: value["equivalence_band"].update(lower=0.98),
             "exponent band": lambda value: value["equivalence_band"].update(upper="1.02e0"),
+            "trailing zero band": lambda value: value["equivalence_band"].update(lower="0.980"),
+            "wider band": lambda value: value["equivalence_band"].update(lower="0.97", upper="1.03"),
+            "narrower upper": lambda value: value["equivalence_band"].update(upper="1.01"),
             "lower above one": lambda value: value["equivalence_band"].update(lower="1.01"),
             "upper below one": lambda value: value["equivalence_band"].update(upper="0.99"),
             "zero lower": lambda value: value["equivalence_band"].update(lower="0"),
@@ -2241,12 +2246,12 @@ class BindingTests(unittest.TestCase):
             descriptor = candidate["execution"]["host"]["aa_admission_receipt"]
             admission = json.loads(candidate_contents[descriptor["path"]].decode())
             self.assertEqual((admission["schema"], admission["version"], admission["aa_decision"]),
-                             (binding.AA_SCHEMA, 2, "admitted"))
+                             (binding.AA_SCHEMA, 3, "admitted"))
             mutate(admission)
             data = (json.dumps(admission, sort_keys=True, separators=(",", ":")) + "\n").encode()
             candidate_contents[descriptor["path"]] = data
             descriptor.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
-            with tempfile.TemporaryDirectory(prefix="retirement-aa-v2-") as directory:
+            with tempfile.TemporaryDirectory(prefix="retirement-aa-v3-") as directory:
                 root = Path(directory)
                 self.write_evidence(root, candidate, candidate_contents)
                 with self.subTest(mutation=name), self.assertRaisesRegex(

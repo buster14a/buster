@@ -42,12 +42,12 @@
  * one `key=<64 hex>` line per worker-unit pin (BQ_RETIREMENT_PROFILE_PINS,
  * retirement_worker_unit.c: bq_retirement_worker_unit_pins), lane D's four
  * campaign lines and the status line, each at most BQ_RECIPE_PROFILE_LINE_CAP
- * bytes. That is about 2.8 KB today; the cap is 4480 bytes. retirement_worker_unit.c
+ * bytes. That is about 2.7 KB today; the cap is 4352 bytes. retirement_worker_unit.c
  * checks the pin count against BQ_RETIREMENT_PROFILE_PINS; queue.c checks the
  * compiled profiles against the cap. */
 #define BQ_RECIPE_PROFILE_BASE_CAP 1024u
 #define BQ_RECIPE_PROFILE_LINE_CAP 128u
-#define BQ_RETIREMENT_PROFILE_PINS 22u
+#define BQ_RETIREMENT_PROFILE_PINS 21u
 #define BQ_RETIREMENT_PROFILE_CAMPAIGN_LINES 4u
 #define BQ_RECIPE_PROFILE_CAP (BQ_RECIPE_PROFILE_BASE_CAP + \
     (BQ_RETIREMENT_PROFILE_PINS + BQ_RETIREMENT_PROFILE_CAMPAIGN_LINES + 1u) * BQ_RECIPE_PROFILE_LINE_CAP)

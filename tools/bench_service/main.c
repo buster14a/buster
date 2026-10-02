@@ -32,7 +32,7 @@
  * producer's in-unit campaign (retirement_worker_campaign.c) runs lane D's
  * driver through READY and then composes, issues the receipt authority and
  * sends MEASURED (retirement_worker_compose.c); its A/A admission decides
- * from the pinned #426 policy (retirement_aa_admission.c) over the rows the
+ * from this job's in-job A/A (retirement_aa_admission.c) over the rows the
  * coordinator attested as AA_MEASURED (#1021). The
  * coordinator's side (retirement_coordinator.c: request gate, budget loader,
  * authority handoff before MEASURED, replay at finalization) is refused the

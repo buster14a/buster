@@ -251,14 +251,15 @@ static int test_unit_campaign_population(TestUnitCampaign* fixture)
 }
 
 /* A canonical #437 A/A admission receipt (the validator's AA_SCHEMA keys,
- * test identities) for `cpu` and `family`, and its digest. */
-static int test_unit_campaign_aa_receipt(TestUnitCampaign* fixture, int cpu, char const* family, char const* admitted)
+ * test identities) for `cpu`, `family` and the equivalence band `upper`
+ * (the fixed band's upper string, or another), and its digest. */
+static int test_unit_campaign_aa_receipt(TestUnitCampaign* fixture, int cpu, char const* family, char const* admitted,
+    char const* upper)
 {
     int length = snprintf(fixture->aa_receipt, sizeof(fixture->aa_receipt),
         "{\"aa_decision\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_DECISION "\","
-        "\"aa_policy_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\","
         "\"admitted\":%s,\"baseline_source_commit\":\"%040d\",\"baseline_source_tree\":\"%040d\","
-        "\"equivalence_band\":{\"lower\":\"0.98\",\"upper\":\"1.02\"},"
+        "\"equivalence_band\":{\"lower\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND_LOWER "\",\"upper\":\"%s\"},"
         "\"family_sha256\":\"%s\",\"lease_protocol\":\"server-authoritative-supervisor-lease-v1\","
         "\"logical_cpu\":%d,\"machine_id\":\"fixture-machine\",\"native_only\":true,"
         "\"native_target\":\"x86_64-unknown-linux-gnu\","
@@ -266,7 +267,7 @@ static int test_unit_campaign_aa_receipt(TestUnitCampaign* fixture, int cpu, cha
         "\"profile_id\":\"fixture-profile\",\"profile_version\":1,"
         "\"schema\":\"" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_SCHEMA "\",\"service_id\":\"fixture-service\","
         "\"version\":" BQ_RETIREMENT_UNIT_CAMPAIGN_AA_VERSION "}",
-        admitted, 1, 2, family, cpu);
+        admitted, 1, 2, upper, family, cpu);
     int ok = length > 0 && (size_t)length < sizeof(fixture->aa_receipt);
     if (ok)
     {
@@ -588,7 +589,8 @@ static int test_unit_campaign_setup(TestUnitCampaign* fixture, char const* execu
         bq_retirement_documents_family(&fixture->population, &timed, &fixture->family) &&
         fixture->family.bootstrap_members == 37 && fixture->family.cell_members == 9 &&
         tp_path(fixture->documents_path, fixture->directory, "unit-campaign-documents") &&
-        test_unit_campaign_aa_receipt(fixture, fixture->cpu, fixture->family.sha256, "true");
+        test_unit_campaign_aa_receipt(fixture, fixture->cpu, fixture->family.sha256, "true",
+                                      BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND_UPPER);
     bq_retirement_documents_partition_release(&timed);
     return ok && fixture->cpu >= 0;
 }
@@ -803,7 +805,7 @@ enum
     TEST_UNIT_CAMPAIGN_DOCUMENT_EXISTS, TEST_UNIT_CAMPAIGN_DOCUMENT_PIN, TEST_UNIT_CAMPAIGN_NO_POST_DOCUMENT,
     TEST_UNIT_CAMPAIGN_POST_DOCUMENT_PIN, TEST_UNIT_CAMPAIGN_RECEIPT_DIGEST, TEST_UNIT_CAMPAIGN_RECEIPT_FAMILY,
     TEST_UNIT_CAMPAIGN_RECEIPT_CPU, TEST_UNIT_CAMPAIGN_RECEIPT_REFUSED, TEST_UNIT_CAMPAIGN_POST_DOCUMENT_SUPPORT,
-    TEST_UNIT_CAMPAIGN_UNTIMED_NO_ARTIFACT,
+    TEST_UNIT_CAMPAIGN_UNTIMED_NO_ARTIFACT, TEST_UNIT_CAMPAIGN_RECEIPT_BAND,
     TEST_UNIT_CAMPAIGN_SCENARIOS
 };
 
@@ -1316,7 +1318,8 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
         ok = 0;
     }
     /* The #437 receipt: the fixture's, or one whose bytes are not the named
-     * digest, over another family or CPU, or not admitted. */
+     * digest, over another family or CPU, not admitted, or recording a band
+     * other than the fixed [0.98, 1.02]. */
     TestUnitCampaign* receipt = fixture;
     char const* receipt_sha = fixture->aa_receipt_sha;
     char other_family[65];
@@ -1324,13 +1327,18 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
     other_family[0] = other_family[0] == '0' ? '1' : '0';
     TestUnitCampaign* other = (TestUnitCampaign*)calloc(1, sizeof(*other));
     if (other && scenario == TEST_UNIT_CAMPAIGN_RECEIPT_FAMILY)
-        CHECK(test_unit_campaign_aa_receipt(other, fixture->cpu, other_family, "true"));
+        CHECK(test_unit_campaign_aa_receipt(other, fixture->cpu, other_family, "true",
+                                            BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND_UPPER));
     if (other && scenario == TEST_UNIT_CAMPAIGN_RECEIPT_CPU)
-        CHECK(test_unit_campaign_aa_receipt(other, fixture->cpu + 1, fixture->family.sha256, "true"));
+        CHECK(test_unit_campaign_aa_receipt(other, fixture->cpu + 1, fixture->family.sha256, "true",
+                                            BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND_UPPER));
     if (other && scenario == TEST_UNIT_CAMPAIGN_RECEIPT_REFUSED)
-        CHECK(test_unit_campaign_aa_receipt(other, fixture->cpu, fixture->family.sha256, "false"));
+        CHECK(test_unit_campaign_aa_receipt(other, fixture->cpu, fixture->family.sha256, "false",
+                                            BQ_RETIREMENT_UNIT_CAMPAIGN_AA_BAND_UPPER));
+    if (other && scenario == TEST_UNIT_CAMPAIGN_RECEIPT_BAND)
+        CHECK(test_unit_campaign_aa_receipt(other, fixture->cpu, fixture->family.sha256, "true", "1.03"));
     if (other && (scenario == TEST_UNIT_CAMPAIGN_RECEIPT_FAMILY || scenario == TEST_UNIT_CAMPAIGN_RECEIPT_CPU ||
-                  scenario == TEST_UNIT_CAMPAIGN_RECEIPT_REFUSED))
+                  scenario == TEST_UNIT_CAMPAIGN_RECEIPT_REFUSED || scenario == TEST_UNIT_CAMPAIGN_RECEIPT_BAND))
     {
         receipt = other;
         receipt_sha = other->aa_receipt_sha;
@@ -1347,7 +1355,7 @@ static void test_unit_campaign_attempt(TestUnitCampaign* fixture, unsigned scena
         if (scenario == TEST_UNIT_CAMPAIGN_DENIED || scenario == TEST_UNIT_CAMPAIGN_STALE_ADMISSION ||
             scenario == TEST_UNIT_CAMPAIGN_POST_AA_ADMISSION || scenario == TEST_UNIT_CAMPAIGN_RECEIPT_DIGEST ||
             scenario == TEST_UNIT_CAMPAIGN_RECEIPT_FAMILY || scenario == TEST_UNIT_CAMPAIGN_RECEIPT_CPU ||
-            scenario == TEST_UNIT_CAMPAIGN_RECEIPT_REFUSED)
+            scenario == TEST_UNIT_CAMPAIGN_RECEIPT_REFUSED || scenario == TEST_UNIT_CAMPAIGN_RECEIPT_BAND)
             CHECK(!ok && campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && !stages.ab.execution.sequence &&
                   driver.step == BQ_RETIREMENT_UNIT_CAMPAIGN_FAILED);
         else CHECK(ok && campaign.phase == TP_RETIREMENT_CAMPAIGN_AB);
