@@ -25861,6 +25861,8 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope,
                 starts[argument], ends[argument], &type, diagnostic);
         }
+        bool fabs_builtin = builtin == C_SYMBOL_BUILTIN_MATH &&
+                            (string_equal(name, S8("__builtin_fabs")) || string_equal(name, S8("__builtin_fabsf")));
         u32 minimum = 0;
         u32 maximum = UINT32_MAX;
         switch (builtin)
@@ -25889,6 +25891,26 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         }
         String8 message = count < minimum || count > maximum ? S8("could not prepare C calls") : (String8){0};
         u32 location = close;
+        if (fabs_builtin)
+        {
+            if (count != 1)
+            {
+                message = string_format(result->arena, S8("{S8} takes exactly one argument"), name);
+            }
+            else
+            {
+                CTypeId type = C_TYPE_ID_INVALID;
+                bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
+                                                           starts[0], ends[0], &type);
+                if (typed && type.value < result->type_count &&
+                    !c_parse_expression_real_kind(result->types[type.value].kind) &&
+                    !c_type_kind_is_complex(result->types[type.value].kind))
+                {
+                    message = string_format(result->arena, S8("{S8} requires one arithmetic scalar argument"), name);
+                    location = starts[0];
+                }
+            }
+        }
         if (builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET && !message.length)
         {
             CTypeId type = C_TYPE_ID_INVALID;
