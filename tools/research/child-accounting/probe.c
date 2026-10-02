@@ -46,6 +46,11 @@ static int probe_principal(char const* mode, char const* marker, int release_rea
         close(ready[0]);
         int status = 0;
         int live = helper > 0 && received == 1 && waitpid(helper, &status, WNOHANG) == 0;
+        if (live)
+        {
+            printf("HELPER_READY mode=%s helper=%ld alive_before_exit=1\n", mode, (long)helper);
+            if (fflush(stdout) != 0) live = 0;
+        }
         if (live && !strcmp(mode, "orphan"))
         {
             /* The helper cannot finish: the root still holds its release. */
@@ -103,12 +108,13 @@ int main(int argc, char** argv)
                 probe_delay(200);
                 struct stat info;
                 int marker_present = stat(marker, &info) == 0;
+                int marker_valid = marker_present ? info.st_size == 15 : errno == ENOENT;
                 int status_expected = scenario == 2 ? 7 : 0;
                 printf("CHILD_ACCOUNTING mode=%s exit=%d launch_error=%d timeout=%d signal=%d marker=%d released=%d\n",
                        modes[scenario], process.exit_code, process.launch_error, process.timed_out,
                        process.signal_number, marker_present, released);
                 ok = released && process.exit_code == status_expected && !process.launch_error &&
-                     !process.timed_out && !process.signal_number && marker_present == (scenario == 0);
+                     !process.timed_out && !process.signal_number && marker_valid && marker_present == (scenario == 0);
             }
         }
         result = ok ? 0 : 1;
