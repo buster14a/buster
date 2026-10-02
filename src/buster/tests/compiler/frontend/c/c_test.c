@@ -17293,6 +17293,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
         "    if (seen != expected) return 14;\n"
         "    if (cleanups != expected_cleanups) return 15;\n"
         "}\n");
+    BUSTER_UNUSED(caller);
     String8 canonical_parts[] = {callee, S8("int main(void) {}\n")};
     String8 canonical_source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(canonical_parts), false);
     typedef struct CTestFalloffFunction CTestFalloffFunction;
