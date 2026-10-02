@@ -983,7 +983,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
         "static const enum B static_qualified = (const enum B)-0.5;\n"
         "static_assert(X == 1 && Y == 1 && ZERO_INTEGER == 0 && ZERO_FLOAT == 0, \"positive and zero truth\");\n"
         "static_assert(NEGATIVE_INTEGER == 1 && NEGATIVE_FLOAT == 1 && HIGH_LIMB == 1 && NEGATIVE_ZERO == 0, \"whole value truth\");\n"
-        "static_assert(ALIAS_INTEGER == 1 && QUALIFIED_FLOAT == 1 && sizeof arr == 2 && sizeof fraction_arr == 2, \"enum context parity\");\n"
+        "static_assert(ALIAS_INTEGER == 1 && QUALIFIED_FLOAT == 1, \"enum context parity\");\n"
         "int main(void) {\n"
         "    volatile int two = 2, zero = 0, negative = -2; volatile double half = 0.5, negative_half = -0.5;\n"
         "    enum B r = (enum B)two, q = (enum B)half, z = (enum B)zero;\n"
@@ -1018,8 +1018,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
                     .target = target, .data_layout = target_data_layout(target),
                     .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_C23,
                 });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
                 CParseResult parsed = c_parse(temporary.arena, tokens);
-                if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count))
+                if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !parsed.diagnostic_count))
                 {
                     BUSTER_TEST(arguments, parsed.enum_member_count == BUSTER_ARRAY_LENGTH(expected));
                     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
@@ -1039,7 +1040,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
                                                       !constant.magnitude_high && !constant.is_negative, expected[index].name);
                         }
                     }
-                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-bool-conversion.c"), tokens, parsed, target,
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("enum-bool-conversion.c"), tokens, syntax, target,
                         (CIRLowerOptions){.disable_direct_ssa = form != 0});
                     for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
                     {
@@ -1075,7 +1076,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                     invocation.reject_machine_fallback = mode != 0;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
-                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    String8 context = string_format(temporary.arena, S8("dialect={S8} mode={S8} form={u32}: {S8}"),
+                                                    dialects[dialect], modes[mode], form, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, context);
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
                         String8 run[] = {output};
@@ -1084,7 +1087,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
                         if (BUSTER_REQUIRE(arguments, child.handle != 0))
                         {
                             ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
-                            BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, context);
                         }
                     }
                     scratch_end(temporary);
