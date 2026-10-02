@@ -300,7 +300,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_empty_tests(UnitTestArgum
                         String8 object_path = string_format_z(arena, S8("{S8}/lld-{u32}.o"), root, tls);
                         String8 executable = string_format_z(arena, S8("{S8}/lld-{u32}"), root, tls);
                         String8 program = tls ? S8("_Thread_local int initialized = 7;\n_Thread_local int zero;\n"
-                            "int main(void) { zero = initialized + 2; return zero != 9; }\n")
+                            "int main(void) { if (initialized != 7 || zero != 0) return 1; zero = initialized + 2; "
+                            "return initialized != 7 || zero != 9; }\n")
                             : S8("static const char value[] = \"a\";\nint main(void) { return *(const volatile char *)value != 97; }\n");
                         bool stored = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program));
                         BUSTER_TEST(arguments, stored);
