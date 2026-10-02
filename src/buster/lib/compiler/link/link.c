@@ -13040,16 +13040,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         if (object->target.cpu_arch == CPU_ARCH_X86_64)
         {
             u64 text_start = section_offsets[OBJECT_SECTION_TEXT];
-            u64 text_size = object->sections[OBJECT_SECTION_TEXT].data.length;
-            if (text_start > stub_offset || text_size > stub_offset - text_start || stub_offset > file_size)
+            u64 object_text_size = object->sections[OBJECT_SECTION_TEXT].data.length;
+            if (text_start > stub_offset || object_text_size > stub_offset - text_start || stub_offset > file_size)
             {
                 result.error = LINK_ERROR_INVALID_INPUT;
             }
             if (result.error == LINK_ERROR_NONE)
             {
-                u64 text_end = text_start + text_size;
-                if (stub_offset - text_end >= BUSTER_LINK_IMAGE_STUB_ALIGNMENT ||
-                    !assembly_fill_executable_padding(object->target, bytes + text_end, text_end - text_start, stub_offset - text_end))
+                u64 object_text_end = text_start + object_text_size;
+                if (stub_offset - object_text_end >= BUSTER_LINK_IMAGE_STUB_ALIGNMENT ||
+                    !assembly_fill_executable_padding(object->target, bytes + object_text_end, object_text_end - text_start, stub_offset - object_text_end))
                 {
                     result.error = LINK_ERROR_INVALID_INPUT;
                 }
