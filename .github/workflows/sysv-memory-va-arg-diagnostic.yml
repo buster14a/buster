@@ -1,0 +1,207 @@
+name: SysV MEMORY va_arg diagnostic
+on:
+  push:
+    branches: [codex/1264-sysv-memory-va-arg-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/codex/1264-sysv-memory-va-arg-probe'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 97c62802a732ce6374d29f3f74e01d0603d9e39d
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 8bc403391828bdb3738e759a2e0779c142923f73
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: diagnostic
+          persist-credentials: false
+      - name: Verify exact fixture transport and reference controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cp diagnostic/.github/diagnostics/1264/*.c evidence/
+          git -C baseline rev-parse HEAD | tee evidence/baseline-head.txt
+          git -C candidate rev-parse HEAD | tee evidence/candidate-head.txt
+          git -C diagnostic rev-parse HEAD | tee evidence/diagnostic-head.txt
+          uname -a | tee evidence/runner.txt
+          clang --version | tee evidence/clang-version.txt
+          gcc --version | tee evidence/gcc-version.txt
+          dpkg-query -W > evidence/installed-packages.txt
+          for copyright in /usr/share/doc/clang*/copyright /usr/share/doc/gcc*/copyright /usr/share/doc/libgcc*/copyright; do
+            if test -f "$copyright"; then
+              package=$(basename "$(dirname "$copyright")")
+              cp "$copyright" "evidence/toolchain-license-$package.txt"
+            fi
+          done
+          python3 - <<'PY'
+          import json, pathlib, re
+          text = pathlib.Path("candidate/src/buster/tests/compiler/driver/driver_test.c").read_text()
+          region = text[text.index("UnitTestResult compiler_driver_test_sysv_padding_eightbytes("):]
+          region = region[:region.index("String8 source_path")]
+          parts = re.findall(r"String8 source_part[01] = S8\((.*?)\);[ \t]*$", region, re.S | re.M)
+          assert len(parts) == 2
+          source = "".join(json.loads(s) for part in parts for s in re.findall(r'"(?:[^"\\]|\\.)*"', part))
+          assert len(source.encode()) == 6259
+          assert pathlib.Path("evidence/fixture.c").read_bytes() == source.encode()
+          needle = "__builtin_memcpy(&after, &ap, sizeof(after));"
+          assert source.count(needle) == 4
+          pathlib.Path("evidence/negative-cursor.c").write_text(source.replace(needle, needle + "\n    after.overflow = (void*)((unsigned long long)after.overflow + 8ull);", 1))
+          needle = "va_end(ap);"
+          assert source.count(needle) == 1
+          pathlib.Path("evidence/negative-payload.c").write_text(source.replace(needle, needle + "\n    c17.c[16] ^= 1;", 1))
+          print("FIXTURE_TRANSPORT exact_bytes=6259")
+          PY
+          reference_controls=0
+          negative_controls=0
+          for host in clang gcc; do
+            timeout 60s "$host" -std=c11 -O0 -fno-inline -funsigned-char -fno-strict-aliasing -c evidence/fixture.c -o "evidence/reference-plain-$host.o"
+            timeout 60s "$host" -std=c11 -O0 -fno-inline -funsigned-char -fno-strict-aliasing -DSYSV_PADDING_HOST -c evidence/fixture.c -o "evidence/reference-host-$host.o"
+            timeout 60s "$host" -no-pie "evidence/reference-plain-$host.o" "evidence/reference-host-$host.o" -o "evidence/reference-$host"
+            timeout 20s "evidence/reference-$host"
+            reference_controls=$((reference_controls + 1))
+            for control in cursor payload; do
+              timeout 60s "$host" -std=c11 -O0 -fno-inline -funsigned-char -fno-strict-aliasing -c "evidence/negative-$control.c" -o "evidence/negative-$control-$host.o"
+              timeout 60s "$host" -no-pie "evidence/negative-$control-$host.o" "evidence/reference-host-$host.o" -o "evidence/negative-$control-$host"
+              status=0
+              timeout 20s "evidence/negative-$control-$host" || status=$?
+              printf 'NEGATIVE control=%s host=%s exit=%s\n' "$control" "$host" "$status" | tee -a evidence/negative-results.txt
+              test "$status" = 64
+              negative_controls=$((negative_controls + 1))
+            done
+            for source in p9-callee p9-caller; do
+              timeout 60s "$host" -std=c11 -O0 -fno-inline -funsigned-char -fno-strict-aliasing -c "evidence/$source.c" -o "evidence/host-$source-$host.o"
+            done
+            timeout 60s "$host" -no-pie "evidence/host-p9-caller-$host.o" "evidence/host-p9-callee-$host.o" -o "evidence/p9-reference-$host"
+            timeout 20s "evidence/p9-reference-$host"
+            reference_controls=$((reference_controls + 1))
+            timeout 60s "$host" -std=c11 -O0 -fno-inline -funsigned-char -fno-strict-aliasing -c evidence/c17.c -o "evidence/host-c17-callee-$host.o"
+            timeout 60s "$host" -std=c11 -O0 -fno-inline -funsigned-char -fno-strict-aliasing -DC17_HOST_CALLER -c evidence/c17.c -o "evidence/host-c17-caller-$host.o"
+            timeout 60s "$host" -no-pie "evidence/host-c17-caller-$host.o" "evidence/host-c17-callee-$host.o" -o "evidence/c17-reference-$host"
+            timeout 20s "evidence/c17-reference-$host"
+            reference_controls=$((reference_controls + 1))
+          done
+          test "$reference_controls" = 6
+          test "$negative_controls" = 4
+          printf 'REFERENCE controls=%s negatives=%s\n' "$reference_controls" "$negative_controls" | tee evidence/reference-results.txt
+      - name: Build isolated trusted compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --version
+          ninja --version
+          for revision in baseline candidate; do
+            (
+              cd "$revision"
+              timeout 120s clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/$revision-driver"
+              timeout 120s "$RUNNER_TEMP/$revision-driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=ON -DBUSTER_DEBUG_INFO=OFF
+              timeout 600s "$RUNNER_TEMP/$revision-driver" build --config Release -t ide
+              sha256sum build/Release/ide
+            )
+          done
+          sha256sum baseline/build/Release/ide candidate/build/Release/ide | tee evidence/compiler-sha256.txt
+      - name: Establish isolated baseline defects and mixed-object correctness
+        shell: bash
+        run: |
+          set -euo pipefail
+          p9_baseline_wrong=0
+          p9_baseline_pass=0
+          p9_candidate_pass=0
+          c17_refusals=0
+          c17_baseline_pass=0
+          c17_candidate_pass=0
+          for frontend in -ffrontend-ssa -fno-frontend-ssa; do
+            for mode in none mir-stack fast quality; do
+              strict=""
+              if test "$mode" != none; then strict="-fno-machine-fallback"; fi
+              tag="$frontend-$mode"
+              for revision in baseline candidate; do
+                for source in p9-callee p9-caller; do
+                  timeout 60s "$revision/build/Release/ide" cc -target x86_64-unknown-linux -march=baseline -O0 -fverify-codegen "$frontend" "-fregister-allocator=$mode" $strict -fno-pic -g0 -c "evidence/$source.c" -o "evidence/$revision-$source-$tag.o" >"evidence/$revision-$source-$tag.log" 2>&1
+                done
+                for host in clang gcc; do
+                  timeout 60s "$host" -no-pie "evidence/host-p9-caller-$host.o" "evidence/$revision-p9-callee-$tag.o" -o "evidence/$revision-host-to-buster-p9-$host-$tag"
+                  status=0
+                  timeout 20s "evidence/$revision-host-to-buster-p9-$host-$tag" || status=$?
+                  printf 'P9 revision=%s direction=host-to-buster host=%s frontend=%s mode=%s exit=%s\n' "$revision" "$host" "$frontend" "$mode" "$status" | tee -a evidence/p9-results.txt
+                  if test "$revision" = baseline && test "$mode" = none; then
+                    test "$status" -gt 0
+                    test "$status" -lt 124
+                    test "$((status & 10))" = 10
+                    p9_baseline_wrong=$((p9_baseline_wrong + 1))
+                  else
+                    test "$status" = 0
+                    if test "$revision" = baseline; then p9_baseline_pass=$((p9_baseline_pass + 1)); else p9_candidate_pass=$((p9_candidate_pass + 1)); fi
+                  fi
+                  timeout 60s "$host" -no-pie "evidence/$revision-p9-caller-$tag.o" "evidence/host-p9-callee-$host.o" -o "evidence/$revision-buster-to-host-p9-$host-$tag"
+                  timeout 20s "evidence/$revision-buster-to-host-p9-$host-$tag"
+                  if test "$revision" = baseline; then p9_baseline_pass=$((p9_baseline_pass + 1)); else p9_candidate_pass=$((p9_candidate_pass + 1)); fi
+                done
+                status=0
+                timeout 60s "$revision/build/Release/ide" cc -target x86_64-unknown-linux -march=baseline -O0 -fverify-codegen "$frontend" "-fregister-allocator=$mode" $strict -fno-pic -g0 -c evidence/c17.c -o "evidence/$revision-c17-$tag.o" >"evidence/$revision-c17-$tag.log" 2>&1 || status=$?
+                if test "$revision" = baseline && test "$mode" = none; then
+                  test "$status" -gt 0
+                  test "$status" -lt 124
+                  grep -q 'kind=codegen.unsupported-instruction' "evidence/$revision-c17-$tag.log"
+                  grep -q "function='c17_probe'" "evidence/$revision-c17-$tag.log"
+                  c17_refusals=$((c17_refusals + 1))
+                else
+                  test "$status" = 0
+                  for host in clang gcc; do
+                    timeout 60s "$host" -no-pie "evidence/host-c17-caller-$host.o" "evidence/$revision-c17-$tag.o" -o "evidence/$revision-c17-$host-$tag"
+                    timeout 20s "evidence/$revision-c17-$host-$tag"
+                    if test "$revision" = baseline; then c17_baseline_pass=$((c17_baseline_pass + 1)); else c17_candidate_pass=$((c17_candidate_pass + 1)); fi
+                  done
+                fi
+              done
+            done
+          done
+          test "$p9_baseline_wrong" = 4
+          test "$p9_baseline_pass" = 28
+          test "$p9_candidate_pass" = 32
+          test "$c17_refusals" = 2
+          test "$c17_baseline_pass" = 12
+          test "$c17_candidate_pass" = 16
+          fixture_objects=0
+          fixture_native=0
+          for target in x86_64-unknown-linux x86_64-apple-macos; do
+            for frontend in -ffrontend-ssa -fno-frontend-ssa; do
+              for mode in none mir-stack fast quality; do
+                strict=""
+                if test "$mode" != none; then strict="-fno-machine-fallback"; fi
+                for pic in -fPIC -fno-pic; do
+                  tag="$target-$frontend-$mode-$pic"
+                  timeout 60s candidate/build/Release/ide cc -target "$target" -march=baseline -O0 -fverify-codegen "$frontend" "-fregister-allocator=$mode" $strict "$pic" -g0 -c evidence/fixture.c -o "evidence/fixture-$tag.o" >"evidence/fixture-$tag.log" 2>&1
+                  fixture_objects=$((fixture_objects + 1))
+                  if test "$target" = x86_64-unknown-linux; then
+                    for host in clang gcc; do
+                      timeout 60s "$host" -no-pie "evidence/fixture-$tag.o" "evidence/reference-host-$host.o" -o "evidence/fixture-$host-$tag"
+                      timeout 20s "evidence/fixture-$host-$tag"
+                      fixture_native=$((fixture_native + 1))
+                    done
+                  fi
+                done
+              done
+            done
+          done
+          test "$fixture_objects" = 32
+          test "$fixture_native" = 32
+          printf 'SYSV_MEMORY_PROBE p9_baseline_wrong=%s p9_baseline_pass=%s p9_candidate_pass=%s c17_refusals=%s c17_baseline_pass=%s c17_candidate_pass=%s fixture_objects=%s fixture_native=%s\n' "$p9_baseline_wrong" "$p9_baseline_pass" "$p9_candidate_pass" "$c17_refusals" "$c17_baseline_pass" "$c17_candidate_pass" "$fixture_objects" "$fixture_native" | tee evidence/result.txt
+          sha256sum evidence/*.c evidence/*.o evidence/reference-clang evidence/reference-gcc evidence/negative-cursor-clang evidence/negative-cursor-gcc evidence/negative-payload-clang evidence/negative-payload-gcc > evidence/source-object-sha256.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: sysv-memory-va-arg-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          if-no-files-found: ignore
+          retention-days: 7
