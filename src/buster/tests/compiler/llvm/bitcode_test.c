@@ -2079,7 +2079,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_scalar_abi_runtime(UnitTest
                 String8 command[] = {S8("-emit-llvm"), S8("-std=gnu17"), S8("-g0"), S8("-fwrapv"), S8("-fno-strict-aliasing"),
                     S8("-funsigned-char"), S8("-fno-pie"), target, frontend[form], S8("-o"), output, paths[unit]};
                 CompilerDriverResult emitted = {0};
-                CompilerDriverResult repeated = {0};
+                CompilerDriverResult repeated;
                 bool valid = false;
                 if (host_ready && admission)
                 {
