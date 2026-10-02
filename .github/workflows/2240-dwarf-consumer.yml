@@ -97,6 +97,24 @@ jobs:
               return expression[0] == 0x10 and expression[-1] == 0x9f
 
 
+          def observed_transitions(observations, source_front_only=False):
+              counts = {"expression": 0, "physical": 0, "constant": 0}
+              previous = None
+              for observation in observations:
+                  if source_front_only and observation["phase"] != "source_front":
+                      continue
+                  expression = observation.get("expression_hex") if observation.get("available", False) else None
+                  # Gaps and the unobserved interval between statements are barriers.
+                  # A physical transition qualifies only between checked observations
+                  # within one statement, where x retains the independently known value.
+                  if previous is not None and expression is not None and previous != expression:
+                      counts["expression"] += 1
+                      counts["physical"] += physical_expression(previous) and physical_expression(expression)
+                      counts["constant"] += constant_expression(previous) and constant_expression(expression)
+                  previous = expression
+              return counts
+
+
           def fixture(pressure=False):
               lines = ["typedef unsigned long long U;", "static volatile int decision;",
                        "static volatile U observed;"]
@@ -122,15 +140,50 @@ jobs:
           GDB_SCRIPT = r'''
           import gdb, json, pathlib, traceback
           config = json.loads(pathlib.Path(CONFIG_PATH).read_text())
-          result = {"status": "fail", "observations": []}
+          result = {"status": "fail", "observations": [], "probes": [], "source_front_count": 0}
           def demand(condition, message):
               if not condition:
                   raise RuntimeError(message)
+
+          def same_statement(frame, line):
+              same = frame is not None and frame.name() == "main"
+              if same:
+                  sal = frame.find_sal()
+                  same = (sal.symtab is not None and sal.line == line and
+                          pathlib.Path(sal.symtab.fullname()).resolve() == pathlib.Path(config["source"]).resolve())
+              return same
+
+          def inspect(frame, ordinal, stop, phase, allow_gap):
+              record = {"ordinal": ordinal, "phase": phase, "line": stop["line"], "pc": frame.pc(),
+                        "expected": stop["expected"], "available": True}
+              result["observations"].append(record)
+              if config["ranges"] is not None:
+                  matches = [(index, row) for index, row in enumerate(config["ranges"]) if row["start"] <= frame.pc() < row["end"]]
+                  demand(len(matches) <= 1, "LOCATION overlapping ranges at actual PC")
+                  if not matches:
+                      record["available"] = False
+                      record["unavailable_gap"] = True
+                      demand(allow_gap, "VALUE source-front location unavailable")
+                      return
+                  index, row = matches[0]
+                  record["range_index"] = index
+                  record["expression_hex"] = row["expression_hex"]
+              value = frame.read_var("x")
+              record["optimized_out"] = value.is_optimized_out
+              record["unavailable"] = getattr(value, "is_unavailable", False)
+              demand(not record["optimized_out"] and not record["unavailable"], "VALUE available descriptor could not be fetched")
+              actual = int(value)
+              record["value"] = actual
+              expected = stop["expected"] + (1 if config["wrong_value"] and ordinal == 0 else 0)
+              record["expected"] = expected
+              demand(actual == expected, "VALUE mismatch: {} != {}".format(actual, expected))
+
           try:
               for command in ("set pagination off", "set confirm off", "set breakpoint pending off",
                               "set print entry-values no", "set debuginfod enabled off"):
                   gdb.execute(command)
               gdb.execute("file " + json.dumps(config["executable"]))
+              breakpoints = []
               for stop in config["stops"]:
                   try:
                       bp = gdb.Breakpoint(source=config["source"], line=stop["line"])
@@ -139,20 +192,42 @@ jobs:
                   demand(not bp.pending and len(bp.locations) > 0, "BREAKPOINT unresolved")
                   for location in bp.locations:
                       demand(location.source is not None and location.source[1] == stop["line"], "BREAKPOINT moved")
+                  breakpoints.append(bp)
               gdb.execute("run")
               for ordinal, stop in enumerate(config["stops"]):
                   frame = gdb.newest_frame()
-                  demand(frame is not None and frame.name() == "main", "FRAME wrong")
-                  sal = frame.find_sal()
-                  demand(sal.symtab is not None and pathlib.Path(sal.symtab.fullname()).resolve() == pathlib.Path(config["source"]).resolve(), "SOURCE wrong")
-                  demand(sal.line == stop["line"], "SOURCE line wrong")
-                  value = frame.read_var("x")
-                  demand(not value.is_optimized_out and not getattr(value, "is_unavailable", False), "VALUE unavailable")
-                  actual = int(value)
-                  result["observations"].append({"ordinal": ordinal, "line": sal.line, "pc": frame.pc(), "value": actual})
-                  expected = stop["expected"] + (1 if config["wrong_value"] and ordinal == 0 else 0)
-                  demand(actual == expected, "VALUE mismatch: {} != {}".format(actual, expected))
-                  gdb.execute("continue")
+                  demand(same_statement(frame, stop["line"]), "SOURCE front skipped, duplicated or moved")
+                  front_addresses = [location.address for location in breakpoints[ordinal].locations]
+                  demand(frame.pc() in front_addresses, "SOURCE not at original breakpoint address")
+                  inspect(frame, ordinal, stop, "source_front", False)
+                  result["source_front_count"] += 1
+                  already_at_next_front = False
+                  if config["instruction_probe"]:
+                      steps = 0
+                      while same_statement(frame, stop["line"]):
+                          demand(steps < config["maximum_line_steps"], "PROBE instruction budget exhausted")
+                          gdb.execute("stepi")
+                          steps += 1
+                          demand(gdb.selected_inferior().pid != 0, "PROBE inferior exited inside observation statement")
+                          frame = gdb.newest_frame()
+                          if same_statement(frame, stop["line"]):
+                              inspect(frame, ordinal, stop, "instruction_step", True)
+                      sal = frame.find_sal() if frame is not None else None
+                      boundary = {"ordinal": ordinal, "phase": "probe_boundary", "available": False,
+                                  "pc": frame.pc() if frame is not None else None,
+                                  "exit_line": sal.line if sal is not None else None}
+                      result["observations"].append(boundary)
+                      result["probes"].append({"ordinal": ordinal, "line": stop["line"], "steps": steps,
+                                               "exit_pc": boundary["pc"], "exit_line": boundary["exit_line"]})
+                      if ordinal + 1 < len(config["stops"]) and same_statement(frame, config["stops"][ordinal + 1]["line"]):
+                          # A step can hit the next active breakpoint. Do not continue
+                          # over it: the next loop must verify that exact source front.
+                          addresses = [location.address for location in breakpoints[ordinal + 1].locations]
+                          demand(frame.pc() in addresses, "PROBE entered next observation beyond its source front")
+                          already_at_next_front = True
+                  if not already_at_next_front:
+                      gdb.execute("continue")
+              demand(result["source_front_count"] == len(config["stops"]), "SOURCE incomplete front protocol")
               demand(gdb.selected_inferior().pid == 0, "EXIT still live")
               demand(int(gdb.parse_and_eval("$_exitcode")) == 0, "EXIT nonzero")
               result["status"] = "pass"
@@ -355,8 +430,9 @@ jobs:
                       demand(child.returncode == 0, "command failed: " + stem)
                   return child.returncode, stdout.decode(errors="replace")
 
-              def debugger(stem, binary, source, stops, wrong_value=False):
-                  config = {"executable": str(binary), "source": str(source), "stops": stops, "wrong_value": wrong_value}
+              def debugger(stem, binary, source, stops, wrong_value=False, ranges=None):
+                  config = {"executable": str(binary), "source": str(source), "stops": stops, "wrong_value": wrong_value,
+                            "ranges": ranges, "instruction_probe": ranges is not None, "maximum_line_steps": 128}
                   config_path = output / (stem + ".config.json")
                   config_path.write_text(json.dumps(config, indent=2) + "\n")
                   script = output / (stem + ".gdb.py")
@@ -369,8 +445,8 @@ jobs:
                   (output / (stem + ".result.json")).write_text(json.dumps(result, indent=2) + "\n")
                   return result
 
-              def negative_controls(stem, positive, no_debug, source, stops):
-                  wrong = debugger(stem + "-wrong-value", positive, source, stops, True)
+              def negative_controls(stem, positive, no_debug, source, stops, ranges=None):
+                  wrong = debugger(stem + "-wrong-value", positive, source, stops, True, ranges)
                   demand(wrong["status"] == "fail" and wrong["returncode"] == 1 and
                          wrong.get("error", "").startswith("VALUE mismatch"), "wrong-value negative control failed")
                   absent = debugger(stem + "-no-debug", no_debug, source, stops)
@@ -420,20 +496,16 @@ jobs:
                                   run(stem + "-dump", ["llvm-dwarfdump", "--debug-info", "--debug-loc", binary])
                                   run(stem + "-readelf", ["readelf", "--debug-dump=info,loc,decodedline", binary])
                                   row["locations"] = variable_locations(binary)
-                                  consumer = debugger(stem + "-consumer", binary, source, stops)
+                                  consumer = debugger(stem + "-consumer", binary, source, stops, ranges=row["locations"]["ranges"])
                                   row["consumer"] = consumer
                                   demand(consumer["status"] == "pass" and consumer["returncode"] == 0, mode + " GDB values failed")
-                                  observed = []
-                                  for observation in consumer["observations"]:
-                                      matches = [r for r in row["locations"]["ranges"] if r["start"] <= observation["pc"] < r["end"]]
-                                      demand(len(matches) == 1, "GDB stop not in one emitted x range")
-                                      observation["expression_hex"] = matches[0]["expression_hex"]
-                                      observed.append(matches[0]["expression_hex"])
-                                  pairs = list(zip(observed, observed[1:]))
-                                  row["observed_expression_transitions"] = sum(a != b for a, b in pairs)
-                                  row["observed_physical_location_transitions"] = sum(a != b and physical_expression(a) and physical_expression(b) for a, b in pairs)
-                                  row["observed_constant_expression_transitions"] = sum(a != b and constant_expression(a) and constant_expression(b) for a, b in pairs)
-                                  row["negative_controls"] = negative_controls(stem, binary, no_debug, source, stops)
+                                  transitions = observed_transitions(consumer["observations"])
+                                  source_front_transitions = observed_transitions(consumer["observations"], True)
+                                  row["observed_expression_transitions"] = transitions["expression"]
+                                  row["observed_physical_location_transitions"] = transitions["physical"]
+                                  row["observed_constant_expression_transitions"] = transitions["constant"]
+                                  row["source_front_physical_location_transitions"] = source_front_transitions["physical"]
+                                  row["negative_controls"] = negative_controls(stem, binary, no_debug, source, stops, row["locations"]["ranges"])
                                   row["status"] = "pass"
                                   if mode in ("fast", "quality") and row["locations"]["physical_location_transitions"] > 7 and row["observed_physical_location_transitions"] > 7:
                                       summary["qualifying_witnesses"].append({"case": case, "mode": mode,
@@ -446,6 +518,7 @@ jobs:
                                       "observed_transitions": row["observed_expression_transitions"],
                                       "physical_transitions": row["locations"]["physical_location_transitions"],
                                       "observed_physical_transitions": row["observed_physical_location_transitions"],
+                                      "source_front_physical_transitions": row["source_front_physical_location_transitions"],
                                       "constant_transitions": row["locations"]["constant_expression_transitions"],
                                       "observed_constant_transitions": row["observed_constant_expression_transitions"]}
                                   print("LOC_MODE " + stem + " " + json.dumps(counts), flush=True)
