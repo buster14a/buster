@@ -11,6 +11,8 @@
 // (c_ir_build_delimiter_index).
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
+// c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
+// into builtin list storage while the source place keeps its C type.
 // c_ir_assignment_expression_place_frame_push forms assignment destinations
 // after their calls complete, retaining the computed place for result storage.
 // c_ir_record_local_place publishes canonical owner/place identities for
@@ -19646,6 +19648,40 @@ BUSTER_C_INTERNAL bool c_ir_va_list_operand_valid(CIntegerIrBuilder* builder, Ir
     return list && list->kind == IR_TYPE_VA_LIST;
 }
 
+// Reinterpret the already evaluated Windows char* cursor's storage as a
+// builtin list place. The source object retains its C type and qualifications;
+// canonical VA instructions still consume only IR_TYPE_VA_LIST.
+BUSTER_C_INTERNAL IrValueId c_ir_windows_va_start_cursor_place(CIntegerIrBuilder* builder, IrValueId place, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId character = c_ir_builder_scalar_type(builder, C_TYPE_CHAR);
+    IrValue* destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
+    IrTypeId cursor_type = destination ? destination->canonical_type : IR_TYPE_ID_INVALID;
+    IrType* cursor = ir_type_from_id(&builder->program->types, cursor_type);
+    bool is_volatile = destination && (destination->is_volatile || (cursor && cursor->is_volatile));
+    bool valid = builder->target.os == OPERATING_SYSTEM_WINDOWS &&
+        (builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64) &&
+        destination && destination->category == IR_VALUE_PLACE && !destination->is_read_only &&
+        cursor && cursor->kind == IR_TYPE_POINTER && !cursor->is_atomic &&
+        character.value != IR_ID_UNDERLYING_INVALID && cursor->element_type.value == character.value;
+    if (valid)
+    {
+        IrTypeId list = c_ir_builder_scalar_type(builder, C_TYPE_VA_LIST);
+        if (is_volatile && list.value != IR_ID_UNDERLYING_INVALID)
+        {
+            list = c_ir_add_qualified_type(builder->program, list, false, true);
+        }
+        IrTypeId pointer = list.value != IR_ID_UNDERLYING_INVALID
+                               ? c_ir_add_pointer_type(builder->program, builder->pointer_types, list) : IR_TYPE_ID_INVALID;
+        IrValueId address = pointer.value != IR_ID_UNDERLYING_INVALID
+                                ? c_ir_emit_address_of_place(builder, place, cursor_type, source) : IR_VALUE_ID_INVALID;
+        IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID
+                             ? c_ir_emit_cast(builder, address, pointer, source) : IR_VALUE_ID_INVALID;
+        result = cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
                                                                         CIrPreparedCallContinuation continuation, bool child_success,
                                                                         IrValueId child_value)
@@ -19658,6 +19694,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
     u32 count = 0;
     bool valid = c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &count) &&
                  count == (selected->builtin_va_end ? 1u : 2u);
+    bool addressed_start = selected->builtin_va_start && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__va_start")) &&
+        starts[0] < ends[0] && c_token_is_punctuator(&builder->preprocess.tokens[starts[0]], C_PUNCTUATOR_AMPERSAND);
     CIrPreparedCallStepResult step = C_IR_PREPARED_CALL_STEP_FINISHED;
     IrValueId source_list = IR_VALUE_ID_INVALID;
     IrTypeId destination_type = IR_TYPE_ID_INVALID;
@@ -19684,8 +19722,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
         {
             // MSVC's header passes the address to __va_start; recover the
             // same destination expression without re-evaluating its effects.
-            if (selected->builtin_va_start && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__va_start")) &&
-                starts[0] < ends[0] && c_token_is_punctuator(&builder->preprocess.tokens[starts[0]], C_PUNCTUATOR_AMPERSAND))
+            if (addressed_start)
             {
                 starts[0] += 1;
             }
@@ -19702,6 +19739,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
             IrValueId place = frame->as.prepared_call.state->place;
             IrValue* destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
             IrType* type = destination ? ir_type_from_id(&builder->program->types, destination->canonical_type) : 0;
+            if (child_success && addressed_start && type && type->kind == IR_TYPE_POINTER)
+            {
+                place = c_ir_windows_va_start_cursor_place(builder, place, source);
+                frame->as.prepared_call.state->place = place;
+                destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
+                type = destination ? ir_type_from_id(&builder->program->types, destination->canonical_type) : 0;
+            }
             valid = child_success && destination && destination->category == IR_VALUE_PLACE && !destination->is_read_only &&
                     type && type->kind == IR_TYPE_VA_LIST && !type->is_atomic;
             if (valid)

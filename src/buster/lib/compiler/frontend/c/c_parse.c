@@ -26115,8 +26115,10 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             {
                 CTypeId type = C_TYPE_ID_INVALID;
                 u32 operand_start = starts[argument];
-                if (write && !argument && string_equal(name, S8("__va_start")) &&
-                    c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_AMPERSAND))
+                bool addressed_start = write && !argument && string_equal(name, S8("__va_start")) &&
+                    operand_start < ends[argument] &&
+                    c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_AMPERSAND);
+                if (addressed_start)
                 {
                     operand_start += 1;
                 }
@@ -26125,8 +26127,17 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                 {
                     type = result->types[type.value].element_type;
                 }
-                valid &= type.value < result->type_count && result->types[type.value].kind == C_TYPE_VA_LIST &&
-                         (!(write && !argument) || (!result->types[type.value].is_const && !result->types[type.value].is_atomic));
+                CType* operand = type.value < result->type_count ? result->types + type.value : 0;
+                CType* element = operand && operand->kind == C_TYPE_POINTER && operand->element_type.value < result->type_count
+                                     ? result->types + operand->element_type.value : 0;
+                // The Windows CRT's literal intrinsic addresses its public char* cursor.
+                // This representation bridge does not give other pointer typedefs va_list identity.
+                bool windows_cursor = addressed_start && preprocess.target.os == OPERATING_SYSTEM_WINDOWS &&
+                    (preprocess.target.cpu_arch == CPU_ARCH_X86_64 || preprocess.target.cpu_arch == CPU_ARCH_AARCH64) &&
+                    element && element->kind == C_TYPE_CHAR && !element->is_const && !element->is_volatile &&
+                    !element->is_restrict && !element->is_atomic;
+                valid &= operand && (operand->kind == C_TYPE_VA_LIST || windows_cursor) &&
+                         (!(write && !argument) || (!operand->is_const && !operand->is_atomic));
             }
             if (builtin == C_SYMBOL_BUILTIN_VA_START || builtin == C_SYMBOL_BUILTIN_VA_START_C23)
             {

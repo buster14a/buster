@@ -30831,6 +30831,207 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_semantics(UnitTestArg
     return result;
 }
 
+// Literal Windows __va_start bridges public cursor storage without changing its C type.
+typedef struct CTestWindowsVaStartCursorCase CTestWindowsVaStartCursorCase;
+struct CTestWindowsVaStartCursorCase
+{
+    String8 name;
+    String8 source;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_cursor(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef char *public_list;\n"
+            "typedef struct Holder Holder; struct Holder { public_list cursor; };\n"
+            "static int slot_calls;\n"
+            "static public_list *slot(public_list *value) { slot_calls += 1; return value; }\n"
+            "int probe(int last, ...) {\n"
+            "    public_list named; Holder holder; public_list array[2]; public_list indirect;\n"
+            "    public_list volatile qualified; int index = 0; int failed = 0;\n"
+            "    __va_start(&named, last); __va_start(&holder.cursor, last); __va_start(&array[index++], last);\n"
+            "    __va_start(&*slot(&indirect), last); __va_start(&qualified, last);\n"
+            "    failed += index != 1 || slot_calls != 1 || named == 0 || holder.cursor == 0 || array[0] == 0 || indirect == 0 || qualified == 0;\n"
+            "    failed += __builtin_va_arg(*((__builtin_va_list *)&named), int) != -17;\n"
+            "    failed += __builtin_va_arg(*((__builtin_va_list *)&holder.cursor), int) != -17;\n"
+            "    failed += __builtin_va_arg(*((__builtin_va_list *)&array[0]), int) != -17;\n"
+            "    failed += __builtin_va_arg(*((__builtin_va_list *)&indirect), int) != -17;\n"
+            "    failed += __builtin_va_arg(*((volatile __builtin_va_list *)&qualified), int) != -17;\n"
+            "    failed += __builtin_va_arg(*((__builtin_va_list *)&named), double) != 2.5;\n"
+            "    failed += __builtin_va_arg(*((__builtin_va_list *)&named), long long) != 0x1122334455667788LL;\n"
+            "    __builtin_va_list copy; __builtin_va_copy(copy, *((__builtin_va_list *)&holder.cursor));\n"
+            "    failed += __builtin_va_arg(copy, double) != 2.5 || __builtin_va_arg(copy, long long) != 0x1122334455667788LL;\n"
+            "    __builtin_va_list builtin; __va_start(&builtin, last);\n"
+            "    failed += __builtin_va_arg(builtin, int) != -17;\n"
+            "    __builtin_va_list ordinary; __builtin_va_start(ordinary, last);\n"
+            "    failed += __builtin_va_arg(ordinary, int) != -17;\n"
+            "    __builtin_va_end(copy); __builtin_va_end(builtin); __builtin_va_end(ordinary);\n"
+            "    __builtin_va_end(*((__builtin_va_list *)&named)); __builtin_va_end(*((__builtin_va_list *)&holder.cursor));\n"
+            "    __builtin_va_end(*((__builtin_va_list *)&array[0])); __builtin_va_end(*((__builtin_va_list *)&indirect));\n"
+            "    __builtin_va_end(*((volatile __builtin_va_list *)&qualified));\n"
+            "    return failed;\n"
+            "}\n"
+            "int main(void) { return probe(9, -17, 2.5, 0x1122334455667788LL); }\n");
+    CTestWindowsVaStartCursorCase invalid[] = {
+        {S8("const-cursor"), S8("void probe(int last, ...) { char *const cursor = 0; __va_start(&cursor, last); }\n")},
+        {S8("atomic-cursor"), S8("void probe(int last, ...) { _Atomic(char *) cursor; __va_start(&cursor, last); }\n")},
+        {S8("no-address"), S8("void probe(int last, ...) { char *cursor; __va_start(cursor, last); }\n")},
+        {S8("void-pointee"), S8("void probe(int last, ...) { void *cursor; __va_start(&cursor, last); }\n")},
+        {S8("integer-pointee"), S8("void probe(int last, ...) { int *cursor; __va_start(&cursor, last); }\n")},
+        {S8("unsigned-character"), S8("void probe(int last, ...) { unsigned char *cursor; __va_start(&cursor, last); }\n")},
+        {S8("signed-character"), S8("void probe(int last, ...) { signed char *cursor; __va_start(&cursor, last); }\n")},
+        {S8("nested-pointer"), S8("void probe(int last, ...) { char **cursor; __va_start(&cursor, last); }\n")},
+        {S8("const-pointee"), S8("void probe(int last, ...) { const char *cursor; __va_start(&cursor, last); }\n")},
+        {S8("volatile-pointee"), S8("void probe(int last, ...) { volatile char *cursor; __va_start(&cursor, last); }\n")},
+        {S8("arity-one"), S8("void probe(int last, ...) { char *cursor; __va_start(&cursor); }\n")},
+        {S8("arity-three"), S8("void probe(int last, ...) { char *cursor; __va_start(&cursor, last, 0); }\n")},
+        {S8("nonvariadic"), S8("void probe(int last) { char *cursor; __va_start(&cursor, last); }\n")},
+        {S8("builtin-start-pointer"), S8("void probe(int last, ...) { char *cursor; __builtin_va_start(cursor, last); }\n")},
+        {S8("builtin-copy-pointer"), S8("void probe(int last, ...) { char *cursor; __builtin_va_list source; __builtin_va_copy(cursor, source); }\n")},
+        {S8("builtin-end-pointer"), S8("void probe(int last, ...) { char *cursor; __builtin_va_end(cursor); }\n")},
+        {S8("builtin-arg-pointer"), S8("int probe(int last, ...) { char *cursor; return __builtin_va_arg(cursor, int); }\n")},
+        {S8("address-rvalue"), S8("void probe(int last, ...) { char *cursor; __va_start(&(cursor + 1), last); }\n")},
+    };
+    for (u32 layout = 0; layout < 6; layout += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = layout & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = layout < 2 ? OPERATING_SYSTEM_WINDOWS : layout < 4 ? OPERATING_SYSTEM_LINUX : OPERATING_SYSTEM_MACOS;
+        for (u32 row = 0; row <= BUSTER_ARRAY_LENGTH(invalid); row += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 input = row ? invalid[row - 1].source : source;
+            String8 name = row ? invalid[row - 1].name : S8("live-cursors");
+            bool accepted = !row && layout < 2;
+            CPreprocessResult tokens = c_preprocess(temporary.arena, input, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_C17,
+            });
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            String8 context = string_format(temporary.arena, S8("WINDOWS_VA_CURSOR case={S8} layout={u32} accepted={u32}"),
+                name, layout, (u32)accepted);
+            BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count, context);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST_RAW(arguments, analysis.analysis_complete && (accepted ? !analysis.diagnostic_count : analysis.diagnostic_count != 0), context);
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("windows-va-cursor.c"), tokens, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                String8 detail = string_format(temporary.arena, S8("{S8} form={u32} message={S8}"), context, form,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none"));
+                BUSTER_TEST_RAW(arguments, accepted ? lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count :
+                    lowered.diagnostic_count && !lowered.canonical_ir_certified, detail);
+                if (accepted && lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count)
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST_RAW(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE, detail);
+                    IrFunction* probe = c_test_find_ir_function(module, S8("probe"));
+                    BUSTER_TEST_RAW(arguments, probe != 0, detail);
+                    u32 starts = 0;
+                    u32 copies = 0;
+                    u32 reads = 0;
+                    u32 ends = 0;
+                    u32 volatile_list_stores = 0;
+                    for (u32 instruction_index = 0; probe && instruction_index < probe->instruction_count; instruction_index += 1)
+                    {
+                        IrInstruction* instruction = probe->instructions + instruction_index;
+                        starts += instruction->opcode == IR_OPCODE_VA_START;
+                        copies += instruction->opcode == IR_OPCODE_VA_COPY;
+                        reads += instruction->opcode == IR_OPCODE_VA_ARG;
+                        ends += instruction->opcode == IR_OPCODE_VA_END;
+                        if (instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY)
+                        {
+                            IrType* type = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
+                            BUSTER_TEST_RAW(arguments, type && type->kind == IR_TYPE_VA_LIST && !type->is_atomic && !type->is_volatile &&
+                                type->layout.resolved && type->layout.size == 8 && type->layout.alignment == 8, detail);
+                        }
+                        if (instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access && instruction->operand_count == 2 &&
+                            instruction->operands[0].value < probe->value_count)
+                        {
+                            IrType* type = ir_type_from_id(&lowered.program->types, probe->values[instruction->operands[0].value].canonical_type);
+                            volatile_list_stores += type && type->kind == IR_TYPE_VA_LIST && type->is_volatile;
+                        }
+                    }
+                    BUSTER_TEST_RAW(arguments, starts == 7 && copies == 1 && reads == 11 && ends == 8 && volatile_list_stores != 0, detail);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if BUSTER_WINDOWS && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 input = buster_test_temporary_path(arguments->arena, S8("windows-va-cursor-live"), S8(".c"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    bool admission = written;
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 mode = 0; admission && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 form = 0; admission && form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            FileMapRead mapped = file_map_read(temporary.arena, input, (FileReadOptions){0});
+            bool original = mapped.bytes.pointer && mapped.bytes.length == source.length && !memcmp(mapped.bytes.pointer, source.pointer, source.length);
+            BUSTER_TEST(arguments, original);
+            file_unmap_read(mapped);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("windows-va-cursor-live"), S8(".exe"));
+            String8 command[] = {S8("-std=c17"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"),
+                modes[mode], forms[form], S8("-fverify-codegen"), S8("-o"), output, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = mode != 0;
+            CompilerDriverResult linked = {0};
+            if (original)
+            {
+                linked = compiler_driver_execute_invocation(temporary.arena, invocation);
+            }
+            else
+            {
+                admission = false;
+            }
+            BUSTER_TEST_RAW(arguments, original && linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+            if (original && linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                        .capture_limits = {.per_stream = {0, BUSTER_KB(64), BUSTER_KB(64)}, .total = BUSTER_KB(128)},
+                        .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+                bool passed = false;
+                if (spawn.handle)
+                {
+                    ProcessWaitResult waited = os_process_wait_deadline(temporary.arena, spawn, 30000000);
+                    passed = spawn.process_group && !spawn.error.v && spawn.failure == PROCESS_SPAWN_FAILURE_NONE &&
+                        waited.result == PROCESS_RESULT_SUCCESS && !waited.platform_status && !waited.timed_out &&
+                        !waited.termination_requested && !waited.forcibly_terminated && !waited.capture_limit_exceeded &&
+                        !waited.output_truncated && !waited.capture_failed && !waited.process_tree_cleanup_failed &&
+                        !waited.process_group_reservation_retained && !waited.process_group_ownership_lost &&
+                        !waited.dropped_total && !waited.streamed_total && waited.captured_total == waited.observed_total;
+                    admission = !waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
+                    arguments->show(arguments, S8("WINDOWS_VA_CURSOR_RUNTIME mode={u32} form={u32} result={u32} native={u32} "
+                        "timeout={u32} requested={u32} forced={u32} capture_limit={u32} truncated={u32} capture_failed={u32} "
+                        "cleanup_failed={u32} reservation_retained={u32} ownership_lost={u32}\n"),
+                        mode, form, (u32)waited.result, waited.platform_status, (u32)waited.timed_out, (u32)waited.termination_requested,
+                        (u32)waited.forcibly_terminated, (u32)waited.capture_limit_exceeded, (u32)waited.output_truncated,
+                        (u32)waited.capture_failed, (u32)waited.process_tree_cleanup_failed,
+                        (u32)waited.process_group_reservation_retained, (u32)waited.process_group_ownership_lost);
+                }
+                else
+                {
+                    admission = false;
+                }
+                BUSTER_TEST_RAW(arguments, passed, string_format(temporary.arena, S8("WINDOWS_VA_CURSOR_RUNTIME mode={u32} form={u32} "
+                    "spawn_error={u32} stage={u32} group={u32}"), mode, form, spawn.error.v, (u32)spawn.failure, (u32)spawn.process_group));
+            }
+            if (admission) BUSTER_TEST(arguments, os_file_delete(output));
+            scratch_end(temporary);
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+#endif
+    return result;
+}
+
 // Needed Windows header-inline bodies retain their shared external identity.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_inline_bodies(UnitTestArguments* arguments)
 {
@@ -32454,6 +32655,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_windows_va_start_semantics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_windows_va_start_cursor);
     BUSTER_TEST_FIXTURE(arguments, c_test_windows_inline_bodies);
     BUSTER_TEST_FIXTURE(arguments, c_test_c99_inline_linkage);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);

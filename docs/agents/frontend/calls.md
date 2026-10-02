@@ -231,6 +231,26 @@ allocator modes and both frontend forms.
   header order without turning ordinary pointer typedefs into builtin types.
   The modern CRT `__crt_va_*` macros use the same bridge when already defined.
 
+  Literal `__va_start(&cursor, last)` also admits the CRT's modifiable public
+  `char *` cursor on Windows x86-64 and AArch64. Its addressed place is evaluated
+  once, then the existing typed address/cast/dereference helpers view that
+  storage as the target's builtin list. The original C pointer type remains
+  intact; a volatile cursor retains a volatile list store. Arity and variadic
+  function checks remain in force. Other builtin spellings, non-Windows targets,
+  non-address operands, const/atomic destinations and non-character or qualified
+  character pointees keep their refusal. Canonical validators still require
+  `IR_TYPE_VA_LIST`; ordinary pointer typedefs do not gain builtin identity.
+
+  `c_test_windows_va_start_cursor` checks live named/member/subscript/dereference
+  and volatile cursors, fixed integer/double/long-long values, builtin-list and
+  explicit-copy controls, plus negative neighbors through semantic validation
+  and both canonical frontend forms on Windows/Linux/macOS x86-64/AArch64.
+  Native Windows execution covers both forms and four allocator modes, with
+  original source readback, finite process-group deadlines and full transport
+  failure checks. The earlier unused-body diagnostic sources and real SDK
+  formatting witnesses remain unchanged. This fixture is a validation contract,
+  not evidence of an executed or passing repair.
+
 ## Declarator constraints
 
 Function types reject array and function return types when their declarators
