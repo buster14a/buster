@@ -1691,6 +1691,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_consumers(UnitTestArgu
     {
         arguments->show(arguments, S8("LLVM weak ELF validation requires clang and llvm-readelf/readelf on PATH\n"));
     }
+#else
+    (void)arguments;
 #endif
     return result;
 }
