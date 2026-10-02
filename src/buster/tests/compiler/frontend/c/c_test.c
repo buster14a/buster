@@ -28847,17 +28847,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_qualifiers(UnitTestA
             CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
             BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
             BUSTER_TEST_RAW(arguments, (analysis.diagnostic_count == 0) == cases[index].accepted, source);
-            CParseResult parse = c_parse(temporary.arena, tokens);
             for (u32 frontend = 0; frontend < 2; frontend += 1)
             {
-                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("transparent-union-qualifiers.c"), tokens, parse,
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("transparent-union-qualifiers.c"), tokens, syntax,
                     target, (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
-                bool accepted = parse.diagnostic_count == 0 && lowered.program && lowered.diagnostic_count == 0;
+                bool accepted = lowered.program && lowered.diagnostic_count == 0;
                 BUSTER_TEST_RAW(arguments, accepted == cases[index].accepted, source);
                 if (accepted)
                 {
                     BUSTER_TEST(arguments, lowered.program->module_count != 0 &&
                         ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+                }
+                if (!cases[index].accepted)
+                {
+                    BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && !lowered.program);
                 }
             }
             scratch_end(temporary);
