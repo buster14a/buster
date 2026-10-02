@@ -765,7 +765,14 @@ without facts for identical bitcode and diagnostics.
   values even after a bound variable changes.
   `compiler_driver_test_vla_runtime_types` checks these sizes, allocation and
   row casts at O0/O2 in both frontend forms and all four allocators. It also
-  checks nested call arguments and the effects of VLA-valued `typeof` operands.
+  checks pointer/pointer, scalar/pointer and pointer/scalar declarator lists,
+  including row stepping, pointer differences, saved bounds and per-declarator
+  bound side effects. The single and list paths both flatten a pointer-to-VLA
+  carrier and attach its declaration's runtime shape before initialization;
+  #2062 supplied the list path that was missing in #1390. The syntax/object
+  diagnostic-equivalence corpus retains all three original accepted forms.
+  The runtime fixture also checks nested call arguments and the effects of
+  VLA-valued `typeof` operands.
   Object and typedef declarations evaluate VLA-valued `typeof` operands before
   capturing their layout. Nested pointer-to-VLA casts receive a diagnostic
   until their indirect shape can be retained.
