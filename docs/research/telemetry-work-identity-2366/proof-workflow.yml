@@ -1,0 +1,122 @@
+name: Telemetry work identity proof 2366
+on:
+  push:
+    branches: [codex/2366-telemetry-work-identity-proof]
+permissions:
+  contents: read
+concurrency:
+  group: telemetry-work-identity-proof-2366
+  cancel-in-progress: false
+jobs:
+  proof:
+    if: github.ref == 'refs/heads/codex/2366-telemetry-work-identity-proof'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 12
+    env:
+      ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin sources and hosted toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/transport-revision.txt
+          git diff --name-only 4c08ec62d1ff2ce492031e6151b63ea63d7f948c HEAD > evidence/transport-delta.txt
+          test "$(cat evidence/transport-delta.txt)" = '.github/workflows/probe-2366-telemetry.yml'
+          git diff --check f73f75ed4a59594eb1f43ec505c100457bc35185 4c08ec62d1ff2ce492031e6151b63ea63d7f948c
+          clang --version > evidence/clang.txt
+          uname -a > evidence/host.txt
+          lscpu >> evidence/host.txt
+          printf 'source=4c08ec62d1ff2ce492031e6151b63ea63d7f948c\nbaseline=f73f75ed4a59594eb1f43ec505c100457bc35185\n' > evidence/source-pins.txt
+          sha256sum tools/throughput/throughput.c tools/throughput/tests.c build.c > evidence/candidate-inputs.sha256
+      - name: Baseline with the independent regression must fail
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_root="$RUNNER_TEMP/telemetry-2366-baseline"
+          git worktree add --detach "$base_root" f73f75ed4a59594eb1f43ec505c100457bc35185
+          git show 4c08ec62d1ff2ce492031e6151b63ea63d7f948c:tools/throughput/tests.c > "$base_root/tools/throughput/tests.c"
+          cd "$base_root"
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
+          set +e
+          ./build/build bench_throughput self-test > "$GITHUB_WORKSPACE/evidence/baseline.log" 2>&1
+          result=$?
+          set -e
+          printf '%s\n' "$result" > "$GITHUB_WORKSPACE/evidence/baseline-exit.txt"
+          test "$result" = 1
+          cp -a build/throughput-tool-tests/probe-identity-* "$GITHUB_WORKSPACE/evidence/"
+          python3 - "$GITHUB_WORKSPACE/evidence/baseline.log" <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path(sys.argv[1]).read_text()
+          matches = re.findall(r'THROUGHPUT_INTEGRATION_TEST assertions=(\d+) failures=(\d+)', text)
+          assert len(matches) == 1 and int(matches[0][1]) == 24, matches
+          assert text.count('tp_compare(directory) == (scenario < NEGATIVE_CASES ? 2 : 0)') == 8
+          print('BASELINE_CONFIRMED eight inconsistent probe cases accepted; 24 expected regression assertions failed')
+          PY
+          mkdir "$GITHUB_WORKSPACE/evidence/baseline"
+          mv "$GITHUB_WORKSPACE/evidence"/probe-identity-* "$GITHUB_WORKSPACE/evidence/baseline/"
+      - name: Corrected native harness normal and sanitized
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
+          ./build/build bench_throughput self-test > evidence/candidate.log 2>&1
+          ./build/build bench_throughput self-test --sanitize > evidence/sanitized.log 2>&1
+          mkdir evidence/candidate evidence/sanitized
+          cp -a build/throughput-tool-tests/probe-identity-* evidence/candidate/
+          cp -a build/throughput-tool-tests-sanitized/probe-identity-* evidence/sanitized/
+          sha256sum build/build build/throughput-tools/throughput-tests build/throughput-tools/throughput-tests-sanitized > evidence/executables.sha256
+      - name: Independently verify cases and sealed evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import csv, hashlib, json, pathlib, re
+          root = pathlib.Path('evidence')
+          names = ['samples.csv', 'telemetry.csv', 'metadata.json', 'jobs.tsv', 'commands.jsonl', 'capabilities.jsonl']
+          receipts = []
+          for variant in ['baseline', 'candidate', 'sanitized']:
+              if variant != 'baseline':
+                  log = (root / ('candidate.log' if variant == 'candidate' else 'sanitized.log')).read_text()
+                  assert re.search(r'THROUGHPUT_INTEGRATION_TEST assertions=\d+ failures=0', log)
+              for case in range(10):
+                  directory = root / variant / ('probe-identity-' + str(case))
+                  samples = list(csv.DictReader((directory / 'samples.csv').open()))
+                  probes = list(csv.DictReader((directory / 'telemetry.csv').open()))
+                  assert len(samples) == 80 and len(probes) == 12
+                  refs = {int(v): next(s for s in samples if s['variant'] == v) for v in ['0', '1']}
+                  mismatches = [(p, f) for p in probes for f in ['output_bytes', 'source_bytes', 'source_lines', 'source_functions', 'output_sha256'] if p[f] != refs[int(p['variant'])][f]]
+                  assert len(mismatches) == (1 if case < 8 else 0), (variant, case, mismatches)
+                  if case < 8:
+                      probe, field = mismatches[0]
+                      assert field == ('source_functions' if (case // 2) % 2 else 'output_bytes')
+                      assert int(probe['round']) == case // 4 and int(probe['variant']) == case % 2 and probe['pair'] == '2'
+                  if case == 8:
+                      assert refs[0]['output_bytes'] != refs[1]['output_bytes'] and refs[0]['output_sha256'] != refs[1]['output_sha256']
+                  if case == 9:
+                      assert all(r['source_functions'] == '0' for r in samples + probes)
+                  expected_reports = variant == 'baseline' or case >= 8
+                  assert all((directory / n).exists() == expected_reports for n in ['summary.json', 'summary.md'])
+                  seal = (directory / 'complete.txt').read_text()
+                  for name in names:
+                      digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+                      assert digest + ' ' + name in seal
+                  receipts.append({'build': variant, 'case': case, 'mismatch_count': len(mismatches), 'summaries_present': expected_reports, 'seal_verified': True})
+          (root / 'verification.json').write_text(json.dumps({'source': '4c08ec62d1ff2ce492031e6151b63ea63d7f948c', 'baseline': 'f73f75ed4a59594eb1f43ec505c100457bc35185', 'cases': receipts, 'hardware_acceptance': False}, indent=2) + '\n')
+          print('PROOF_PASSED baseline exposed all 8 cases; normal/sanitized candidate refused all 8; both controls passed; all seals preserved')
+          PY
+          cat evidence/source-pins.txt >> "$GITHUB_STEP_SUMMARY"
+          printf '\nHosted native harness proof passed. No compiler performance measurement or hardware acceptance.\n' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: telemetry-2366-proof
+          path: evidence
+          retention-days: 30
