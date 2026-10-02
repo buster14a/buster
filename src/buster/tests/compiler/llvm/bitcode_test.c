@@ -1582,7 +1582,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_scalar_abi_wire(UnitTestArg
             instructions[instruction].immediates = parameter_indices + index;
             instructions[instruction].immediate_count = 1;
             instructions[instruction].result.value = instruction;
-            values[instruction] = (IrValue){.id = {.value = instruction}, .canonical_type = probe_parameters[index],
+            values[instruction] = (IrValue){.canonical_type = probe_parameters[index],
                 .definition = {.value = instruction}, .category = IR_VALUE_VALUE};
         }
         for (u32 index = 9; index <= 10; index += 1)
@@ -1592,7 +1592,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_scalar_abi_wire(UnitTestArg
             instructions[index].operands = index == 9 ? direct : indirect;
             instructions[index].operand_count = BUSTER_ARRAY_LENGTH(direct);
             instructions[index].result.value = index;
-            values[index] = (IrValue){.id = {.value = index}, .canonical_type = {.value = 1}, .definition = {.value = index}, .category = IR_VALUE_VALUE};
+            values[index] = (IrValue){.canonical_type = {.value = 1}, .definition = {.value = index}, .category = IR_VALUE_VALUE};
         }
         instructions[11].opcode = IR_OPCODE_RETURN;
         instructions[11].operands = &returned;
