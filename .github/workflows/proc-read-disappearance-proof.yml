@@ -1,0 +1,16 @@
+name: OS proc read disappearance proof
+on:
+  push:
+    branches: [codex/2380-process-group-churn-validation]
+permissions:
+  contents: read
+jobs:
+  native-reader-proof:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 3
+      - name: Baseline, candidate and classifier mutation controls
+        run: python3 tools/proc_read_disappearance_proof_test.py
