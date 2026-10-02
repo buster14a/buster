@@ -1,0 +1,62 @@
+name: Slot cache simulation
+
+on:
+  push:
+    branches:
+      - codex/1912-slot-coloring-evidence
+    paths:
+      - tools/simulate_slot_coloring.py
+      - .github/workflows/slot-cache-simulation.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: slot-cache-simulation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  simulate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      BUSTER_TEST_JOBS: 2
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install diagnostic simulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+      - name: Build matched portable hosts and simulate
+        run: |
+          cp tools/simulate_slot_coloring.py "$RUNNER_TEMP/simulate-slot-coloring.py"
+          python3 "$RUNNER_TEMP/simulate-slot-coloring.py" \
+            --baseline 33b73bb9562ddf2756575e7e453e59fb96b4c48f \
+            --head 9af21c5cfb2911dd46d508e58f6f9c1c9c99628c \
+            --timing-pairs 7 \
+            --output "$RUNNER_TEMP/slot-cache-simulation"
+      - name: Retain complete evidence including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: slot-simulation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/slot-cache-simulation
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain compact summary and logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compact-simulation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/slot-cache-simulation/*.json
+            ${{ runner.temp }}/slot-cache-simulation/*.jsonl
+            ${{ runner.temp }}/slot-cache-simulation/*.log
+            ${{ runner.temp }}/slot-cache-simulation/*.rss
+            ${{ runner.temp }}/slot-cache-simulation/*.txt
+            ${{ runner.temp }}/slot-cache-simulation/*.c
+          if-no-files-found: error
+          retention-days: 14
