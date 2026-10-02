@@ -14,6 +14,7 @@ from unittest import mock
 import urllib.parse
 
 import github_ci_time
+import merge_queue_admission as admission
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -90,6 +91,12 @@ class ReconciledInventoryTests(unittest.TestCase):
             result = github_ci_time.require_jobs(arguments)
         return result
 
+    def test_metadata_contract_matches_existing_trusted_publisher(self):
+        self.assertEqual(github_ci_time.GITHUB_ACTIONS_APP_ID, admission.GITHUB_ACTIONS_APP_ID)
+        self.assertEqual(github_ci_time.RECONCILED_CHECK_MARKERS,
+                         {admission.CONTEXT: admission.SCHEMA + ":",
+                          admission.RETIREMENT_CONTEXT: admission.RETIREMENT_MARKER + ":"})
+
     def test_pending_success_and_failed_metadata_are_retained_outside_workloads(self):
         for status, conclusion in (("in_progress", None), ("completed", "success"),
                                    ("completed", "failure"), ("completed", "cancelled")):
@@ -141,6 +148,8 @@ class ReconciledInventoryTests(unittest.TestCase):
     def test_partial_moving_or_excessive_check_snapshots_are_refused(self):
         first = {"total_count": 2, "check_runs": self.checks[:1]}
         cases = ((first, {"total_count": 2, "check_runs": []}),
+                 ({"total_count": 200, "check_runs": [{}] * 100},
+                  {"total_count": 150, "check_runs": [{}] * 50}),
                  (first, {"total_count": 3, "check_runs": self.checks[1:]}),
                  ({"total_count": 1001, "check_runs": self.checks},),
                  ({"total_count": True, "check_runs": self.checks},))
@@ -150,6 +159,12 @@ class ReconciledInventoryTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         github_ci_time._gate_reconciled_checks(
                             "buster14a/buster", self.HEAD, None, github_ci_time.time.monotonic() + 30, [])
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[
+                {"total_count": 101, "check_runs": [{}] * 100},
+                {"total_count": 101, "check_runs": [{}]}]) as read:
+            self.assertEqual(len(github_ci_time._gate_reconciled_checks(
+                "buster14a/buster", self.HEAD, None, github_ci_time.time.monotonic() + 30, [])), 101)
+            self.assertEqual(read.call_count, 2)
         with mock.patch.object(github_ci_time, "api_get") as read:
             with self.assertRaises(ValueError):
                 github_ci_time._gate_reconciled_checks(

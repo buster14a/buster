@@ -276,12 +276,36 @@ def source_run(api, sha, *, expected=None, diagnostics=None):
     return source
 
 
+def reconciled_check_inventory(api, sha):
+    """Checks-only complete snapshot; verify stable bounded totals on every page."""
+    rows = []
+    total = None
+    page = 1
+    while total is None or len(rows) < total:
+        require(page <= 10, "reconciler check pagination limit reached")
+        batch = api.get(f"commits/{sha}/check-runs", filter="all", per_page=100, page=page)
+        require(isinstance(batch, dict), "malformed reconciler check page")
+        count = batch.get("total_count")
+        require(type(count) is int and 0 <= count <= 1000 and
+                (total is None or count == total),
+                "missing, changing or excessive reconciler check inventory")
+        total = count
+        chunk = batch.get("check_runs")
+        require(isinstance(chunk, list) and len(chunk) <= 100 and
+                len(rows) + len(chunk) <= total and (bool(chunk) or len(rows) == total),
+                "incomplete reconciler check pagination")
+        rows.extend(chunk)
+        require(len(chunk) == 100 or len(rows) == total, "partial reconciler check page")
+        page += 1
+    return rows
+
+
 def successful_source_jobs(api, source, sha, *, diagnostics=None):
     diagnostics = {} if diagnostics is None else diagnostics
     run_id = source["id"]
     jobs = api.pages(f"actions/runs/{run_id}/attempts/1/jobs", "jobs")
     try:
-        checks = (api.pages(f"commits/{sha}/check-runs", "check_runs", filter="all")
+        checks = (reconciled_check_inventory(api, sha)
                   if github_ci_time.reconciled_job_candidates(jobs) else [])
         jobs, diagnostics["source_reconciled_checks"] = github_ci_time.separate_reconciled_jobs(
             jobs, run_id, 1, sha, checks)
@@ -422,7 +446,7 @@ def verify_current_jobs(api, sha, run_id, *, diagnostics=None):
     exact_run(current, run_id=run_id, sha=sha, event="push", branch="main")
     rows = api.pages(f"actions/runs/{run_id}/jobs", "jobs", filter="all")
     try:
-        checks = (api.pages(f"commits/{sha}/check-runs", "check_runs", filter="all")
+        checks = (reconciled_check_inventory(api, sha)
                   if github_ci_time.reconciled_job_candidates(rows) else [])
         rows, diagnostics["current_reconciled_checks"] = github_ci_time.separate_reconciled_jobs(
             rows, run_id, 1, sha, checks)

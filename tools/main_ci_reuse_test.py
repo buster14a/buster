@@ -107,6 +107,8 @@ class FakeAPI:
                                 "status": status, "conclusion": conclusion})
 
     def get(self, path, **query):
+        if path == f"commits/{SHA}/check-runs" and query == {"filter": "all", "per_page": 100, "page": 1}:
+            return {"total_count": len(self.checks), "check_runs": copy.deepcopy(self.checks)}
         if path == f"actions/runs/{CURRENT_ID}":
             return copy.deepcopy(self.current)
         if path == f"actions/runs/{SOURCE_ID}":
@@ -119,8 +121,6 @@ class FakeAPI:
         raise AssertionError(path)
 
     def pages(self, path, field, **query):
-        if path == f"commits/{SHA}/check-runs" and field == "check_runs" and query == {"filter": "all"}:
-            return copy.deepcopy(self.checks)
         if path == f"actions/workflows/{reuse.WORKFLOW_ID}/runs" and field == "workflow_runs":
             return [copy.deepcopy(self.source)]
         if path == f"actions/runs/{SOURCE_ID}/attempts/1/jobs" and field == "jobs":
@@ -219,12 +219,27 @@ class MainCIReuseTests(unittest.TestCase):
 
     def test_complete_check_proof_uses_strict_pagination(self):
         api = GitHub(reuse.REPOSITORY, "unused")
-        with mock.patch.object(api, "get", return_value={"total_count": 2, "check_runs": []}):
-            with self.assertRaises(AdmissionError):
-                api.pages(f"commits/{SHA}/check-runs", "check_runs", filter="all")
+        cases = (({"total_count": 2, "check_runs": []},),
+                 ({"total_count": 200, "check_runs": [{}] * 100},
+                  {"total_count": 150, "check_runs": [{}] * 50}),
+                 ({"total_count": 101, "check_runs": [{}] * 100},
+                  {"total_count": 101, "check_runs": []}),
+                 ({"total_count": True, "check_runs": []},),
+                 ({"total_count": 1001, "check_runs": []},),
+                 ({"total_count": 2, "check_runs": [{}]},))
+        for pages in cases:
+            with self.subTest(pages=pages):
+                with mock.patch.object(api, "get", side_effect=pages):
+                    with self.assertRaises(AdmissionError):
+                        reuse.reconciled_check_inventory(api, SHA)
+        with mock.patch.object(api, "get", side_effect=[
+                {"total_count": 101, "check_runs": [{}] * 100},
+                {"total_count": 101, "check_runs": [{}]}]) as read:
+            self.assertEqual(len(reuse.reconciled_check_inventory(api, SHA)), 101)
+            self.assertEqual(read.call_count, 2)
         with mock.patch.object(api, "get", side_effect=OSError("check evidence unavailable")):
             with self.assertRaises(OSError):
-                api.pages(f"commits/{SHA}/check-runs", "check_runs", filter="all")
+                reuse.reconciled_check_inventory(api, SHA)
 
     def test_reuse_token_has_only_read_permission_for_check_proof(self):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()

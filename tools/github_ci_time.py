@@ -615,6 +615,8 @@ def _gate_reconciled_checks(repository, head_sha, token, deadline, lookups):
     total = None
     page = 1
     while total is None or len(checks) < total:
+        if page > 10:
+            raise ValueError("Reconciler check pagination limit reached")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ValueError("Reconciler check proof exhausted the metadata budget")
@@ -629,10 +631,12 @@ def _gate_reconciled_checks(repository, head_sha, token, deadline, lookups):
             raise ValueError("Missing, changing or excessive reconciler check inventory")
         total = count
         chunk = batch.get("check_runs")
-        if (not isinstance(chunk, list) or len(checks) + len(chunk) > total or
+        if (not isinstance(chunk, list) or len(chunk) > JOB_PAGE_SIZE or len(checks) + len(chunk) > total or
                 (not chunk and len(checks) < total)):
             raise ValueError("Incomplete reconciler check pagination")
         checks.extend(chunk)
+        if len(chunk) != JOB_PAGE_SIZE and len(checks) != total:
+            raise ValueError("Partial reconciler check page")
         page += 1
     return checks
 
