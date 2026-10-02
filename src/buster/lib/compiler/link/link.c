@@ -18,6 +18,9 @@
 // states the relocation and preemption rules. link_elf_version_plan_build and
 // link_elf_copy_plan_build are the symbol-version and copy-slot construction
 // it shares with the x86-64 dynamic writer.
+// link_comdat_associations_resolve follows object-local associative paths in
+// bounded linear work after group arbitration; state marks detect cycles and
+// replay each unresolved path without allocating an auxiliary stack.
 // link_validate_linker_arguments refuses unconsumed options before any writer.
 // Before x86-64 Linux writer selection,
 // link_elf_without_unused_got_marker removes only unreferenced reserved markers
@@ -1540,13 +1543,6 @@ BUSTER_GLOBAL_LOCAL u32 link_pe_export_group_scalar(NativeExecutableLinkOptions 
 }
 
 
-typedef enum LinkComdatState
-{
-    LINK_COMDAT_STATE_UNKNOWN,
-    LINK_COMDAT_STATE_KEEP,
-    LINK_COMDAT_STATE_DISCARD,
-} LinkComdatState;
-
 typedef struct LinkComdatPlan LinkComdatPlan;
 struct LinkComdatPlan
 {
@@ -1815,6 +1811,102 @@ BUSTER_GLOBAL_LOCAL bool link_comdat_record_valid(ObjectFile* object, u32 index)
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+#define BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(field) do { if (counts) counts->field += 1; } while (0)
+#define BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT , 0
+#else
+#define BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(field) ((void)0)
+#define BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT
+#endif
+
+// Group arbitration has settled every non-associative root; record validation
+// has checked parent bounds and excluded self-association. Each unknown row
+// has one immutable object-local parent, so a marked path can be replayed from
+// its start without saving a stack. Every association is read at most twice.
+BUSTER_GLOBAL_LOCAL LinkError link_comdat_associations_resolve(ObjectComdat const* comdats, u32 count, u8* states
+#if BUSTER_INCLUDE_TESTS
+                                                               , LinkComdatAssociationCounts* counts
+#endif
+)
+{
+    LinkError error = LINK_ERROR_NONE;
+    for (u32 start = 0; error == LINK_ERROR_NONE && start < count; start += 1)
+    {
+        BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(row_scans);
+        if (states[start] == LINK_COMDAT_STATE_UNKNOWN)
+        {
+            u32 current = start;
+            while (states[current] == LINK_COMDAT_STATE_UNKNOWN)
+            {
+                u32 parent = comdats[current].associated;
+                BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(parent_reads);
+                u8 decision = states[parent];
+                if (decision == LINK_COMDAT_STATE_KEEP || decision == LINK_COMDAT_STATE_DISCARD)
+                {
+                    // Ordinary forward chains and stars already know their
+                    // parent's answer: one read/write, no mark or replay.
+                    states[current] = decision;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(resolved_writes);
+                }
+                else
+                {
+                    states[current] = LINK_COMDAT_STATE_VISITING;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(path_marks);
+                    current = parent;
+                }
+            }
+            u8 decision = states[current];
+            if (decision == LINK_COMDAT_STATE_VISITING)
+            {
+                error = LINK_ERROR_INVALID_INPUT;
+            }
+            else
+            {
+                current = start;
+                while (states[current] == LINK_COMDAT_STATE_VISITING)
+                {
+                    u32 parent = comdats[current].associated;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(parent_reads);
+                    states[current] = decision;
+                    BUSTER_LINK_COMDAT_ASSOCIATION_RECORD(resolved_writes);
+                    current = parent;
+                }
+            }
+        }
+    }
+    return error;
+}
+
+#if BUSTER_INCLUDE_TESTS
+LinkError link_comdat_associations_resolve_test(ObjectFile* object, u8* states, LinkComdatAssociationCounts* counts)
+{
+    LinkError error = LINK_ERROR_NONE;
+    if (counts) *counts = (LinkComdatAssociationCounts){0};
+    if (!object || (object->comdat_count && (!object->comdats || !states)) ||
+        (object->section_count && !object->sections) || (object->relocation_count && !object->relocations))
+    {
+        error = LINK_ERROR_INVALID_INPUT;
+    }
+    for (u32 index = 0; error == LINK_ERROR_NONE && index < object->comdat_count; index += 1)
+    {
+        if (!link_comdat_record_valid(object, index) ||
+            (object->comdats[index].selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE
+                 ? states[index] != LINK_COMDAT_STATE_UNKNOWN
+                 : states[index] != LINK_COMDAT_STATE_KEEP && states[index] != LINK_COMDAT_STATE_DISCARD))
+        {
+            error = LINK_ERROR_INVALID_INPUT;
+        }
+    }
+    if (error == LINK_ERROR_NONE)
+    {
+        error = link_comdat_associations_resolve(object->comdats, object->comdat_count, states, counts);
+    }
+    return error;
+}
+#endif
+
+#undef BUSTER_LINK_COMDAT_ASSOCIATION_RECORD
+
 BUSTER_GLOBAL_LOCAL LinkError link_comdat_plan_build(Arena* arena, ObjectFile* objects, u32 object_count,
                                                      LinkComdatPlan* plan, String8* error_symbol)
 {
@@ -1925,41 +2017,17 @@ BUSTER_GLOBAL_LOCAL LinkError link_comdat_plan_build(Arena* arena, ObjectFile* o
                 }
             }
         }
-        bool progress = true;
-        for (u64 pass = 0; error == LINK_ERROR_NONE && progress && pass < plan->count; pass += 1)
+        for (u32 object_index = 0; error == LINK_ERROR_NONE && object_index < object_count; object_index += 1)
         {
-            progress = false;
-            for (u32 object_index = 0; object_index < object_count; object_index += 1)
-            {
-                ObjectFile* object = objects + object_index;
-                u64 base = plan->object_offsets[object_index];
-                for (u32 comdat_index = 0; comdat_index < object->comdat_count; comdat_index += 1)
-                {
-                    ObjectComdat* comdat = object->comdats + comdat_index;
-                    u64 state_index = base + comdat_index;
-                    if (comdat->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE &&
-                        plan->states[state_index] == LINK_COMDAT_STATE_UNKNOWN)
-                    {
-                        u8 parent = plan->states[base + comdat->associated];
-                        if (parent != LINK_COMDAT_STATE_UNKNOWN)
-                        {
-                            plan->states[state_index] = parent;
-                            progress = true;
-                        }
-                    }
-                }
-            }
-        }
-        for (u64 index = 0; error == LINK_ERROR_NONE && index < plan->count; index += 1)
-        {
-            if (plan->states[index] == LINK_COMDAT_STATE_UNKNOWN)
-            {
-                error = LINK_ERROR_INVALID_INPUT;
-            }
+            ObjectFile* object = objects + object_index;
+            error = link_comdat_associations_resolve(object->comdats, object->comdat_count,
+                plan->states + plan->object_offsets[object_index] BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT);
         }
     }
     return error;
 }
+
+#undef BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT
 
 BUSTER_GLOBAL_LOCAL bool link_comdat_is_discarded(LinkComdatPlan* plan, u32 object_index, u32 comdat)
 {

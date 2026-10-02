@@ -4,12 +4,15 @@ The `ide cc` driver supports external GPU compiler pipelines for SPIR-V,
 NVIDIA PTX, AMDGCN/HSA code objects, Apple Metal AIR/metallib, and Microsoft
 DXIL. The orchestration code lives in
 `src/buster/lib/compiler/gpu/gpu.{c,h}` and is shared by unity and non-unity
-builds.
+builds. The distinct `spirv-vulkan1.2-compute` target implements a bounded
+[direct C compute path](spirv-compute.md) through canonical IR and emits the
+binary itself. It does not use this external orchestration.
 
-This support deliberately does not route ordinary Buster or C source through
-the native compiler frontend. The canonical IR does not yet model GPU address
-spaces, kernels, resources, execution scopes, barriers, or shader interfaces.
-GPU targets therefore consume the source or intermediate language expected by
+These external routes do not use Buster's C frontend. Canonical IR has no
+general shader address-space, resource, execution-scope, or barrier model.
+The direct compute slice maps one explicit interface at the backend boundary;
+it does not advertise those broader features. The external targets consume
+the source or intermediate language expected by
 the corresponding vendor toolchain and preserve that toolchain's semantics.
 The buster executable remains dependency-free; the selected external compiler
 must be installed only when a GPU pipeline is executed.

@@ -150,6 +150,279 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_thread_local_symbol_identity(UnitTe
     return result;
 }
 
+// Independent scalar oracle: follow the immutable input graph from each row,
+// without consulting any decisions the production resolver has published.
+BUSTER_GLOBAL_LOCAL u8 link_test_comdat_root_decision(ObjectFile* object, u8 const* seeds, u32 start)
+{
+    u8 result = LINK_COMDAT_STATE_UNKNOWN;
+    u32 current = start;
+    for (u32 step = 0; step < object->comdat_count && current < object->comdat_count; step += 1)
+    {
+        if (object->comdats[current].selection != OBJECT_COMDAT_SELECTION_ASSOCIATIVE)
+        {
+            result = seeds[current];
+            break;
+        }
+        current = object->comdats[current].associated;
+    }
+    return result;
+}
+
+// Baseline pass-scan algorithm retained only as a bounded negative control.
+// The final no-progress pass is included in row_scans, as in the baseline.
+BUSTER_GLOBAL_LOCAL LinkComdatAssociationCounts link_test_comdat_legacy(ObjectFile* object, u8* states)
+{
+    LinkComdatAssociationCounts result = {0};
+    bool progress = true;
+    for (u32 pass = 0; progress && pass < object->comdat_count; pass += 1)
+    {
+        progress = false;
+        for (u32 index = 0; index < object->comdat_count; index += 1)
+        {
+            result.row_scans += 1;
+            ObjectComdat* comdat = object->comdats + index;
+            if (comdat->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE && states[index] == LINK_COMDAT_STATE_UNKNOWN)
+            {
+                result.parent_reads += 1;
+                u8 parent = states[comdat->associated];
+                if (parent != LINK_COMDAT_STATE_UNKNOWN)
+                {
+                    states[index] = parent;
+                    result.resolved_writes += 1;
+                    progress = true;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// Sizes are powers of two (or one), so multiplication by three permutes a
+// chain without randomness. One byte per record keeps output growth linear.
+BUSTER_GLOBAL_LOCAL ObjectFile link_test_comdat_graph(Arena* arena, Target target, u32 count, u32 family, u8 decision, u8* seeds)
+{
+    ObjectComdat* comdats = arena_allocate(arena, ObjectComdat, count);
+    u8* bytes = arena_allocate(arena, u8, count);
+    memset(bytes, 0x5a, count);
+    for (u32 logical = 0; logical < count; logical += 1)
+    {
+        u32 index = family == 2 ? logical * 3 % count : logical;
+        u32 parent;
+        if (family == 1 || family == 4)
+        {
+            parent = logical ? (family == 1 ? logical - 1 : (logical - 1) / 2) : OBJECT_COMDAT_ASSOCIATED_NONE;
+        }
+        else if (family == 3)
+        {
+            parent = logical + 1 < count ? count - 1 : OBJECT_COMDAT_ASSOCIATED_NONE;
+        }
+        else if (family == 5)
+        {
+            parent = logical + 1 == count || logical % 8 == 7 ? OBJECT_COMDAT_ASSOCIATED_NONE : logical + 1;
+        }
+        else
+        {
+            parent = logical + 1 < count ? logical + 1 : OBJECT_COMDAT_ASSOCIATED_NONE;
+        }
+        if (family == 2 && parent != OBJECT_COMDAT_ASSOCIATED_NONE) parent = parent * 3 % count;
+        bool root = parent == OBJECT_COMDAT_ASSOCIATED_NONE;
+        ObjectComdatSelection selection = root ? OBJECT_COMDAT_SELECTION_ANY : OBJECT_COMDAT_SELECTION_ASSOCIATIVE;
+        if (root && family == 5 && logical / 8 % 2 == 0) selection = OBJECT_COMDAT_SELECTION_NONE;
+        comdats[index] = (ObjectComdat){.key = S8("scaling_root"), .offset = index, .size = 1,
+            .section = OBJECT_SECTION_TEXT, .associated = parent, .selection = selection};
+        seeds[index] = root ? (selection == OBJECT_COMDAT_SELECTION_NONE ? (u8)LINK_COMDAT_STATE_KEEP : decision)
+                            : (u8)LINK_COMDAT_STATE_UNKNOWN;
+    }
+    ObjectFile result = link_test_comdat_object(arena, target, (ByteSlice){.pointer = bytes, .length = count},
+                                               0, 0, 0, 0, comdats, count);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_comdat_association_scaling(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arena_create((ArenaCreation){0});
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+    u32 sizes[] = {1, 2, 8, 32, 128, 512};
+    for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(sizes); size += 1)
+    {
+        u32 count = sizes[size];
+        for (u32 family = 0; family < 6; family += 1)
+        {
+            for (u32 discarded = 0; discarded < 2; discarded += 1)
+            {
+                u8* seeds = arena_allocate(arena, u8, count);
+                u8* storage = arena_allocate(arena, u8, count + 2);
+                u8* legacy = arena_allocate(arena, u8, count);
+                ObjectFile object = link_test_comdat_graph(arena, target, count, family,
+                    discarded ? (u8)LINK_COMDAT_STATE_DISCARD : (u8)LINK_COMDAT_STATE_KEEP, seeds);
+                ObjectComdat* snapshot = arena_allocate(arena, ObjectComdat, count);
+                memcpy(snapshot, object.comdats, (u64)count * sizeof(*snapshot));
+                memcpy(legacy, seeds, count);
+                LinkComdatAssociationCounts baseline = link_test_comdat_legacy(&object, legacy);
+                u32 associations = 0;
+                for (u32 index = 0; index < count; index += 1) associations += seeds[index] == LINK_COMDAT_STATE_UNKNOWN;
+                for (u32 replay = 0; replay < 2; replay += 1)
+                {
+                    memset(storage, 0xa5, count + 2);
+                    memcpy(storage + 1, seeds, count);
+                    ObjectFile object_snapshot;
+                    memcpy(&object_snapshot, &object, sizeof(object_snapshot));
+                    u64 position = arena->position;
+                    LinkComdatAssociationCounts actual = {0};
+                    LinkError error = link_comdat_associations_resolve_test(&object, storage + 1, &actual);
+                    BUSTER_TEST(arguments, error == LINK_ERROR_NONE);
+                    BUSTER_TEST(arguments, actual.row_scans == count && actual.parent_reads <= (u64)associations * 2);
+                    BUSTER_TEST(arguments, actual.resolved_writes == associations && actual.path_marks <= associations);
+                    BUSTER_TEST(arguments, arena->position == position && storage[0] == 0xa5 && storage[count + 1] == 0xa5);
+                    BUSTER_TEST(arguments, memcmp(&object, &object_snapshot, sizeof(object)) == 0 &&
+                        memcmp(object.comdats, snapshot, (u64)count * sizeof(*snapshot)) == 0);
+                    for (u32 index = 0; index < count; index += 1)
+                    {
+                        u8 expected = link_test_comdat_root_decision(&object, seeds, index);
+                        BUSTER_TEST(arguments, expected != LINK_COMDAT_STATE_UNKNOWN && storage[index + 1] == expected && legacy[index] == expected);
+                        BUSTER_TEST(arguments, object.sections[OBJECT_SECTION_TEXT].data.pointer[index] == 0x5a);
+                    }
+                    if (family == 0)
+                    {
+                        BUSTER_TEST(arguments, baseline.row_scans == (u64)count * count &&
+                            baseline.parent_reads == (u64)count * (count - 1) / 2);
+                        BUSTER_TEST(arguments, actual.parent_reads == (count > 1 ? (u64)count * 2 - 3 : 0) &&
+                            actual.path_marks == (count > 1 ? count - 2 : 0));
+                        BUSTER_TEST(arguments, count < 8 || baseline.parent_reads > actual.parent_reads);
+                    }
+                    if (family == 1 || family == 3 || family == 4)
+                    {
+                        BUSTER_TEST(arguments, actual.parent_reads == associations && actual.path_marks == 0);
+                    }
+                    if (!replay && !discarded && (family == 0 || family == 1 || family == 3))
+                    {
+                        string_print(S8("COMDAT_SCALING_V1 family={u32} count={u32} legacy_rows={u64} legacy_parents={u64} rows={u64} parents={u64} marks={u64} writes={u64} state_bytes={u32} auxiliary_bytes=0\n"),
+                            family, count, baseline.row_scans, baseline.parent_reads, actual.row_scans, actual.parent_reads,
+                            actual.path_marks, actual.resolved_writes, count);
+                    }
+                }
+                arena_reset_to_start(arena);
+            }
+        }
+    }
+    // Both object-local chains are ordered child-before-parent. LARGEST
+    // replaces the first root only after the later object's arbitration;
+    // every descendant must inherit that final choice before symbol merging.
+    {
+        enum { COMDAT_CHAIN_COUNT = 8 };
+        ObjectFile objects[2];
+        ObjectFile snapshots[2];
+        ObjectComdat* comdat_snapshots[2];
+        ObjectSymbol* symbol_snapshots[2];
+        ObjectRelocation* relocation_snapshots[2];
+        for (u32 input = 0; input < BUSTER_ARRAY_LENGTH(objects); input += 1)
+        {
+            u8 seeds[COMDAT_CHAIN_COUNT];
+            objects[input] = link_test_comdat_graph(arena, target, COMDAT_CHAIN_COUNT, 0, LINK_COMDAT_STATE_KEEP, seeds);
+            ObjectFile* object = objects + input;
+            u32 byte_count = COMDAT_CHAIN_COUNT * 8 + input * 8;
+            u8* bytes = arena_allocate(arena, u8, byte_count);
+            memset(bytes, input ? 0xb2 : 0xa1, byte_count);
+            object->sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = bytes, .length = byte_count};
+            object->symbols = arena_allocate(arena, ObjectSymbol, COMDAT_CHAIN_COUNT + 1);
+            object->symbol_count = COMDAT_CHAIN_COUNT + 1;
+            object->relocations = arena_allocate(arena, ObjectRelocation, COMDAT_CHAIN_COUNT - 1);
+            object->relocation_count = COMDAT_CHAIN_COUNT - 1;
+            for (u32 index = 0; index < COMDAT_CHAIN_COUNT; index += 1)
+            {
+                bool root = index + 1 == COMDAT_CHAIN_COUNT;
+                ObjectComdat* comdat = object->comdats + index;
+                comdat->offset = (u64)index * 8;
+                comdat->size = root ? 8 + input * 8 : 8;
+                comdat->first_relocation = index;
+                comdat->relocation_count = root ? 0 : 1;
+                if (root) comdat->selection = OBJECT_COMDAT_SELECTION_LARGEST;
+                object->symbols[index] = (ObjectSymbol){.name = root ? S8("scaling_root") : string_format(arena, S8("scaling_child_{u32}"), index),
+                    .value = comdat->offset, .size = comdat->size, .section = OBJECT_SECTION_TEXT, .comdat = index + 1,
+                    .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true};
+                if (!root)
+                {
+                    object->relocations[index] = (ObjectRelocation){.offset = comdat->offset, .addend = (s64)index + 1,
+                        .section = OBJECT_SECTION_TEXT, .symbol = COMDAT_CHAIN_COUNT, .comdat = index + 1, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+                }
+            }
+            object->symbols[COMDAT_CHAIN_COUNT] = (ObjectSymbol){.name = input ? S8("scaling_winner_target") : S8("scaling_loser_target"),
+                .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true};
+            memcpy(snapshots + input, object, sizeof(*object));
+            comdat_snapshots[input] = arena_allocate(arena, ObjectComdat, object->comdat_count);
+            symbol_snapshots[input] = arena_allocate(arena, ObjectSymbol, object->symbol_count);
+            relocation_snapshots[input] = arena_allocate(arena, ObjectRelocation, object->relocation_count);
+            memcpy(comdat_snapshots[input], object->comdats, (u64)object->comdat_count * sizeof(*object->comdats));
+            memcpy(symbol_snapshots[input], object->symbols, (u64)object->symbol_count * sizeof(*object->symbols));
+            memcpy(relocation_snapshots[input], object->relocations, (u64)object->relocation_count * sizeof(*object->relocations));
+        }
+        LinkObjectResult linked = link_objects(arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){.allow_undefined_symbols = true});
+        if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && linked.object.relocation_count == COMDAT_CHAIN_COUNT - 1))
+        {
+            for (u32 index = 0; index < COMDAT_CHAIN_COUNT; index += 1)
+            {
+                String8 name = index + 1 == COMDAT_CHAIN_COUNT ? S8("scaling_root") : string_format(arena, S8("scaling_child_{u32}"), index);
+                u32 symbol = link_test_comdat_symbol_find(&linked.object, name);
+                if (BUSTER_REQUIRE(arguments, symbol != UINT32_MAX))
+                {
+                    ObjectSymbol* defined = linked.object.symbols + symbol;
+                    BUSTER_TEST(arguments, defined->section == OBJECT_SECTION_TEXT && defined->size == (index + 1 == COMDAT_CHAIN_COUNT ? 16u : 8u));
+                    BUSTER_TEST(arguments, defined->value < linked.object.sections[OBJECT_SECTION_TEXT].data.length &&
+                        linked.object.sections[OBJECT_SECTION_TEXT].data.pointer[defined->value] == 0xb2);
+                    if (index + 1 < COMDAT_CHAIN_COUNT)
+                    {
+                        ObjectRelocation* relocation = linked.object.relocations + index;
+                        BUSTER_TEST(arguments, relocation->offset == defined->value && relocation->addend == (s64)index + 1 &&
+                            relocation->symbol < linked.object.symbol_count &&
+                            string_equal(linked.object.symbols[relocation->symbol].name, S8("scaling_winner_target")));
+                    }
+                }
+            }
+        }
+        for (u32 input = 0; input < BUSTER_ARRAY_LENGTH(objects); input += 1)
+        {
+            ObjectFile* object = objects + input;
+            BUSTER_TEST(arguments, memcmp(object, snapshots + input, sizeof(*object)) == 0 &&
+                memcmp(object->comdats, comdat_snapshots[input], (u64)object->comdat_count * sizeof(*object->comdats)) == 0 &&
+                memcmp(object->symbols, symbol_snapshots[input], (u64)object->symbol_count * sizeof(*object->symbols)) == 0 &&
+                memcmp(object->relocations, relocation_snapshots[input], (u64)object->relocation_count * sizeof(*object->relocations)) == 0);
+            for (u64 byte = 0; byte < object->sections[OBJECT_SECTION_TEXT].data.length; byte += 1)
+            {
+                BUSTER_TEST(arguments, object->sections[OBJECT_SECTION_TEXT].data.pointer[byte] == (input ? 0xb2 : 0xa1));
+            }
+        }
+        arena_reset_to_start(arena);
+    }
+    // Public merge refusal covers a cycle, a prefix reaching that cycle,
+    // a disjoint cycle after a valid root, self-association and invalid bounds.
+    for (u32 invalid = 0; invalid < 5; invalid += 1)
+    {
+        u8 seeds[8];
+        ObjectFile object = link_test_comdat_graph(arena, target, BUSTER_ARRAY_LENGTH(seeds), 0, LINK_COMDAT_STATE_KEEP, seeds);
+        if (invalid == 0 || invalid == 1)
+        {
+            object.comdats[invalid ? 5 : 1].associated = invalid ? 3 : 0;
+        }
+        else if (invalid == 2)
+        {
+            object.comdats[0].selection = OBJECT_COMDAT_SELECTION_NONE;
+            object.comdats[0].associated = OBJECT_COMDAT_ASSOCIATED_NONE;
+            object.comdats[5].associated = 3;
+        }
+        else
+        {
+            object.comdats[0].associated = invalid == 3 ? 0 : object.comdat_count;
+        }
+        LinkObjectResult linked = link_objects(arena, &object, 1, (LinkOptions){0});
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_INVALID_INPUT);
+        BUSTER_TEST(arguments, linked.object.symbol_count == 0 && linked.object.relocation_count == 0);
+        arena_reset_to_start(arena);
+    }
+    arena_destroy(arena, 1);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4798,6 +5071,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult comdat_selection = link_test_coff_comdat_selection(arguments);
     result.succeeded_test_count += comdat_selection.succeeded_test_count;
     result.test_count += comdat_selection.test_count;
+    UnitTestResult comdat_scaling = link_test_comdat_association_scaling(arguments);
+    result.succeeded_test_count += comdat_scaling.succeeded_test_count;
+    result.test_count += comdat_scaling.test_count;
     UnitTestResult thread_local_identity = link_test_thread_local_symbol_identity(arguments);
     result.succeeded_test_count += thread_local_identity.succeeded_test_count;
     result.test_count += thread_local_identity.test_count;

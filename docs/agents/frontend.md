@@ -157,6 +157,20 @@ C99/C11/C17; hosted Linux x86-64 also requires GCC and Clang to compile and
 execute the same self-checking source. These are registered validation paths,
 not claims that a local compiler or external performance host was run.
 
+## Lexer diagnostic reservation failure
+
+Diagnostic rows allocate lazily. If their worst case does not fit scratch and
+the dedicated arena reservation fails, they grow in the caller's result arena;
+lexing still emits the complete token stream and EOF. Formatted messages and
+the returned rows remain owned by the result arena.
+
+Registered `c_test_lex_diagnostic_reserve_failure` warms scratch, then uses the
+existing one-shot arena reserve failure on a 3 MiB source. Both public lexer
+entries check fixed token/EOF and diagnostic expectations for 1, 65 and 200
+errors, including growth, source positions and lifetime after scratch reuse.
+A clean-source control must leave the failure pending for a no-pool probe;
+malformed sources must consume it, and the next reservation must recover.
+
 ## Source translation limits
 
 The source translator accepts at most `UINT32_MAX - 2` raw bytes so its

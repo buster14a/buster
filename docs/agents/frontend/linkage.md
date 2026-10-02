@@ -104,7 +104,23 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   range and relocation range. `link_objects` resolves those groups first:
   ANY keeps one, SAME_SIZE and EXACT_MATCH validate their contracts, LARGEST
   chooses by size independently of input order, and ASSOCIATIVE follows its
-  parent. Only then does the surviving definition enter ordinary weak/strong
+  parent. Associative chains resolve after every non-associative winner is final,
+  through `link_comdat_associations_resolve`: an object-local parent walk marks
+  its current path, rejects cycles, and publishes the terminal KEEP/DISCARD state
+  along that path. A shared ancestor is resolved once. The walk uses the existing
+  state bytes and follows the immutable parent links again to finish a path;
+  it needs no recursion, auxiliary allocation or persistent cache. Its work is
+  O(C + A), where C is the COMDAT population and A the associative population,
+  independent of record order and association depth. This bound describes only
+  association resolution, not key hashing, exact-match comparison or the whole
+  linker. The registered `link_test_comdat_association_scaling` generates ordinary
+  and reverse/permuted parent graphs, compares an independent pass-scan control,
+  checks real group/symbol/relocation survival and rejects malformed associations.
+  Its deterministic work bounds run in ordinary tests without timing thresholds.
+  The [PE/COFF contract](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#comdat-sections-object-only)
+  permits associative parents that are themselves associative, requires a final
+  non-associative root and forbids cycles (GitHub #2232).
+  Only then does the surviving definition enter ordinary weak/strong
   arbitration. A COFF object therefore reads `weak` back but cannot write it
   and carries a compiler-produced weak symbol as an ordinary external. That is the one gap of the
   three formats, and it predates aliases: `object.c`'s header states it. An
