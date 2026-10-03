@@ -133,11 +133,11 @@ fixture as well as compiling both architectures.
   `failed_opcode`; `CodegenStatistics.fallback_opcode_counts` and
   `fallback_verify_count` expose the actual canonical fallback. There is no
   declarative pattern-miss category because there is no declarative matcher.
-- Shared canonical-IR facts and the generated FAST/QUALITY rule decision tree
-  live in `machine_select.{c,h}`, `machine_select_rules.h`, and
-  `machine_select_generated.c`. Target selectors may retain custom ABI and
-  complex lowering, but must consume shared facts instead of introducing a
-  third permanent graph IR.
+- Target selectors consume the shared canonical-IR facts in
+  `machine_select.{c,h}` alongside their direct ABI and complex-lowering helpers;
+  do not introduce a third permanent graph IR. The unused declarative selector
+  was removed in [#269](https://github.com/buster14a/buster/pull/269), resolving
+  [#42](https://github.com/buster14a/buster/issues/42).
 - `MachineSelectResult.signature_rejected` is set only inside target function
   signature gates; other unclassified selection failures remain distinct.
   Native dispatch records exactly one `CodegenFallbackReason` per discarded
