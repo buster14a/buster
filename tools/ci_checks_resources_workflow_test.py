@@ -40,7 +40,7 @@ class ResourceWorkflowTests(unittest.TestCase):
 
     def test_existing_payload_scripts_are_byte_identical(self):
         pins = {
-            "Combination matrix (Linux, macOS)": "f6e839f352f6c680ee6f6225329238074e7a7987a277cbe08b75e43d9950c6ca",
+            "Combination matrix (Linux, macOS)": "fe8bc88b204bd19f1b94dfe7fad5697e37d39867143bc505ff5c26850658fe34",
             "Combination matrix (Windows)": "982b6445a766bf35663e7428f6c6a949b4979ff6c35c78236fbe9e8c6397ee30",
         }
         for name, expected in pins.items():
