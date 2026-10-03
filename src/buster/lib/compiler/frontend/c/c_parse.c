@@ -8611,6 +8611,35 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             }
         }
         u64 slots = frame->slots;
+        // An explicit brace list containing only one string initializes the
+        // entire character array, including when that array is nested. An
+        // array of pointers retains its ordinary element-initializer walk.
+        if (!frame->borrowed && !frame->next_index && frame->type.value < result->type_count &&
+            result->types[frame->type.value].kind == C_TYPE_ARRAY && frame->cursor < frame->limit)
+        {
+            u32 string_limit = frame->limit;
+            if (c_token_is_punctuator(&preprocess.tokens[string_limit - 1], C_PUNCTUATOR_COMMA)) string_limit -= 1;
+            CIrDecodedString decoded = {0};
+            CTypeId string_element = result->types[frame->type.value].element_type;
+            bool string_contents = frame->cursor < string_limit &&
+                c_ir_tokens_are_string_literals(preprocess, frame->cursor, string_limit) &&
+                c_ir_count_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, frame->cursor,
+                                                           string_limit, result->string_literals, &decoded) &&
+                c_parse_initializer_string_element_compatible(preprocess, result, string_element, decoded);
+            if (string_contents)
+            {
+                if (decoded.element_count == UINT64_MAX || decoded.element_count > slots)
+                {
+                    // Reuse the ordinary excess-element diagnostic below.
+                    frame->next_index = slots;
+                }
+                else
+                {
+                    frame->cursor = frame->limit;
+                    continue;
+                }
+            }
+        }
         if (!slots && frame->borrowed && frame->cursor < frame->limit)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[frame->cursor]),
