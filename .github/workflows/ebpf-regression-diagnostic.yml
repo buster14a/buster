@@ -1,0 +1,156 @@
+name: eBPF regression diagnostic
+
+# Separate diagnostic branch only; never merge this workflow into a feature PR.
+# Set BUSTER_DIAGNOSTIC_SOURCE_SHA to the final immutable source commit that
+# contains both #1624 and #1627 production changes and their regression tests.
+on:
+  push:
+    branches: [codex/1624-ebpf-kernel-diagnostic]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ebpf-regression-diagnostic
+  cancel-in-progress: false
+
+env:
+  BUSTER_DIAGNOSTIC_SOURCE_SHA: 232191b38663b07307aac6265db57a4ae850ebe8
+  # Optional same-tests negative control, restoring only #1624 argument capture.
+  BUSTER_DIAGNOSTIC_NARROW_MUTANT: '1'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ebpf:
+    name: eBPF VM and privileged kernel regressions
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Require an immutable source pin
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ebpf-diagnostic"
+          [[ "$BUSTER_DIAGNOSTIC_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          printf 'source_sha=%s\nworkflow_sha=%s\n' \
+            "$BUSTER_DIAGNOSTIC_SOURCE_SHA" "$GITHUB_SHA" \
+            | tee "$RUNNER_TEMP/ebpf-diagnostic/revisions.txt"
+
+      - name: Checkout the pinned source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.BUSTER_DIAGNOSTIC_SOURCE_SHA }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build with the documented hosted Clang bootstrap
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BUSTER_DIAGNOSTIC_SOURCE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          {
+            uname -a
+            clang --version
+            cmake --version
+            ninja --version
+          } | tee "$RUNNER_TEMP/ebpf-diagnostic/toolchain.txt"
+          # Hosted Clang is the documented exception in docs/agents/build.md.
+          # DEFAULT uses the hosted system linker; no mold/LLVM install is needed.
+          # generate recreates build/, so keep the driver and evidence outside it.
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -g build.c \
+            -o "$RUNNER_TEMP/buster-ebpf-build" \
+            2>&1 | tee "$RUNNER_TEMP/ebpf-diagnostic/bootstrap.log"
+          "$RUNNER_TEMP/buster-ebpf-build" generate --cc clang --config Release \
+            --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_INCLUDE_TESTS=ON \
+            2>&1 | tee "$RUNNER_TEMP/ebpf-diagnostic/generate.log"
+          "$RUNNER_TEMP/buster-ebpf-build" build --config Release -t ide -- -j1 \
+            2>&1 | tee "$RUNNER_TEMP/ebpf-diagnostic/build.log"
+          sha256sum build/Release/ide \
+            | tee "$RUNNER_TEMP/ebpf-diagnostic/producer.sha256"
+          git diff --exit-code
+          git diff --cached --exit-code
+
+      - name: Require complete codegen success and kernel execution for both fixes
+        working-directory: source
+        run: |
+          set -euo pipefail
+          sudo -- env BUSTER_TEST_JOBS=1 BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS=900 \
+            "$GITHUB_WORKSPACE/source/build/Release/ide" test \
+            --module=codegen_tests --verbose=1 --ci=1 \
+            2>&1 | tee "$RUNNER_TEMP/ebpf-diagnostic/codegen-final.log"
+          # Successful process exit is insufficient: VM-only execution fails here.
+          test "$(grep -Ec 'eBPF kernel verifier/JIT for codegen_test_ebpf_argument_images: available, 6912 executions compared' \
+            "$RUNNER_TEMP/ebpf-diagnostic/codegen-final.log")" = 1
+          test "$(grep -Ec 'EBPF_LOCAL_CALL_ORACLE available=1 executions=144 frontend_forms=2' \
+            "$RUNNER_TEMP/ebpf-diagnostic/codegen-final.log")" = 1
+          grep -Eq 'Unit tests \(1 of [0-9]+ modules selected\)' \
+            "$RUNNER_TEMP/ebpf-diagnostic/codegen-final.log"
+          git diff --exit-code
+          git diff --cached --exit-code
+          printf 'Both eBPF fixtures executed through the kernel verifier/JIT at `%s`.\n' \
+            "$BUSTER_DIAGNOSTIC_SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Same-tests narrow-argument negative control
+        if: ${{ env.BUSTER_DIAGNOSTIC_NARROW_MUTANT == '1' }}
+        working-directory: source
+        run: |
+          set -euo pipefail
+          ebpf_source=src/buster/lib/compiler/ebpf/ebpf.c
+          test "$(grep -Fc '// Normalize a private copy:' "$ebpf_source")" = 1
+          test "$(grep -Fc '        ebpf_fe_store_stack(emitter, slot, incoming);' "$ebpf_source")" = 1
+          cp "$ebpf_source" "$RUNNER_TEMP/ebpf-diagnostic/ebpf-final.c"
+          trap 'cp "$RUNNER_TEMP/ebpf-diagnostic/ebpf-final.c" "$ebpf_source"' EXIT
+          # Remove only the new normalization block. Preserve all other code,
+          # including #1627, and preserve the exact same tests as the passing run.
+          sed '/^        \/\/ Normalize a private copy:/,/^        ebpf_fe_store_stack(emitter, slot, incoming);/c\
+                  ebpf_fe_store_stack(emitter, slot, (u8)(EBPF_REG_1 + instruction->immediates[0]));' \
+            "$RUNNER_TEMP/ebpf-diagnostic/ebpf-final.c" > "$ebpf_source"
+          test "$(git diff --name-only)" = "$ebpf_source"
+          git diff -- "$ebpf_source" > "$RUNNER_TEMP/ebpf-diagnostic/narrow-mutant.patch"
+          test -s "$RUNNER_TEMP/ebpf-diagnostic/narrow-mutant.patch"
+          "$RUNNER_TEMP/buster-ebpf-build" build --config Release -t ide -- -j1 \
+            2>&1 | tee "$RUNNER_TEMP/ebpf-diagnostic/build-mutant.log"
+          sha256sum build/Release/ide \
+            | tee "$RUNNER_TEMP/ebpf-diagnostic/mutant.sha256"
+          set +e
+          sudo -- env BUSTER_TEST_JOBS=1 BUSTER_TEST_FIXTURE_TIMEOUT_SECONDS=900 \
+            "$GITHUB_WORKSPACE/source/build/Release/ide" test \
+            --module=codegen_tests --verbose=1 --ci=1 \
+            2>&1 | tee "$RUNNER_TEMP/ebpf-diagnostic/codegen-mutant.log"
+          test_status=("${PIPESTATUS[@]}")
+          set -e
+          test "${test_status[0]}" = 1
+          test "${test_status[1]}" = 0
+          grep -Eq 'eBPF argument type=' "$RUNNER_TEMP/ebpf-diagnostic/codegen-mutant.log"
+          grep -Eq 'ebpf_test_internal\.h:codegen_test_ebpf_argument_images:[0-9]+' \
+            "$RUNNER_TEMP/ebpf-diagnostic/codegen-mutant.log"
+          grep -Eq 'Unit tests \(1 of [0-9]+ modules selected\)' \
+            "$RUNNER_TEMP/ebpf-diagnostic/codegen-mutant.log"
+          # Expected failures stay within fixtures consuming narrow arguments.
+          # Any unrelated failure is an unsuccessful diagnostic, not causal proof.
+          if grep ' failed at ' "$RUNNER_TEMP/ebpf-diagnostic/codegen-mutant.log" \
+            | grep -Ev 'ebpf_test_internal\.h:codegen_test_ebpf_(argument_images|scalars|integer_images):[0-9]+$'; then
+            echo '::error::The negative control also failed an unrelated assertion.'
+            exit 1
+          fi
+          cp "$RUNNER_TEMP/ebpf-diagnostic/ebpf-final.c" "$ebpf_source"
+          trap - EXIT
+          git diff --exit-code
+          git diff --cached --exit-code
+          printf 'Same-tests #1624 negative control failed the narrow-argument regression; unrelated fixtures stayed green.\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain diagnostic evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ebpf-regression-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ebpf-diagnostic/
+          if-no-files-found: error
+          retention-days: 7
