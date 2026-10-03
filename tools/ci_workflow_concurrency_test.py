@@ -122,5 +122,35 @@ class MainPushConcurrencyTests(unittest.TestCase):
             self.assertNotIn("queue", fields)
 
 
+    def test_auxiliary_validation_preserves_candidate_policy_and_isolates_pushes(self):
+        for name, cancel_pr in (("debug-lifetime-slice.yml", False),
+                                ("hot-reload-demo.yml", True)):
+            fields = self.fields((ROOT / ".github/workflows" / name).read_text())
+            with self.subTest(workflow=name):
+                self.assertNotIn("queue", fields)
+                pr = self.context("pull_request")
+                pr_next = self.context("pull_request", 102)
+                self.assertEqual(self.resolved_group(fields["group"], pr),
+                                 self.resolved_group(fields["group"], pr_next))
+                self.assertEqual(self.cancelled(fields["cancel-in-progress"], pr),
+                                 cancel_pr)
+                other_pr = dict(pr, **{"github.event.pull_request.number": 8,
+                                     "github.ref": "refs/pull/8/merge"})
+                self.assertNotEqual(self.resolved_group(fields["group"], pr),
+                                    self.resolved_group(fields["group"], other_pr))
+                pushes = [self.context(number=number) for number in (101, 102, 103)]
+                for context in pushes:
+                    context["github.sha"] = pr["github.sha"]
+                    self.assertFalse(self.cancelled(fields["cancel-in-progress"], context))
+                groups = {self.resolved_group(fields["group"], c) for c in pushes}
+                self.assertEqual(len(groups), 3)
+                self.assertNotIn(self.resolved_group(fields["group"], pr), groups)
+                if name == "hot-reload-demo.yml":
+                    manual = self.context("workflow_dispatch")
+                    manual["github.ref"] = "refs/heads/main"
+                    self.assertFalse(self.cancelled(fields["cancel-in-progress"], manual))
+                    self.assertNotIn(self.resolved_group(fields["group"], manual), groups)
+
+
 if __name__ == "__main__":
     unittest.main()
