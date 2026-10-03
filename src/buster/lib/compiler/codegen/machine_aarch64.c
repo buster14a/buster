@@ -8828,6 +8828,12 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
         case MACHINE_A64_LEA_SYMBOL:
             capacity64 += 16;
             break;
+        case MACHINE_A64_TLS_WINDOWS:
+            capacity64 += 28;
+            break;
+        case MACHINE_A64_TLS_DARWIN:
+            capacity64 += 16;
+            break;
         case MACHINE_A64_RET:
             capacity64 += 20 + (large_save_offset ? 8u : 0u) + (u64)frame_chunk_words * 4 + (u64)push_count * 4;
             break;
@@ -10283,9 +10289,13 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                     u32 index_fields[] = {destination, MACHINE_A64_X10, 3, destination};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, index_fields, BUSTER_ARRAY_LENGTH(index_fields));
                     machine_a64_emit_generated_unsigned_memory(&encoder, destination, destination, 0, 8, false);
+                    MachineCallSite* offset_high_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                    *offset_high_site = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
+                        .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
+                    machine_a64_emit(&encoder, UINT32_C(0x91400000) | (destination << 5) | destination);
                     MachineCallSite* offset_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                     *offset_site = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
-                        .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
+                        .is_thread_local = 1, .thread_local_low = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
                     u32 offset_fields[] = {destination, destination, 0};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, offset_fields, BUSTER_ARRAY_LENGTH(offset_fields));
                 }

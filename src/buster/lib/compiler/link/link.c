@@ -10635,7 +10635,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                         link_write_u32(bytes, output_offset, encoded);
                     }
                 }
-                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
                 {
                     if (symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO)
                     {
@@ -10651,8 +10652,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                     {
                         u32 instruction = link_read_u32(bytes, output_offset);
                         u32 encoded = 0;
-                        if (!object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, instruction, output_offset, tls_offset,
-                                                              relocation->addend, &encoded))
+                        if (!object_aarch64_pe_tls_offset_relocate(relocation->kind, instruction, tls_offset, relocation->addend, &encoded))
                         {
                             result.error = LINK_ERROR_RELOCATION;
                         }
@@ -11142,6 +11142,7 @@ BUSTER_GLOBAL_LOCAL bool link_uefi_relocation_is_tls(ObjectRelocationKind kind)
            kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
            kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
            kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+           kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ||
            kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12;
 }
 

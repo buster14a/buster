@@ -2458,6 +2458,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12, true, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL, false, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_X86_64_PLT32, false, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12, true, false, true, false, false},
     };
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(relocation_kinds) == CODEGEN_MODULE_RELOCATION_COUNT);
     for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(relocation_kinds); kind_index += 1)
@@ -3500,6 +3501,89 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         ByteSlice ordinary_tls_offset = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008),
                                                                             UINT32_C(0x91000100), 0x0009);
         BUSTER_TEST(arguments, object_read(arguments->arena, ordinary_tls_offset, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+
+        // Original COFF input and literal type 10 keep this oracle independent
+        // of the writer. A shifted ADD still carries an unscaled byte addend.
+        u32 tls_high_addends[] = {0, 1, 4095};
+        for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(tls_high_addends); addend_index += 1)
+        {
+            u32 addend = tls_high_addends[addend_index];
+            u32 high_word = UINT32_C(0x91400100) | (addend << 10);
+            ByteSlice raw = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008), high_word, 10);
+            object_test_coff_write_name(raw.pointer, 60, S8(".tls$AAA"));
+            u8 snapshot[158];
+            BUSTER_TEST(arguments, raw.length == sizeof(snapshot));
+            memcpy(snapshot, raw.pointer, sizeof(snapshot));
+            ObjectFile high = object_read(arguments->arena, raw, arm64_coff_target);
+            if (BUSTER_REQUIRE(arguments, high.error == OBJECT_ERROR_NONE && high.relocation_count == 2))
+            {
+                BUSTER_TEST(arguments, high.relocations[1].kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 &&
+                                           high.relocations[1].addend == addend);
+                u32 canonical = 0;
+                memcpy(&canonical, high.sections[OBJECT_SECTION_TEXT].data.pointer + 4, 4);
+                BUSTER_TEST(arguments, canonical == UINT32_C(0x91400100));
+                ObjectArtifact rewritten = object_write(arguments->arena, &high, OBJECT_FORMAT_COFF);
+                if (BUSTER_REQUIRE(arguments, rewritten.error == OBJECT_ERROR_NONE && rewritten.bytes.length >= 60))
+                {
+                    u32 text_offset = 0;
+                    u32 relocation_offset = 0;
+                    memcpy(&text_offset, rewritten.bytes.pointer + 40, 4);
+                    memcpy(&relocation_offset, rewritten.bytes.pointer + 44, 4);
+                    if (BUSTER_REQUIRE(arguments, text_offset <= rewritten.bytes.length && 8 <= rewritten.bytes.length - text_offset &&
+                                                  relocation_offset <= rewritten.bytes.length && 20 <= rewritten.bytes.length - relocation_offset))
+                    {
+                        u32 inline_word = 0;
+                        u16 high_type = 0;
+                        memcpy(&inline_word, rewritten.bytes.pointer + text_offset + 4, 4);
+                        memcpy(&high_type, rewritten.bytes.pointer + relocation_offset + 18, 2);
+                        BUSTER_TEST(arguments, inline_word == high_word && high_type == 10);
+                    }
+                    ObjectFile reread = object_read(arguments->arena, rewritten.bytes, arm64_coff_target);
+                    BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && reread.relocation_count == 2 &&
+                                               reread.relocations[1].addend == addend);
+                }
+                BUSTER_TEST(arguments, memcmp(raw.pointer, snapshot, sizeof(snapshot)) == 0);
+            }
+        }
+        u32 invalid_high_words[] = {UINT32_C(0x91000100), UINT32_C(0xd1400100), UINT32_C(0xb1400100), UINT32_C(0xd65f03c0)};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_high_words); index += 1)
+        {
+            ByteSlice raw = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008), invalid_high_words[index], 10);
+            object_test_coff_write_name(raw.pointer, 60, S8(".tls$AAA"));
+            BUSTER_TEST(arguments, object_read(arguments->arena, raw, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        }
+        ByteSlice ordinary_high = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008), UINT32_C(0x91400100), 10);
+        BUSTER_TEST(arguments, object_read(arguments->arena, ordinary_high, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+
+        u64 tls_offsets[] = {0, 4095, 4096, 8191, 8192, 65535, UINT64_C(0xffffff)};
+        for (u32 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(tls_offsets); offset_index += 1)
+        {
+            for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(tls_high_addends); addend_index += 1)
+            {
+                u64 expected = tls_offsets[offset_index] + tls_high_addends[addend_index];
+                u32 high = UINT32_C(0x12345678);
+                u32 low = UINT32_C(0x12345678);
+                bool high_ok = object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12, UINT32_C(0x91400100),
+                                                                      tls_offsets[offset_index], tls_high_addends[addend_index], &high);
+                bool low_ok = object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12, UINT32_C(0x91000100),
+                                                                     tls_offsets[offset_index], tls_high_addends[addend_index], &low);
+                BUSTER_TEST(arguments, high_ok == (expected <= UINT64_C(0xffffff)) && low_ok == high_ok);
+                if (high_ok && low_ok)
+                {
+                    BUSTER_TEST(arguments, (high & UINT32_C(0xffc003ff)) == UINT32_C(0x91400100) &&
+                                               (low & UINT32_C(0xffc003ff)) == UINT32_C(0x91000100) &&
+                                               (((u64)((high >> 10) & 4095) << 12) + ((low >> 10) & 4095)) == expected);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, high == UINT32_C(0x12345678) && low == UINT32_C(0x12345678));
+                }
+            }
+        }
+        u32 unchanged = UINT32_C(0x12345678);
+        BUSTER_TEST(arguments, !object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12,
+                                                                       UINT32_C(0x91400100), UINT64_MAX, 1, &unchanged) &&
+                                   unchanged == UINT32_C(0x12345678));
 
         ByteSlice misaligned = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008),
                                                                    UINT32_C(0x91000100), 0x0006);
