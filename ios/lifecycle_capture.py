@@ -479,7 +479,7 @@ class Supervisor:
         blocked = signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
         try:
             self.keeper = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), "--keeper", str(ready_write), str(control_read)],
+                [sys.executable, "-S", str(Path(__file__).resolve()), "--keeper", str(ready_write), str(control_read)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 close_fds=True, pass_fds=(ready_write, control_read))
         finally:
@@ -629,7 +629,8 @@ class Supervisor:
                     self.spawn()
                 else:
                     self.command_terminal = True
-                    self.facts["deadline_reached"] = int(not self.cancellation and not (self.bridge is not None and self.bridge.caller_lost))
+                    if not self.cancellation and not (self.bridge is not None and self.bridge.caller_lost):
+                        self.facts["deadline_reached"] = 1
                     self.facts["command_status"] = 124 if self.facts["deadline_reached"] else 125
                     self.native_done()
                     self.final_cleanup(time.monotonic_ns())

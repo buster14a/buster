@@ -110,6 +110,9 @@ elif mode=='active':
     mark('native-ended')
     sys.exit(0 if stopped[0] or (state/'release').exists() else 92)
 elif mode in ('delay-done','delay-publication','anchor-guard'):
+    if args[:1]==['-S']:
+        if args[1:2]!=[EXPECTED_OWNER_HELPER]:raise RuntimeError('unknown no-site owner prefix')
+        args=args[1:]
     helper,*command=args
     spec=importlib.util.spec_from_file_location('fixture_owner',helper)
     module=importlib.util.module_from_spec(spec)
@@ -150,7 +153,7 @@ elif mode in ('delay-done','delay-publication','anchor-guard'):
     finally:mark('owner-wrapper-ended')
     sys.exit(result)
 else:raise RuntimeError('unknown finite fixture')
-'''
+'''.replace("EXPECTED_OWNER_HELPER", repr(str(HELPER)))
 
 
 def wait_for_path(path, seconds):
@@ -230,10 +233,10 @@ class BridgeTests(unittest.TestCase):
         environment["PATH"] = str(directory) + os.pathsep + environment.get("PATH", "")
         return environment
 
-    def start_cap(self, command, environment=None, prefix=None, command_seconds=1, capture_seconds=12, cwd=None):
+    def start_cap(self, command, environment=None, prefix=None, command_seconds=1, capture_seconds=12, cwd=None, bridge_path=None):
         self.sequence += 1
         prefix = prefix or self.root / ("phase-%d" % self.sequence)
-        arguments = [TIMEOUT, "--signal=KILL", "%ds" % capture_seconds, "bash", str(BRIDGE),
+        arguments = [TIMEOUT, "--signal=KILL", "%ds" % capture_seconds, "bash", str(bridge_path or BRIDGE),
                      TIMEOUT, str(prefix), str(command_seconds), str(capture_seconds), "--", *command]
         output = self.root / ("caller-output-%d" % self.sequence)
         errors = self.root / ("caller-errors-%d" % self.sequence)
@@ -287,6 +290,155 @@ sys.exit(subprocess.run([REAL,*arguments]).returncode)
         environment = dict(os.environ)
         environment["PATH"] = str(state) + os.pathsep + environment.get("PATH", "")
         return environment
+
+    def test_builtin_helper_paths_overwrite_old_callers_and_record_private_stages(self):
+        stages = ("private-created", "ipc-created", "caller-initial-recorded", "monitor-launch",
+                  "setup-observed", "invocation-launch", "invocation-registered", "ready-observed",
+                  "go-authorized", "complete-observed", "completion-eof", "invocation-waited",
+                  "snapshot-start", "snapshot-complete", "caller-final-recorded")
+        for spelling in (BRIDGE.name, "nested path/" + BRIDGE.name):
+            with self.subTest(bridge=spelling):
+                cwd = self.root / ("helper-path-%d" % self.sequence)
+                (cwd / Path(spelling).parent).mkdir(parents=True)
+                shutil.copyfile(BRIDGE, cwd / spelling)
+                shutil.copyfile(HELPER, (cwd / spelling).parent / HELPER.name)
+                prefix = cwd / "phase"
+                Path(str(prefix) + ".caller-status.log").write_text(
+                    "BUSTER_IOS_CALLER version=1 generation=OldValid admission=1 helper_status=0 "
+                    "invocation_status=0 command_monitor_status=0 reason=complete\n")
+                Path(str(prefix) + ".caller-fields.log").write_text("1 0 0 OldValid 0 complete\n")
+                status, caller, prefix, private, elapsed, errors = self.finish_cap(self.start_cap(
+                    ["/bin/sh", "-c", "printf 'native\\n'"], prefix=prefix, cwd=cwd, bridge_path=spelling))
+                self.assertEqual(status, 0, errors)
+                self.assertEqual(caller["admission"], "1")
+                self.assertNotEqual(caller["generation"], "OldValid")
+                self.assertEqual(Path(str(prefix) + ".log").read_bytes(), b"native\n")
+                observations = []
+                for line in (private / "bridge-stages.log").read_text().splitlines():
+                    tag, *tokens = line.split()
+                    self.assertEqual(tag, "BUSTER_IOS_BRIDGE_STAGE")
+                    observations.append(dict(token.split("=", 1) for token in tokens))
+                self.assertEqual([int(item["ordinal"]) for item in observations], list(range(1, 16)))
+                self.assertEqual([item["stage"] for item in observations], list(stages))
+                seconds = [int(item["elapsed_seconds"]) for item in observations]
+                self.assertEqual(seconds, sorted(seconds))
+                self.assertTrue(all(value >= 0 for value in seconds))
+
+    def test_both_caller_destinations_are_guarded_before_either_builtin_write(self):
+        for suffix in (".caller-status.log", ".caller-fields.log"):
+            for kind in ("symlink", "dangling", "directory"):
+                with self.subTest(suffix=suffix, kind=kind):
+                    self.sequence += 1
+                    prefix = self.root / ("guarded-caller-%d" % self.sequence)
+                    targets = [Path(str(prefix) + value) for value in
+                               (".caller-status.log", ".caller-fields.log")]
+                    blocked = Path(str(prefix) + suffix)
+                    other = targets[1] if blocked == targets[0] else targets[0]
+                    other.write_bytes(b"previous caller record\n")
+                    sentinel = self.root / ("caller-sentinel-%d" % self.sequence)
+                    if kind == "directory":
+                        blocked.mkdir()
+                    else:
+                        if kind == "symlink":
+                            sentinel.write_bytes(b"untouched sentinel\n")
+                        blocked.symlink_to(sentinel)
+                    native = self.root / ("native-forbidden-%d" % self.sequence)
+                    process, actual_prefix, started, errors = self.start_cap(
+                        ["/bin/sh", "-c", "printf forbidden > " + shlex.quote(str(native))], prefix=prefix)
+                    self.assertEqual(process.wait(timeout=3), 125, errors.read_bytes())
+                    self.assertEqual(other.read_bytes(), b"previous caller record\n")
+                    self.assertFalse(native.exists())
+                    if kind == "symlink":
+                        self.assertEqual(sentinel.read_bytes(), b"untouched sentinel\n")
+                    elif kind == "dangling":
+                        self.assertFalse(sentinel.exists())
+                    else:
+                        self.assertEqual(list(blocked.iterdir()), [])
+
+    def caller_phase_fixture(self, mode):
+        state = self.root / ("caller-record-" + mode)
+        state.mkdir()
+        shutil.copyfile(HELPER, state / HELPER.name)
+        shutil.copyfile(BRIDGE, state / BRIDGE.name)
+        environment = dict(os.environ)
+        shell_hook = state / "shell-hook"
+        if mode == "partial":
+            shell_hook.write_text('''if [[ $0 == */lifecycle_capture_bridge.sh && ${1:-} != --bootstrap ]]; then
+printf() {
+    builtin printf "$@"
+    if [[ ${1:-} == BUSTER_IOS_CALLER* && ${3:-} == 1 ]]; then return 70; fi
+}
+fi
+''')
+        else:
+            shell_hook.write_text('''if [[ $0 == */lifecycle_capture_bridge.sh && ${1:-} != --bootstrap ]]; then
+trap 'exit 70' EXIT
+fi
+''')
+        environment["BASH_ENV"] = str(shell_hook)
+        source = LAUNCHER.read_text()
+        phase = source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
+        prefix = state / "console"
+        script = state / "phase.sh"
+        script.write_text("#!/bin/bash\nset -euo pipefail\nmonitor_command_timeout_seconds=1\n"
+            "timeout_bin=" + shlex.quote(TIMEOUT) + "\nconsole_log_base=" + shlex.quote(str(prefix))
+            + "\ncollect_lifecycle_context() { :; }\n" + phase
+            + "\nif run_lifecycle_phase control Test " + shlex.quote(str(prefix))
+            + " 1 /bin/sh -c ':'; then exit 0; else exit $?; fi\n")
+        process = subprocess.Popen(["bash", str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   env=environment, close_fds=True)
+        self.owned.append(process)
+        output, errors = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 1, errors)
+        status = Path(str(prefix) + ".control.status.log").read_text()
+        self.assertIn("outcome=evidence-failure", status)
+        actual_collector = 125 if mode == "partial" else 70
+        self.assertIn("BUSTER_IOS_CALLER_GATE monitor_status=%d admission=0" % actual_collector, status)
+        phase_prefix = Path(str(prefix) + ".control")
+        caller = named_receipt(Path(str(phase_prefix) + ".caller-status.log"), "BUSTER_IOS_CALLER")
+        positional = Path(str(phase_prefix) + ".caller-fields.log").read_text().split()
+        self.assertEqual(caller["admission"], "1")
+        self.assertEqual(caller["helper_status"], "0")
+        self.assertEqual(caller["invocation_status"], "0")
+        private = Path(Path(str(phase_prefix) + ".caller-private-directory.log").read_text().strip())
+        owner = self.supervisor(private / phase_prefix.name)
+        self.assertEqual(owner["command_status"], "0")
+        self.assertEqual(owner["cleanup_status"], "0")
+        return caller, positional
+
+    def test_partial_final_caller_record_cannot_admit_older_second_record(self):
+        caller, positional = self.caller_phase_fixture("partial")
+        self.assertEqual(positional[0], "0")
+        self.assertEqual(positional[3], caller["generation"])
+        self.assertEqual(positional[-1], "starting")
+
+    def test_full_matching_caller_records_cannot_admit_actual_collector_exit70(self):
+        caller, positional = self.caller_phase_fixture("nonzero")
+        self.assertEqual(positional, [caller[key] for key in
+            ("admission", "helper_status", "invocation_status", "generation", "command_monitor_status", "reason")])
+
+    def test_owner_and_keeper_skip_unused_finite_site_initialization(self):
+        site = self.root / "finite-site-hook"
+        site.mkdir()
+        entered, completed = site / "entered", site / "completed"
+        (site / "sitecustomize.py").write_text(
+            "import time\nfrom pathlib import Path\nPath(" + repr(str(entered)) + ").touch()\n"
+            "time.sleep(13)\nPath(" + repr(str(completed)) + ").touch()\n")
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = str(site)
+        command = ["/bin/sh", "-c", 'printf "%s\\n%s\\n" "$1" "$PYTHONPATH"', "native", "payload argument"]
+        status, caller, prefix, private, elapsed, errors = self.finish_cap(self.start_cap(command, environment))
+        self.assertEqual(status, 0, errors)
+        self.assertEqual(caller["admission"], "1")
+        self.assertEqual(Path(str(prefix) + ".log").read_bytes(),
+                         ("payload argument\n" + str(site) + "\n").encode())
+        owner = self.supervisor(prefix)
+        for field in ("command_status", "capture_status", "cleanup_status", "keeper_status"):
+            self.assertEqual(owner[field], "0")
+        for field in ("native_reaped", "keeper_reaped", "keeper_control_eof_ack"):
+            self.assertEqual(owner[field], "1")
+        self.assertFalse(entered.exists())
+        self.assertFalse(completed.exists())
 
     def test_snapshot_uses_one_batch_and_preserves_binary_bytes_for_relative_prefixes(self):
         payload = bytes(range(256)) * 256
@@ -494,6 +646,48 @@ sys.exit(subprocess.run([REAL,*arguments]).returncode)
         status = process.wait(timeout=3)
         self.assertEqual(status, int(complete[2]))
         return status, self.supervisor(prefix), time.monotonic() - started
+
+    def test_observed_startup_deadline_survives_caller_loss_without_native_admission(self):
+        for monitor_status, signum in ((137, None), (None, None), (137, signal.SIGINT), (137, signal.SIGTERM)):
+            with self.subTest(monitor_status=monitor_status, signum=signum):
+                native = self.root / ("declined-native-%d" % self.sequence)
+                case = self.owner_driver(["/bin/sh", "-c", "printf forbidden > " + shlex.quote(str(native))],
+                                         command_seconds=10, capture_seconds=21, authorize=False)
+                process, prefix, descriptors, generation, started = case
+                # This is our registered direct child. Stop it only to make both
+                # already-owned channels ready before its next pre-GO pump.
+                process.send_signal(signal.SIGSTOP)
+                stop_bound = time.monotonic() + 2
+                while True:
+                    observed, raw = os.waitpid(process.pid, os.WUNTRACED | os.WNOHANG)
+                    if observed:
+                        self.assertTrue(os.WIFSTOPPED(raw))
+                        break
+                    self.assertLess(time.monotonic(), stop_bound)
+                    time.sleep(.005)
+                if monitor_status is not None:
+                    os.write(descriptors["adjudication"],
+                             ("COMMAND-MONITOR %s %d\n" % (generation, monitor_status)).encode())
+                    self.close_descriptor(descriptors["adjudication"])
+                if signum is not None:
+                    os.write(descriptors["lifetime"], ("CANCEL %s %d\n" % (generation, signum)).encode())
+                self.close_descriptor(descriptors["lifetime"])
+                self.close_descriptor(descriptors["control"])
+                process.send_signal(signal.SIGCONT)
+                status, owner, elapsed = self.finish_owner(case)
+                expected = 128 + signum if signum is not None else 124 if monitor_status else 125
+                self.assertEqual(status, expected)
+                self.assertEqual(owner["command_status"], str(expected))
+                self.assertEqual(owner["deadline_reached"], "1" if monitor_status else "0")
+                self.assertEqual(owner["capture_status"], "124")
+                self.assertEqual(owner["caller_lost"], "1")
+                self.assertEqual(owner["command_monitor_status"], str(monitor_status) if monitor_status else "pending")
+                self.assertEqual(owner["native_launch"], "0")
+                self.assertEqual(owner["keeper_status"], "unavailable")
+                self.assertEqual(owner["cleanup_status"], "0")
+                self.assertEqual(owner["helper_error"], "none")
+                self.assertFalse(native.exists())
+                self.assertLess(elapsed, 3)
 
     def test_actual_invocation70_refuses_real_helper_token0(self):
         state = self.root / "shim70"

@@ -118,9 +118,13 @@ class LifecycleCaptureTests(unittest.TestCase):
                       + native)
 
         def popen_control(arguments, **options):
-            is_keeper = len(arguments) > 2 and arguments[2] == "--keeper"
+            if arguments[1:3] == ["-S", str(HELPER)]:
+                self.assertEqual(arguments[3:4], ["--keeper"])
+            keeper_arguments = ([arguments[0], *arguments[2:]]
+                                if arguments[1:3] == ["-S", str(HELPER)] else arguments)
+            is_keeper = len(keeper_arguments) > 2 and keeper_arguments[2] == "--keeper"
             if is_keeper and keeper_exit is not None:
-                arguments = [sys.executable, "-c", keeper_code, *arguments[3:]]
+                arguments = [sys.executable, "-S", "-c", keeper_code, *keeper_arguments[3:]]
                 if premature:
                     arguments.extend(str(descriptors[name]) for name in ("entry_read", "death_write"))
                     options["pass_fds"] = (*options.get("pass_fds", ()),
@@ -213,9 +217,13 @@ sys.exit(m.main(['--keeper',*sys.argv[5:]]))
 '''
 
                 def popen_control(arguments, **options):
-                    if len(arguments) > 2 and arguments[2] == "--keeper":
-                        arguments = [sys.executable, "-c", keeper_code, str(HELPER), mode,
-                                     str(entered), str(completed), *arguments[3:]]
+                    if arguments[1:3] == ["-S", str(HELPER)]:
+                        self.assertEqual(arguments[3:4], ["--keeper"])
+                    keeper_arguments = ([arguments[0], *arguments[2:]]
+                                        if arguments[1:3] == ["-S", str(HELPER)] else arguments)
+                    if len(keeper_arguments) > 2 and keeper_arguments[2] == "--keeper":
+                        arguments = [sys.executable, "-S", "-c", keeper_code, str(HELPER), mode,
+                                     str(entered), str(completed), *keeper_arguments[3:]]
                     process = original_popen(arguments, **options)
                     owned.append(process)
                     return process

@@ -217,7 +217,23 @@
   promotion, without establishing the runner's delay cause or a future native
   result. Expiry, cancellation, malformed handoffs or a shim's
   mismatched exit refuse admission; a residual old owner can only publish in
-  its old generation. Caller cancellation retains status 130/143. Residual
+  its old generation. The two caller records use guarded builtin writes;
+  admission requires the actual collector exit zero and both complete matching
+  records, including matching helper/invocation statuses. Private fixed-order
+  Bash `SECONDS` stages observe setup, monitor launch, interpreter handoff and
+  publication without changing either clock or authorizing admission. Builtin
+  path trimming and caller writes remove known external launches; a retained
+  late-start failure does not establish the cause of its post-setup delay or
+  a hosted speed improvement. Startup refusal preserves any already observed
+  command-monitor deadline even when the caller is then lost.
+  The owner and keeper use only standard-library imports and invoke Python with
+  [`-S`](https://docs.python.org/3/using/cmdline.html#cmdoption-S), which disables
+  automatic [`site`](https://docs.python.org/3/library/site.html) initialization
+  and its customization hooks. Payload arguments and environment are unchanged.
+  A finite thirteen-second site hook remains unentered while both roles complete
+  and are reaped; separate retained counterfactuals show this is a reachable
+  startup delay class, not the established cause of the hosted late-start failure.
+  Caller cancellation retains status 130/143. Residual
   cleanup and unknown reaps remain failures, rather than synchronized-cleanup
   claims. Ordinary EOF releases only the keeper and does not prove silent
   descendants are gone. Named receipts retain dispatches, authority release,
