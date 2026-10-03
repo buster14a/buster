@@ -33907,7 +33907,7 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
         u32 close = c_ir_matching_delimiter_cached(builder, start, assignment, C_PUNCTUATOR_LEFT_PARENTHESIS,
                                                    C_PUNCTUATOR_RIGHT_PARENTHESIS);
         parenthesized_base_suffix =
-            close + 1 < assignment &&
+            close < assignment && close + 1 < assignment &&
             (c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_DOT) ||
              c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_ARROW) ||
              c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACKET));
