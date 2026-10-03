@@ -26,11 +26,11 @@ static int write_source(char const* directory, unsigned shape)
             for (unsigned pass = 0; pass < (hot ? 10u : 2u); pass += 1)
             {
                 // Empty assembly has declared physical effects but emits no
-                // instructions. Cold rows foreclose the whole allocatable file;
-                // the hot row leaves the callee-saved pin file untouched.
+                // instructions. Cold rows clobber accepted caller registers and
+                // rbx; r12-r15 stay available. Hot rows leave rbx available too.
                 fprintf(output, "      __asm__ volatile(\"\" : : : \"rax\",\"rcx\",\"rdx\",\"rsi\",\"rdi\","
                     "\"r8\",\"r9\",\"r10\",\"r11\"%s,\"cc\",\"memory\");\n"
-                    "      output[%u] = value;\n", hot ? "" : ",\"rbx\",\"r12\",\"r13\",\"r14\",\"r15\"", value);
+                    "      output[%u] = value;\n", hot ? "" : ",\"rbx\"", value);
             }
             fputs("    }\n", output);
         }

@@ -24,9 +24,10 @@ metadata, frozen generated inputs, and all observations remain in the artifact.
 `late-hot`, `early-hot`, `equal-forward`, and `equal-reverse`. Logical value V
 reads `input[V % 16]` and XORs it with `V * 7 + 123456789`, then publishes it to
 `output[V]`. The cold shape has two physical-clobber barriers and two volatile
-stores. The hot logical value, V=4096, has ten caller-saved barriers/stores and
-leaves the callee-saved pin file available. Equal shapes contain only cold
-values. Ordering changes preserve logical input/output identities.
+stores. Its barriers clobber caller-saved GPRs and rbx, leaving r12-r15
+available. The hot logical value, V=4096, has ten caller-saved barriers/stores
+and leaves rbx available too. Equal shapes contain only cold values. Ordering
+changes preserve logical input/output identities.
 
 These source forms are hypotheses about allocator pressure, not a claim that
 the frontend admits exactly 4,097 candidates. Explicit candidate diagnostics
@@ -93,10 +94,49 @@ budget. This bounded corpus cannot establish cap-hit prevalence across external
 projects. No AArch64, Windows, macOS, Zen 5, PMU, or real-project performance
 claim is made. Admission-only latency remains a separate optional experiment.
 
-Validation before publication: Clang C11 warnings-as-errors syntax checks pass
-for the three packet sources; no generated stress source, Buster compiler,
-runtime binary, or measurement was executed locally. Hosted execution and review
-remain pending at this documentation checkpoint.
+## Preserved rejected corpus and distinct corrected corpus
+
+The first hosted attempt, run
+[37150651728](https://github.com/buster14a/buster/actions/runs/37150651728), used
+packet `4cff40618ae5886fe705c1788ededbec9524e458`. Both ordinary subject builds
+and the census build passed, but all 312 stress compiler trials were rejected
+for unsupported GNU assembly clobbers. No stress objects, valid compile-time
+comparisons, generated-runtime results, code-byte results, or spill comparisons
+exist from that attempt. Every rejection log and CSV row remains in artifact
+`quality313-research-37150651728-1`, ID 11283692821, ZIP SHA-256
+`8ba6680dc70c0a002be9f8ccd67afb45b09fb2b080a8d5e87a57000cacdb8bb4`.
+
+The pinned semantic parser, `c_gen.c` blob
+`e9e60e90effefe5c0492f680c0d43f9128a63129`, accepts named base GPRs and
+numeric r8-r11, but rejects the original cold barriers' r12-r15. The corrected
+generator removes only those four clobber strings. Subjects, four shapes,
+input/output identities, store/barrier counts, driver, collector, workflow,
+and fixed sample population remain unchanged. Cold intervals now have part of
+the callee-saved file available; actual eligibility, cap incidence and benefit
+must be observed rather than inferred from the rejected MIR hypothesis.
+
+Original generator Git blob: `d9ab8db03dd3246225b5e46add2dd75bb091ece8`;
+SHA-256: `2cd0c3ccf0151d0195daa45c64668766e0f4b6cff31bb8f8ac8a8816ab904a09`.
+Corrected generator Git blob: `86b1fd73be5a1889a50671885bcafe2eae4f4b5a`;
+SHA-256: `9d1309dfc0bd8c2b72e4d62255326b8118e718e2763ef022b19c0367416d6e59`.
+The original four generated input hashes remain in the first artifact's
+`frozen-inputs.sha256`. The corrected attempt will generate its own immutable
+files and SHA-256 manifest once on the runner; no corrected generated source
+has been executed locally or treated as identical to the rejected corpus.
+
+The first attempt's two real candidate unity QUALITY census cells succeeded.
+Direct SSA observed 6,129 QUALITY functions, 5,815 prepassed functions and
+86,080 eligible candidates; shared local promotion observed the same function
+counts and 86,626 eligible candidates. Both recorded 314 switch fallback
+functions, zero cap functions, zero excluded candidates and zero excluded
+potential traffic. These observations apply to those candidate-source cells,
+not to the rejected stress corpus or external projects.
+
+Validation: Clang C11 warnings-as-errors syntax checks pass for all three packet
+sources; all seven Bash literal steps pass syntax checks and the staged diff
+passes whitespace checks. No generated stress source, Buster compiler, runtime
+binary, or measurement was executed locally. Corrected hosted execution remains
+pending at this documentation checkpoint.
 
 Buster first-party licensing remains unselected, verified at the pinned
 `LICENSES/README.md` and #621. The packet imports no third-party implementation
