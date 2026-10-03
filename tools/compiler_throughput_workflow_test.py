@@ -91,6 +91,7 @@ class CompilerThroughputWorkflowTest(unittest.TestCase):
             WORKFLOWS / "native-retirement-catch-up.yml",
             WORKFLOWS / "native-retirement-automation.yml",
             WORKFLOWS / "merge-queue-reconcile.yml",
+            WORKFLOWS / "pages.yml",
         }
         queued = {path for path in WORKFLOWS.glob("*.yml")
                   if re.search(r"^\s+queue:", path.read_text(), re.MULTILINE)}
@@ -102,8 +103,12 @@ class CompilerThroughputWorkflowTest(unittest.TestCase):
                 self.assertIn("  queue: max\n", concurrency)
                 self.assertIn("  cancel-in-progress: false\n", concurrency)
                 self.assertEqual(len(re.findall(r"^\s+queue:", text, re.MULTILINE)), 1)
-                self.assertNotIn("${{", re.search(r"^  group: (.*)$", concurrency,
-                                                  re.MULTILINE).group(1))
+                group = re.search(r"^  group: (.*)$", concurrency, re.MULTILINE).group(1)
+                if path.name == "pages.yml":
+                    self.assertEqual(group, "pages-${{ github.event_name == 'pull_request' && "
+                                     "github.event.pull_request.number || github.ref }}")
+                else:
+                    self.assertNotIn("${{", group)
         ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("python3 tools/compiler_throughput_workflow_test.py", ci)
         self.assertIn("-ignore 'unexpected key \"queue\" for \"concurrency\" section'", ci)

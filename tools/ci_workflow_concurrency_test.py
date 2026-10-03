@@ -12,6 +12,7 @@ class MainPushConcurrencyTests(unittest.TestCase):
         "native-retirement-automation.yml": "native-retirement-automation-controller",
         "native-retirement-catch-up.yml": "native-retirement-catch-up",
         "merge-queue-reconcile.yml": "merge-queue-admission-reconcile",
+        "pages.yml": "pages-refs/heads/main",
     }
 
     def context(self, event="push", number=101):
