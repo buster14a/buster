@@ -3971,7 +3971,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_backward_switch_cfg(Unit
             MachineTargetDescription const* description = descriptions[target_index];
             MachineFunctionBuilder builder = machine_function_builder_begin(arena);
             MachineRef values[VALUE_COUNT];
-            MachineRef argument = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, target_index == 0 ? MACHINE_X64_RDI : MACHINE_A64_X0);
+            u32 physical_argument = target_index == 0 ? (u32)MACHINE_X64_RDI : (u32)MACHINE_A64_X0;
+            MachineRef argument = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, physical_argument);
             u16 store_opcode = target_index == 0 ? MACHINE_X64_STORE_FRAME64 : MACHINE_A64_STORE_FRAME64;
             u16 return_opcode = target_index == 0 ? MACHINE_X64_RET : MACHINE_A64_RET;
             machine_builder_block_begin(&builder);
