@@ -269,6 +269,141 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_call_validation(UnitTestArg
 }
 
 
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_unary_categories_case(UnitTestArguments* arguments, IrUnaryOperation operation,
+                                                                         u32 type_index, u32 variant)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    // Complete raw input independent of C lowering and construction helpers.
+    // LOCAL remains a PLACE and LOAD remains the explicit value boundary;
+    // only the UNARY operand selection or operand/result category changes.
+    IrType types[] = {
+        {.id = {.value = 0}, .kind = IR_TYPE_INTEGER, .bit_width = 64, .is_signed = true,
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_FLOAT, .bit_width = 64,
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 2}, .kind = IR_TYPE_BOOLEAN, .bit_width = 1,
+         .layout = {.size = 1, .alignment = 1, .resolved = true}},
+        {.id = {.value = 3}, .kind = IR_TYPE_VECTOR, .element_type = {.value = 0}, .element_count = 2,
+         .layout = {.size = 16, .alignment = 16, .resolved = true}},
+        {.id = {.value = 4}, .kind = IR_TYPE_VECTOR, .element_type = {.value = 1}, .element_count = 2,
+         .layout = {.size = 16, .alignment = 16, .resolved = true}},
+        {.id = {.value = 5}, .kind = IR_TYPE_VOID},
+        {.id = {.value = 6}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 5}},
+    };
+    IrValueId operands[] = {{.value = 0}, {.value = variant == 1 || variant == 3 ? 0 : 1}};
+    IrValue values[] = {
+        {.canonical_type = {.value = type_index}, .definition = {.value = 0}, .category = IR_VALUE_PLACE},
+        {.canonical_type = {.value = type_index}, .definition = {.value = 1}, .category = IR_VALUE_VALUE},
+        {.canonical_type = {.value = type_index}, .definition = {.value = 2}, .category = IR_VALUE_VALUE},
+    };
+    if (variant == 2 || variant == 3)
+    {
+        values[2].category = IR_VALUE_PLACE;
+    }
+    else if (variant == 4)
+    {
+        values[1].category = IR_VALUE_COUNT;
+    }
+    else if (variant == 5)
+    {
+        values[2].category = IR_VALUE_COUNT;
+    }
+    IrInstruction instructions[] = {
+        {.opcode = IR_OPCODE_LOCAL, .canonical_type = {.value = type_index}, .result = {.value = 0},
+         .canonical_local = {.value = 0}, .next = {.value = 1}},
+        {.opcode = IR_OPCODE_LOAD, .canonical_type = {.value = type_index}, .result = {.value = 1},
+         .operands = operands, .operand_count = 1, .next = {.value = 2}},
+        {.opcode = IR_OPCODE_UNARY, .unary_operation = (u8)operation, .canonical_type = {.value = type_index},
+         .result = {.value = 2}, .operands = operands + 1, .operand_count = 1, .next = {.value = 3}},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 5}, .result = IR_VALUE_ID_INVALID,
+         .next = IR_INSTRUCTION_ID_INVALID},
+    };
+    IrBlock block = {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 3},
+                     .sealed = true, .terminated = true};
+    IrFunction function = {.id = {.value = 0}, .canonical_type = {.value = 6}, .state = IR_FUNCTION_LOWERED, .entry = {.value = 0},
+                           .blocks = &block, .block_count = 1, .instructions = instructions,
+                           .instruction_count = BUSTER_ARRAY_LENGTH(instructions), .values = values,
+                           .value_count = BUSTER_ARRAY_LENGTH(values), .local_count = 1};
+    IrModule module = {.functions = &function, .function_count = 1};
+    IrProgram program = {.arena = arguments->arena, .modules = &module, .module_count = 1,
+                         .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    IrValidationResult validation = ir_validate_canonical_module(&program, &module);
+    IrValidationError expected = variant ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE;
+    BUSTER_TEST(arguments, validation.error == expected);
+    // A missing rejection in the failure-first baseline must not send
+    // deliberately malformed values through promotion or publication.
+    if (validation.error == expected)
+    {
+        if (variant)
+        {
+            BUSTER_TEST(arguments, validation.function.value == 0 && validation.block.value == 0 && validation.instruction.value == 2);
+            u8 instruction_snapshot[sizeof(instructions)];
+            u8 value_snapshot[sizeof(values)];
+            u8 block_snapshot[sizeof(block)];
+            memcpy(instruction_snapshot, instructions, sizeof(instructions));
+            memcpy(value_snapshot, values, sizeof(values));
+            memcpy(block_snapshot, &block, sizeof(block));
+            IrValidationResult prepared = ir_prepare_canonical_module(&program, &module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_OPERATION);
+            BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+            BUSTER_TEST(arguments, prepared.function.value == 0 && prepared.block.value == 0 && prepared.instruction.value == 2);
+            BUSTER_TEST(arguments, function.published_cfg == 0 && !module.local_promotion_complete && !module.fast_complete);
+            BUSTER_TEST(arguments, function.instruction_count == BUSTER_ARRAY_LENGTH(instructions) &&
+                                   function.value_count == BUSTER_ARRAY_LENGTH(values));
+            BUSTER_TEST(arguments, memcmp(instruction_snapshot, instructions, sizeof(instructions)) == 0);
+            BUSTER_TEST(arguments, memcmp(value_snapshot, values, sizeof(values)) == 0);
+            BUSTER_TEST(arguments, memcmp(block_snapshot, &block, sizeof(block)) == 0);
+        }
+        else
+        {
+            IrValidationResult prepared = ir_prepare_canonical_module(&program, &module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+            BUSTER_TEST(arguments, function.published_cfg != 0 && module.local_promotion_complete);
+            if (function.published_cfg)
+            {
+                BUSTER_TEST(arguments, function.published_cfg->edge_count == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(&program, &module).error == IR_VALIDATION_NONE);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_unary_categories(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        IrUnaryOperation operation;
+        u32 type_index;
+    } const cases[] = {
+        {IR_UNARY_INTEGER_NEGATE, 0},
+        {IR_UNARY_FLOAT_NEGATE, 1},
+        {IR_UNARY_INTEGER_BITWISE_NOT, 0},
+        {IR_UNARY_INTEGER_COUNT_LEADING_ZEROS, 0},
+        {IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS, 0},
+        {IR_UNARY_INTEGER_POPULATION_COUNT, 0},
+        {IR_UNARY_BOOLEAN_NOT, 2},
+        {IR_UNARY_VECTOR_INTEGER_NEGATE, 3},
+        {IR_UNARY_VECTOR_FLOAT_NEGATE, 4},
+        {IR_UNARY_VECTOR_INTEGER_BITWISE_NOT, 3},
+    };
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(cases) == IR_UNARY_COUNT);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 variant = 0; variant < 6; variant += 1)
+        {
+            UnitTestResult cell = ir_test_canonical_unary_categories_case(arguments, cases[index].operation, cases[index].type_index, variant);
+            result.test_count += cell.test_count;
+            result.succeeded_test_count += cell.succeeded_test_count;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_binary_fixture(IrBinaryOperation operation, u32 operand_type, u32 result_type)
 {
     // Independent complete-module data: the arguments, definitions, block
@@ -1169,6 +1304,10 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         }
     }
     BUSTER_TEST(arguments, ir_field_access_pieces(IR_FIELD_ACCESS_MAX_SIZE, 0) == 0);
+
+    UnitTestResult unary_categories = ir_test_canonical_unary_categories(arguments);
+    result.succeeded_test_count += unary_categories.succeeded_test_count;
+    result.test_count += unary_categories.test_count;
 
     UnitTestResult binary_families = ir_test_canonical_binary_families(arguments);
     result.succeeded_test_count += binary_families.succeeded_test_count;

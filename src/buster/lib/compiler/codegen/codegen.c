@@ -43,6 +43,8 @@
 //   codegen_emit_global_assembly                 here, instructions through
 //                                                assembly_encode, relocations
 //                                                into the module
+//   codegen_publish_machine_relocations          transactional machine-reference
+//                                                publication before line rows
 //   a64_emit_*, codegen_canonical_a64_*          AArch64 emission helpers
 //   codegen_slot_costs_build,                    the attempt's per-type frame
 //   codegen_record_machine_line_marks            slot table and the line rows
@@ -6739,6 +6741,130 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocat
     return result;
 }
 
+// Publishes the encoded function's call and inline-assembly references as one
+// transaction. Refused inline rows cannot expose the already appended calls
+// or valid inline prefix to the canonical code that replaces this encoding.
+bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* result, u32 relocation_capacity,
+                                         MachineFunction const* function, MachineEncodeResult const* encoded,
+                                         u32 code_base, Target target)
+{
+    u32 relocation_start = result->relocation_count;
+    bool valid = relocation_start <= relocation_capacity &&
+                 encoded->call_site_count <= relocation_capacity - relocation_start &&
+                 encoded->inline_assembly_relocation_count <= relocation_capacity - relocation_start - encoded->call_site_count;
+    if (valid)
+    {
+        if (target.cpu_arch == CPU_ARCH_AARCH64)
+        {
+            for (u32 site_index = 0; site_index < encoded->call_site_count; site_index += 1)
+            {
+                MachineThreadLocalSite thread_local_site = (MachineThreadLocalSite)encoded->call_sites[site_index].thread_local_site;
+                result->relocations[result->relocation_count++] = (CodegenModuleRelocation){
+                    .symbol = function->call_targets[encoded->call_sites[site_index].target],
+                    .offset = code_base + encoded->call_sites[site_index].code_offset,
+                    .kind = (u8)(encoded->call_sites[site_index].is_thread_local
+                                     ? (thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX
+                                            ? (encoded->call_sites[site_index].thread_local_low
+                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
+                                                : CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP)
+                                        : thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET
+                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12
+                                        : thread_local_site == MACHINE_THREAD_LOCAL_SITE_DARWIN_DESCRIPTOR
+                                            ? (encoded->call_sites[site_index].thread_local_low
+                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
+                                                : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21)
+                                        : encoded->call_sites[site_index].thread_local_low
+                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
+                                            : CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12)
+                                     : encoded->call_sites[site_index].page_relative
+                                         ? (encoded->call_sites[site_index].page_low
+                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12
+                                                : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21)
+                                     : encoded->call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
+                                                                               : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
+                };
+            }
+        }
+        else
+        {
+            for (u32 site_index = 0; site_index < encoded->call_site_count; site_index += 1)
+            {
+                // The encoder says which field of which
+                // sequence each site is; only the ELF
+                // thread-local models have more than one
+                // spelling, and the call beside a
+                // general-dynamic lea is not thread-local at
+                // all -- it resolves to __tls_get_addr.
+                MachineThreadLocalSite thread_local_site =
+                    (MachineThreadLocalSite)encoded->call_sites[site_index].thread_local_site;
+                bool site_is_thread_local = encoded->call_sites[site_index].is_thread_local != 0;
+                // Everything that is not thread-local takes
+                // the reference form the selector wrote beside
+                // the call target, so a GOT load and a PLT
+                // call are told apart here by what the symbol
+                // is rather than by which row emitted them.
+                u32 site_target = encoded->call_sites[site_index].target;
+                u8 site_reference = function->call_target_references
+                                        ? function->call_target_references[site_target]
+                                        : (u8)MACHINE_SYMBOL_REFERENCE_DIRECT;
+                CodegenModuleRelocationKind site_direct_kind =
+                    site_reference == MACHINE_SYMBOL_REFERENCE_GOT   ? CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL
+                    : site_reference == MACHINE_SYMBOL_REFERENCE_PLT ? CODEGEN_MODULE_RELOCATION_X86_64_PLT32
+                                                                     : CODEGEN_MODULE_RELOCATION_X86_64_PC32;
+                CodegenModuleRelocationKind site_kind =
+                    thread_local_site == MACHINE_THREAD_LOCAL_SITE_TLS_GET_ADDR ? CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32
+                    : !site_is_thread_local                                     ? site_direct_kind
+                    : thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX ? CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32
+                    : target.os == OPERATING_SYSTEM_WINDOWS                     ? CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32
+                    : (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+                        ? CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32
+                    : thread_local_site == MACHINE_THREAD_LOCAL_SITE_INITIAL_EXEC    ? CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF
+                    : thread_local_site == MACHINE_THREAD_LOCAL_SITE_GENERAL_DYNAMIC ? CODEGEN_MODULE_RELOCATION_X86_64_TLSGD
+                                                                                     : CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32;
+                result->relocations[result->relocation_count++] = (CodegenModuleRelocation){
+                    .symbol = function->call_targets[site_target],
+                    .offset = code_base + encoded->call_sites[site_index].code_offset,
+                    .kind = (u8)site_kind,
+                };
+            }
+        }
+        for (u32 relocation_index = 0;
+             relocation_index < encoded->inline_assembly_relocation_count && valid;
+             relocation_index += 1)
+        {
+            MachineInlineAssemblyRelocation relocation = encoded->inline_assembly_relocations[relocation_index];
+            CodegenModuleRelocationKind kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32;
+            valid = !relocation.is_block && codegen_global_assembly_relocation_kind((AssemblyRelocationKind)relocation.kind, &kind);
+            s64 addend = relocation.addend;
+            if (valid && kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32)
+            {
+                valid = addend <= INT64_MAX - 4;
+                if (valid)
+                {
+                    addend += 4;
+                }
+            }
+            IrSymbolId symbol = valid ? codegen_global_assembly_symbol(program, relocation.symbol, target, IR_SYMBOL_DATA) : IR_SYMBOL_ID_INVALID;
+            valid = valid && symbol.value != IR_ID_UNDERLYING_INVALID;
+            if (valid)
+            {
+                result->relocations[result->relocation_count++] = (CodegenModuleRelocation){
+                    .addend = addend,
+                    .symbol = symbol,
+                    .offset = code_base + relocation.offset,
+                    .source = CODEGEN_MODULE_RELOCATION_CODE,
+                    .kind = (u8)kind,
+                };
+            }
+        }
+    }
+    if (!valid)
+    {
+        result->relocation_count = relocation_start;
+    }
+    return valid;
+}
+
 // Assembles one instruction line through the same assembler the inline
 // assembly path uses, and records the relocations it reports against names
 // the block does not define. `call sym` and `lea sym(%rip),%reg` -- what a
@@ -12982,76 +13108,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (machine_unwind_valid)
                         {
-                            bool machine_code_in_place = encoded.bytes == code_destination;
-                            if (!machine_code_in_place)
+                            bool machine_relocations_valid = codegen_publish_machine_relocations(program, &result, relocation_capacity,
+                                                                                                   &selected.function, &encoded,
+                                                                                                   (u32)buffer.count, target);
+                            if (machine_relocations_valid)
                             {
-                                memcpy(code_destination, encoded.bytes, encoded.byte_count);
-                            }
-                            codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit, &selected.function,
-                                                              encoded.row_offsets, (u32)buffer.count);
-                            for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
-                            {
-                                MachineThreadLocalSite thread_local_site = (MachineThreadLocalSite)encoded.call_sites[site_index].thread_local_site;
-                                result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
-                                    .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
-                                    .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
-                                    .kind = (u8)(encoded.call_sites[site_index].is_thread_local
-                                                     ? (thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX
-                                                            ? (encoded.call_sites[site_index].thread_local_low
-                                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
-                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP)
-                                                        : thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET
-                                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12
-                                                        : thread_local_site == MACHINE_THREAD_LOCAL_SITE_DARWIN_DESCRIPTOR
-                                                            ? (encoded.call_sites[site_index].thread_local_low
-                                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
-                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21)
-                                                        : encoded.call_sites[site_index].thread_local_low
-                                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
-                                                            : CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12)
-                                                     : encoded.call_sites[site_index].page_relative
-                                                         ? (encoded.call_sites[site_index].page_low
-                                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12
-                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21)
-                                                     : encoded.call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
-                                                                                               : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
-                                };
-                            }
-                            bool machine_inline_relocations_valid =
-                                result.relocation_count <= relocation_capacity &&
-                                encoded.inline_assembly_relocation_count <= relocation_capacity - result.relocation_count;
-                            for (u32 relocation_index = 0;
-                                 relocation_index < encoded.inline_assembly_relocation_count && machine_inline_relocations_valid;
-                                 relocation_index += 1)
-                            {
-                                MachineInlineAssemblyRelocation relocation = encoded.inline_assembly_relocations[relocation_index];
-                                CodegenModuleRelocationKind kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32;
-                                machine_inline_relocations_valid = !relocation.is_block &&
-                                    codegen_global_assembly_relocation_kind((AssemblyRelocationKind)relocation.kind, &kind);
-                                s64 addend = relocation.addend;
-                                if (machine_inline_relocations_valid && kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32)
+                                bool machine_code_in_place = encoded.bytes == code_destination;
+                                if (!machine_code_in_place)
                                 {
-                                    machine_inline_relocations_valid = addend <= INT64_MAX - 4;
-                                    addend += 4;
+                                    memcpy(code_destination, encoded.bytes, encoded.byte_count);
                                 }
-                                IrSymbolId symbol = machine_inline_relocations_valid
-                                                        ? codegen_global_assembly_symbol(program, relocation.symbol, target, IR_SYMBOL_DATA)
-                                                        : IR_SYMBOL_ID_INVALID;
-                                machine_inline_relocations_valid = machine_inline_relocations_valid &&
-                                    symbol.value != IR_ID_UNDERLYING_INVALID;
-                                if (machine_inline_relocations_valid)
-                                {
-                                    result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
-                                        .addend = addend,
-                                        .symbol = symbol,
-                                        .offset = (u32)buffer.count + relocation.offset,
-                                        .source = CODEGEN_MODULE_RELOCATION_CODE,
-                                        .kind = (u8)kind,
-                                    };
-                                }
-                            }
-                            if (machine_inline_relocations_valid)
-                            {
+                                codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit,
+                                                                  &selected.function, encoded.row_offsets, (u32)buffer.count);
                                 // Seed storage grows with what recording
                                 // actually emits. Reserving the records-times-
                                 // rows worst case instead put gigabytes of
@@ -13167,88 +13235,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (machine_unwind_valid)
                         {
-                            bool machine_code_in_place = encoded.bytes == code_destination;
-                            if (!machine_code_in_place)
+                            bool machine_relocations_valid = codegen_publish_machine_relocations(program, &result, relocation_capacity,
+                                                                                                   &selected.function, &encoded,
+                                                                                                   (u32)buffer.count, target);
+                            if (machine_relocations_valid)
                             {
-                                memcpy(code_destination, encoded.bytes, encoded.byte_count);
-                            }
-                            codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit, &selected.function,
-                                                              encoded.row_offsets, (u32)buffer.count);
-                            for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
-                            {
-                                // The encoder says which field of which
-                                // sequence each site is; only the ELF
-                                // thread-local models have more than one
-                                // spelling, and the call beside a
-                                // general-dynamic lea is not thread-local at
-                                // all -- it resolves to __tls_get_addr.
-                                MachineThreadLocalSite thread_local_site =
-                                    (MachineThreadLocalSite)encoded.call_sites[site_index].thread_local_site;
-                                bool site_is_thread_local = encoded.call_sites[site_index].is_thread_local != 0;
-                                // Everything that is not thread-local takes
-                                // the reference form the selector wrote beside
-                                // the call target, so a GOT load and a PLT
-                                // call are told apart here by what the symbol
-                                // is rather than by which row emitted them.
-                                u32 site_target = encoded.call_sites[site_index].target;
-                                u8 site_reference = selected.function.call_target_references
-                                                        ? selected.function.call_target_references[site_target]
-                                                        : (u8)MACHINE_SYMBOL_REFERENCE_DIRECT;
-                                CodegenModuleRelocationKind site_direct_kind =
-                                    site_reference == MACHINE_SYMBOL_REFERENCE_GOT   ? CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL
-                                    : site_reference == MACHINE_SYMBOL_REFERENCE_PLT ? CODEGEN_MODULE_RELOCATION_X86_64_PLT32
-                                                                                     : CODEGEN_MODULE_RELOCATION_X86_64_PC32;
-                                CodegenModuleRelocationKind site_kind =
-                                    thread_local_site == MACHINE_THREAD_LOCAL_SITE_TLS_GET_ADDR ? CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32
-                                    : !site_is_thread_local                                     ? site_direct_kind
-                                    : thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX ? CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32
-                                    : target.os == OPERATING_SYSTEM_WINDOWS                     ? CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32
-                                    : (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
-                                        ? CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32
-                                    : thread_local_site == MACHINE_THREAD_LOCAL_SITE_INITIAL_EXEC    ? CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF
-                                    : thread_local_site == MACHINE_THREAD_LOCAL_SITE_GENERAL_DYNAMIC ? CODEGEN_MODULE_RELOCATION_X86_64_TLSGD
-                                                                                                     : CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32;
-                                result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
-                                    .symbol = selected.function.call_targets[site_target],
-                                    .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
-                                    .kind = (u8)site_kind,
-                                };
-                            }
-                            bool machine_inline_relocations_valid =
-                                result.relocation_count <= relocation_capacity &&
-                                encoded.inline_assembly_relocation_count <= relocation_capacity - result.relocation_count;
-                            for (u32 relocation_index = 0;
-                                 relocation_index < encoded.inline_assembly_relocation_count && machine_inline_relocations_valid;
-                                 relocation_index += 1)
-                            {
-                                MachineInlineAssemblyRelocation relocation = encoded.inline_assembly_relocations[relocation_index];
-                                CodegenModuleRelocationKind kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32;
-                                machine_inline_relocations_valid = !relocation.is_block &&
-                                    codegen_global_assembly_relocation_kind((AssemblyRelocationKind)relocation.kind, &kind);
-                                s64 addend = relocation.addend;
-                                if (machine_inline_relocations_valid && kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32)
+                                bool machine_code_in_place = encoded.bytes == code_destination;
+                                if (!machine_code_in_place)
                                 {
-                                    machine_inline_relocations_valid = addend <= INT64_MAX - 4;
-                                    addend += 4;
+                                    memcpy(code_destination, encoded.bytes, encoded.byte_count);
                                 }
-                                IrSymbolId symbol = machine_inline_relocations_valid
-                                                        ? codegen_global_assembly_symbol(program, relocation.symbol, target, IR_SYMBOL_DATA)
-                                                        : IR_SYMBOL_ID_INVALID;
-                                machine_inline_relocations_valid = machine_inline_relocations_valid &&
-                                    symbol.value != IR_ID_UNDERLYING_INVALID;
-                                if (machine_inline_relocations_valid)
-                                {
-                                    result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
-                                        .addend = addend,
-                                        .symbol = symbol,
-                                        .offset = (u32)buffer.count + relocation.offset,
-                                        .source = CODEGEN_MODULE_RELOCATION_CODE,
-                                        .kind = (u8)kind,
-                                    };
-                                }
-                            }
-                            if (machine_inline_relocations_valid)
-                            {
+                                codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit,
+                                                                  &selected.function, encoded.row_offsets, (u32)buffer.count);
                                 u32 machine_frame_base_offset = encoded.frame_pointer_offset ? placement.frame_size : 0;
                                 // Same emitted-range sizing as the AArch64 path
                                 // above.

@@ -46,8 +46,13 @@ and debug arrays. The wrapper owns the ABI and slot-cost caches across attempts;
 the machine path uses a per-function scratch arena. A failed attempt is discarded
 by rewinding the arena. A machine failure may instead fall back to canonical
 emission for that function, so its partially written code and unwind state must
-not be published. The canonical emitter's flat instruction and value loops are
-intentional; moving a boundary must keep their iteration and data layout.
+not be published. `codegen_publish_machine_relocations` checks combined call
+and inline-assembly capacity before writing and restores the live relocation
+count when any inline row is refused. Both native commit sites record line rows
+only after that transaction succeeds, so canonical replacement cannot inherit
+references or line positions from discarded machine bytes. The canonical
+emitter's flat instruction and value loops are intentional; moving a boundary
+must keep their iteration and data layout.
 
 The public native result identifies a failing function, instruction and opcode
 for many backend errors, counts machine fallbacks by reason, and names the
