@@ -16180,13 +16180,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTe
                              "           placed_constant == 6 && placed_zero == 0 && !__start_buster_absent && block_scope() == 0 && ordinary_between == 100 &&\n"
                              "           __start_buster_mixed == &mixed_first && __start_buster_mixed[0] == 7 && mixed_second == 2.0 && odd_member == 1 ? 0 : 1;\n"
                              "}\n");
-    String8 member_source = S8("#ifndef BUSTER_SET_BOUND\n"
-                               "#define BUSTER_SET_BOUND __attribute__((weak))\n"
-                               "#endif\n"
-                               "__attribute__((section(\"buster_set\"), used)) static int third_member = 10;\n"
-                               "extern int __start_buster_set[] BUSTER_SET_BOUND;\n"
-                               "extern int __stop_buster_set[] BUSTER_SET_BOUND;\n"
-                               "int buster_set_count(void) { return (int)(__stop_buster_set - __start_buster_set); }\n");
+    String8 member_source = S8("__attribute__((section(\"buster_set\"), used)) static int third_member = 10;\n"
+                               "__attribute__((section(\"buster_weak_only\"), used)) static int weak_only_member = 19;\n"
+                               "extern int __start_buster_set[] __attribute__((weak));\n"
+                               "extern int __stop_buster_set[] __attribute__((weak));\n"
+                               "extern int __start_buster_weak_only[] __attribute__((weak));\n"
+                               "extern int __stop_buster_weak_only[] __attribute__((weak));\n"
+                               "extern int __start_buster_absent[] __attribute__((weak));\n"
+                               "extern int __stop_buster_absent[] __attribute__((weak));\n"
+                               "int buster_set_count(void) {\n"
+                               "    return __start_buster_set && __stop_buster_set && !__start_buster_absent && !__stop_buster_absent &&\n"
+                               "           __start_buster_weak_only && __stop_buster_weak_only &&\n"
+                               "           __stop_buster_weak_only - __start_buster_weak_only == 1 && *__start_buster_weak_only == 19 ?\n"
+                               "           (int)(__stop_buster_set - __start_buster_set) : -1;\n"
+                               "}\n");
     String8 main_input = buster_test_temporary_path(arena, S8("buster-section-main"), S8(".c"));
     String8 member_input = buster_test_temporary_path(arena, S8("buster-section-member"), S8(".c"));
     bool written = BUSTER_REQUIRE(arguments, file_write(main_input, BUSTER_SLICE_TO_BYTE_SLICE(main_source)) &&
@@ -16254,10 +16261,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTe
                             string_first_sequence(printed_text, S8("\t.section .preinit_array,\"aw\",@preinit_array\n")) < printed_text.length,
                         printed.diagnostic);
         // The host compiler's unit refers to the set's bounds weakly, the
-        // shape that used to read as an empty set. An AArch64 compiler reaches
-        // an extern-weak symbol through the GOT whatever the code model, and
-        // this reader does not take AArch64 GOT relocations (issue 1719), so
-        // there the unit names the bounds strongly and without -fPIC.
+        // shape that used to read as an empty set. Keep present and absent
+        // bounds weak on AArch64 too: Clang reaches them through GOT 311/312,
+        // whose reader and linker support is required by issue 1719.
         String8 host_command[10];
         u32 host_count = 0;
         host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
@@ -16265,10 +16271,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTe
         {
             host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
         }
-#if BUSTER_CPU_ARCH_AARCH64
-        host_command[host_count++] = S8("-fno-pic");
-        host_command[host_count++] = S8("-DBUSTER_SET_BOUND=");
-#endif
+        host_command[host_count++] = S8("-fPIC");
         host_command[host_count++] = S8("-c");
         host_command[host_count++] = member_input;
         host_command[host_count++] = S8("-o");
@@ -16277,6 +16280,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_section_attribute(UnitTe
                                                          (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         bool host_compiled = host_spawn.handle && os_process_wait_deadline(arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
         BUSTER_TEST(arguments, host_compiled);
+        if (host_compiled)
+        {
+            ByteSlice host_bytes = file_read(arena, host_member_object, (FileReadOptions){0});
+            ObjectFile host_object = object_read(arena, host_bytes, target_native);
+            if (BUSTER_REQUIRE(arguments, host_object.error == OBJECT_ERROR_NONE))
+            {
+                String8 bounds[] = {
+                    S8("__start_buster_set"), S8("__stop_buster_set"), S8("__start_buster_weak_only"),
+                    S8("__stop_buster_weak_only"), S8("__start_buster_absent"), S8("__stop_buster_absent"),
+                };
+                for (u32 bound = 0; bound < BUSTER_ARRAY_LENGTH(bounds); bound += 1)
+                {
+                    ObjectSymbol const* symbol = compiler_driver_test_object_symbol(&host_object, bounds[bound]);
+                    BUSTER_TEST(arguments, symbol && symbol->section == OBJECT_SECTION_UNDEFINED && symbol->global && symbol->weak && !symbol->hidden);
+#if BUSTER_CPU_ARCH_AARCH64
+                    BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&host_object, bounds[bound], OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21));
+                    BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&host_object, bounds[bound], OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12));
+#endif
+                }
+            }
+        }
         // This linker, from sources, from Buster objects, and with the host's
         // weak-reference unit.
         String8 buster_links[3][4] = {

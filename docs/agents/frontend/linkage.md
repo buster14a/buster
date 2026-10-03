@@ -173,8 +173,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `object_read_elf64` keeps every C-identifier-named input section as its
   own section. `link_objects` places each such set contiguously after the
   ordinary sections of its kind, and defines the `__start_NAME`/`__stop_NAME`
-  references GNU `ld` would (`link_section_sets_define`). The LLVM bitcode
-  writer records the names. Wasm does not yet (#1717).
+  references GNU `ld` would (`link_section_sets_define`). The registered
+  `compiler_driver_test_section_attribute` keeps the host-produced set bounds
+  weak on both Linux architectures and executes present and absent bounds
+  through Buster and host links. AArch64 Clang's weak references exercise ELF
+  GOT 311/312 instead of substituting strong bounds (GitHub #1719).
+  The LLVM bitcode writer records the names. Wasm names data segments and
+  accepts function section attributes without effect (GitHub #1717).
 - **`.init_array` and `.fini_array` are section kinds**,
   `OBJECT_SECTION_INIT_ARRAY` and `OBJECT_SECTION_FINI_ARRAY`, holding one
   pointer-wide slot per initializer with an `ABSOLUTE64` relocation against
