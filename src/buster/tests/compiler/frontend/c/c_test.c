@@ -721,6 +721,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_assignment_accesses(UnitTest
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_bit_field_assignment_values(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct S { unsigned a : 3; unsigned b : 5; };\n"
+                        "static unsigned trace;\n"
+                        "static struct S *locate(struct S *p) { trace = trace * 10u + 1u; return p; }\n"
+                        "static int consume(int value) { trace = trace * 10u + 2u; return value; }\n"
+                        "int main(void)\n"
+                        "{\n"
+                        "    struct S s = {7, 31};\n"
+                        "    struct S *p = &s;\n"
+                        "    unsigned failed = 0;\n"
+                        "    int value;\n"
+                        "    ((s).b = 3);\n"
+                        "    failed |= s.b != 3;\n"
+                        "    s.b = 31;\n"
+                        "    ((s).b &= 3);\n"
+                        "    failed |= s.b != 3;\n"
+                        "    value = ((s).b = 33);\n"
+                        "    failed |= value != 1 || s.b != 1;\n"
+                        "    ((*p).b |= 16);\n"
+                        "    failed |= s.b != 17;\n"
+                        "    value = (((p)->a += 2));\n"
+                        "    failed |= value != 1 || s.a != 1;\n"
+                        "    trace = 0;\n"
+                        "    value = consume(((locate(&s))->a = 9));\n"
+                        "    failed |= value != 1 || s.a != 1 || trace != 12u;\n"
+                        "    return failed != 0;\n"
+                        "}\n");
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("parenthesized-bit-field-assignment-values.c"),
+                    tokens, parse, target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("parenthesized-bit-field-assignment-values"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("parenthesized-bit-field-assignment-values-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-O0"), modes[mode], frontends[form],
+                                     S8("-fverify-codegen"), S8("-o"), output, source_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("parenthesized bit-field assignment {S8} {S8}: {S8}"),
+                        modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("parenthesized bit-field runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_lowering(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -32059,6 +32156,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArg
     return result;
 }
 
+// A comma used as a value operand must sequence its complete left operand
+// before preparing a call in the right operand. This is the value-producing
+// companion to the controlling-expression matrix above (GitHub #1421).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_value_operands(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_parts[] = {
+        S8("static volatile unsigned trace; static int payload;\n"),
+        S8("static int mark(int digit, int value) { trace = trace * 10u + (unsigned)digit; return value; }\n"),
+        S8("static int called(int digit, int value) { trace = trace * 10u + (unsigned)digit; return value; }\n"),
+        S8("static int *give(int digit) { trace = trace * 10u + (unsigned)digit; return &payload; }\n"),
+        S8("static int pair(int a, int b) { return a + b; }\n"),
+        S8("int conditional_true(int select) { return select ? (mark(1, 0), called(2, 10)) : called(3, 20); }\n"),
+        S8("int conditional_false(int select) { return select ? called(3, 20) : (mark(1, 0), called(2, 10)); }\n"),
+        S8("int binary_value(void) { return (mark(1, 0), called(2, 10)) + 1; }\n"),
+        S8("long cast_value(void) { return (long)(mark(1, 0), called(2, 7)); }\n"),
+        S8("int argument_value(void) { return pair(5, (mark(1, 0), called(2, 7))); }\n"),
+        S8("int nested_value(void) { return (mark(1, 0), (mark(2, 0), called(3, 9))); }\n"),
+        S8("int initializer_value(void) { int value = (mark(1, 0), called(2, 3)) + 1; return value; }\n"),
+        S8("int comparison_value(void) { return (mark(1, 0), called(2, 5)) == 5; }\n"),
+        S8("int *pointer_cast_value(void) { return (int *)((void)mark(1, 0), give(2)); }\n"),
+        S8("int main(void) { unsigned failed = 0; int value; long wide; int *pointer;\n"),
+        S8("trace = 0; value = conditional_true(1); failed |= value != 10 || trace != 12u;\n"),
+        S8("trace = 0; value = conditional_true(0); failed |= value != 20 || trace != 3u;\n"),
+        S8("trace = 0; value = conditional_false(0); failed |= value != 10 || trace != 12u;\n"),
+        S8("trace = 0; value = conditional_false(1); failed |= value != 20 || trace != 3u;\n"),
+        S8("trace = 0; value = binary_value(); failed |= value != 11 || trace != 12u;\n"),
+        S8("trace = 0; wide = cast_value(); failed |= wide != 7 || trace != 12u;\n"),
+        S8("trace = 0; value = argument_value(); failed |= value != 12 || trace != 12u;\n"),
+        S8("trace = 0; value = nested_value(); failed |= value != 9 || trace != 123u;\n"),
+        S8("trace = 0; value = initializer_value(); failed |= value != 4 || trace != 12u;\n"),
+        S8("trace = 0; value = comparison_value(); failed |= value != 1 || trace != 12u;\n"),
+        S8("trace = 0; pointer = pointer_cast_value(); failed |= pointer != &payload || trace != 12u;\n"),
+        S8("return failed != 0; }\n"),
+    };
+    String8 source_text = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            Arena* conflicts[] = {arguments->arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("comma-value-operands.c"), tokens, parsed, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("comma-value-operands"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                Arena* conflicts[] = {arguments->arena};
+                TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                String8 output = buster_test_temporary_path(temporary.arena, S8("comma-value-operands-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-O0"), S8("-fverify-codegen"), S8("-o"), output, source_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("comma value {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
+
 // A comma is never an lvalue, even when its final operand was a place.
 // Keep these in the registered suite alongside the VLA-row negative cases.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArguments* arguments)
@@ -32463,6 +32661,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
+    BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_bit_field_assignment_values);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successors);
@@ -32518,6 +32717,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
     BUSTER_TEST_FIXTURE(arguments, c_test_comma_condition_evaluation);
+    BUSTER_TEST_FIXTURE(arguments, c_test_comma_value_operands);
     BUSTER_TEST_FIXTURE(arguments, c_test_comma_result_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
     BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_control_call);
