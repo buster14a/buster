@@ -4246,7 +4246,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_shift_breakpoint(Unit
     String8 operations[] = {S8("sar"), S8("shl"), S8("shr"), S8("sal")};
     String8 suffixes[] = {S8("b"), S8("w"), S8("l"), S8("q"), S8("")};
     String8 types[] = {S8("unsigned char"), S8("unsigned short"), S8("unsigned int"), S8("unsigned long long"), S8("unsigned long long")};
-    u32 widths[] = {8, 16, 32, 64, 64};
     enum { SHAPE_COUNT = 40 };
     String8 parts[SHAPE_COUNT + 1];
     String8 names[SHAPE_COUNT];
@@ -4291,6 +4290,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_shift_breakpoint(Unit
                         CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
                         if (BUSTER_REQUIRE(arguments, executable.error == CODEGEN_ERROR_NONE && executable.address))
                         {
+                            u32 widths[] = {8, 16, 32, 64, 64};
                             for (u32 shape = 0; shape < SHAPE_COUNT; shape += 1)
                             {
                                 u32 offset = machine_test_module_offset(&generated, module, names[shape]);
