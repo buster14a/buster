@@ -18,13 +18,17 @@ import tempfile
 import time
 import unittest
 
+import gnu_timeout
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = ROOT
 HELPER = SOURCE_ROOT / "ios/lifecycle_capture.py"
 BRIDGE = SOURCE_ROOT / "ios/lifecycle_capture_bridge.sh"
 LAUNCHER = SOURCE_ROOT / "ios/launch_simulator.sh"
-TIMEOUT = shutil.which("timeout") or shutil.which("gtimeout")
+TIMEOUT = None
+if os.name == "posix" and hasattr(os, "fork"):
+    TIMEOUT = gnu_timeout.select_timeout()
 
 FIXTURE = r'''import importlib.util,os,pathlib,signal,subprocess,sys,time
 mode,state,*args=sys.argv[1:]

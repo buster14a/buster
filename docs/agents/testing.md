@@ -175,7 +175,16 @@
   lifecycle receipts and up to 64 KiB of stdout/stderr per command, with
   native exit, timeout/helper status and capture completion distinguished.
   `ios/lifecycle_capture_bridge.sh` starts GNU command and capture clocks before
-  interpreter startup. Those timers own only bootstrap/collector groups; the
+  interpreter startup. The launcher and caller-clock controls share
+  `ios/gnu_timeout.py`: it prefers `gnutimeout`/`gtimeout`, verifies bounded
+  GNU `--version` output with its own clock and owned probe cleanup, then uses
+  one absolute executable path and retains that path/version. Bare `timeout`
+  is admitted only after the same verification. Unknown, malformed, oversized,
+  hanging or nonzero providers refuse selection; unresolved probe cleanup is
+  fatal. The hosted Linux fixture installs `gnu-coreutils` aliases only when
+  existing providers cannot be verified, preserving its system coreutils
+  provider. `python3 ios/gnu_timeout_test.py -v` covers those boundaries.
+  Those timers own only bootstrap/collector groups; the
   initialized `ios/lifecycle_capture.py` owner detaches before admitting a
   keeper or native command. The owner anchors its private command group with a
   deliberately unreaped keeper and retains a separate owned native handle for
@@ -212,6 +221,19 @@
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim
   CoreSimulator descendants are contained by a group.
+  The ten-minute hosted fixture job runs the independent signing suite beside
+  the sequential install/capture/caller/attached-monitor/shared lifecycle chain.
+  `ios/monitor_groups.py` gives each group a separate evidence root and an
+  immediately owned session-leader anchor. Private pipes retain both payload
+  statuses without reaping either anchor; final group KILL precedes individual
+  anchor waits and either payload failure is propagated. INT/TERM retains
+  status 130/143 through one-second TERM grace, final KILL and one absolute
+  one-second reap bound while both anchors remain owned. Android controls
+  begin only after both groups
+  pass. `python3 ios/monitor_workflow_test.py -v` exercises the actual extracted
+  workflow with finite leaf fixtures for overlap, chain failures, independent
+  waits, cancellation and conditional GNU availability. The frozen shared
+  mobile fixture and all command/capture/job deadlines remain unchanged.
   `bash ios/launch_diagnostics_simulator_test.sh` uses a synthetic timed-out
   payload with real CoreSimulator boot, probes and shutdown on hosted macOS
   ARM64. The mobile lifecycle workflow retains actual probe availability and

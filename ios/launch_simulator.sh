@@ -101,18 +101,9 @@ fi
 log_dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
 console_log_base=${BUSTER_IOS_CONSOLE_LOG:-${log_dir%/}/buster-ios-console.log}
 
-# macOS runners do not always ship GNU `timeout`; prefer it (or coreutils
-# `gtimeout`) when present so a stuck simulator fails fast instead of hanging
-# silently under Ninja's output buffering.
-timeout_bin=
-if command -v timeout >/dev/null 2>&1; then
-    timeout_bin=timeout
-elif command -v gtimeout >/dev/null 2>&1; then
-    timeout_bin=gtimeout
-else
-    echo "error: timeout or gtimeout is required for bounded iOS simulator CI" >&2
-    exit 1
-fi
+# Caller clocks require GNU process-group semantics. Resolve and positively
+# verify one absolute timer path before any lifecycle command is admitted.
+timeout_bin=$(python3 "$(dirname "${BASH_SOURCE[0]}")/gnu_timeout.py")
 
 run_with_timeout() {
     local seconds=$1
