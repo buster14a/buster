@@ -11815,6 +11815,12 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_sum(CIrExt80Fold* fold, CIrExt80Value* va
 
 BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value* value_out)
 {
+    while (fold->cursor < fold->limit &&
+           c_token_in_well_known_set(fold->preprocess.spelling_base, fold->preprocess.tokens[fold->cursor],
+                                    C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+    {
+        fold->cursor += 1;
+    }
     if (fold->cursor >= fold->limit || fold->depth >= C_IR_EXT80_FOLD_DEPTH_LIMIT)
     {
         fold->blame = fold->cursor < fold->limit ? fold->cursor : (fold->limit ? fold->limit - 1 : 0);
@@ -11825,6 +11831,12 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
     {
         bool negative = c_token_is_punctuator(token, C_PUNCTUATOR_MINUS);
         fold->cursor += 1;
+        while (fold->cursor < fold->limit &&
+               c_token_in_well_known_set(fold->preprocess.spelling_base, fold->preprocess.tokens[fold->cursor],
+                                        C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+        {
+            fold->cursor += 1;
+        }
         if (fold->cursor < fold->limit && fold->preprocess.tokens[fold->cursor].kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
             // A sign directly on a literal converts in that literal's own
@@ -47972,16 +47984,28 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_builtin(CIntegerIrBuild
 BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end,
                                                                    CIrConstantComplexInitializerValue* result)
 {
+    bool trimmed = true;
+    while (trimmed && start < end)
+    {
+        trimmed = false;
+        if (c_token_in_well_known_set(builder->preprocess.spelling_base, builder->preprocess.tokens[start],
+                                    C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+        {
+            start += 1;
+            trimmed = true;
+        }
+        else if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                 c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                         C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+        {
+            start += 1;
+            end -= 1;
+            trimmed = true;
+        }
+    }
     if (start >= end)
     {
         return false;
-    }
-    while (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-           c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                   C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
-    {
-        start += 1;
-        end -= 1;
     }
     CIrConstantValue scalar = {0};
     if (c_ir_constant_evaluate(builder, start, end, &scalar))
@@ -48048,6 +48072,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_evaluate(CIntegerIrBuil
         }
         if (parentheses || brackets || braces || token.kind == C_TOKEN_INVALID)
         {
+            continue;
+        }
+        if (c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+        {
+            // A diagnostic marker cannot turn the following unary sign
+            // into a binary operator. Its operand position stays unchanged.
             continue;
         }
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS))
@@ -48459,6 +48489,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
         }
         if (expect_operand)
         {
+            // GNU's diagnostic-only unary marker preserves the operand's
+            // constant value. Consume it only where an operand is expected.
+            if (c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+            {
+                continue;
+            }
             if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
             {
                 CIrConstantValue value = {0};

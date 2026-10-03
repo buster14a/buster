@@ -25670,6 +25670,157 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     return result;
 }
 
+// GNU's marker suppresses extension diagnostics and preserves operand values.
+// I spells the glibc imaginary-unit macro without requiring a host header.
+BUSTER_GLOBAL_LOCAL String8 const c_test_extension_constant_source = S8_INITIALIZER(
+    "#define I (__extension__ 1.0iF)\n"
+    "enum { K = (__extension__ 5), N = 3 + __extension__ -1 };\n"
+    "_Static_assert((__extension__ K) == 5 && N == 2, \"typed constants\");\n"
+    "static int integer = (__extension__ 5);\n"
+    "static int values[(__extension__ 2)] = {(__extension__ 5), - __extension__ 3};\n"
+    "static float single = (__extension__ 1.5f);\n"
+    "static double real = (__extension__ (__extension__ 2.0));\n"
+    "static long double wide = (__extension__ (__extension__ 0x1.0000000000000002p0L));\n"
+    "static long double wide_unsigned = __extension__ - __extension__ 1u;\n"
+    "static double _Complex z = 1.0 + 2.0 * I;\n"
+    "static double _Complex sign = 1.0iF + __extension__ -2.0iF;\n"
+    "static double _Complex nested = - __extension__ -1.0iF;\n"
+    "static double _Complex table[2] = {(__extension__ 1.0iF), (__extension__ (2.0 + 3.0iF))};\n"
+    "int main(void) {\n"
+    "static int local_integer = (__extension__ 5);\n"
+    "static double _Complex local_z = (__extension__ (1.0 + 2.0 * I));\n"
+    "static long double local_wide = (__extension__ 1.5L);\n"
+    "int automatic = (__extension__ 5); double _Complex automatic_z = 1.0 + 2.0 * I;\n"
+    "if (integer != 5 || values[0] != 5 || values[1] != -3 || single != 1.5f || real != 2.0) return 1;\n"
+    "if (__real__ z != 1.0 || __imag__ z != 2.0 || __real__ sign != 0.0 || __imag__ sign != -1.0) return 2;\n"
+    "if (__real__ nested != 0.0 || __imag__ nested != 1.0 || __imag__ table[0] != 1.0 || __real__ table[1] != 2.0 || __imag__ table[1] != 3.0) return 3;\n"
+    "if (local_integer != 5 || automatic != 5 || __real__ local_z != 1.0 || __imag__ local_z != 2.0 || __imag__ automatic_z != 2.0) return 4;\n"
+    "#if __LDBL_MANT_DIG__ == 113\n"
+    "const unsigned char *l = (const unsigned char *)&local_wide, *w = (const unsigned char *)&wide, *u = (const unsigned char *)&wide_unsigned;\n"
+    "const unsigned char expected_l[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0x80,0xff,0x3f};\n"
+    "const unsigned char expected_w[16] = {0,0,0,0,0,0,2,0,0,0,0,0,0,0,0xff,0x3f};\n"
+    "const unsigned char expected_u[16] = {0,0,0,0,0,0,0,0,0,0,0xfe,0xff,0xff,0xff,0x1e,0x40};\n"
+    "for (unsigned int k = 0; k < 16; ++k) if (l[k] != expected_l[k] || w[k] != expected_w[k] || u[k] != expected_u[k]) return 5;\n"
+    "#else\n"
+    "if ((double)local_wide != 1.5 || (double)wide_unsigned != 4294967295.0 || (double)wide != 1.0) return 5;\n"
+    "#endif\n"
+    "return 0; }\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_extension_constants(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    String8 refused[] = {
+        S8("static int x = (__extension__);"),
+        S8("static int x = (__extension__ unknown);"),
+        S8("int f(void); static int x = (__extension__ f());"),
+        S8("static int x = 5 __extension__ + 1;"),
+        S8("static double _Complex x = 1.0iF __extension__ + 2.0iF;"),
+        S8("static long double x = 1.0L __extension__;"),
+        S8("enum { K = 3 __extension__ + 2 };"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 row = 0; row <= BUSTER_ARRAY_LENGTH(refused); row += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Target target = targets[target_index];
+                String8 source = row ? refused[row - 1] : c_test_extension_constant_source;
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CIRLowerResult checked = c_analyze_with_options(temporary.arena, S8("extension-constants.c"), tokens, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, source);
+                if (row)
+                {
+                    BUSTER_TEST_RAW(arguments, syntax.diagnostic_count + checked.diagnostic_count != 0 && !checked.program, source);
+                }
+                else if (BUSTER_REQUIRE(arguments, syntax.diagnostic_count == 0 && checked.diagnostic_count == 0 && checked.program))
+                {
+                    IrModule* module = checked.program->modules;
+                    IrGlobal* integer = c_test_find_ir_global(module, checked.program, S8("integer"));
+                    IrGlobal* single = c_test_find_ir_global(module, checked.program, S8("single"));
+                    IrGlobal* real = c_test_find_ir_global(module, checked.program, S8("real"));
+                    IrGlobal* z = c_test_find_ir_global(module, checked.program, S8("z"));
+                    BUSTER_TEST(arguments, integer && integer->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && integer->initializer_bits == 5);
+                    BUSTER_TEST(arguments, single && single->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && single->initializer_bits == 0x3fc00000);
+                    BUSTER_TEST(arguments, real && real->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && real->initializer_bits == 0x4000000000000000ull);
+                    u8 const expected_z[] = {0, 0, 0, 0, 0, 0, 0xf0, 0x3f, 0, 0, 0, 0, 0, 0, 0, 0x40};
+                    BUSTER_TEST(arguments, c_test_ext80_aggregate_bytes(z, expected_z, sizeof(expected_z)));
+                    if (c_test_target_uses_x86_f80_abi(target))
+                    {
+                        IrGlobal* wide = c_test_find_ir_global(module, checked.program, S8("wide"));
+                        IrGlobal* wide_unsigned = c_test_find_ir_global(module, checked.program, S8("wide_unsigned"));
+                        u8 const expected_wide[] = {1, 0, 0, 0, 0, 0, 0, 0x80, 0xff, 0x3f, 0, 0, 0, 0, 0, 0};
+                        u8 const expected_unsigned[] = {0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0x1e, 0x40, 0, 0, 0, 0, 0, 0};
+                        BUSTER_TEST(arguments, c_test_ext80_global_bytes(checked.program, wide, expected_wide, sizeof(expected_wide)));
+                        BUSTER_TEST(arguments, c_test_ext80_global_bytes(checked.program, wide_unsigned, expected_unsigned, sizeof(expected_unsigned)));
+                    }
+                    else if (target_data_layout(target).long_double_type.bit_width == 128)
+                    {
+                        IrGlobal* wide = c_test_find_ir_global(module, checked.program, S8("wide"));
+                        IrGlobal* wide_unsigned = c_test_find_ir_global(module, checked.program, S8("wide_unsigned"));
+                        u8 const expected_wide[] = {0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0xff, 0x3f};
+                        u8 const expected_unsigned[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0x1e, 0x40};
+                        BUSTER_TEST(arguments, c_test_ext80_aggregate_bytes(wide, expected_wide, sizeof(expected_wide)));
+                        BUSTER_TEST(arguments, c_test_ext80_aggregate_bytes(wide_unsigned, expected_unsigned, sizeof(expected_unsigned)));
+                    }
+                    BUSTER_TEST(arguments, checked.canonical_ir_certified);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(checked.program, module).error == IR_VALIDATION_NONE);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 input = buster_test_temporary_path(arguments->arena, S8("extension-constants"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_extension_constant_source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("extension-constants-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
+                    S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("extension constants {S8} form={u32}: status={u32} timeout={u32}"),
+                                modes[mode], form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // `_Float16`: the type the LLVM 18 FP16 resource headers declare, and the
 // only real floating type narrower than `float` this frontend has. The three
 // groups below are the contract: the layout every supported target gives it,
@@ -32101,6 +32252,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
+    BUSTER_TEST_FIXTURE(arguments, c_test_extension_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_float16_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_bfloat16_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
