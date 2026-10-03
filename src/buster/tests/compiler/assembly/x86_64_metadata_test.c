@@ -1263,8 +1263,8 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_exact_plan_case(
     BusterX86MetadataExactPlan plan = {0};
     BusterX86MetadataExactPlan looked_up = {0};
     // Plans are prepared by the serial machine/codegen prewarm hook.  The
-    // metadata module runs in worker lanes, so tests must only perform the
-    // immutable lookup here (calling prepare would violate that contract).
+    // metadata module runs in worker lanes, so tests perform immutable lookup
+    // here; preparing a new key would violate the serial-fill contract.
     if (!buster_x86_metadata_exact_plan_for_key(key, &plan) ||
         !buster_x86_metadata_exact_plan_for_key(key, &looked_up) ||
         plan.form_id != looked_up.form_id || plan.stable_hash != looked_up.stable_hash)
