@@ -257,6 +257,55 @@ markers, checks structured diagnostic parity and refused programs, and
 independently validates accepted canonical IR. Local declaration controls
 avoid the separately tracked repeated-linkage restriction (#1562).
 
+`c_parse_types_compatible_walk` applies two additional C17 compatibility
+requirements: a prototype paired with a pre-C23 unspecified parameter list
+must use parameter types unchanged by default argument promotions, and both
+parameter spellings undergo array/function adjustment. Documentary outer
+array bounds and parameter-only qualifiers therefore disappear from
+compatibility; inner bounds and pointee qualifiers remain. Promotion checks
+read existing parameter rows and resolve an enum's compatible integer kind;
+the shared pair stack compares adjusted pointees without creating types or
+evaluating removed outer bounds. C23's empty-list constructor is unchanged.
+
+`c_test_function_parameter_compatibility` uses 56 fixed source cases over
+C17/GNU17/C23/GNU23, six desktop target layouts and both frontend forms
+(2,688 configurations). It preserves the existing C23 empty-list rule and
+checks semantic-only diagnostics, diagnostic parity, failed program
+nonpublication and independent canonical validation of accepted sources.
+The cases include original float/char/short/Bool promotion conflicts, both
+declaration orders, promoted scalar/enum/pointer controls, typedefs and
+definitions, fixed/VLA/static array bounds, function parameters and nested
+qualifier/inner-bound refusals. GNU type-compatibility queries retain fixed
+answers independent of the compatibility implementation. Two further fixed
+negative declarations pair an incompatible nested callback or inner array
+bound with an otherwise compatible aggregate sibling. They require a failed
+comparison to remain failed through the existing pair-stack walk; the loop
+stops at the first incompatible pair, so later siblings cannot restore a
+successful verdict.
+
+`c_test_function_parameter_compatibility_runtime` keeps a literal 1,299-byte
+source with fixed results for promoted scalars and adjusted array/callback
+parameters. Desktop native execution uses GNU17/GNU23 × four allocators ×
+two frontend forms (16 profiles). Linux additionally requires GCC and Clang
+at both dialects and O0/O2 (eight build/run controls), and separately compiles
+each original float/char/short/Bool conflict in C17/GNU17 (16 required
+refusals). Both reference commands disable only `-Wstrict-prototypes`: the
+legal pre-C23 empty declarations are deprecated, and Clang otherwise upgrades
+that warning under `-pedantic-errors`. Actual conflicting-type errors remain
+required, including a captured `conflicting` diagnostic for every refusal.
+Original source bytes are read back before launch. Every child
+owns its process group and has a thirty-second deadline; bounded captured
+diagnostics fail on truncation/overflow. Cleanup/retained-reservation/lost-
+ownership failures stop later child admission. Temporary executables and
+sources are deleted before their arena lifetime ends. These are registered
+requirements, not execution results for this checkpoint.
+
+The pre-C23 requirements are C17 6.5.2.2p6 and 6.7.6.3p7–8,p15; the
+same promotion/adjustment text is present in the public
+[WG14 N1256](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf)
+6.7.5.3p15. This work does not alter call-site promotions, declaration
+construction, live enum publication or target ABI policy.
+
 All parameter-list paths share the void and ellipsis constraints. The void
 sentinel is sole, unnamed and unqualified, including through a void typedef;
 ellipsis terminates the list and requires a fixed parameter before C23. C23

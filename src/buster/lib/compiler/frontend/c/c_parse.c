@@ -16451,7 +16451,7 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
     };
     bool compatible = true;
     WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_CALLS, 1);
-    while (stack_count)
+    while (stack_count && compatible)
     {
         CTypePair pair = stack[--stack_count];
         WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_PAIRS, 1);
@@ -16561,16 +16561,31 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
         }
         case C_TYPE_FUNCTION:
         {
-            // C11 6.2.7p3: one type has a parameter list and the other does
-            // not, so only the return types have to agree -- provided the
-            // prototyped one is not variadic. This is what makes musl's
-            // `long __syscall_cp_asm();` and the prototype beside it one
-            // function; the parameter types are checked at the call.
+            // C17 6.7.6.3p15: a prototype agrees with an unspecified
+            // parameter list only when each adjusted parameter type is
+            // unchanged by the default argument promotions. Enum values
+            // use their selected compatible integer kind; array/function
+            // parameters already adjust to pointers and do not promote.
             if (left_type.is_unprototyped != right_type.is_unprototyped)
             {
                 if (left_type.is_variadic || right_type.is_variadic)
                 {
                     compatible = false;
+                    break;
+                }
+                CType prototype = left_type.is_unprototyped ? right_type : left_type;
+                for (u32 parameter_index = 0; parameter_index < prototype.parameter_count; parameter_index += 1)
+                {
+                    CTypeId parameter = result->parameters[prototype.parameter_start + parameter_index].type;
+                    CTypeKind kind = c_parse_expression_value_kind(result, parameter);
+                    if (kind == C_TYPE_INVALID || kind == C_TYPE_FLOAT || c_parse_expression_promoted_kind(kind) != kind)
+                    {
+                        compatible = false;
+                        break;
+                    }
+                }
+                if (!compatible)
+                {
                     break;
                 }
                 stack[stack_count++] = (CTypePair){
@@ -16592,47 +16607,24 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
             {
                 CTypeId left_parameter = result->parameters[left_type.parameter_start + parameter_index].type;
                 CTypeId right_parameter = result->parameters[right_type.parameter_start + parameter_index].type;
-                // C 6.7.6.3p7/p8: a parameter declared as an array or a
-                // function is adjusted to the corresponding pointer, so a
-                // prototype's `char **` and a definition's `char *argv[]`
-                // declare one and the same function. The declared spelling
-                // survives into the parameter type, so decay the halves that
-                // disagree here rather than rejecting them. Qualifiers are
-                // ignored only at the top level, which is why the decayed
-                // pointee pair keeps them.
+                // C17 6.7.6.3p7/p8/p15: adjust both parameter spellings
+                // before comparing, including two arrays with different
+                // documentary outer bounds. Only the adjusted pointer's
+                // top qualifiers disappear; its pointee retains qualifiers
+                // and every inner array bound.
                 CTypeKind left_parameter_kind =
                     left_parameter.value < result->type_count ? result->types[left_parameter.value].kind : C_TYPE_INVALID;
                 CTypeKind right_parameter_kind =
                     right_parameter.value < result->type_count ? result->types[right_parameter.value].kind : C_TYPE_INVALID;
-                if (left_parameter_kind == C_TYPE_ARRAY && right_parameter_kind == C_TYPE_POINTER)
+                bool left_adjusted = left_parameter_kind == C_TYPE_ARRAY || left_parameter_kind == C_TYPE_FUNCTION;
+                bool right_adjusted = right_parameter_kind == C_TYPE_ARRAY || right_parameter_kind == C_TYPE_FUNCTION;
+                if ((left_adjusted || right_adjusted) &&
+                    (left_adjusted || left_parameter_kind == C_TYPE_POINTER) &&
+                    (right_adjusted || right_parameter_kind == C_TYPE_POINTER))
                 {
                     stack[stack_count++] = (CTypePair){
-                        .left = result->types[left_parameter.value].element_type,
-                        .right = result->types[right_parameter.value].element_type,
-                    };
-                    continue;
-                }
-                if (left_parameter_kind == C_TYPE_POINTER && right_parameter_kind == C_TYPE_ARRAY)
-                {
-                    stack[stack_count++] = (CTypePair){
-                        .left = result->types[left_parameter.value].element_type,
-                        .right = result->types[right_parameter.value].element_type,
-                    };
-                    continue;
-                }
-                if (left_parameter_kind == C_TYPE_FUNCTION && right_parameter_kind == C_TYPE_POINTER)
-                {
-                    stack[stack_count++] = (CTypePair){
-                        .left = left_parameter,
-                        .right = result->types[right_parameter.value].element_type,
-                    };
-                    continue;
-                }
-                if (left_parameter_kind == C_TYPE_POINTER && right_parameter_kind == C_TYPE_FUNCTION)
-                {
-                    stack[stack_count++] = (CTypePair){
-                        .left = result->types[left_parameter.value].element_type,
-                        .right = right_parameter,
+                        .left = left_parameter_kind == C_TYPE_FUNCTION ? left_parameter : result->types[left_parameter.value].element_type,
+                        .right = right_parameter_kind == C_TYPE_FUNCTION ? right_parameter : result->types[right_parameter.value].element_type,
                     };
                     continue;
                 }
