@@ -16724,7 +16724,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
         S8("failed |= block() != 5 || member() != 7 || object_product() != 6 || object_call() != 8 || size_product() != 12;\n"),
         S8("failed |= label() != 9 || enumeration() != 9 || zero_parameter(forty_two) != 42 || many(twice) != 42;\nreturn failed; }\n"),
     };
-    String8 source_text = string_join_arena(arguments->arena, source_parts, BUSTER_ARRAY_LENGTH(source_parts), (StringJoin){0});
+    String8 source_text = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
     String8 invalid_source = S8("typedef int T;\nstatic int bad(T (T)) { return T; }\n");
     struct
     {
