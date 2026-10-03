@@ -153,7 +153,15 @@ main jobs remain visibly skipped. This documentation does not change rules.
 Each workflow uses its own name and event in the concurrency key. Only PR and
 merge-group runs permit cancellation. Main, tag and manual runs include their
 run ID: `cancel-in-progress: false` alone would still allow a newer pending run
-to replace an older pending run. The bootstrap workflow no longer starts an
+to replace an older pending run. This also applies to benchmark-service policy
+and both disposable systemd gate validations: their main-push invocations have
+unique run-ID groups. The systemd gates retain their existing non-cancelling
+candidate policy. Controllers that mutate shared state (native-retirement
+catch-up, native-retirement automation and main integration reconciliation)
+keep their fixed serial groups and use `queue: max` to retain up to 100 pending
+invocations. Overflow beyond that bound can still cancel a run; waiting order
+follows entry into the concurrency queue, not guaranteed event order. See
+[main-push maintenance](main-push-maintenance.md) for exact-main side-effect guards. The bootstrap workflow no longer starts an
 expensive audit just because an inspection/transport branch is published.
 This avoids automatic work on non-PR feature pushes, not deliberate main,
 tag or manual validation. It does not establish a measured latency speedup.
