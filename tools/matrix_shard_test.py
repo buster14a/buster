@@ -389,6 +389,7 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/matrix_unit_observation_test.py",
             "tools/github_ci_time_test.py", "tools/ci_vs_dev_shell_test.py",
             "tools/ci_workflow_tools_test.py",
+            "tools/ci_checks_resources_test.py", "tools/ci_checks_resources_workflow_test.py",
             "tools/bootstrap_wrapper_cases_test.py",
         }
         suites = re.findall(r'^            ([^ =]+\.py)=[^ =]+\.log$', block, re.M)
