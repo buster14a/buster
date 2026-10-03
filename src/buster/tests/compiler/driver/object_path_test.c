@@ -502,10 +502,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
         if (anchor_written)
         {
             FileReadResult readback = file_read_checked(arena, anchor_original, (FileReadOptions){0});
-            bool original_source = readback.status == OS_FILE_READ_OK && readback.error.v == 0 &&
+            bool anchor_source_matches = readback.status == OS_FILE_READ_OK && readback.error.v == 0 &&
                                    string_equal(BYTE_SLICE_TO_STRING(8, readback.bytes), anchor_source);
-            BUSTER_TEST(arguments, original_source);
-            if (original_source)
+            BUSTER_TEST(arguments, anchor_source_matches);
+            if (anchor_source_matches)
             {
                 bool reference_built = compiler_driver_aarch64_printer_assemble(arguments, arena, &admission,
                     compiler, compiler_argument, clang, anchor_original, anchor_reference);
