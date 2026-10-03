@@ -504,6 +504,41 @@ was frozen before sampling; the admitted service receipt must bind both facts.
     compiler do not produce the same output**, because the host build's
     feature set reaches the compiler's own target defaults. Byte-identity
     gates must compare like with like, and both builds need their own gate.
+  - **Recipe.** Configure a separate diagnostic tree; a default `generate`
+    keeps `-march=native`, so trusted trees are unchanged:
+
+    ```sh
+    ./build.sh generate -DBUSTER_NATIVE_TARGET=x86-64-v3
+    ./build.sh build --config Release -t ide
+    valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
+        --callgrind-out-file=base.cg build/Release/ide cc -c tests/basic_c_operations.c -o /tmp/basic.o
+    callgrind_annotate --inclusive=yes base.cg | head -40
+    ```
+
+    `BUSTER_NATIVE_TARGET` is the `-march=` value for every host-built target
+    (default `native`, and the legacy Clang AVX10 probe only runs for
+    `native`). Developer Release trees already carry `-g`, so the annotation
+    has file and line records, and `fi=`/`fe=` records charge an inlined
+    helper's lines to the physical caller. Build baseline and candidate in the
+    same checkout path, one after the other: an `-O3` unity compile of `ide.c`
+    takes about 5 GiB, and parallel builds can be OOM-killed. Run each workload
+    with the same command line and working directory, and pin `ide cc`'s own
+    output target (for example `-march=znver3`), since it defaults to the host
+    CPU. A stage-1 self-compile takes about 10 minutes per profile;
+    `--cache-sim=yes --branch-sim=yes` roughly doubles that.
+  - **Read the numbers as diagnostics, never as acceptance evidence.**
+    `-march=x86-64-v3` compiles out `BUSTER_SIMD_512` kernels such as
+    `BUSTER_C_LEX_COMPACT`, so the lexer and other SIMD paths run their
+    fallbacks and their counts are not the production binary's. Counts
+    elsewhere compare only between two diagnostic binaries built the same way,
+    never against a `-march=native` build. Callgrind reports instructions and a
+    modeled cache and branch predictor, not time; its small bimodal predictor
+    aliases when code moves, so misprediction deltas often land in unchanged
+    functions. Two rebuilds of the same source differ by about 0.03% of a
+    self-compile's Ir, so a smaller total delta needs per-function or per-line
+    attribution of the changed code. `callgrind_annotate` reads sources at
+    annotation time: annotate each profile from its own checkout, from the
+    build's working directory. The approved 9700X route still owns timing.
 - **`tools/branch_miss_survey.py` ranks branch mispredictions by source line,
   not by symbol.** `perf record -e branch-misses` is not a precise event: the
   sample lands past the branch that caused it, so its histogram names the
