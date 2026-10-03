@@ -254,6 +254,27 @@ does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
 
+Statement boundaries follow the target: x86-64 and non-Apple AArch64 use
+`;` between statements; Apple AArch64 uses `%%` and treats `;` as a line
+comment. `#` starts an x86-64 comment and remains part of AArch64 immediates.
+`//` comments are accepted on both architectures. Quoted strings retain these
+markers and block-comment text, including escaped quotes. Diagnostics keep
+physical lines/columns after a separator; numeric labels resolve by statement
+order even when their definitions share one physical line. Scalar AArch64
+constant operands accept an optional `#` through the existing constant parser.
+`mov wN, constant` and `mov xN, constant` accept an unsigned sixteen-bit
+constant through the scalar `movz` form; register aliases keep their existing
+operand rules.
+Pair-exclusive `ldxp`/`ldaxp` and `stxp`/`stlxp` spellings project matching W/X
+data registers, W store status and an X/SP base into the existing typed AArch64
+memory semantic encoder. Data/status ZR roles are retained; store status cannot
+overlap either data register or a non-SP base. The optional address offset must
+be zero. Nonzero/symbolic offsets, mismatched widths, and writeback are source
+operand diagnostics. No pair instruction words or generated identities are
+duplicated in the source adapter.
+Unsupported post-index memory operands are refused with their full spelling,
+so their writeback cannot silently disappear during comment handling.
+
 Integer data expressions retain `.` as the current field's section-relative
 address, including each separate operand in a comma-separated directive.
 `.long symbol - .` and `.quad symbol - .` use ELF PC32/PC64 on x86-64 and
@@ -290,6 +311,20 @@ names -- `.init` and `.fini` are neither `.text` nor absent -- and a
 hand-written section gets alignment 1, because `crti.o` and `crtn.o`
 contribute one and two bytes to `.init` and any padding between them would
 run as code.
+
+AArch64 units fold same-section, binding-invariant `b`, `bl`, `b.cond`,
+`cbz`/`cbnz`, and `tbz`/`tbnz` references using the shared control semantic
+fixup, including signed addends and numeric labels. Out-of-range or unaligned
+references are diagnosed at their physical source position. Undefined,
+cross-section, weak, and default-visible ELF global short branches are refused
+because the object model cannot retain their relocation families; `b`/`bl`
+retain the existing object relocations. This unit-local capability does not
+enable machine inline-asm private-label expansion. The registered driver
+fixture assembles pristine `tests/aarch64_atomic_update_pair_oracle.s` through
+`.s` inference and `-x assembler`, checks all 108 text bytes against independent
+literal words, and compares the same words with Clang cross-assembly when a
+configured or PATH Clang is available. An unavailable Clang observer is reported
+explicitly; its comparison is not a passed gate.
 
 A forward branch to a label always uses the near form: the instruction layer
 sizes a statement before the label is known and this assembler does not relax.
@@ -328,6 +363,12 @@ or `wasm32-wasip1` (also spelled `wasm32-wasi`). The latter emits a WASI Preview
 command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
 header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
 output rejects `-emit-llvm`, native link inputs, and `-S`.
+
+The direct backend consumes canonical integer bit-count operations at their
+semantic bit width, independently of the i32/i64 WebAssembly carrier. Leading
+and trailing zeros count within that width; a zero operand produces the width,
+and population count ignores carrier extension bits. This is the canonical IR
+contract rather than a promise about C builtins on undefined zero inputs.
 
 Static archive extraction uses `compiler_driver_archive_extract` in the
 private `driver/archive.c` implementation. Its invocation-owned name table
@@ -401,6 +442,26 @@ It may bind to a member selected for a separate strong dependency, to a
 direct object input, or to an already included shared library. Keep archive
 selection separate from those later resolution rules (GitHub #226).
 
+Linux `-lNAME` static archives are searched in explicit `-L` directories first,
+then the same target roots used by ELF export discovery: `lib/<triple>`,
+`usr/lib/<triple>`, `lib64`, `usr/lib64`, `lib`, and `usr/lib` under a supplied
+sysroot. Without a sysroot, the absolute host roots also include
+`/usr/<triple>/lib` after the two multiarch roots. The sysroot replaces these
+default host paths; explicit `-L` directories retain their literal meaning.
+Each directory prefers `libNAME.so` to `libNAME.a`, so an earlier explicit
+archive wins over a later default shared library. `-l:FILE.a` searches the
+exact archive name without that shared-library probe and retains its existing
+bare-path fallback. Other target search policies are unchanged.
+
+`compiler_driver_archive_test_default_roots`, invoked by the registered lazy
+archive fixture, checks both ELF CPUs and all six literal sysroot roots,
+named/exact/direct image parity, distinct provider precedence, explicit `-L`,
+shared preference, exact archive bypass and output preservation on refusal.
+Its configured native Linux control builds a real archive with host compiler
+and archiver, links an independent host control, and runs both Buster's direct
+and sysroot-default named links. GNU linker-script interpretation and Apple's
+missing-library behavior remain separate #1285 work.
+
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized
 global may require alignment larger than a page or the fixed image base.
@@ -416,6 +477,28 @@ disagrees with the target, so a cross link never reads the host's own libc.
 A cross link that finds no target libc cannot tell a missing symbol from a
 libc import and keeps every strong undefined reference as an import (GitHub
 #1729).
+
+Native Linux links also supply the compiler-runtime calls used for binary16
+conversion and binary128 arithmetic/conversion (GitHub #1272). After merging
+objects and reading explicitly requested shared libraries, a remaining strong
+undefined function helper selects `libgcc_s.so.1` from the same `-L`, target
+and sysroot roots. Its ELF machine must match the target, and it must export a
+default-version callable definition of every required helper. An earlier
+explicit data/TLS/unknown definition cannot preempt that call as code.
+Hidden/internal definitions and non-default versions provide no helper;
+truncated version-symbol metadata is refused. Missing runtime files or helpers
+fail the link before replacing the output, including cross links with no
+readable libc. Existing object/archive definitions and explicit shared-library
+providers take precedence; weak optional references add no runtime dependency.
+Data references with helper-like names also add none; untyped external-object
+references retain the separate #1242 boundary.
+An explicit `-l:libgcc_s.so.1` is reused without a duplicate `DT_NEEDED` entry.
+Normal library symbol-version binding records the GCC version the selected
+runtime publishes. Ordinary links with no such unresolved helper do not read
+or name libgcc_s. This uses an installed target runtime; it installs or embeds
+none. Apple, Windows, Android and freestanding runtime provisioning remain
+separate #1272 work.
+
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
 

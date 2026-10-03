@@ -776,6 +776,36 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, message):
             qualification.desktop(self.root, invalid, self.run_fixture(), condition, "combined-overlap")
 
+    def test_detected_capability_duplicates_are_rejected_before_projection(self):
+        item, coverage, condition = self.complete_desktop()
+        qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        original = coverage["detected"]
+        conflicting = dict(original[0], version="conflicting")
+        changes = {
+            "identical-extra": original + [copy.deepcopy(original[0])],
+            "conflicting-overwritten": [conflicting] + original,
+            "identical-same-length": original[:1] + [copy.deepcopy(original[0])] + original[2:],
+            "conflicting-same-length": original[:1] + [conflicting] + original[2:],
+        }
+        for name, detected in changes.items():
+            with self.subTest(change=name):
+                self.reject_coverage(item, coverage, condition,
+                                     lambda value: value.update(detected=detected), "detected capability")
+
+    def test_detected_capability_census_rejects_missing_foreign_and_malformed_records(self):
+        item, coverage, condition = self.complete_desktop()
+        original = coverage["detected"]
+        changes = [None, False, 1, "records", {}, [], original[:-1],
+                   original[:-1] + [dict(original[-1], id="foreign")]]
+        for row in (None, False, 1, "record", [], {}, {"id": None}, {"id": False},
+                    {"id": 1}, {"id": []}, {"id": {}}, {"id": ""}):
+            changes.append(original[:-1] + [row])
+        for detected in changes:
+            with self.subTest(detected=detected):
+                self.reject_coverage(item, coverage, condition,
+                                     lambda value: value.update(detected=detected), "detected capability")
+        self.reject_coverage(item, coverage, condition, lambda value: value.pop("detected"), "detected capability")
+
     def test_recomputed_shrunken_policy_is_rejected_by_independent_anchor(self):
         item, coverage, condition = self.complete_desktop()
         def shrink(value):

@@ -181,6 +181,23 @@ the gate through the private seam beside the unchanged diagnostics.
 
 ## Regression contract
 
+Lowering checks the query machine's five arrays, missing scope-child indexes,
+per-function builder arrays and body tasks against their existing scratch
+reservations before carving them. SSA event/read growth and retained assignment
+states check the remaining capacity at each growth or allocation. A refused
+query publishes a source diagnostic before creating an `IrProgram`; a refused
+function retains its rejected state and cannot certify partial canonical IR.
+The reservation sizes and ordinary lowering capacities are unchanged.
+
+`c_test_ir_lower_scratch_capacity` exercises both frontend SSA forms, accepted
+small source, query and function refusal, a synthetic million-token query plan,
+and isolated body-task/SSA-growth exhaustion in a small arena. Arithmetic
+controls pin exact fit, alignment, zero count and multiplication overflow.
+The private smaller-budget wrapper avoids allocating huge source/IR fixtures in
+every test configuration; it does not change driver options. These are resource
+limit regressions for #1330 and the query prerequisite of #1412, not a promise
+that every allocation in lowering has a recoverable failure path.
+
 `compiler_driver_test_syntax_diagnostic_equivalence` contains frozen acceptance
 expectations, valid neighbors and rejected cases from the migration. Each source
 runs through syntax-only and object actions in both frontend SSA forms. The test

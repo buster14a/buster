@@ -167,7 +167,8 @@ UnitTestResult x86_64_forwarding_tests(UnitTestArguments* arguments)
                                            imported.section == OBJECT_SECTION_UNDEFINED);
                     BUSTER_TEST(arguments, relocation.offset == stub * size + size - 4 && relocation.symbol == stub * 2 + 1 &&
                                            relocation.section == OBJECT_SECTION_TEXT && relocation.addend == (x86 ? -4 : 0) &&
-                                           relocation.kind == (x86 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_JUMP26));
+                                            relocation.kind == (x86 ? (windows ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_X86_64_PLT32)
+                                                                    : OBJECT_RELOCATION_AARCH64_JUMP26));
                 }
             }
         }

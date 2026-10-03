@@ -3,6 +3,7 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/tests/compiler/codegen/ebpf_test_internal.h>
+#include <buster/tests/compiler/codegen/ebpf_call_test_internal.h>
 
 enum
 {
@@ -2227,9 +2228,188 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_reused_home_bounda
 }
 
 
+#if !BUSTER_SANITIZE && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL s32 codegen_test_switch_call(void* address, u16 width, bool is_signed, u64 input)
+{
+    s32 result = 0;
+#define CODEGEN_TEST_SWITCH_CALL(type) \
+    do \
+    { \
+        typedef s32 CodegenTestSwitchFunction(type); \
+        CodegenTestSwitchFunction* entry = 0; \
+        memcpy(&entry, &address, sizeof(entry)); \
+        result = entry((type)input); \
+    } while (0)
+    if (is_signed)
+    {
+        switch (width)
+        {
+        case 8: CODEGEN_TEST_SWITCH_CALL(s8); break;
+        case 16: CODEGEN_TEST_SWITCH_CALL(s16); break;
+        case 32: CODEGEN_TEST_SWITCH_CALL(s32); break;
+        case 64: CODEGEN_TEST_SWITCH_CALL(s64); break;
+        }
+    }
+    else
+    {
+        switch (width)
+        {
+        case 8: CODEGEN_TEST_SWITCH_CALL(u8); break;
+        case 16: CODEGEN_TEST_SWITCH_CALL(u16); break;
+        case 32: CODEGEN_TEST_SWITCH_CALL(u32); break;
+        case 64: CODEGEN_TEST_SWITCH_CALL(u64); break;
+        }
+    }
+#undef CODEGEN_TEST_SWITCH_CALL
+    return result;
+}
+#endif
+
+// C provides the function/CFG, then only the SWITCH operand and one raw key
+// change. Selecting the typed ARGUMENT bypasses C's integer promotion so
+// narrow canonical consumers are exercised directly. Expected branches use
+// integer bit-vector equality, independently of any allocator or encoding.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_switch_key_images(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[][2] = {
+        {S8("int choose(unsigned char x) { switch (x) { case 7: return 11; default: return 22; } }"),
+         S8("int choose(signed char x) { switch (x) { case 7: return 11; default: return 22; } }")},
+        {S8("int choose(unsigned short x) { switch (x) { case 7: return 11; default: return 22; } }"),
+         S8("int choose(short x) { switch (x) { case 7: return 11; default: return 22; } }")},
+        {S8("int choose(unsigned int x) { switch (x) { case 7: return 11; default: return 22; } }"),
+         S8("int choose(int x) { switch (x) { case 7: return 11; default: return 22; } }")},
+        {S8("int choose(unsigned long long x) { switch (x) { case 7: return 11; default: return 22; } }"),
+         S8("int choose(long long x) { switch (x) { case 7: return 11; default: return 22; } }")},
+    };
+    u16 widths[] = {8, 16, 32, 64};
+    Target targets[] = {target_native, target_native};
+    targets[0].cpu_arch = CPU_ARCH_X86_64;
+    targets[1].cpu_arch = CPU_ARCH_AARCH64;
+    targets[0].cpu_model = CPU_MODEL_BASELINE;
+    targets[1].cpu_model = CPU_MODEL_BASELINE;
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
+        {
+            u16 width = widths[width_index];
+            u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+            u64 keys[] = {7, width == 64 ? 7 : (UINT64_C(1) << width) + 7, mask, UINT64_MAX, 8, UINT64_C(0x100000007)};
+#if !BUSTER_SANITIZE && !BUSTER_ANDROID && !BUSTER_IOS
+            u64 inputs[] = {0, 7, 8, mask, UINT64_C(0x100000007)};
+#endif
+            for (u32 signed_index = 0; signed_index < 2; signed_index += 1)
+            {
+                for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(keys); variant += 1)
+                {
+                    for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        CPreprocessResult tokens = c_preprocess(temporary.arena, sources[width_index][signed_index],
+                            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+                        CParseResult parsed = c_parse(temporary.arena, tokens);
+                        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("canonical-switch-key-images.c"), tokens, parsed, target);
+                        if (BUSTER_REQUIRE(arguments, !tokens.error_count && !parsed.diagnostic_count && !lowered.diagnostic_count &&
+                                                      lowered.program && lowered.program->module_count == 1))
+                        {
+                            IrProgram* program = lowered.program;
+                            IrModule* module = program->modules;
+                            IrFunction* function = codegen_test_c_function_find(module, S8("choose"));
+                            if (BUSTER_REQUIRE(arguments, function != 0))
+                            {
+                                IrValueId argument = IR_VALUE_ID_INVALID;
+                                IrInstruction* switched = 0;
+                                u32 argument_count = 0;
+                                u32 switch_count = 0;
+                                for (u32 row = 0; row < function->instruction_count; row += 1)
+                                {
+                                    IrInstruction* instruction = function->instructions + row;
+                                    if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count == 1 &&
+                                        instruction->immediates[0] == 0)
+                                    {
+                                        argument = instruction->result;
+                                        argument_count += 1;
+                                    }
+                                    if (instruction->opcode == IR_OPCODE_SWITCH)
+                                    {
+                                        switched = instruction;
+                                        switch_count += 1;
+                                    }
+                                }
+                                if (BUSTER_REQUIRE(arguments, argument_count == 1 && switch_count == 1 && argument.value < function->value_count &&
+                                                              switched && switched->operand_count == 1 && switched->immediate_count == 1))
+                                {
+                                    IrType* type = ir_type_from_id(&program->types, function->values[argument.value].canonical_type);
+                                    if (BUSTER_REQUIRE(arguments, type && type->kind == IR_TYPE_INTEGER && type->bit_width == width &&
+                                                                  type->is_signed == (signed_index != 0)))
+                                    {
+                                        switched->operands[0] = argument;
+                                        switched->immediates[0] = keys[variant];
+                                        u64* raw_key = switched->immediates;
+                                        IrValidationResult validation = ir_validate_canonical_module(program, module);
+                                        if (BUSTER_REQUIRE(arguments, validation.error == IR_VALIDATION_NONE))
+                                        {
+                                            CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                                                (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true, .record_fallbacks = true});
+                                            if (generated.error)
+                                            {
+                                                arguments->show(arguments, S8("SWITCH width={u32}, signed={u32}, variant={u32}, target={u32}, allocator={u32}: error={u32}\n"),
+                                                    (u32)width, signed_index, variant, target_index, mode, (u32)generated.error);
+                                            }
+                                            BUSTER_TEST(arguments, *raw_key == keys[variant]);
+                                            BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+                                            if (BUSTER_REQUIRE(arguments, generated.error == CODEGEN_ERROR_NONE))
+                                            {
+#if !BUSTER_SANITIZE && !BUSTER_ANDROID && !BUSTER_IOS
+                                                if (target.cpu_arch == target_native.cpu_arch && target.os == target_native.os)
+                                                {
+                                                    CodegenFunctionDescriptor* descriptor = codegen_test_c_descriptor_find(&generated, function->symbol);
+                                                    if (BUSTER_REQUIRE(arguments, descriptor && descriptor->code_offset < generated.code.length))
+                                                    {
+                                                        CodegenExecutable executable = codegen_make_executable(
+                                                            (CodegenFunction){.code = generated.code, .error = generated.error});
+                                                        if (BUSTER_REQUIRE(arguments, executable.error == CODEGEN_ERROR_NONE && executable.address))
+                                                        {
+                                                            void* address = (u8*)executable.address + descriptor->code_offset;
+                                                            for (u32 input_index = 0; input_index < BUSTER_ARRAY_LENGTH(inputs); input_index += 1)
+                                                            {
+                                                                s32 expected = (inputs[input_index] & mask) == (keys[variant] & mask) ? 11 : 22;
+                                                                s32 actual = codegen_test_switch_call(address, width, signed_index != 0, inputs[input_index]);
+                                                                if (actual != expected)
+                                                                {
+                                                                    arguments->show(arguments, S8("SWITCH width={u32}, signed={u32}, variant={u32}, allocator={u32}, input={u32}: actual={s32}, expected={s32}\n"),
+                                                                        (u32)width, signed_index, variant, mode, input_index, actual, expected);
+                                                                }
+                                                                BUSTER_TEST(arguments, actual == expected);
+                                                            }
+                                                        }
+                                                        codegen_release_executable(executable);
+                                                    }
+                                                }
+#endif
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_symbols(arguments);
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_ebpf_local_calls);
+    UnitTestResult switch_key_images = codegen_test_canonical_switch_key_images(arguments);
+    result.succeeded_test_count += switch_key_images.succeeded_test_count;
+    result.test_count += switch_key_images.test_count;
     UnitTestResult machine_debug = codegen_test_machine_debug_locations(arguments);
     result.succeeded_test_count += machine_debug.succeeded_test_count;
     result.test_count += machine_debug.test_count;
@@ -2248,6 +2428,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult ebpf_scalars = codegen_test_ebpf_scalars(arguments);
     result.succeeded_test_count += ebpf_scalars.succeeded_test_count;
     result.test_count += ebpf_scalars.test_count;
+    UnitTestResult ebpf_argument_images = codegen_test_ebpf_argument_images(arguments);
+    result.succeeded_test_count += ebpf_argument_images.succeeded_test_count;
+    result.test_count += ebpf_argument_images.test_count;
     UnitTestResult ebpf_integer_images = codegen_test_ebpf_integer_images(arguments);
     result.succeeded_test_count += ebpf_integer_images.succeeded_test_count;
     result.test_count += ebpf_integer_images.test_count;

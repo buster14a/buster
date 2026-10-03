@@ -52,9 +52,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
       - name: Test merge-parent preservation guard
         shell: bash
         run: python3 -B tools/merge_parent_preservation_test.py -v
@@ -74,6 +82,7 @@ jobs:
           python3 -B tools/ci_checks_qualification_test.py -v
           python3 -B tools/ci_checks_sample_test.py -v
           python3 -B tools/ci_checks_tools_test.py -v
+          python3 -B tools/ci_job_environment_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
@@ -144,6 +153,7 @@ jobs:
           path: |
             ${{ runner.temp }}/actionlint.log
             ${{ runner.temp }}/selected-go.json
+            ${{ runner.temp }}/job-environment.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -153,6 +163,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      checks: read
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
@@ -161,8 +172,16 @@ jobs:
       receipt: ${{ steps.admit.outputs.receipt }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
       - name: Verify exact queue execution before scheduling main jobs
         id: admit
         shell: bash
@@ -177,7 +196,9 @@ jobs:
           label: main-ci-reuse
           label_title: Main CI reuse
           name: main-ci-reuse-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/main-ci-reuse.json
+          path: |
+            ${{ runner.temp }}/main-ci-reuse.json
+            ${{ runner.temp }}/job-environment.json
           if-no-files-found: error
           retention-days: 7
 
@@ -528,9 +549,27 @@ jobs:
           set -euo pipefail
           mkdir -p build "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/combinations.log") 2>&1
+          # #1400: exercise the existing correctness suite with a long base.
+          # Preserve an externally supplied base, including memory-backed runs.
+          if [[ "${{ matrix.lane }}" == linux-x86_64 && "${{ matrix.shard }}" == release ]]; then
+            buster_long_temporary_parent=${BUSTER_TEST_TEMPORARY_BASE:-$RUNNER_TEMP}
+            buster_long_temporary_base=$(mktemp -d "$buster_long_temporary_parent/buster-temporary-base-regression-1400-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-0123456789-XXXXXXXXXX")
+            trap 'rm -rf -- "$buster_long_temporary_base"' EXIT
+            export BUSTER_TEST_TEMPORARY_BASE="$buster_long_temporary_base"
+            buster_long_temporary_base_bytes=$(printf '%s' "$BUSTER_TEST_TEMPORARY_BASE" | wc -c)
+            [[ "$buster_long_temporary_base_bytes" -ge 87 ]]
+            printf 'CI_LONG_TEMPORARY_BASE_V1 status=prepared bytes=%s minimum_bytes=87\n' "$buster_long_temporary_base_bytes"
+          fi
           # The superbuild manifest names this exact bootstrap-driver path.
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
           ./build/build test_all_combinations_ci --verbose=1
+          if [[ -n "${buster_long_temporary_base:-}" ]]; then
+            # library_tests owns and deletes its children before returning.
+            # An unexpected leftover fails the lane before fallback cleanup.
+            rmdir -- "$buster_long_temporary_base"
+            trap - EXIT
+            printf 'CI_LONG_TEMPORARY_BASE_V1 status=cleaned\n'
+          fi
 
       - name: Combination matrix (Windows)
         id: combinations_windows
@@ -1136,8 +1175,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/buster-ci/job-environment.json"
       - name: Install pinned QEMU and reference firmware
         shell: bash
         run: |
@@ -1197,6 +1244,7 @@ jobs:
             build/uefi-self-test
             build/uefi-compiler/CMakeCache.txt
             ${{ runner.temp }}/buster-ci/selected-ninja.json
+            ${{ runner.temp }}/buster-ci/job-environment.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -1208,9 +1256,17 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/buster-analyzer/job-environment.json"
       - name: Bootstrap candidate and select reference build driver
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
@@ -1453,8 +1509,16 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
       - name: Verify every desktop partition exists
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
@@ -1479,6 +1543,7 @@ jobs:
           path: |
             ${{ runner.temp }}/desktop-partitions.json
             ${{ runner.temp }}/main-ci-reuse-finish.json
+            ${{ runner.temp }}/job-environment.json
           if-no-files-found: error
           retention-days: 7
       - name: Require every shard

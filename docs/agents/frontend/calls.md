@@ -4,6 +4,22 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Transparent-union pointer arguments
+
+A pointer argument matches a GNU transparent-union member through the ordinary
+`c_parse_assignment_conversion_message` rule. Compare unqualified pointee
+identity, then require the destination pointee to retain the source's const,
+volatile and restrict qualifiers. Adding qualifiers is permitted;
+dropping them or adding a qualifier at a deeper pointer level is not. The same
+atomic, object/void-pointer and null-pointer policy applies as in an ordinary call.
+
+`c_test_transparent_union_qualifiers` checks accepted additions, unchanged
+qualified pointers, incompatible tags, nested-pointer mismatches and each
+qualifier-loss control through semantic-only validation and both canonical
+frontend forms on six target layouts. Its runtime companion checks member
+transport, reads/writes and exactly-once argument evaluation in all four native
+allocator modes and both frontend forms.
+
 - **A top-level `(` right after an identifier** is the parameter list of a
   function that identifier names in `T f(int)`, and a parenthesized declarator
   in `T (*p)[2]`, whose `T` is the last word of the declaration specifiers.
@@ -87,6 +103,15 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   it -- hence the by-shape strip. `tests/basic_c_typeof_conditional.c` runs
   both macros under all four allocators and
   `c_test_typeof_conditional_type` pins the resolved types themselves.
+- **A comma expression can be any value operand, including when its right side
+  calls a function.** The lowering expression machine sequences the complete
+  left operand before it prepares the right operand's calls, then yields only
+  the converted right value to a conditional arm, binary operator, cast,
+  initializer, comparison, argument or enclosing comma. The unselected
+  conditional arm is never evaluated, and the result is not an lvalue.
+  `c_test_comma_value_operands` checks these contexts on all six native target
+  layouts in both frontend forms and executes the exact-once ordering controls
+  in every native allocator/frontend combination (GitHub #1421).
 - `c_parse_direct_expression_type_core` resolves nested comma/prefix bases
   with explicit continuations. Each frame keeps its prefix slice and postfix
   range; all frames share one query-sized scratch allocation, released on
@@ -222,6 +247,24 @@ are formed, including unused prototypes, typedef return types and nested
 function-pointer declarators. Pointer return types keep their array/function
 pointees. Ordinary function declarators also reject a second array or function
 suffix instead of silently discarding it.
+
+`c_parse_parameter_list_unprototyped` records the empty-list distinction at
+construction: `()` leaves parameters unspecified before C23 and is a
+zero-parameter prototype in C23/GNU23, as is `(void)` in every dialect.
+Direct, parenthesized, nested and block-local function declarators share this
+rule, so compatibility sees the same fact as call validation and canonical
+type mapping. A C23 `int f();` conflicts with `int f(int);`, including when
+the mismatch is inside a function pointer, typedef or callback signature.
+Pre-C23 compatible redeclarations retain their existing behavior. The rule
+follows [WG14 N3096](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3096.pdf)
+6.7.6.3 paragraphs 13–14.
+
+`c_test_c23_empty_list_prototypes` checks explicit C17/GNU17/C23/GNU23
+expectations through semantic-only validation and both canonical frontend
+forms on three native target layouts. It inspects the original function-type
+markers, checks structured diagnostic parity and refused programs, and
+independently validates accepted canonical IR. Local declaration controls
+avoid the separately tracked repeated-linkage restriction (#1562).
 
 All parameter-list paths share the void and ellipsis constraints. The void
 sentinel is sole, unnamed and unqualified, including through a void typedef;

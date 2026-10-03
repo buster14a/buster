@@ -415,6 +415,7 @@ def desktop(root, item, run, condition, variant):
     require(meta.get("GITHUB_SHA") == run["head_sha"] and str(meta.get("GITHUB_RUN_ID")) == str(run["id"]) and meta.get("GITHUB_RUN_ATTEMPT") == "1", "desktop result run identity mismatch")
     environment = phase_environment(summary, meta)
     rows, selected = policy_rows(coverage, environment)
+    capabilities = phases.capability_index(coverage.get("detected"), rows)
     report = phases.analyze(root / item["phase_directory"], coverage, environment)
     require(report == summary and result.get("matrix_phases") == summary, "retained phase summary differs from native journal replay/result")
     require(COMMIT.fullmatch(report["identity"]["source_tree"]) and all(HASH.fullmatch(str(identity.get(k, ""))) for k in ("source_hash", "driver_hash")), "missing exact source/tree/driver identity")
@@ -434,8 +435,6 @@ def desktop(root, item, run, condition, variant):
     executed = coverage.get("executed", [])
     require(len(executed) == 1 and executed[0].get("status") == "success" and executed[0].get("evidence") == "driver-complete" and
             executed[0].get("lane_id") == identity["lane_id"] and Counter(executed[0].get("rows", [])) == Counter(selected), "incomplete/duplicate selected-row completion")
-    capabilities = {row["id"]: row for row in coverage.get("detected", [])}
-    require(set(capabilities) == set(rows), "missing full capability census")
     runtime = {key for key in selected if rows[key].get("execution") == "runtime"}
     tests = item.get("tests", [])
     require(Counter(t["row_id"] for t in tests) == Counter(runtime), "missing/duplicate runtime assertion census")

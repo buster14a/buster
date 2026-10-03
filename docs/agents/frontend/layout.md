@@ -9,6 +9,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   model and returns stable integer facts without entering the live declaration
   machine. Enum consumers retain the explicit ENUM compatibility mode until
   their declaration preparation is migrated (#1247).
+- Record definitions in expression type names are registered in the containing
+  C scope as their keyword is reached. Their braces hold member declarations;
+  the block binder skips those bodies instead of opening a local scope or
+  parsing a bit-field's colon as a local declarator trailer. The existing type
+  parser owns widths and nested record definitions, while array-bound tokens
+  keep source-point identifier bindings after nested enumeration constants are
+  published in the containing scope. This includes
+  `sizeof` operands in returns, arguments and controlling expressions.
+  `c_test_expression_aggregate_bit_fields` checks these contexts, unnamed and
+  zero-width members, typedef-named anonymous members, arithmetic widths, tag visibility and local/member name
+  separation across six target layouts and both frontend forms. Its embedded
+  runtime source checks fixed sizes and unevaluated width operands in all four
+  native allocators; invalid member declarations retain structured diagnostics.
 - A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
   alignment above the native stack's sixteen-byte guarantee, both canonical
   and machine emitters compute `align_down(old_sp - size, alignment)` and
@@ -265,9 +278,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   at 32 bits before converting back. Boolean results use truth conversion.
   The computed value supplies the result without a second volatile load.
   Assignment-expression destination calls are prepared before place lowering;
-  the retained place carries their result into the store exactly once. The
-  runtime fixture includes `get_fields()->c = 9` in a local initializer, whose
-  returned value is 1 and whose destination call must run once.
+  the retained place carries their result into the store exactly once. A
+  parenthesized base followed by a member or subscript suffix remains on the
+  place machine; only a group enclosing the complete destination needs value
+  recovery. The runtime fixture includes `get_fields()->c = 9` in a local
+  initializer, whose returned value is 1 and whose destination call must run
+  once. `c_test_parenthesized_bit_field_assignment_values` covers grouped
+  record and pointer bases as statements and values (GitHub #1413).
   `compiler_driver_test_bit_field_assignment_results` covers both frontend
   forms and all four allocators, with ordinary, volatile and split packed
   fields, postfix controls, full-width fields and terminating update loops.
@@ -442,6 +459,39 @@ compiles the other half for `x86-64-v4`, which has the same 64-byte vector ABI
 and is accepted by Clang releases older than 19, unlike `znver5`. The approved retirement
 corpus and its pre-existing C ABI header stay unchanged: #507 explicitly
 leaves this new frontend feature to #73, separate from retirement coverage.
+
+## Offsetof member promotion
+
+Runtime `__builtin_offsetof` enters `c_ir_offsetof_evaluate`, and static
+initializers use the OFFSETOF query child. Both dispatch
+`c_ir_constant_offsetof_attempt`, which selects each member through the
+existing `c_ir_promoted_member_path`. Anonymous struct/union promotion, missing
+or ambiguous members, and bit-field refusal therefore use the same lowering
+walk. Member sums, array-index multiplication and accumulated array offsets
+are checked before publication. Array-index expressions are constant-query
+children on the explicit query stack; a dot must separate member selections.
+
+Parser enumerators and static assertions still use
+`c_parse_constant_offsetof` / `c_parse_constant_member_offset`. They already
+promote anonymous members and refuse bit-fields. Issue #1570 remains open for
+a shared parser/lowering designator authority, signed-index policy, the
+parser's unchecked offset arithmetic and nested `offsetof` in array indices.
+The parser's index evaluator accepts `sizeof` but does not evaluate nested
+`offsetof`; this lowering repair does not settle those contracts.
+
+`c_test_offsetof_members` pins direct and anonymous member offsets, a nested
+anonymous struct within a union, and an anonymous array element through
+parser constants, scalar initializer bits, aggregate initializer bytes and both canonical frontend forms
+on Linux, Windows and macOS x86-64/AArch64 in GNU17/GNU23. It also refuses
+direct/promoted bit-fields in enumerators, assertions, static initializers and
+runtime expressions, plus missing members, malformed dot separators and lowering arithmetic overflow.
+The positive source also includes a named multidimensional member chain.
+Static initializer and runtime witnesses use an array index containing nested
+`sizeof` and `offsetof` queries; the matching parser enumerator uses literal
+index 1 so it remains independent of the parser's nested-index limitation.
+`c_test_offsetof_members_runtime` compares all three constant contexts with
+addresses of real subobjects in generated programs, using both frontend forms
+and all four register allocators. Runtime execution is omitted on Android/iOS.
 
 ## Parse-side layout solve: ordered passes and the agenda
 

@@ -33,6 +33,10 @@
 // in input order only after the gang returns; assembly and archive selection
 // remain serial boundaries.
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
+// compiler_driver_elf_library_roots shares target/sysroot search roots between
+// export discovery and static-library lookup; explicit -L roots come first.
+// compiler_driver_elf_compiler_runtime adds existing libgcc_s on demand for
+// unresolved half/quad helper calls after explicit library exports are known.
 
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
@@ -2235,6 +2239,8 @@ struct CompilerDriverDynamicLibraries
     // loader, and a configure script reads the successful link as the
     // library existing.  Empty when every requested library was found.
     String8 missing_request;
+    String8 missing_runtime_symbol;
+    String8 runtime_failure_library;
 };
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u16(ByteSlice bytes, u64 offset, u16* value)
@@ -2482,6 +2488,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
     u64 string_size = 0;
     u64 version_symbol_offset = 0;
     u64 version_symbol_size = 0;
+    bool version_symbols_present = false;
+    bool version_symbols_invalid = false;
     u64 version_definition_offset = 0;
     u64 version_definition_size = 0;
     u32 version_definition_count = 0;
@@ -2496,9 +2504,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         u64 entry_size = 0;
         u64 strings_offset = 0;
         u64 strings_size = 0;
-        if (!compiler_driver_read_u32(bytes, section + 4, &section_type) || !compiler_driver_read_u64(bytes, section + 24, &offset) ||
+        bool type_valid = compiler_driver_read_u32(bytes, section + 4, &section_type);
+        if (type_valid && section_type == DRIVER_ELF_SECTION_TYPE_VERSION_SYMBOLS)
+        {
+            version_symbols_invalid |= version_symbols_present;
+            version_symbols_present = true;
+        }
+        if (!type_valid || !compiler_driver_read_u64(bytes, section + 24, &offset) ||
             !compiler_driver_read_u64(bytes, section + 32, &size) || offset > bytes.length || size > bytes.length - offset)
         {
+            version_symbols_invalid |= type_valid && section_type == DRIVER_ELF_SECTION_TYPE_VERSION_SYMBOLS;
             continue;
         }
         if (section_type == DRIVER_ELF_SECTION_TYPE_DYNAMIC_SYMBOLS && !symbol_size)
@@ -2586,7 +2601,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
     }
     // Export arrays use u32 counts and the link indexes reserve UINT32_MAX
     // as an empty entry. Check before allocating or narrowing the ELF count.
-    if (symbol_size && symbol_size / DRIVER_ELF_SYMBOL_SIZE < UINT32_MAX)
+    if (symbol_size && symbol_size / DRIVER_ELF_SYMBOL_SIZE < UINT32_MAX && !version_symbols_invalid &&
+        (!version_symbols_present || (version_symbol_size % sizeof(u16) == 0 &&
+                                     version_symbol_size / sizeof(u16) >= symbol_size / DRIVER_ELF_SYMBOL_SIZE)))
     {
         u64 symbol_count = symbol_size / DRIVER_ELF_SYMBOL_SIZE;
         bool versioned = version_symbol_size / sizeof(u16) >= symbol_count;
@@ -2606,6 +2623,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
                 continue;
             }
             u8 info = bytes.pointer[symbol + 4];
+            u8 visibility = (u8)(bytes.pointer[symbol + 5] & 3);
             u8 binding = (u8)(info >> 4);
             // Global or weak entries only: a local one names nothing this
             // executable could bind to or define for the library.
@@ -2641,7 +2659,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
                 // VER_NDX_LOCAL and VER_NDX_GLOBAL name no version, so a
                 // reference to such a definition records none either.
                 .version = version_index > 1 && version_index < version_name_count ? version_names[version_index] : (String8){0},
-                .has_default = (version & DRIVER_ELF_VERSION_HIDDEN) == 0,
+                .has_default = (version & DRIVER_ELF_VERSION_HIDDEN) == 0 && (visibility == 0 || visibility == 3),
+                .elf_type = (u8)(info & 0xf),
+                .elf_visibility = visibility,
             };
             // STT_OBJECT is what a copy relocation applies to, and an absolute
             // or address-less entry names no storage to copy.
@@ -2668,18 +2688,12 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
     return result;
 }
 
-// The ELF counterpart of compiler_driver_pe_library_exports.  A shared library
-// is looked up where the loader would look for it, and a file whose machine
-// disagrees with the target is skipped rather than believed, so a cross link
-// does not read the host's own libc.  Without a sysroot, `/usr/<triple>/lib`
-// is also searched: it is where Debian's cross libc packages (for example
-// libc6-arm64-cross) install and where the GNU cross toolchains look.
-BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
-                                                             NativeDynamicLibrary* library, FileMapRead* export_map)
+// Both ELF library searches use target roots after explicit -L directories.
+// A sysroot replaces every default host root. Without one, /usr/<triple>/lib
+// also covers Debian's cross-libc/compiler-runtime installation convention.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, CompilerDriverInvocation invocation, String8* roots)
 {
     String8 multiarch = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-gnu") : S8("x86_64-linux-gnu");
-    u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
-    String8 roots[7] = {0};
     u32 root_count = 0;
     if (invocation.sysroot.length)
     {
@@ -2700,6 +2714,15 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
         roots[root_count++] = S8("/lib");
         roots[root_count++] = S8("/usr/lib");
     }
+    return root_count;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
+                                                             NativeDynamicLibrary* library, FileMapRead* export_map)
+{
+    u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
+    String8 roots[7];
+    u32 root_count = compiler_driver_elf_library_roots(arena, invocation, roots);
     *export_map = (FileMapRead){0};
     bool found = false;
     u32 candidate_count = invocation.library_path_count + root_count + 1;
@@ -2756,8 +2779,101 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_object_imports_data(ObjectFile* object)
     return result;
 }
 
+// Exact compiler ABI entry points emitted by the native half/quad lowering.
+// Ordinary undefined names and weak optional references do not add a runtime.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_compiler_runtime_symbol(String8 name)
+{
+    static String8 const names[] = {
+        S8_INITIALIZER("__truncsfhf2"), S8_INITIALIZER("__truncdfhf2"), S8_INITIALIZER("__truncxfhf2"), S8_INITIALIZER("__extendhfsf2"),
+        S8_INITIALIZER("__addtf3"), S8_INITIALIZER("__subtf3"), S8_INITIALIZER("__multf3"), S8_INITIALIZER("__divtf3"),
+        S8_INITIALIZER("__eqtf2"), S8_INITIALIZER("__netf2"), S8_INITIALIZER("__lttf2"), S8_INITIALIZER("__letf2"),
+        S8_INITIALIZER("__gttf2"), S8_INITIALIZER("__getf2"),
+        S8_INITIALIZER("__trunctfhf2"), S8_INITIALIZER("__trunctfsf2"), S8_INITIALIZER("__trunctfdf2"),
+        S8_INITIALIZER("__extendhftf2"), S8_INITIALIZER("__extendsftf2"), S8_INITIALIZER("__extenddftf2"),
+        S8_INITIALIZER("__fixtfsi"), S8_INITIALIZER("__fixtfdi"), S8_INITIALIZER("__fixtfti"),
+        S8_INITIALIZER("__fixunstfsi"), S8_INITIALIZER("__fixunstfdi"), S8_INITIALIZER("__fixunstfti"),
+        S8_INITIALIZER("__floatsitf"), S8_INITIALIZER("__floatditf"), S8_INITIALIZER("__floattitf"),
+        S8_INITIALIZER("__floatunsitf"), S8_INITIALIZER("__floatunditf"), S8_INITIALIZER("__floatuntitf"),
+    };
+    bool result = false;
+    if (name.length > 2 && name.pointer[0] == '_' && name.pointer[1] == '_')
+    {
+        for (u32 index = 0; !result && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        {
+            result = string_equal(name, names[index]);
+        }
+    }
+    return result;
+}
+
+// 0 means absent, 1 callable, 2 a default data/unknown definition that would
+// preempt an appended runtime. Do not silently call that definition as code.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_helper_provider(NativeDynamicLibrary const* library, String8 name)
+{
+    enum { ELF_SYMBOL_FUNCTION = 2, ELF_SYMBOL_IFUNC = 10 };
+    u32 result = 0;
+    for (u32 index = 0; !result && index < library->versioned_symbol_count; index += 1)
+    {
+        NativeDynamicVersionedSymbol const* symbol = library->versioned_symbols + index;
+        if (symbol->has_default && (symbol->elf_visibility == 0 || symbol->elf_visibility == 3) && string_equal(symbol->name, name))
+        {
+            result = symbol->elf_type == ELF_SYMBOL_FUNCTION || symbol->elf_type == ELF_SYMBOL_IFUNC ? 1u : 2u;
+        }
+    }
+    return result;
+}
+
+// Explicit DSOs retain precedence, and a definition selected from an object or
+// archive has already disappeared from the undefined set. Missing target libc
+// must not turn a known missing compiler helper into a blind loader import.
+BUSTER_GLOBAL_LOCAL void compiler_driver_elf_compiler_runtime(Arena* arena, CompilerDriverInvocation invocation,
+                                                             ObjectFile const* linked, bool imports_data,
+                                                             CompilerDriverDynamicLibraries* libraries)
+{
+    u32 runtime_index = UINT32_MAX;
+    for (u32 index = 0; index < libraries->count; index += 1)
+    {
+        if (string_equal(libraries->pointer[index].name, S8("libgcc_s.so.1")))
+        {
+            runtime_index = index;
+        }
+    }
+    for (u32 index = 0; !libraries->missing_runtime_symbol.length && index < linked->symbol_count; index += 1)
+    {
+        ObjectSymbol const* symbol = linked->symbols + index;
+        if (symbol->global && !symbol->weak && !symbol->hidden && symbol->section == OBJECT_SECTION_UNDEFINED &&
+            symbol->kind == OBJECT_SYMBOL_FUNCTION &&
+            compiler_driver_elf_compiler_runtime_symbol(symbol->name))
+        {
+            NativeDynamicLibrary const* provider = &libraries->runtime;
+            u32 provided = compiler_driver_elf_library_helper_provider(provider, symbol->name);
+            for (u32 library_index = 0; !provided && library_index < libraries->count; library_index += 1)
+            {
+                provider = libraries->pointer + library_index;
+                provided = compiler_driver_elf_library_helper_provider(provider, symbol->name);
+            }
+            if (!provided && runtime_index == UINT32_MAX)
+            {
+                runtime_index = libraries->count++;
+                NativeDynamicLibrary* runtime = libraries->pointer + runtime_index;
+                *runtime = (NativeDynamicLibrary){.name = S8("libgcc_s.so.1")};
+                FileMapRead* export_map = libraries->export_maps + libraries->export_map_count;
+                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map);
+                libraries->export_map_count += export_map->bytes.pointer != 0;
+                provider = runtime;
+                provided = compiler_driver_elf_library_helper_provider(runtime, symbol->name);
+            }
+            if (provided != 1)
+            {
+                libraries->missing_runtime_symbol = symbol->name;
+                libraries->runtime_failure_library = provided == 2 ? provider->name : S8("libgcc_s.so.1");
+            }
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libraries(Arena* arena, CompilerDriverInvocation invocation, bool* static_libraries,
-                                                                                    bool imports_data)
+                                                                                    bool imports_data, ObjectFile const* linked)
 {
     CompilerDriverDynamicLibraries result = {0};
     static String8 const windows_system_libraries[] = {
@@ -2770,15 +2886,17 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         S8_INITIALIZER("vcruntime140.dll"),
     };
     u32 default_library_count = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? BUSTER_ARRAY_LENGTH(windows_system_libraries) : 0;
+    u32 library_capacity = invocation.library_count + invocation.framework_count + default_library_count +
+                           (invocation.target.os == OPERATING_SYSTEM_LINUX ? 1u : 0u);
     NativeDynamicLibrary* libraries =
-        arena_allocate(arena, NativeDynamicLibrary, invocation.library_count + invocation.framework_count + default_library_count);
+        arena_allocate(arena, NativeDynamicLibrary, library_capacity);
     // The `-l` spelling that produced each entry, kept beside the mapped file
     // name so a library the search below never finds is reported as the
     // request the caller wrote rather than as the soname it was mapped to.
     // Entries the caller did not request -- the Windows defaults and the
     // Apple frameworks -- keep an empty request and are never reported.
-    String8* requests = arena_allocate(arena, String8, invocation.library_count + invocation.framework_count + default_library_count);
-    memset(requests, 0, sizeof(*requests) * (invocation.library_count + invocation.framework_count + default_library_count));
+    String8* requests = arena_allocate(arena, String8, library_capacity);
+    memset(requests, 0, sizeof(*requests) * library_capacity);
     u32 count = 0;
     for (u32 index = 0; index < default_library_count; index += 1)
     {
@@ -2906,7 +3024,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         // link with no undefined data symbol has nothing to copy.  Reading
         // libc.so.6 where nothing did before costs about 0,65 M instructions
         // on this host, a tenth of a percent of the smallest hosted compile.
-        result.export_maps = arena_allocate(arena, FileMapRead, count + 1);
+        result.export_maps = arena_allocate(arena, FileMapRead, count + 2);
         result.runtime.name = S8("libc.so.6");
         FileMapRead* export_map = result.export_maps + result.export_map_count;
         compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map);
@@ -2929,6 +3047,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
     }
     result.pointer = libraries;
     result.count = count;
+    if (invocation.target.os == OPERATING_SYSTEM_LINUX)
+    {
+        compiler_driver_elf_compiler_runtime(arena, invocation, linked, imports_data, &result);
+    }
     return result;
 }
 
@@ -2942,7 +3064,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_target_dynami
     }
     else
     {
-        result = compiler_driver_dynamic_libraries(arena, invocation, static_libraries, compiler_driver_object_imports_data(linked));
+        result = compiler_driver_dynamic_libraries(arena, invocation, static_libraries, compiler_driver_object_imports_data(linked), linked);
     }
 
     return result;
@@ -2989,9 +3111,13 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
         } :
         (String8){0};
     bool exact_archive = exact && compiler_driver_archive_input(exact_name);
-    for (u32 path_index = 0; path_index < invocation.library_path_count; path_index += 1)
+    String8 roots[7];
+    u32 root_count = invocation.target.os == OPERATING_SYSTEM_LINUX ? compiler_driver_elf_library_roots(arena, invocation, roots) : 0;
+    u32 candidate_count = invocation.library_path_count + root_count;
+    for (u32 path_index = 0; path_index < candidate_count; path_index += 1)
     {
-        String8 root = invocation.library_paths[path_index];
+        String8 root = path_index < invocation.library_path_count ? invocation.library_paths[path_index]
+                                                                : roots[path_index - invocation.library_path_count];
         if (!exact_archive && invocation.target.os != OPERATING_SYSTEM_UEFI)
         {
             String8 shared_name = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? string_format(arena, S8("{S8}.dll"), requested)
@@ -3596,6 +3722,16 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     {
         result->error = COMPILER_DRIVER_ERROR_LINK;
         result->diagnostic = string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+        return;
+    }
+    if (dynamic_libraries.missing_runtime_symbol.length)
+    {
+        result->error = COMPILER_DRIVER_ERROR_LINK;
+        result->native_link.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+        result->native_link.symbol = dynamic_libraries.missing_runtime_symbol;
+        result->diagnostic = string_format(arena, S8("target library {S8} does not provide callable compiler helper: {S8}"),
+                                          dynamic_libraries.runtime_failure_library, dynamic_libraries.missing_runtime_symbol);
         compiler_driver_dynamic_libraries_release(&dynamic_libraries);
         return;
     }
@@ -4570,6 +4706,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = invocation.diagnostic.length ? invocation.diagnostic : S8("invalid compiler invocation");
         goto finish;
     }
+    // Count both explicit entries and the target's defaults before any source
+    // read, fast-path allocation or lookup; export maps also reserve libc.
+    u64 library_count = (u64)invocation.library_count + invocation.framework_count;
+    u32 library_reserve = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation.target.os == OPERATING_SYSTEM_LINUX ? 2u : 0u;
+    if (library_count >= (u64)UINT32_MAX - library_reserve || invocation.library_path_count > UINT32_MAX - 8u)
+    {
+        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        result.diagnostic = S8("native library counts exceed driver limits");
+        goto finish;
+    }
     if (invocation.linker_argument_count)
     {
         String8 unsupported = invocation.linker_arguments ? invocation.linker_arguments[0] : S8("(missing argument storage)");
@@ -5295,6 +5441,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
         result.diagnostic = string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+        goto finish;
+    }
+    if (dynamic_libraries.missing_runtime_symbol.length)
+    {
+        result.error = COMPILER_DRIVER_ERROR_LINK;
+        result.native_link.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+        result.native_link.symbol = dynamic_libraries.missing_runtime_symbol;
+        result.diagnostic = string_format(arena, S8("target library {S8} does not provide callable compiler helper: {S8}"),
+                                         dynamic_libraries.runtime_failure_library, dynamic_libraries.missing_runtime_symbol);
         compiler_driver_dynamic_libraries_release(&dynamic_libraries);
         goto finish;
     }
