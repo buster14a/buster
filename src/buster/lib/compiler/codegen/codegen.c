@@ -3290,7 +3290,9 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
     {
         return;
     }
-    TemporalArena temporary = scratch_begin(0, 0);
+    // Seed growth publishes storage in the sink arena; its temporary local
+    // index must not rewind those persistent records when recording ends.
+    TemporalArena temporary = scratch_begin(&sink->arena, 1);
     IrValueId* local_places = arena_allocate(temporary.arena, IrValueId, function->local_count);
     memset(local_places, 0xff, sizeof(*local_places) * function->local_count);
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)

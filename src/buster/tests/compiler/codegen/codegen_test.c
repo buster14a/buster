@@ -1636,6 +1636,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_block_local_storage(UnitTe
     return result;
 }
 
+// Dynamic canonical seeds must survive when their output is the first thread
+// scratch arena, including subsequent function and object allocations there.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_first_scratch_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { REPETITIONS = 300 };
+    Arena* source_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8), .flags.no_pool = true});
+    if (BUSTER_REQUIRE(arguments, source_arena != 0))
+    {
+        String8 prefix = S8("int first(int x) { int r=0;\n");
+        String8 row = S8("if(x>7){int t=x^3;r+=t;}\n");
+        String8 suffix = S8("return r; } int second(int x) { int tail=x+1; return tail; }\n");
+        String8 source = {.pointer = arena_allocate(source_arena, char8, prefix.length + REPETITIONS * row.length + suffix.length),
+                          .length = prefix.length + REPETITIONS * row.length + suffix.length};
+        memcpy(source.pointer, prefix.pointer, prefix.length);
+        for (u32 repetition = 0; repetition < REPETITIONS; repetition += 1)
+        {
+            memcpy(source.pointer + prefix.length + repetition * row.length, row.pointer, row.length);
+        }
+        memcpy(source.pointer + prefix.length + REPETITIONS * row.length, suffix.pointer, suffix.length);
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+        CPreprocessResult tokens = c_preprocess(source_arena, source, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(source_arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(source_arena, S8("debug-first-scratch.c"), tokens, parsed, target);
+        if (BUSTER_REQUIRE(arguments, tokens.error_count == 0 && parsed.diagnostic_count == 0 &&
+                                     lowered.diagnostic_count == 0 && lowered.program))
+        {
+            IrModule* module = lowered.program->modules;
+            IrValidationResult validated = ir_validate_canonical_module(lowered.program, module);
+            if (BUSTER_REQUIRE(arguments, validated.error == IR_VALIDATION_NONE && module->function_count == 2))
+            {
+                // scratch_begin with no exclusions names arena[0] regardless
+                // of active scopes; an independently mapped output would
+                // leave the canonical recorder's former alias unexercised.
+                TemporalArena generation = scratch_begin(0, 0);
+                CodegenModule generated = codegen_generate_canonical_module(generation.arena, lowered.program, module, target,
+                    (CodegenModuleOptions){.debug_info = true, .assume_validated = true, .verify_invariants = true,
+                                           .register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE});
+                if (BUSTER_REQUIRE(arguments, generated.error == CODEGEN_ERROR_NONE && generated.debug_locations &&
+                                             generated.debug_location_count > 256))
+                {
+                    u64 seed_bytes = (u64)generated.debug_location_count * sizeof(*generated.debug_locations);
+                    u64 seed_end = (u64)generated.debug_locations + seed_bytes;
+                    BUSTER_TEST(arguments, seed_end <= (u64)generation.arena + generation.arena->position);
+                    DebugLocationSeed* saved = arena_allocate(source_arena, DebugLocationSeed, generated.debug_location_count);
+                    memcpy(saved, generated.debug_locations, seed_bytes);
+                    bool found_first = false;
+                    bool found_second = false;
+                    for (u32 seed_index = 0; seed_index < generated.debug_location_count; seed_index += 1)
+                    {
+                        DebugLocationSeed seed = generated.debug_locations[seed_index];
+                        found_first |= seed.function_symbol.value == module->functions[0].symbol.value;
+                        found_second |= seed.function_symbol.value == module->functions[1].symbol.value;
+                        BUSTER_TEST(arguments, seed.end > seed.start);
+                    }
+                    BUSTER_TEST(arguments, found_first && found_second);
+                    ObjectFile object = object_from_canonical_codegen_module(generation.arena, lowered.program, &generated, target);
+                    if (BUSTER_REQUIRE(arguments, object.error == OBJECT_ERROR_NONE))
+                    {
+                        BUSTER_TEST(arguments, object.sections[OBJECT_SECTION_DEBUG_INFO].data.length != 0);
+                        ObjectArtifact written = object_write(generation.arena, &object, OBJECT_FORMAT_ELF64);
+                        BUSTER_TEST(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length != 0);
+                    }
+                    BUSTER_TEST(arguments, !memcmp(saved, generated.debug_locations, seed_bytes));
+                }
+                scratch_end(generation);
+            }
+        }
+        BUSTER_TEST(arguments, arena_destroy(source_arena, 1));
+    }
+    return result;
+}
+
 // The predicate bank leaves a MASK value no predicate edit names without a
 // frame home. Recording reports such a value unavailable wherever its frame
 // copy would be selected, keeps its register rows, and still rejects a home
@@ -2577,6 +2650,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     result.test_count += machine_debug_sizing.test_count;
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_seed_capacity);
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_block_local_storage);
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_first_scratch_storage);
     UnitTestResult ebpf_scalars = codegen_test_ebpf_scalars(arguments);
     result.succeeded_test_count += ebpf_scalars.succeeded_test_count;
     result.test_count += ebpf_scalars.test_count;
