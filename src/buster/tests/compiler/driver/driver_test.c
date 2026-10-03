@@ -17410,7 +17410,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_identifier_list_definiti
                     row.arena, S8("buster-identifier-list-definition"),
                     string_format(row.arena, S8("-{u32}-{u32}-{u32}"), dialect, frontend, allocator));
                 String8 command[] = {dialects[dialect], frontends[frontend], allocators[allocator], S8("-fverify-codegen"),
-                                     S8("-fno-machine-fallback"), S8("-o"), image, source_path};
+                                     allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                                     S8("-o"), image, source_path};
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(
                     row.arena, compiler_driver_parse_arguments(row.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                 String8 description = string_format(

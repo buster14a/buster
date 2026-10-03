@@ -101,18 +101,9 @@ fi
 log_dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
 console_log_base=${BUSTER_IOS_CONSOLE_LOG:-${log_dir%/}/buster-ios-console.log}
 
-# macOS runners do not always ship GNU `timeout`; prefer it (or coreutils
-# `gtimeout`) when present so a stuck simulator fails fast instead of hanging
-# silently under Ninja's output buffering.
-timeout_bin=
-if command -v timeout >/dev/null 2>&1; then
-    timeout_bin=timeout
-elif command -v gtimeout >/dev/null 2>&1; then
-    timeout_bin=gtimeout
-else
-    echo "error: timeout or gtimeout is required for bounded iOS simulator CI" >&2
-    exit 1
-fi
+# Caller clocks require GNU process-group semantics. Resolve and positively
+# verify one absolute timer path before any lifecycle command is admitted.
+timeout_bin=$(python3 "$(dirname "${BASH_SOURCE[0]}")/gnu_timeout.py")
 
 run_with_timeout() {
     local seconds=$1
@@ -196,56 +187,236 @@ run_lifecycle_phase() {
     local status_log="${evidence_base}.${phase}.status.log"
     local native_log="${evidence_base}.${phase}.native-status.log"
     local started=$SECONDS
-    local statuses native_status=unavailable outcome result
+    local statuses native_status=unavailable outcome result helper_status=0
+    local deadline_reached=0 cleanup_status=1 native_kind=unavailable launch_error=none
+    local cancellation_signal=0 native_launch=0
+    local helper_error=none
+    local caller_status=0 caller_admission=0 caller_reported=unavailable caller_invocation=unavailable
+    local caller_generation=unavailable caller_monitor=pending caller_reason=unavailable
+    local caller_valid=0
+    local supervisor_valid=0 extra= key value expected_helper
+    local supervisor_prefix="${evidence_base}.${phase}"
+    local supervisor_fields="${supervisor_prefix}.supervisor-fields.log"
+    local supervisor_log="${supervisor_prefix}.supervisor-status.log"
     local capture_receipt=incomplete command_elapsed=unavailable capture_elapsed=unavailable
     local command_elapsed_log="${evidence_base}.${phase}.command-elapsed.log"
     local capture_elapsed_log="${evidence_base}.${phase}.capture-elapsed.log"
     mkdir -p "$(dirname "$evidence_base")"
-    rm -f "$native_log" "${output_log}.capture-status.log" "$command_elapsed_log" "$capture_elapsed_log"
-    # Record the command's own status before the timeout helper returns. This
-    # distinguishes an ordinary exit 124 from the helper's deadline status.
-    if (
-        command_started=$SECONDS
-        if run_with_timeout "$seconds" "$BASH" -c '
-        status_path=$1
-        shift
-        if "$@"; then status=0; else status=$?; fi
-        printf "%s\n" "$status" >"$status_path"
-        exit "$status"
-    ' bash "$native_log" "$@"; then command_status=0; else command_status=$?; fi
-        printf '%s\n' "$((SECONDS - command_started))" >"$command_elapsed_log"
-        exit "$command_status"
-    ) 2>&1 | (
-        capture_started=$SECONDS
-        if capture_lifecycle_output "$((seconds + 10 + monitor_command_timeout_seconds))" "$output_log"; then
-            capture_status=0
-        else
-            capture_status=$?
-        fi
-        printf '%s\n' "$((SECONDS - capture_started))" >"$capture_elapsed_log"
-        exit "$capture_status"
-    ); then
-        statuses=("${PIPESTATUS[@]}")
+    rm -f "$output_log" "$native_log" "${output_log}.capture-status.log" "$command_elapsed_log" "$capture_elapsed_log" \
+        "$supervisor_fields" "$supervisor_log" "${supervisor_prefix}.caller-fields.log" \
+        "${supervisor_prefix}.caller-status.log" "${supervisor_prefix}.caller-private-directory.log"
+    # The supervisor keeps its private group anchor unreaped until the final
+    # dispatch. Native exit, explicit deadline, real EOF and cleanup are separate.
+    if "$timeout_bin" --signal=KILL "$((seconds + 10 + monitor_command_timeout_seconds))s" \
+        bash "$(dirname "${BASH_SOURCE[0]}")/lifecycle_capture_bridge.sh" \
+        "$timeout_bin" "$supervisor_prefix" "$seconds" "$((seconds + 10 + monitor_command_timeout_seconds))" -- "$@"; then
+        caller_status=0
     else
-        statuses=("${PIPESTATUS[@]}")
+        caller_status=$?
     fi
-    if [[ -f $native_log ]]; then
-        read -r native_status <"$native_log" || native_status=unavailable
+    if [[ -s ${supervisor_prefix}.caller-fields.log ]] \
+        && [[ $(wc -l <"${supervisor_prefix}.caller-fields.log") -eq 1 ]] \
+        && read -r caller_admission caller_reported caller_invocation caller_generation caller_monitor caller_reason extra \
+            <"${supervisor_prefix}.caller-fields.log" \
+        && [[ $caller_admission =~ ^[01]$ \
+            && ( $caller_reported == unavailable || $caller_reported =~ ^(0|[1-9][0-9]{0,2})$ && $caller_reported -le 255 ) \
+            && ( $caller_invocation == unavailable || $caller_invocation =~ ^(0|[1-9][0-9]{0,2})$ && $caller_invocation -le 255 ) \
+            && $caller_generation =~ ^[A-Za-z0-9]{8,64}$ \
+            && ( $caller_monitor =~ ^(pending|invalid)$ || $caller_monitor =~ ^(0|[1-9][0-9]{0,2})$ && $caller_monitor -le 255 ) \
+            && $caller_reason =~ ^[a-z0-9-]+$ && -z $extra ]]; then
+        if [[ -s ${supervisor_prefix}.caller-status.log \
+            && $(wc -l <"${supervisor_prefix}.caller-status.log") -eq 1 ]] \
+            && grep -q '^BUSTER_IOS_CALLER version=1 ' "${supervisor_prefix}.caller-status.log"; then
+            caller_valid=1
+            for key in version generation admission helper_status invocation_status command_monitor_status reason; do
+                case "$key" in
+                    version) value=1 ;;
+                    generation) value=$caller_generation ;;
+                    admission) value=$caller_admission ;;
+                    helper_status) value=$caller_reported ;;
+                    invocation_status) value=$caller_invocation ;;
+                    command_monitor_status) value=$caller_monitor ;;
+                    reason) value=$caller_reason ;;
+                esac
+                if ! grep -Eq "(^| )${key}=${value}( |$)" "${supervisor_prefix}.caller-status.log" \
+                    || [[ $(grep -oE "(^| )${key}=" "${supervisor_prefix}.caller-status.log" | wc -l) -ne 1 ]]; then
+                    caller_valid=0
+                fi
+            done
+        fi
+        if [[ $caller_valid -eq 1 && $caller_status -eq 0 && $caller_admission -eq 1 \
+            && $caller_reported != unavailable && $caller_invocation == "$caller_reported" \
+            && $caller_monitor =~ ^(0|[1-9][0-9]{0,2})$ && $caller_reason == complete ]]; then
+            helper_status=$caller_reported
+        else
+            caller_admission=0
+            helper_status=$caller_status
+        fi
+    else
+        caller_admission=0
+        helper_status=$caller_status
+        caller_invocation=unavailable
+        caller_generation=unavailable
+        caller_reason=malformed-caller-receipt
     fi
-    if [[ -s $command_elapsed_log ]]; then
-        read -r command_elapsed <"$command_elapsed_log" || command_elapsed=unavailable
+    statuses=(125 1)
+    if [[ $caller_admission -eq 1 && -s $supervisor_fields && -s $supervisor_log ]] \
+        && [[ $(wc -l <"$supervisor_fields") -eq 1 && $(wc -l <"$supervisor_log") -eq 1 ]] \
+        && grep -q '^BUSTER_IOS_SUPERVISOR version=1 ' "$supervisor_log" \
+        && read -r 'statuses[0]' native_status 'statuses[1]' command_elapsed capture_elapsed \
+            deadline_reached cleanup_status native_kind launch_error extra <"$supervisor_fields"; then
+        if [[ ${statuses[0]} =~ ^(0|[1-9][0-9]{0,2})$ && ${statuses[0]} -le 255 \
+            && ( $native_status == unavailable || $native_status =~ ^(0|[1-9][0-9]{0,2})$ && $native_status -le 255 ) \
+            && ${statuses[1]} =~ ^(0|1|124)$ && $command_elapsed =~ ^[0-9]+$ \
+            && $capture_elapsed =~ ^[0-9]+$ && $deadline_reached =~ ^[01]$ \
+            && $cleanup_status =~ ^[01]$ && $native_kind =~ ^(exit|signal|unavailable)$ \
+            && $launch_error =~ ^(none|ENOENT|EACCES|ENOEXEC|other)$ && -z $extra ]]; then
+            supervisor_valid=1
+            if [[ $(grep -oE '(^| )version=' "$supervisor_log" | wc -l) -ne 1 ]]; then
+                supervisor_valid=0
+            fi
+            # The compact Bash fields and the named retained receipt must agree.
+            for key in command_status native_status capture_status command_elapsed capture_elapsed \
+                deadline_reached cleanup_status native_kind launch_error; do
+                case "$key" in
+                    command_status) value=${statuses[0]} ;;
+                    capture_status) value=${statuses[1]} ;;
+                    *) value=${!key} ;;
+                esac
+                if ! grep -Eq "(^| )${key}=${value}( |$)" "$supervisor_log" \
+                    || [[ $(grep -oE "(^| )${key}=" "$supervisor_log" | wc -l) -ne 1 ]]; then
+                    supervisor_valid=0
+                fi
+            done
+            for key in capture_eof native_reaped keeper_reaped group_authority_released native_launch; do
+                if ! grep -Eq "(^| )${key}=[01]( |$)" "$supervisor_log" \
+                    || [[ $(grep -oE "(^| )${key}=" "$supervisor_log" | wc -l) -ne 1 ]]; then
+                    supervisor_valid=0
+                fi
+            done
+            # The closed generation must carry the same final command proof
+            # that the collector actually waited for, including refusal facts.
+            for key in bridge_generation command_monitor_status command_authenticated caller_lost; do
+                case "$key" in
+                    bridge_generation) value=$caller_generation ;;
+                    command_monitor_status) value=$caller_monitor ;;
+                    command_authenticated) if [[ $caller_monitor -eq 0 ]]; then value=1; else value=0; fi ;;
+                    caller_lost) value=0 ;;
+                esac
+                if ! grep -Eq "(^| )${key}=${value}( |$)" "$supervisor_log" \
+                    || [[ $(grep -oE "(^| )${key}=" "$supervisor_log" | wc -l) -ne 1 ]]; then
+                    supervisor_valid=0
+                fi
+            done
+            if [[ ( $caller_monitor -eq 124 || $caller_monitor -eq 137 ) && $deadline_reached -ne 1 ]]; then
+                supervisor_valid=0
+            fi
+            if ! grep -Eq '(^| )cancellation_signal=(0|2|15)( |$)' "$supervisor_log" \
+                || [[ $(grep -oE '(^| )cancellation_signal=' "$supervisor_log" | wc -l) -ne 1 ]]; then
+                supervisor_valid=0
+            else
+                value=$(grep -oE '(^| )cancellation_signal=(0|2|15)( |$)' "$supervisor_log")
+                value=${value#*cancellation_signal=}
+                cancellation_signal=${value%% *}
+            fi
+            value=$(grep -oE '(^| )native_launch=[01]( |$)' "$supervisor_log" || true)
+            value=${value#*native_launch=}
+            native_launch=${value%% *}
+            if ! grep -Eq '(^| )helper_error=[A-Za-z][A-Za-z0-9_]*( |$)' "$supervisor_log" \
+                || [[ $(grep -oE '(^| )helper_error=' "$supervisor_log" | wc -l) -ne 1 ]]; then
+                supervisor_valid=0
+            else
+                value=$(grep -oE '(^| )helper_error=[A-Za-z][A-Za-z0-9_]*( |$)' "$supervisor_log")
+                value=${value#*helper_error=}
+                helper_error=${value%% *}
+            fi
+            expected_helper=${statuses[0]}
+            if [[ $expected_helper -eq 0 && ( ${statuses[1]} -ne 0 || $cleanup_status -ne 0 ) ]]; then
+                expected_helper=1
+            fi
+            if [[ $helper_status -ne $expected_helper ]]; then
+                supervisor_valid=0
+            fi
+            if [[ $cancellation_signal -ne 0 ]]; then
+                if [[ ${statuses[0]} -ne $((128 + cancellation_signal)) ]]; then
+                    supervisor_valid=0
+                fi
+            elif [[ $deadline_reached -eq 1 ]]; then
+                if [[ ${statuses[0]} -ne 124 ]]; then
+                    supervisor_valid=0
+                fi
+            elif [[ $helper_error != none ]]; then
+                if [[ ${statuses[0]} -ne 125 ]]; then
+                    supervisor_valid=0
+                fi
+            elif [[ $launch_error == none && $native_status != unavailable \
+                && ${statuses[0]} -ne $native_status ]]; then
+                supervisor_valid=0
+            fi
+            if [[ ${statuses[0]} -eq 0 \
+                && ( $native_status != 0 || $native_kind != exit || $native_launch != 1 \
+                    || $deadline_reached -ne 0 || $cancellation_signal -ne 0 || $launch_error != none \
+                    || $helper_error != none || $caller_monitor -ne 0 ) ]]; then
+                supervisor_valid=0
+            fi
+            if [[ $native_kind == unavailable ]]; then
+                if [[ $native_status != unavailable || -e $native_log ]]; then
+                    supervisor_valid=0
+                fi
+            elif [[ $native_status == unavailable || ! -s $native_log ]] \
+                || [[ $(cat "$native_log") != "$native_status" ]] \
+                || ! grep -Eq '(^| )native_reaped=1( |$)' "$supervisor_log"; then
+                supervisor_valid=0
+            fi
+            if [[ $native_status != unavailable && $cleanup_status -eq 0 ]] \
+                && { ! grep -Eq '(^| )keeper_reaped=1( |$)' "$supervisor_log" \
+                    || ! grep -Eq '(^| )group_authority_released=1( |$)' "$supervisor_log"; }; then
+                supervisor_valid=0
+            fi
+        fi
     fi
-    if [[ -s $capture_elapsed_log ]]; then
-        read -r capture_elapsed <"$capture_elapsed_log" || capture_elapsed=unavailable
-    fi
-    if [[ ${statuses[1]} -eq 0 && -s ${output_log}.capture-status.log ]] \
+    if [[ $supervisor_valid -eq 1 && ${statuses[1]} -eq 0 && -s ${output_log}.capture-status.log ]] \
+        && grep -Eq '(^| )capture_eof=1( |$)' "$supervisor_log" \
         && grep -Eq '^BUSTER_IOS_CAPTURE total_bytes=[0-9]+ retained_bytes=[0-9]+ truncated=[01]$' \
             "${output_log}.capture-status.log"; then
         capture_receipt=complete
     fi
     result=${statuses[0]}
     outcome=command-failure
-    if [[ $result -eq 0 ]]; then
+    if [[ $supervisor_valid -ne 1 ]]; then
+        outcome=evidence-failure
+        result=1
+        statuses=(125 1)
+        native_status=unavailable
+        native_kind=unavailable
+        native_launch=0
+        launch_error=none
+        deadline_reached=0
+        cancellation_signal=0
+        cleanup_status=1
+        command_elapsed=unavailable
+        capture_elapsed=unavailable
+        if [[ $caller_admission -eq 0 ]]; then
+            statuses=(125 124)
+            capture_elapsed=$((SECONDS - started))
+            if [[ $caller_status -eq 130 || $caller_status -eq 143 ]]; then
+                outcome=cancelled
+                result=$caller_status
+                statuses=("$caller_status" 124)
+                cancellation_signal=$((caller_status - 128))
+            fi
+        fi
+    elif [[ $cancellation_signal -ne 0 ]]; then
+        outcome=cancelled
+    elif [[ $deadline_reached -eq 1 ]]; then
+        outcome=timeout
+    elif [[ $helper_error != none ]]; then
+        outcome=helper-failure
+    elif [[ $launch_error != none ]]; then
+        outcome=launch-failure
+    elif [[ $native_kind == signal ]]; then
+        outcome=signal-or-command-failure
+    elif [[ $result -eq 0 ]]; then
         outcome=success
     elif [[ $native_status == unavailable ]]; then
         case "$result" in
@@ -260,6 +431,10 @@ run_lifecycle_phase() {
         outcome=evidence-failure
         result=1
     fi
+    if [[ $cleanup_status -ne 0 && $result -eq 0 ]]; then
+        outcome=cleanup-failure
+        result=1
+    fi
     if ! {
         printf 'BUSTER_IOS_PHASE phase=%s label=%s outcome=%s status=%s native_status=%s capture_status=%s elapsed_seconds=%s deadline_seconds=%s output_limit_bytes=65536 command_elapsed_seconds=%s capture_elapsed_seconds=%s capture_receipt=%s\n' \
             "$phase" "$label" "$outcome" "${statuses[0]}" "$native_status" "${statuses[1]}" "$((SECONDS - started))" "$seconds" \
@@ -267,7 +442,21 @@ run_lifecycle_phase() {
         printf 'command:'
         printf ' %q' "$@"
         printf '\noutput_log=%s\n' "$output_log"
-        if [[ -s ${output_log}.capture-status.log ]]; then
+        printf 'BUSTER_IOS_SUPERVISOR_GATE helper_status=%s supervisor_valid=%s deadline_reached=%s cleanup_status=%s\n' \
+            "$helper_status" "$supervisor_valid" "$deadline_reached" "$cleanup_status"
+        printf 'BUSTER_IOS_CALLER_GATE monitor_status=%s admission=%s invocation_status=%s generation=%s reason=%s\n' \
+            "$caller_status" "$caller_admission" "$caller_invocation" "$caller_generation" "$caller_reason"
+        if [[ $caller_admission -eq 1 && -s $supervisor_log ]]; then
+            cat "$supervisor_log"
+        fi
+        if [[ -s ${supervisor_prefix}.caller-status.log ]]; then
+            cat "${supervisor_prefix}.caller-status.log"
+        fi
+        if [[ -s ${supervisor_prefix}.caller-private-directory.log ]]; then
+            printf 'private_evidence_directory='
+            cat "${supervisor_prefix}.caller-private-directory.log"
+        fi
+        if [[ $caller_admission -eq 1 && -s ${output_log}.capture-status.log ]]; then
             cat "${output_log}.capture-status.log"
         else
             printf 'BUSTER_IOS_CAPTURE incomplete=1 reason=missing-or-empty-receipt\n'
