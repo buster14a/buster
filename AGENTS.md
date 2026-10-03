@@ -131,6 +131,8 @@ history), then the relevant methods in
 Clang-built compiler; self-built stages validate the fixed point. Compare the
 same inputs, flags, target, and machine. Report compile time and useful work,
 not just a proxy or generated-program runtime.
+For a compiler change, run `tools/uarch_lab.py compare` (A/B; `run`
+profiles one binary) and read the verdict in its `summary.json`.
 
 Record an audit with `tools/new_audit.py`: it writes one new file under
 `docs/performance-audits/` and nothing else. Never add a line to the closed
@@ -170,9 +172,10 @@ completed validation, outstanding gates and next action. If no successor has
 accepted ownership, say so explicitly; publishing a PR does not complete a bug.
 
 Use the repository/host the user names; for a GitHub URL, work on that GitHub
-repository. Otherwise inspect the current remote. The project also retains
-Forgejo workflows and a source-free GitHub runner broker; their infrastructure
-rules are in [workflow.md](docs/agents/workflow.md) and [testing.md](docs/agents/testing.md).
+repository. Otherwise inspect the current remote. Historical Forgejo issue
+records and the retired source-free runner broker design remain available;
+active GitHub infrastructure rules are in [workflow.md](docs/agents/workflow.md)
+and [testing.md](docs/agents/testing.md).
 Check live CI for the submitted commit instead of relying on old reports.
 
 Historical issue references may use Forgejo numbers. Resolve those through

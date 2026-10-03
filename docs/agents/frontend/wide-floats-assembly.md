@@ -2,6 +2,24 @@
 
 [Agent instructions](../../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+Generic `__builtin_isfinite`, `__builtin_isinf`, `__builtin_isinf_sign` and
+`__builtin_isnan` retain a wide argument's original floating format. Narrower
+floating arguments keep their existing exact binary64 widening. Their
+infinity operands widen exactly from binary32/binary64, so a finite x87 or
+binary128 argument never becomes infinite through a classifier conversion.
+The explicit `__builtin_isinff` and `__builtin_isnanf` spellings retain their
+float parameter conversion. This preserves the existing comparison semantics;
+it adds no floating-exception guarantee.
+
+`c_test_float_classifier_widths` checks comparison operand types and absence
+of narrowing in both canonical frontend forms on six native layouts.
+`c_test_x87_classifier_runtime` builds values from independent integer images
+and checks both signs of zero, finite values beyond binary64's range, x87
+normal/subnormal boundaries, infinity and quiet NaNs, plus exactly-once
+argument evaluation. Its native allocator/frontend matrix and independent
+GCC/Clang controls run on supported hosted x86-64 platforms; the registered
+coverage itself is not an execution result.
+
 `signbit` reads the original float representation through canonical memory
 operations: bit 31 for binary32, bit 63 for binary64, byte-eight bit 15 for
 x87 and byte-eight bit 63 for binary128. It does not widen or narrow a value
@@ -19,6 +37,27 @@ as closed MIR transactions, with strict no-fallback compilation retaining
 their source/debug locations.
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
+
+## Source-format literal rounding
+
+`c_ir_float_literal_value` rounds a float-suffixed literal to binary32 before
+widening its value into the binary64 constant carrier. Exact rational overflow
+materializes source-format infinity; underflow materializes zero only when the
+converter reports that the rounded significand is zero. Nonzero subnormals
+retain their `C_IR_ROUND_OK` image. Unary negation then preserves the sign of
+infinity and zero. Only `C_IR_ROUND_FAILED` retains the existing approximate
+parser fallback; it is separate from representable special results.
+`c_ir_emit_float_spelling` applies the same range statuses to automatic
+expressions, including bounded large mantissas whose approximate accumulator
+would produce infinity divided by infinity instead of the rounded zero.
+
+Registered `c_test_float_literal_initializer_rounding` checks fixed IEEE images
+for scalar and array globals, source-format comparison queries and rejected
+nonfinite integer conversions on six target layouts and both frontend forms.
+Its runtime companion checks the same independently specified images in
+global, automatic and local-static storage through all four native allocators
+and both frontend forms. Decimal/hexadecimal maximum, subnormal, halfway and
+negative-zero rows preserve finite-boundary and per-literal rounding behavior.
 
 - **`_Float16` is IEEE-754 binary16, and it is a real type rather than a
   storage alias.** Two naturally aligned bytes on every supported target

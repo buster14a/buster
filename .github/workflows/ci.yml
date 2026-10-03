@@ -152,6 +152,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      checks: read
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
@@ -527,9 +528,27 @@ jobs:
           set -euo pipefail
           mkdir -p build "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/combinations.log") 2>&1
+          # #1400: exercise the existing correctness suite with a long base.
+          # Preserve an externally supplied base, including memory-backed runs.
+          if [[ "${{ matrix.lane }}" == linux-x86_64 && "${{ matrix.shard }}" == release ]]; then
+            buster_long_temporary_parent=${BUSTER_TEST_TEMPORARY_BASE:-$RUNNER_TEMP}
+            buster_long_temporary_base=$(mktemp -d "$buster_long_temporary_parent/buster-temporary-base-regression-1400-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-0123456789-XXXXXXXXXX")
+            trap 'rm -rf -- "$buster_long_temporary_base"' EXIT
+            export BUSTER_TEST_TEMPORARY_BASE="$buster_long_temporary_base"
+            buster_long_temporary_base_bytes=$(printf '%s' "$BUSTER_TEST_TEMPORARY_BASE" | wc -c)
+            [[ "$buster_long_temporary_base_bytes" -ge 87 ]]
+            printf 'CI_LONG_TEMPORARY_BASE_V1 status=prepared bytes=%s minimum_bytes=87\n' "$buster_long_temporary_base_bytes"
+          fi
           # The superbuild manifest names this exact bootstrap-driver path.
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
           ./build/build test_all_combinations_ci --verbose=1
+          if [[ -n "${buster_long_temporary_base:-}" ]]; then
+            # library_tests owns and deletes its children before returning.
+            # An unexpected leftover fails the lane before fallback cleanup.
+            rmdir -- "$buster_long_temporary_base"
+            trap - EXIT
+            printf 'CI_LONG_TEMPORARY_BASE_V1 status=cleaned\n'
+          fi
 
       - name: Combination matrix (Windows)
         id: combinations_windows

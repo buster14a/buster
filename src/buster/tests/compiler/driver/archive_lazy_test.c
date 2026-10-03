@@ -117,9 +117,273 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_test_bytes(Arena* arena, O
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_archive_test_default_link(Arena* arena, String8 target, String8 sysroot,
+                                                                                 String8 input, String8 library, String8 explicit_root,
+                                                                                 String8 output)
+{
+    String8 command[10] = {S8("-target"), target, S8("-g0"), string_format(arena, S8("--sysroot={S8}"), sysroot), input};
+    u32 count = 5;
+    if (explicit_root.length)
+    {
+        command[count++] = S8("-L");
+        command[count++] = explicit_root;
+    }
+    command[count++] = library;
+    command[count++] = S8("-o");
+    command[count++] = output;
+    return compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = count}));
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_default_result(UnitTestArguments* arguments, CompilerDriverResult linked,
+                                                                            u8 expected, ByteSlice reference)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+    if (BUSTER_REQUIRE(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE && linked.has_object))
+    {
+        bool found = false;
+        for (u32 index = 0; index < linked.object.symbol_count; index += 1)
+        {
+            ObjectSymbol* symbol = linked.object.symbols + index;
+            if (string_equal(symbol->name, S8("buster1285_selected")))
+            {
+                bool defined = symbol->section == OBJECT_SECTION_DATA && symbol->section < linked.object.section_count;
+                BUSTER_TEST(arguments, defined);
+                if (defined)
+                {
+                    ByteSlice data = linked.object.sections[symbol->section].data;
+                    found = symbol->value < data.length && data.pointer[symbol->value] == expected;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, found);
+        BUSTER_TEST(arguments, linked.native_link.executable.length != 0);
+        if (reference.pointer)
+        {
+            ByteSlice image = linked.native_link.executable;
+            BUSTER_TEST(arguments, image.pointer && image.length == reference.length && memcmp(image.pointer, reference.pointer, image.length) == 0);
+        }
+    }
+    return result;
+}
+
+// Literal sysroot paths are independent of the production root builder. Distinct
+// provider bytes make search precedence observable before image serialization.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_default_roots(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-linux"), S8("aarch64-linux")};
+    String8 triples[] = {S8("x86_64-linux-gnu"), S8("aarch64-linux-gnu")};
+    for (u32 cpu = 0; cpu < BUSTER_ARRAY_LENGTH(targets); cpu += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        Arena* arena = arguments->arena;
+        String8 sysroot = buster_test_temporary_path(arena, S8("buster-default-library-roots"), S8(""));
+        os_make_directory(sysroot);
+        String8 lib = string_format_z(arena, S8("{S8}/lib"), sysroot);
+        String8 usr = string_format_z(arena, S8("{S8}/usr"), sysroot);
+        String8 usr_lib = string_format_z(arena, S8("{S8}/usr/lib"), sysroot);
+        os_make_directory(lib);
+        os_make_directory(usr);
+        os_make_directory(usr_lib);
+        String8 roots[] = {
+            string_format_z(arena, S8("{S8}/lib/{S8}"), sysroot, triples[cpu]),
+            string_format_z(arena, S8("{S8}/usr/lib/{S8}"), sysroot, triples[cpu]),
+            string_format_z(arena, S8("{S8}/lib64"), sysroot),
+            string_format_z(arena, S8("{S8}/usr/lib64"), sysroot), lib, usr_lib,
+        };
+        for (u32 root = 0; root < BUSTER_ARRAY_LENGTH(roots); root += 1) { os_make_directory(roots[root]); }
+        Target target = {.cpu_arch = cpu ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        ObjectSymbol symbols[] = {
+            {.name = S8("main"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("buster1285_selected"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
+             .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO},
+        };
+        ObjectFile caller = compiler_driver_archive_test_object(arena, target, symbols, BUSTER_ARRAY_LENGTH(symbols), 0);
+        u8 x86[] = {0x31, 0xc0, 0xc3};
+        u8 aarch64[] = {0x00, 0x00, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6};
+        caller.sections[OBJECT_SECTION_TEXT].data = cpu ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64) : (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86);
+        ObjectArtifact artifact = object_write(arena, &caller, OBJECT_FORMAT_ELF64);
+        String8 input = string_format_z(arena, S8("{S8}/main.o"), sysroot);
+        if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE && file_write(input, artifact.bytes)))
+        {
+            String8 archive_paths[BUSTER_ARRAY_LENGTH(roots)];
+            for (u32 root = 0; root < BUSTER_ARRAY_LENGTH(roots); root += 1)
+            {
+                ObjectSymbol provider = {.name = S8("buster1285_selected"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA,
+                                         .global = true, .size = 1};
+                ObjectFile member = compiler_driver_archive_test_object(arena, target, &provider, 1, (u8)(root + 11));
+                ByteSlice archive = compiler_driver_archive_test_bytes(arena, &member, 1, 1);
+                archive_paths[root] = string_format_z(arena, S8("{S8}/libbuster1285_marker.a"), roots[root]);
+                if (BUSTER_REQUIRE(arguments, file_write(archive_paths[root], archive)))
+                {
+                    String8 output = string_format_z(arena, S8("{S8}/linked"), sysroot);
+                    CompilerDriverResult direct = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input, archive_paths[root],
+                                                                                          (String8){0}, output);
+                    UnitTestResult checked = compiler_driver_archive_test_default_result(arguments, direct, (u8)(root + 11), (ByteSlice){0});
+                    result.test_count += checked.test_count;
+                    result.succeeded_test_count += checked.succeeded_test_count;
+                    String8 requests[] = {S8("-lbuster1285_marker"), S8("-l:libbuster1285_marker.a")};
+                    for (u32 exact = 0; exact < BUSTER_ARRAY_LENGTH(requests); exact += 1)
+                    {
+                        CompilerDriverResult named = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input, requests[exact],
+                                                                                             (String8){0}, output);
+                        checked = compiler_driver_archive_test_default_result(arguments, named, (u8)(root + 11), direct.native_link.executable);
+                        result.test_count += checked.test_count;
+                        result.succeeded_test_count += checked.succeeded_test_count;
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(archive_paths[root]));
+                }
+            }
+            // With all default roots populated, the first multiarch lib wins.
+            for (u32 root = 0; root < BUSTER_ARRAY_LENGTH(roots); root += 1)
+            {
+                ObjectSymbol provider = {.name = S8("buster1285_selected"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA,
+                                         .global = true, .size = 1};
+                ObjectFile member = compiler_driver_archive_test_object(arena, target, &provider, 1, (u8)(root + 31));
+                BUSTER_TEST(arguments, file_write(archive_paths[root], compiler_driver_archive_test_bytes(arena, &member, 1, 1)));
+            }
+            String8 output = string_format_z(arena, S8("{S8}/precedence"), sysroot);
+            CompilerDriverResult ordered = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input, S8("-lbuster1285_marker"),
+                                                                                     (String8){0}, output);
+            UnitTestResult checked = compiler_driver_archive_test_default_result(arguments, ordered, 31, (ByteSlice){0});
+            result.test_count += checked.test_count;
+            result.succeeded_test_count += checked.succeeded_test_count;
+            String8 explicit_root = string_format_z(arena, S8("{S8}/explicit"), sysroot);
+            os_make_directory(explicit_root);
+            String8 explicit_archive = string_format_z(arena, S8("{S8}/libbuster1285_marker.a"), explicit_root);
+            ObjectSymbol provider = {.name = S8("buster1285_selected"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA,
+                                     .global = true, .size = 1};
+            ObjectFile member = compiler_driver_archive_test_object(arena, target, &provider, 1, 77);
+            BUSTER_TEST(arguments, file_write(explicit_archive, compiler_driver_archive_test_bytes(arena, &member, 1, 1)));
+            String8 shared = string_format_z(arena, S8("{S8}/libbuster1285_marker.so"), roots[0]);
+            ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(S8("existing output"));
+            BUSTER_TEST(arguments, file_write(shared, BUSTER_SLICE_TO_BYTE_SLICE(S8("unreadable shared object"))));
+            CompilerDriverResult explicit = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input,
+                                                                                      S8("-lbuster1285_marker"), explicit_root, output);
+            checked = compiler_driver_archive_test_default_result(arguments, explicit, 77, (ByteSlice){0});
+            result.test_count += checked.test_count;
+            result.succeeded_test_count += checked.succeeded_test_count;
+            CompilerDriverResult exact = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input,
+                                                                                   S8("-l:libbuster1285_marker.a"), (String8){0}, output);
+            checked = compiler_driver_archive_test_default_result(arguments, exact, 31, ordered.native_link.executable);
+            result.test_count += checked.test_count;
+            result.succeeded_test_count += checked.succeeded_test_count;
+            BUSTER_TEST(arguments, file_write(output, sentinel));
+            CompilerDriverResult shadowed = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input,
+                                                                                      S8("-lbuster1285_marker"), (String8){0}, output);
+            BUSTER_TEST(arguments, shadowed.error == COMPILER_DRIVER_ERROR_LINK);
+            BUSTER_STRING_TEST(arguments, shadowed.diagnostic, S8("cannot find -lbuster1285_marker"));
+            ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+            BUSTER_TEST(arguments, preserved.length == sentinel.length && memcmp(preserved.pointer, sentinel.pointer, sentinel.length) == 0);
+            BUSTER_TEST(arguments, shadowed.native_link.executable.length == 0);
+            // A supplied sysroot must not fall back to the host's ordinary libm.
+            CompilerDriverResult isolated = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input, S8("-lm"),
+                                                                                      (String8){0}, output);
+            BUSTER_TEST(arguments, isolated.error == COMPILER_DRIVER_ERROR_LINK);
+            BUSTER_STRING_TEST(arguments, isolated.diagnostic, S8("cannot find -lm"));
+            preserved = file_read(arena, output, (FileReadOptions){0});
+            BUSTER_TEST(arguments, preserved.length == sentinel.length && memcmp(preserved.pointer, sentinel.pointer, sentinel.length) == 0);
+            BUSTER_TEST(arguments, isolated.native_link.executable.length == 0);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_default_native(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = arguments->arena;
+    String8 sysroot = buster_test_temporary_path(arena, S8("buster-default-library-native"), S8(""));
+    os_make_directory(sysroot);
+    String8 usr = string_format_z(arena, S8("{S8}/usr"), sysroot);
+    String8 root = string_format_z(arena, S8("{S8}/usr/lib"), sysroot);
+    os_make_directory(usr);
+    os_make_directory(root);
+    String8 source = string_format_z(arena, S8("{S8}/main.c"), sysroot);
+    String8 provider = string_format_z(arena, S8("{S8}/provider.c"), sysroot);
+    String8 member = string_format_z(arena, S8("{S8}/provider.o"), sysroot);
+    String8 archive = string_format_z(arena, S8("{S8}/libbuster1285_native.a"), root);
+    String8 host_output = string_format_z(arena, S8("{S8}/host"), sysroot);
+    String8 named_output = string_format_z(arena, S8("{S8}/named"), sysroot);
+    String8 direct_output = string_format_z(arena, S8("{S8}/direct"), sysroot);
+    String8 archiver = executable_resolve_in_path(arena, S8("llvm-ar"));
+    if (!archiver.length) { archiver = executable_resolve_in_path(arena, S8("ar")); }
+    bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "extern unsigned char buster1285_selected;\nint main(void) { return buster1285_selected != 91; }\n"))) &&
+        file_write(provider, BUSTER_SLICE_TO_BYTE_SLICE(S8("unsigned char buster1285_selected = 91;\n")));
+    if (BUSTER_REQUIRE(arguments, written && archiver.length))
+    {
+        String8 command[12];
+        u32 count = 0;
+        command[count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+        command[count++] = S8("-c");
+        command[count++] = provider;
+        command[count++] = S8("-o");
+        command[count++] = member;
+        ProcessWaitResult compiled = compiler_driver_test_response_file_run(arena, (SliceString8){.pointer = command, .length = count});
+        if (BUSTER_REQUIRE(arguments, !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS))
+        {
+            String8 archive_command[] = {archiver, S8("rcs"), archive, member};
+            ProcessWaitResult archived = compiler_driver_test_response_file_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(archive_command));
+            if (BUSTER_REQUIRE(arguments, !archived.timed_out && archived.result == PROCESS_RESULT_SUCCESS))
+            {
+                count = 0;
+                command[count++] = S8(BUSTER_HOST_C_COMPILER);
+                if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+                command[count++] = source;
+                command[count++] = S8("-L");
+                command[count++] = root;
+                command[count++] = S8("-lbuster1285_native");
+                command[count++] = S8("-o");
+                command[count++] = host_output;
+                ProcessWaitResult controlled = compiler_driver_test_response_file_run(arena, (SliceString8){.pointer = command, .length = count});
+                bool host_ok = !controlled.timed_out && controlled.result == PROCESS_RESULT_SUCCESS;
+                BUSTER_TEST(arguments, host_ok);
+                if (host_ok)
+                {
+                    host_ok = compiler_driver_test_process_success(arena, host_output);
+                    BUSTER_TEST(arguments, host_ok);
+                }
+                String8 target = BUSTER_CPU_ARCH_AARCH64 ? S8("aarch64-linux") : S8("x86_64-linux");
+                CompilerDriverResult direct = compiler_driver_archive_test_default_link(arena, target, sysroot, source, archive, (String8){0}, direct_output);
+                UnitTestResult checked = compiler_driver_archive_test_default_result(arguments, direct, 91, (ByteSlice){0});
+                result.test_count += checked.test_count;
+                result.succeeded_test_count += checked.succeeded_test_count;
+                CompilerDriverResult named = compiler_driver_archive_test_default_link(arena, target, sysroot, source,
+                                                                                      S8("-lbuster1285_native"), (String8){0}, named_output);
+                checked = compiler_driver_archive_test_default_result(arguments, named, 91, direct.native_link.executable);
+                result.test_count += checked.test_count;
+                result.succeeded_test_count += checked.succeeded_test_count;
+                bool direct_ok = direct.error == COMPILER_DRIVER_ERROR_NONE && compiler_driver_test_process_success(arena, direct_output);
+                bool named_ok = named.error == COMPILER_DRIVER_ERROR_NONE && compiler_driver_test_process_success(arena, named_output);
+                BUSTER_TEST(arguments, direct_ok);
+                BUSTER_TEST(arguments, named_ok);
+                if (host_ok && direct_ok && named_ok)
+                {
+                    arguments->show(arguments, S8("DEFAULT_STATIC_LIBRARY_NATIVE_V1 target={S8} compiler={S8} archiver={S8} host_control=pass direct=pass sysroot_named=pass\n"),
+                                    target, S8(BUSTER_HOST_C_COMPILER), archiver);
+                }
+            }
+        }
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArguments* arguments)
+{
+    UnitTestResult result = compiler_driver_archive_test_default_roots(arguments);
+    UnitTestResult native = compiler_driver_archive_test_default_native(arguments);
+    result.test_count += native.test_count;
+    result.succeeded_test_count += native.succeeded_test_count;
     OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
     for (u32 format = 0; format < BUSTER_ARRAY_LENGTH(systems); format += 1)
     {
