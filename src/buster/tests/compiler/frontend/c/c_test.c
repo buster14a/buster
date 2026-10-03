@@ -11980,7 +11980,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_stddef_need_protocol(UnitTestArguments
                             ProcessWaitResult compilation = os_process_wait_deadline(run_arena, child, 30000000);
                             compiled_ok = !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS;
                             BUSTER_TEST_RAW(arguments, compiled_ok,
-                                (String8){(char8*)compilation.streams[STANDARD_STREAM_ERROR].pointer, compilation.streams[STANDARD_STREAM_ERROR].length});
+                                ((String8){(char8*)compilation.streams[STANDARD_STREAM_ERROR].pointer, compilation.streams[STANDARD_STREAM_ERROR].length}));
                         }
                     }
                 }
