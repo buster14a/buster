@@ -725,6 +725,16 @@ always picked the same letter, and three of the four PRs open when the history
 was split had done exactly that. Those older names are historical — entries
 cross-reference each other by them — and stay as written.
 
+Raw evidence under `docs/performance-audits/evidence/` is **byte-exact**: tool
+output, logs, and `git format-patch` files are stored as produced, and a
+bundle's checksum manifest (`SHA256SUMS`) pins those bytes. Such files carry
+trailing whitespace by nature — a format-patch signature separator is `-- `
+and the file ends in a blank line — so `.gitattributes` marks that directory
+`-whitespace` and `git diff --check` does not report it. Never strip, reflow, or compress evidence
+to satisfy a whitespace check. The exemption covers that directory only: the
+audit prose in `docs/performance-audits/<id>.md` is authored text and remains
+subject to `git diff --check`.
+
 ## Source-map finalization
 
 `BUSTER_TEST_JOBS=1 BUSTER_SOURCE_MAP_BENCH=1 build/Release/ide test --ci=1 --verbose=0`
