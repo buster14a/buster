@@ -12,6 +12,7 @@
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
+// compiler_driver_test_wasm_switch_images checks typed selector/key equality.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
 // the optional independent Clang cross-assembly observer.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
@@ -11088,9 +11089,9 @@ enum
     COMPILER_DRIVER_WASM_BIT_COUNT_LITERAL_COUNT = 12,
 };
 
-// Direct canonical rows keep narrow semantics visible; C builtin promotions
-// would hide the backend's carrier-width and signed-normalization boundary.
-BUSTER_GLOBAL_LOCAL IrInstruction compiler_driver_test_wasm_bit_count_row(IrOpcode opcode, IrTypeId type, IrValueId result)
+// Both direct Wasm fixtures keep semantic widths visible; frontend promotions
+// would hide the consumer's carrier-width and signed-normalization boundary.
+BUSTER_GLOBAL_LOCAL IrInstruction compiler_driver_test_wasm_canonical_row(IrOpcode opcode, IrTypeId type, IrValueId result)
 {
     return (IrInstruction){.canonical_type = type, .symbol = IR_SYMBOL_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID,
                            .next = IR_INSTRUCTION_ID_INVALID, .result = result, .opcode = (u8)opcode,
@@ -11142,9 +11143,9 @@ BUSTER_GLOBAL_LOCAL IrProgram compiler_driver_test_wasm_bit_count_program(Arena*
                 IrValueId argument = ir_function_add_value(arena, function, value);
                 IrValueId counted = ir_function_add_value(arena, function, value);
                 IrInstruction rows[] = {
-                    compiler_driver_test_wasm_bit_count_row(IR_OPCODE_ARGUMENT, integer_type, argument),
-                    compiler_driver_test_wasm_bit_count_row(IR_OPCODE_UNARY, integer_type, counted),
-                    compiler_driver_test_wasm_bit_count_row(IR_OPCODE_RETURN, void_type, IR_VALUE_ID_INVALID),
+                    compiler_driver_test_wasm_canonical_row(IR_OPCODE_ARGUMENT, integer_type, argument),
+                    compiler_driver_test_wasm_canonical_row(IR_OPCODE_UNARY, integer_type, counted),
+                    compiler_driver_test_wasm_canonical_row(IR_OPCODE_RETURN, void_type, IR_VALUE_ID_INVALID),
                 };
                 rows[0].immediates = arena_allocate(arena, u64, 1);
                 rows[0].immediates[0] = 0;
@@ -11355,6 +11356,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_bit_counts(UnitTest
     }
     return result;
 }
+
+#include <buster/tests/compiler/driver/wasm_switch_test_internal.h>
 
 // Actual addresses cross an opaque import boundary. Canonical place-only
 // alignment controls and exact padding extents cannot be folded by the frontend.
@@ -16889,6 +16892,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_stack_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_bit_counts);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_switch_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_tls);
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS

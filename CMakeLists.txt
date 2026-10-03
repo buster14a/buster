@@ -1226,6 +1226,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/gpu/gpu_test.h
     src/buster/tests/compiler/spirv/spirv_test.h
     src/buster/tests/compiler/driver/driver_test.h
+    src/buster/tests/compiler/driver/wasm_switch_test_internal.h
     src/buster/tests/compiler/driver/object_path_test.h
 )
 set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)
