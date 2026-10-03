@@ -308,7 +308,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_label_paths(UnitTestArguments* argume
                 .has_label_provenance = true};
             IrTestLabelPathsFixture fixture;
             ir_test_label_paths_initialize(&fixture, arguments->arena, source, destination, 0, 8);
-            fixture.instruction.opcode = backing_opcodes[opcode_index];
+            fixture.instruction.opcode = (u8)backing_opcodes[opcode_index];
             switch (variant)
             {
             case 0: fixture.metadata[0] = (IrValueLabelMetadata){.label_path_count = 1}; break;
