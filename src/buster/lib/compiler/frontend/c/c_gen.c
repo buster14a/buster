@@ -12948,35 +12948,42 @@ BUSTER_C_INTERNAL bool c_ir_string_encoding(String8 spelling, CIrStringEncoding*
     }
 }
 
-BUSTER_C_INTERNAL bool c_ir_append_wide_unit(u8* bytes, u64 capacity, u64* byte_count, u64* element_count, u32 width, u32 codepoint)
+// Numeric escapes designate one unsigned code unit; only source characters and
+// UCNs designate Unicode scalars that may need a UTF-16 surrogate pair.
+BUSTER_C_INTERNAL bool c_ir_append_wide_unit(u8* bytes, u64 capacity, u64* byte_count, u64* element_count, u32 width, u32 codepoint, bool numeric_escape)
 {
-    if (codepoint > UINT32_C(0x10ffff) || (codepoint >= UINT32_C(0xd800) && codepoint <= UINT32_C(0xdfff)))
+    bool result = width == 2 || width == 4;
+    if (numeric_escape)
     {
-        return false;
+        result &= width == 4 || codepoint <= UINT32_C(0xffff);
     }
-    u32 unit_count = width == 2 && codepoint > UINT32_C(0xffff) ? 2 : 1;
+    else
+    {
+        result &= codepoint <= UINT32_C(0x10ffff) && (codepoint < UINT32_C(0xd800) || codepoint > UINT32_C(0xdfff));
+    }
+    u32 unit_count = !numeric_escape && width == 2 && codepoint > UINT32_C(0xffff) ? 2 : 1;
     u64 required = (u64)unit_count * width;
-    if ((width != 2 && width != 4) || *byte_count > capacity || required > capacity - *byte_count)
+    result &= *byte_count <= capacity && required <= capacity - *byte_count;
+    if (result)
     {
-        return false;
-    }
-    u32 units[2] = {codepoint, 0};
-    if (unit_count == 2)
-    {
-        u32 scalar = codepoint - UINT32_C(0x10000);
-        units[0] = UINT32_C(0xd800) + (scalar >> 10);
-        units[1] = UINT32_C(0xdc00) + (scalar & UINT32_C(0x3ff));
-    }
-    for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
-    {
-        u32 unit = units[unit_index];
-        for (u32 byte_index = 0; byte_index < width; byte_index += 1)
+        u32 units[2] = {codepoint, 0};
+        if (unit_count == 2)
         {
-            bytes[(*byte_count)++] = (u8)(unit >> (byte_index * 8));
+            u32 scalar = codepoint - UINT32_C(0x10000);
+            units[0] = UINT32_C(0xd800) + (scalar >> 10);
+            units[1] = UINT32_C(0xdc00) + (scalar & UINT32_C(0x3ff));
         }
+        for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
+        {
+            u32 unit = units[unit_index];
+            for (u32 byte_index = 0; byte_index < width; byte_index += 1)
+            {
+                bytes[(*byte_count)++] = (u8)(unit >> (byte_index * 8));
+            }
+        }
+        *element_count += unit_count;
     }
-    *element_count += unit_count;
-    return true;
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u8 delimiter, u32 width, ByteSlice* bytes_out, u64* element_count_out)
@@ -13005,6 +13012,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
         while (result && index < end)
         {
             u32 codepoint = 0;
+            bool numeric_escape = false;
             u8 byte = spelling.pointer[index];
             if (byte != '\\')
             {
@@ -13071,6 +13079,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
                     break;
                     case 'x':
                     {
+                        numeric_escape = true;
                         u64 first_digit = index;
                         while (index < end)
                         {
@@ -13094,6 +13103,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
                     break;
                     default:
                     {
+                        numeric_escape = true;
                         result = byte >= '0' && byte <= '7';
                         if (result)
                         {
@@ -13113,7 +13123,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
             }
             if (result)
             {
-                result = c_ir_append_wide_unit(bytes, capacity, &byte_count, &element_count, width, codepoint);
+                result = c_ir_append_wide_unit(bytes, capacity, &byte_count, &element_count, width, codepoint, numeric_escape);
             }
         }
         if (result)
@@ -13427,75 +13437,83 @@ BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spel
     {
         opening += 1;
     }
-    if (opening >= token_spelling.length)
-    {
-        return false;
-    }
-    if (!opening || (opening == 2 && token_spelling.pointer[0] == 'u' && token_spelling.pointer[1] == '8'))
+    bool result = opening < token_spelling.length;
+    u64 value = 0;
+    CTypeKind kind = C_TYPE_INVALID;
+    if (result && (!opening || (opening == 2 && token_spelling.pointer[0] == 'u' && token_spelling.pointer[1] == '8')))
     {
         ByteSlice bytes = {0};
-        if (!c_ir_decode_quoted(arena, token_spelling, '\'', &bytes) || !bytes.length || bytes.length > 4 || (opening && bytes.length != 1))
+        result = c_ir_decode_quoted(arena, token_spelling, '\'', &bytes) && bytes.length && bytes.length <= 4 && (!opening || bytes.length == 1);
+        if (result)
         {
-            return false;
+            for (u64 index = 0; index < bytes.length; index += 1)
+            {
+                value = (value << 8) | bytes.pointer[index];
+            }
+            // A plain single-character constant has the value a plain char
+            // object with that byte would have (C11 6.4.4.4p10): where the
+            // target's plain char is signed, '\x80' is -128, and pickle's
+            // opcode enum -- `PROTO = '\x80'` -- must agree with the signed
+            // byte the unpickler switches on.  Multi-character constants keep
+            // the concatenated spelling every compiler answers, and u8'' is
+            // unsigned by type.
+            if (!opening && bytes.length == 1 && target_data_layout(target).plain_char_is_signed && (value & 0x80))
+            {
+                value |= ~(u64)0xff;
+            }
+            kind = opening ? C_TYPE_UNSIGNED_CHAR : C_TYPE_INT;
         }
-        u64 value = 0;
-        for (u64 index = 0; index < bytes.length; index += 1)
+    }
+    else if (result && opening == 1)
+    {
+        u32 width = 0;
+        switch (token_spelling.pointer[0])
         {
-            value = (value << 8) | bytes.pointer[index];
+        case 'u':
+            width = 2;
+            kind = C_TYPE_UNSIGNED_SHORT;
+            break;
+        case 'U':
+            width = 4;
+            kind = C_TYPE_UNSIGNED_INT;
+            break;
+        case 'L':
+            width = target_uses_16_bit_wchar(target) ? 2 : 4;
+            kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT :
+                   target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+            break;
+        default:
+            result = false;
+            break;
         }
-        // A plain single-character constant has the value a plain char
-        // object with that byte would have (C11 6.4.4.4p10): where the
-        // target's plain char is signed, '\x80' is -128, and pickle's
-        // opcode enum -- `PROTO = '\x80'` -- must agree with the signed
-        // byte the unpickler switches on.  Multi-character constants keep
-        // the concatenated spelling every compiler answers, and u8'' is
-        // unsigned by type.
-        if (!opening && bytes.length == 1 && target_data_layout(target).plain_char_is_signed && (value & 0x80))
+        ByteSlice bytes = {0};
+        u64 element_count = 0;
+        result = result && c_ir_decode_wide_quoted(arena, token_spelling, '\'', width, &bytes, &element_count) && element_count == 1 && bytes.length == width;
+        if (result)
         {
-            value |= ~(u64)0xff;
+            for (u32 index = 0; index < width; index += 1)
+            {
+                value |= (u64)bytes.pointer[index] << (index * 8);
+            }
+            // The code-unit range uses unsigned wchar_t, but the constant's
+            // value has wchar_t's type. Preserve a signed 32-bit wchar_t value
+            // when #if arithmetic widens it directly to intmax_t.
+            if (kind == C_TYPE_INT && (value & UINT32_C(0x80000000)))
+            {
+                value |= ~UINT64_C(0xffffffff);
+            }
         }
+    }
+    else
+    {
+        result = false;
+    }
+    if (result)
+    {
         *value_out = value;
-        *kind_out = opening ? C_TYPE_UNSIGNED_CHAR : C_TYPE_INT;
-        return true;
+        *kind_out = kind;
     }
-    if (opening != 1)
-    {
-        return false;
-    }
-    u32 width = 0;
-    CTypeKind kind = C_TYPE_INVALID;
-    switch (token_spelling.pointer[0])
-    {
-    case 'u':
-        width = 2;
-        kind = C_TYPE_UNSIGNED_SHORT;
-        break;
-    case 'U':
-        width = 4;
-        kind = C_TYPE_UNSIGNED_INT;
-        break;
-    case 'L':
-        width = target_uses_16_bit_wchar(target) ? 2 : 4;
-        kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT :
-               target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
-        break;
-    default:
-        return false;
-    }
-    ByteSlice bytes = {0};
-    u64 element_count = 0;
-    if (!c_ir_decode_wide_quoted(arena, token_spelling, '\'', width, &bytes, &element_count) || element_count != 1 || bytes.length != width)
-    {
-        return false;
-    }
-    u64 value = 0;
-    for (u32 index = 0; index < width; index += 1)
-    {
-        value |= (u64)bytes.pointer[index] << (index * 8);
-    }
-    *value_out = value;
-    *kind_out = kind;
-    return true;
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_character(CIntegerIrBuilder* builder, CToken token)

@@ -949,6 +949,25 @@ without facts for identical bitcode and diagnostics.
   frontend forms; the named target keeps Windows bit-field ABI differences
   out of that oracle.
 
+## Wide numeric escapes
+
+Hexadecimal and octal escapes in u/U/L literals emit one code unit, within the
+unsigned range of the target element type
+([N1570 6.4.4.4p9](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf)). A numeric
+surrogate is a valid 16-bit unit; 32-bit units can exceed U+10FFFF. A value
+above 0xFFFF cannot become a UTF-16 pair. Source characters and UCNs retain
+Unicode scalar validation and UTF-16 encoding in the same shared decoder.
+
+Character values retain their target type: signed 32-bit wchar_t values are
+sign-extended before preprocessing widens them to intmax_t. Failed character
+decodes name the literal; #if/#elif report its token location once, including
+macro-expanded tokens. Inactive branches remain unevaluated.
+
+The registered wide-hexadecimal and wide-numeric fixtures pin independent
+units, constant contexts, semantic diagnostics and both canonical frontend
+forms on six desktop layouts. The numeric runtime fixture checks all four
+allocators and requires GCC/Clang references on hosted Linux x86-64.
+
 ## String literal memo
 
 Semantic analysis sizes, types and validates a string literal through
