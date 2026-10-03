@@ -20205,6 +20205,147 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_identifier_updates(UnitTestArgu
     return result;
 }
 
+// #1260: use assignment values through called places and preserve one call.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "struct M { int m; }; static struct M gm; static int words[2]; static volatile int calls;\n"
+        "static struct M *get(void) { calls += 1; return &gm; }\n"
+        "static int *get_words(void) { calls += 1; return words; }\n"
+        "static int identity(int value) { return value; }\n"
+        "int assignment_initializer(void) { int x = (get()->m = 3); return x; }\n"
+        "int compound_initializer(void) { int x = (get()->m += 2); return x; }\n"
+        "int assignment_argument(void) { return identity(get()->m = 4); }\n"
+        "int compound_argument(void) { return identity(get()->m += 1); }\n"
+        "int assignment_condition(void) { if ((get()->m = 0) == 0) return 8; return 9; }\n"
+        "int compound_condition(void) { if ((get()->m += 2) == 5) return 8; return 9; }\n"
+        "int assignment_arithmetic(void) { return 1 + (get()->m = 4); }\n"
+        "int compound_arithmetic(void) { return 1 + (get()->m += 4); }\n"
+        "int assignment_comma(void) { return (get()->m = 6, 7); }\n"
+        "int compound_comma(void) { return (get()->m += 1, 5); }\n"
+        "int assignment_wrapped(void) { return ((*get()).m = 9); }\n"
+        "int statement_control(void) { get()->m = 5; return gm.m; }\n"
+        "int assignment_subscript(void) { return get_words()[1] = 11; }\n"
+        "int compound_subscript(void) { return get_words()[1] += 2; }\n"
+        "int address_compound(void) { int a = 1; int x = (*&a += 3); return x * 10 + a; }\n"
+        "int address_simple(void) { int a = 1; int x = (*&a = 7); return x * 10 + a; }\n"
+        "int address_argument(void) { int a = 1; int x = identity(*&a += 3); return x * 10 + a; }\n"
+        "int address_call(void) { return *&get()->m += 2; }\n"
+        "#define CHECK(name, expected, stored) do { gm.m = 3; calls = 0; int actual = name(); failed |= actual != (expected) || gm.m != (stored) || calls != 1; } while (0)\n"
+        "int main(void) {\n"
+        "    int failed = 0;\n"
+        "    CHECK(assignment_initializer, 3, 3); CHECK(compound_initializer, 5, 5);\n"
+        "    CHECK(assignment_argument, 4, 4); CHECK(compound_argument, 4, 4);\n"
+        "    CHECK(assignment_condition, 8, 0); CHECK(compound_condition, 8, 5);\n"
+        "    CHECK(assignment_arithmetic, 5, 4); CHECK(compound_arithmetic, 8, 7);\n"
+        "    CHECK(assignment_comma, 7, 6); CHECK(compound_comma, 5, 4);\n"
+        "    CHECK(assignment_wrapped, 9, 9); CHECK(statement_control, 5, 5); CHECK(address_call, 5, 5);\n"
+        "    calls = 0; words[1] = 3; failed |= assignment_subscript() != 11 || words[1] != 11 || calls != 1;\n"
+        "    calls = 0; words[1] = 3; failed |= compound_subscript() != 5 || words[1] != 5 || calls != 1;\n"
+        "    failed |= address_compound() != 44 || address_simple() != 77 || address_argument() != 44; return failed;\n"
+        "}\n");
+    typedef struct CTestCallAssignment CTestCallAssignment;
+    struct CTestCallAssignment
+    {
+        String8 name;
+        String8 callee;
+    };
+    CTestCallAssignment expected[] = {
+        {S8("assignment_initializer"), S8("get")}, {S8("compound_initializer"), S8("get")},
+        {S8("assignment_argument"), S8("get")}, {S8("compound_argument"), S8("get")},
+        {S8("assignment_condition"), S8("get")}, {S8("compound_condition"), S8("get")},
+        {S8("assignment_arithmetic"), S8("get")}, {S8("compound_arithmetic"), S8("get")},
+        {S8("assignment_comma"), S8("get")}, {S8("compound_comma"), S8("get")},
+        {S8("assignment_wrapped"), S8("get")}, {S8("statement_control"), S8("get")},
+        {S8("assignment_subscript"), S8("get_words")}, {S8("compound_subscript"), S8("get_words")},
+        {S8("address_call"), S8("get")},
+    };
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("call-assignment-values.c"), tokens, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                {
+                    BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[index].message);
+                }
+                if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
+                                              lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+                    {
+                        IrFunction* function = c_test_find_ir_function(module, expected[index].name);
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            BUSTER_TEST_RAW(arguments, c_test_ir_direct_call_count(lowered.program, function, expected[index].callee) == 1,
+                                expected[index].name);
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = buster_test_temporary_path(arguments->arena, S8("call-assignment-values"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("call-assignment-values-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
+                                         form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 context = string_format(temporary.arena, S8("call assignment {S8} {S8} form={u32}"),
+                        dialects[dialect], modes[mode], form);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("{S8}: {S8}"), context, compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, context);
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // Assignment expressions can hide a dereference behind a parenthesized
 // address expression.  The result of `*(&local) = value` must remain usable
 // in a comma/return expression after its addressable place is recovered.
@@ -32525,6 +32666,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_control_value);
     BUSTER_TEST_FIXTURE(arguments, c_test_statement_expression_declaration_scope);
     BUSTER_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
+    BUSTER_TEST_FIXTURE(arguments, c_test_call_assignment_values);
     BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_address_assignment_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
     BUSTER_TEST_FIXTURE(arguments, c_test_offsetof_members);
