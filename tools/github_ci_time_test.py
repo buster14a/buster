@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ChecksLayoutCLITests(unittest.TestCase):
-    def test_gate_cli_keeps_the_combined_default_and_accepts_explicit_split(self):
-        for arguments, expected in (([], "combined"), (["--checks-layout", "combined"], "combined"),
+    def test_gate_cli_uses_the_split_default_and_keeps_explicit_layouts(self):
+        for arguments, expected in (([], "split"), (["--checks-layout", "combined"], "combined"),
                                     (["--checks-layout", "split"], "split")):
             with self.subTest(arguments=arguments):
                 with mock.patch.object(sys, "argv", ["github_ci_time.py", "require-jobs", *arguments]), \
@@ -29,6 +29,36 @@ class ChecksLayoutCLITests(unittest.TestCase):
                         mock.patch.object(sys, "stdout", io.StringIO()):
                     self.assertEqual(github_ci_time.main(), 0)
                 self.assertEqual(gate.call_args.args[0].checks_layout, expected)
+
+    def test_only_exact_manual_combined_refs_override_the_split_default(self):
+        branches = ("codex/ci-checks-combined-overlap", "codex/ci-checks-combined-all-builds",
+                    "codex/2120-evidence-v2-combined-overlap", "codex/2120-evidence-v2-combined-all-builds")
+        self.assertEqual(github_ci_time.COMBINED_QUALIFICATION_BRANCHES, branches)
+        self.assertEqual(len(github_ci_time.combination_jobs()), 27)
+        self.assertEqual(len(github_ci_time.combination_jobs("combined")), 21)
+        for branch in branches:
+            for event in ("pull_request", "push", "merge_group", "workflow_dispatch"):
+                with self.subTest(event=event, branch=branch):
+                    expected = "combined" if event == "workflow_dispatch" else "split"
+                    self.assertEqual(github_ci_time.checks_layout_for_run(
+                        {"event": event, "head_branch": branch}, "refs/heads/" + branch), expected)
+            for foreign in ("refs/heads/" + branch, branch + "-extra", "other/" + branch):
+                with self.subTest(foreign=foreign):
+                    self.assertEqual(github_ci_time.checks_layout_for_run(
+                        {"event": "workflow_dispatch", "head_branch": foreign}, "refs/heads/" + foreign), "split")
+            for ref in (None, "refs/tags/" + branch):
+                self.assertEqual(github_ci_time.checks_layout_for_run(
+                    {"event": "workflow_dispatch", "head_branch": branch}, ref), "split")
+            with self.assertRaisesRegex(ValueError, "API branch"):
+                github_ci_time.checks_layout_for_run(
+                    {"event": "workflow_dispatch", "head_branch": "main"}, "refs/heads/" + branch)
+        for branch in (None, "main", "v1.0", "codex/ci-checks-split-overlap",
+                       "codex/2120-evidence-v2-split-overlap"):
+            self.assertEqual(github_ci_time.checks_layout_for_run(
+                {"event": "workflow_dispatch", "head_branch": branch}), "split")
+        for event in (None, "schedule", "repository_dispatch"):
+            with self.assertRaisesRegex(ValueError, "unsupported CI event"):
+                github_ci_time.checks_layout_for_run({"event": event})
 
     def test_unknown_layout_cannot_relax_the_inventory_gate(self):
         for layout in ("all", "mixed", "sanitized-debug", ""):
@@ -54,7 +84,7 @@ class ReconciledInventoryTests(unittest.TestCase):
         self.run = {"id": self.RUN, "run_attempt": 1, "head_sha": self.HEAD,
                     "path": ".github/workflows/ci.yml", "event": "merge_group"}
         self.jobs = []
-        for index, name in enumerate(github_ci_time.COMBINATION_JOBS):
+        for index, name in enumerate(github_ci_time.combination_jobs()):
             self.jobs.append({"id": 1000 + index, "name": name, "run_id": self.RUN,
                               "run_attempt": 1, "head_sha": self.HEAD,
                               "status": "in_progress" if name == "CI complete" else "completed",
@@ -85,7 +115,7 @@ class ReconciledInventoryTests(unittest.TestCase):
                 return []
             raise AssertionError(path)
         arguments = argparse.Namespace(repository="buster14a/buster", run_id=self.RUN, run_attempt=1,
-                                       checks_layout="combined", event_name=None, event_path=None)
+                                       checks_layout="split", event_name=None, event_path=None)
         with mock.patch.object(github_ci_time, "api_get", side_effect=reply), \
                 mock.patch.object(github_ci_time.time, "sleep"):
             result = github_ci_time.require_jobs(arguments)
@@ -106,7 +136,7 @@ class ReconciledInventoryTests(unittest.TestCase):
                     row.update(status=status, conclusion=conclusion)
                 result = self.gate()
                 self.assertTrue(result["success"], result["errors"])
-                self.assertEqual(len(result["jobs"]), len(github_ci_time.COMBINATION_JOBS))
+                self.assertEqual(len(result["jobs"]), len(github_ci_time.combination_jobs()))
                 self.assertEqual([record["job"] for record in result["reconciled_checks"]], self.jobs[-2:])
                 self.assertEqual([record["check"] for record in result["reconciled_checks"]], self.checks)
                 self.assertEqual(result["job_metadata"]["snapshot_attempts"], 1)
