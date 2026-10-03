@@ -135,7 +135,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 del
 // retain the exact allocation order and alignment, including empty arrays.
 BUSTER_C_INTERNAL bool c_ir_arena_reservation_advance(u64 reserved_size, u64* position, u64 element_size, u64 count, u64 alignment)
 {
-    u64 aligned_position;
+    u64 aligned_position = 0;
     bool fits = position && element_size && reserved_size <= ARENA_MAX_RESERVATION &&
                 *position >= arena_minimum_position && *position <= reserved_size &&
                 count <= ARENA_MAX_RESERVATION / element_size &&
