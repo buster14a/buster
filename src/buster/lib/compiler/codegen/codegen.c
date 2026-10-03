@@ -28,7 +28,7 @@
 //   codegen_abi_for_target, codegen_prewarm      ABI selection and the serial
 //                                                table prewarm (AGENTS.md)
 //   codegen_canonical_x64_type_is_f80,          shared x87 representation and
-//   codegen_canonical_aggregate_abi              canonical ABI classification
+//   codegen_canonical_integer_aggregate_parts    aggregate copy classification
 //   codegen_x64_emit_windows_stack_allocate,    shared machine stack probes
 //   codegen_a64_windows_large_stack_adjust      and unwind descriptions
 //   codegen_global_assembly_*,                   module-level asm: directives
@@ -2728,15 +2728,6 @@ u32 codegen_canonical_x64_windows_vector_argument_pieces(Target const* target, I
         *piece_size = register_size;
     }
     return count;
-}
-
-BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_aggregate_abi(IrProgram* program, IrTypeId type_id, CodegenAbi abi, bool is_result,
-                                                                             bool variadic_argument)
-{
-    BUSTER_CHECK(abi < CODEGEN_ABI_COUNT);
-    IrAbiConvention convention = codegen_canonical_ir_abi_convention(abi);
-    IrAbiUse use = is_result ? IR_ABI_USE_RESULT : variadic_argument ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT;
-    return ir_type_abi_value(program, type_id, convention, use);
 }
 
 bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count)

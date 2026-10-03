@@ -211,6 +211,56 @@ BUSTER_GLOBAL_LOCAL CodegenModuleGlobal* codegen_test_c_global_find(CodegenModul
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL MachineInstruction* codegen_test_machine_definition(MachineFunction* function, MachineRef reference)
+{
+    MachineInstruction* result = 0;
+    if (machine_ref_kind(reference) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(reference) < function->virtual_register_count)
+    {
+        MachinePoint point = function->virtual_registers[machine_ref_payload(reference)].definition_point;
+        u32 index = point == MACHINE_POINT_INVALID ? UINT32_MAX : machine_point_instruction(point);
+        if (index < function->instruction_count)
+        {
+            result = function->instructions + index;
+        }
+    }
+    return result;
+}
+
+// A one-call wrapper makes the psABI destination and area alignment unique.
+// Follow the copy pointer to its own allocation so local over-aligned storage
+// and another call's offsets cannot satisfy the argument-area assertions.
+BUSTER_GLOBAL_LOCAL bool codegen_test_x64_stack_copy(MachineFunction* function, u32 size, u32 offset, u32 alignment)
+{
+    u32 calls = 0;
+    u32 copies = 0;
+    bool valid = true;
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        MachineInstruction* row = function->instructions + index;
+        calls += row->opcode == MACHINE_X64_CALL_DIRECT || row->opcode == MACHINE_X64_CALL_INDIRECT;
+        if (row->opcode == MACHINE_X64_COPY_PTR_FROM_FRAME && row->payload == size)
+        {
+            copies += 1;
+            MachineInstruction* allocation = codegen_test_machine_definition(function, row->operands[0]);
+            if (offset)
+            {
+                valid &= allocation && allocation->opcode == MACHINE_X64_LEA_OFFSET && allocation->payload == offset;
+                allocation = valid ? codegen_test_machine_definition(function, allocation->operands[1]) : 0;
+            }
+            valid &= allocation && allocation->opcode == MACHINE_X64_STACK_ALLOCATE && allocation->payload == alignment &&
+                     machine_ref_kind(row->operands[1]) == MACHINE_REF_STACK_SLOT;
+            if (valid)
+            {
+                MachineInstruction* count = codegen_test_machine_definition(function, allocation->operands[1]);
+                valid &= count && count->opcode == MACHINE_X64_MOV_RI && machine_ref_kind(count->operands[1]) == MACHINE_REF_IMMEDIATE;
+                u32 immediate = valid ? machine_ref_payload(count->operands[1]) : UINT32_MAX;
+                valid &= immediate < function->immediate_count && function->immediates[immediate] == (u64)offset + size;
+            }
+        }
+    }
+    return valid && calls == 1 && copies == 1;
+}
+
 BUSTER_GLOBAL_LOCAL u32 codegen_test_canonical_value_frame_size(IrProgram* program, IrFunction* function)
 {
     u64 value_bytes = 0;
@@ -3183,14 +3233,41 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             {
                 u32 outgoing_slot = layout_selected.function.outgoing_slot;
                 BUSTER_TEST(arguments, outgoing_slot < layout_selected.function.stack_slot_count);
-                for (u32 row_index = 0; row_index < layout_selected.function.instruction_count; row_index += 1)
+                bool copy_bounds_valid = outgoing_slot < layout_selected.function.stack_slot_count;
+                if (copy_bounds_valid)
+                {
+                    copy_bounds_valid = layout_selected.function.stack_slot_alignments[outgoing_slot] >= 16;
+                    BUSTER_TEST(arguments, copy_bounds_valid);
+                }
+                u32 indirect_copies = 0;
+                for (u32 row_index = 1; row_index < layout_selected.function.instruction_count; row_index += 1)
                 {
                     MachineInstruction* row = layout_selected.function.instructions + row_index;
-                    found_register_indirect_copy |= row->opcode == MACHINE_X64_COPY_PTR_FROM_FRAME && row->payload == sizeof(CodegenTestAbiLarge);
-                    found_stack_indirect_copy |= row->opcode == MACHINE_X64_STORE_FRAME64 && row->payload >= 32 &&
-                                                 row->payload < maximum_layout_stack_size &&
-                                                 row->operands[0] == machine_ref_make(MACHINE_REF_STACK_SLOT, outgoing_slot);
+                    if (row->opcode != MACHINE_X64_COPY_PTR_FROM_FRAME || row->payload != sizeof(CodegenTestAbiLarge))
+                    {
+                        continue;
+                    }
+                    MachineInstruction* address = row - 1;
+                    bool outgoing_copy = address->opcode == MACHINE_X64_LEA_FRAME &&
+                        address->operands[1] == machine_ref_make(MACHINE_REF_STACK_SLOT, outgoing_slot) &&
+                        address->operands[0] == row->operands[0];
+                    indirect_copies += 1;
+                    copy_bounds_valid &= outgoing_copy && address->payload >= 32 && !(address->payload & 15u) &&
+                        (u64)address->payload + row->payload <= maximum_layout_stack_size;
+                    found_register_indirect_copy |= outgoing_copy;
+                    for (u32 after = row_index + 1; outgoing_copy && after < layout_selected.function.instruction_count; after += 1)
+                    {
+                        MachineInstruction* use = layout_selected.function.instructions + after;
+                        if (use->opcode == MACHINE_X64_CALL_DIRECT || use->opcode == MACHINE_X64_CALL_INDIRECT)
+                        {
+                            break;
+                        }
+                        found_stack_indirect_copy |= use->opcode == MACHINE_X64_STORE_FRAME64 && use->payload == 32 &&
+                            use->operands[0] == machine_ref_make(MACHINE_REF_STACK_SLOT, outgoing_slot) &&
+                            use->operands[1] == row->operands[0] && address->payload >= 48;
+                    }
                 }
+                BUSTER_TEST(arguments, copy_bounds_valid && indirect_copies != 0);
             }
             BUSTER_TEST(arguments, layout_stack_size_count >= 4);
             BUSTER_TEST(arguments, maximum_layout_stack_size >= 48);
@@ -3555,6 +3632,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "                              struct Wide16 w) { return g + w.v[0] + w.v[1]; }\n"
         "static long long after_wide64(long long a, long long b, long long c, long long d, long long e, long long f, long long g,\n"
         "                              struct Wide64 w) { return g + w.v[0] + w.v[7]; }\n"
+        "long long stack_vector_only(Bytes64 v) { Bytes64 result = vector_ninth(v, v, v, v, v, v, v, v, v); return result[0]; }\n"
+        "long long stack_wide16_only(struct Wide16 *w) { return after_wide16(1, 2, 3, 4, 5, 6, 7, *w); }\n"
+        "long long stack_wide64_only(struct Wide64 *w) { return after_wide64(1, 2, 3, 4, 5, 6, 7, *w); }\n"
         "long long stack_alignment_calls(Bytes64 v, struct Wide16 w16, struct Wide64 w64) {\n"
         "    Bytes64 ninth = vector_ninth(v, v, v, v, v, v, v, v, v);\n"
         "    return after_wide16(1, 2, 3, 4, 5, 6, 7, w16) + after_wide64(1, 2, 3, 4, 5, 6, 7, w64) + ninth[0];\n"
@@ -3578,31 +3658,23 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         CodegenFunctionDescriptor* stack_alignment_descriptor = stack_alignment_function
             ? codegen_test_c_descriptor_find(&stack_alignment_generated, stack_alignment_function->symbol) : 0;
         BUSTER_TEST(arguments, stack_alignment_descriptor != 0);
-        MachineSelectResult stack_alignment_selected = {0};
-        if (stack_alignment_function)
+        String8 wrapper_names[] = {S8("stack_vector_only"), S8("stack_wide16_only"), S8("stack_wide64_only")};
+        u32 wrapper_sizes[] = {64, 16, 64};
+        u32 wrapper_offsets[] = {0, 16, 64};
+        u32 wrapper_alignments[] = {64, 16, 64};
+        for (u32 wrapper_index = 0; wrapper_index < BUSTER_ARRAY_LENGTH(wrapper_names); wrapper_index += 1)
         {
-            stack_alignment_selected = machine_select_canonical_function(arguments->arena, stack_alignment_program,
-                                                                         stack_alignment_function, avx512f_target);
+            IrFunction* wrapper = codegen_test_c_function_find(stack_alignment_module, wrapper_names[wrapper_index]);
+            BUSTER_TEST(arguments, wrapper != 0);
+            if (wrapper)
+            {
+                MachineSelectResult selected = machine_select_canonical_function(arguments->arena, stack_alignment_program,
+                                                                                  wrapper, avx512f_target);
+                BUSTER_TEST(arguments, selected.supported);
+                BUSTER_TEST_RAW(arguments, selected.supported && codegen_test_x64_stack_copy(&selected.function,
+                    wrapper_sizes[wrapper_index], wrapper_offsets[wrapper_index], wrapper_alignments[wrapper_index]), wrapper_names[wrapper_index]);
+            }
         }
-        BUSTER_TEST(arguments, stack_alignment_selected.supported);
-        u32 vector_copy_count = 0;
-        bool found_wide16_copy = false;
-        bool found_wide16_offset = false;
-        bool found_wide64_offset = false;
-        bool found_sixty_four_alignment = false;
-        for (u32 row_index = 0; stack_alignment_selected.supported && row_index < stack_alignment_selected.function.instruction_count;
-             row_index += 1)
-        {
-            MachineInstruction* row = stack_alignment_selected.function.instructions + row_index;
-            vector_copy_count += row->opcode == MACHINE_X64_COPY_PTR_FROM_FRAME && row->payload == 64;
-            found_wide16_copy |= row->opcode == MACHINE_X64_COPY_PTR_FROM_FRAME && row->payload == 16;
-            found_wide16_offset |= row->opcode == MACHINE_X64_LEA_OFFSET && row->payload == 16;
-            found_wide64_offset |= row->opcode == MACHINE_X64_LEA_OFFSET && row->payload == 64;
-            found_sixty_four_alignment |= row->opcode == MACHINE_X64_STACK_ALLOCATE && row->payload == 64;
-        }
-        BUSTER_TEST(arguments, vector_copy_count >= 2);
-        BUSTER_TEST(arguments, found_wide16_copy && found_wide16_offset);
-        BUSTER_TEST(arguments, found_wide64_offset && found_sixty_four_alignment);
         // The ABI requires a 64-byte-aligned outgoing area. Accept either a
         // direct RSP mask or a rounded temporary subsequently subtracted from
         // RSP; register choice and probing sequence are lowering details.

@@ -465,7 +465,7 @@ fixture as well as compiling both architectures.
   The x86 selector emits no cache operation. AArch64 selects one constrained
   barrier row with begin/end in X9/X10, X9/X11 clobbered, and NZCV defined. Its
   data-clean and instruction-invalidate walks cover aligned four-byte granules
-  through the exclusive end, with DSB/ISB barriers. The direct AArch64 oracle
+  through the exclusive end, with DSB/ISB barriers. The archived direct AArch64 oracle
   uses the same alignment rule; an unaligned start must not skip a final line.
 - Sixteen-byte AArch64 atomic loads and stores select constrained pair rows.
   A load uses LDXP/LDAXP, writes the observed halves back with STXP (STLXP for
@@ -473,7 +473,7 @@ fixture as well as compiling both architectures.
   A store stages both halves, clears any promoted aggregate padding in the high
   half, arms the monitor with LDXP or LDAXP, and retries STXP/STLXP until the
   replacement lands whole. The rows
-  preserve the direct emitter's memory-order strengths on every desktop ABI.
+  preserve the archived direct emitter's memory-order strengths on every desktop ABI.
   Sixteen-byte exchange, arithmetic/bitwise RMW and compare-exchange use
   constrained update rows with full-width integer input/result frame slots.
   RMW reloads its unchanged operand on each retry and propagates carry/borrow
@@ -598,7 +598,7 @@ fixture as well as compiling both architectures.
   transport. A consumed floating multiply quiets special inputs and raises
   invalid for signaling NaNs; finite inputs are masked to zero before that row,
   preserving subnormals even with flush-to-zero enabled. No libcall is used;
-  the canonical `none` emitter builds the same image with the same rows.
+  all retained allocator spellings use these rows, with `none` aliasing MIR_STACK.
   `compiler_driver_test_aarch64_float_to_f128` retains the original created-NaN
   fixture and tests independent binary128 byte cases under every allocator.
   Native Linux AArch64 exchanges producer/consumer roles with the configured

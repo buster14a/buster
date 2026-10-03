@@ -1417,7 +1417,7 @@ class CheckedInDependencyTests(unittest.TestCase):
                         "codegen_canonical_x64_type_is_f80_x87_shape", "allocated_register_base",
                         "a64_emit_stack_address", "a64_emit_store_offset", "a64_emit_store_value_component",
                         "a64_value_component_offset", "a64_value_offset", "codegen_canonical_a64_adjust_stack",
-                        "codegen_canonical_abi_part_is_float", "codegen_canonical_x64_abi_is_f80_complex_result",
+                        "codegen_canonical_aggregate_abi", "codegen_canonical_abi_part_is_float", "codegen_canonical_x64_abi_is_f80_complex_result",
                         "codegen_canonical_x64_abi_value_in_registers", "codegen_canonical_x64_adjust_stack",
                         "codegen_canonical_x64_native_vector_width", "codegen_canonical_x64_non_power_vector",
                         "codegen_canonical_x64_stack_argument_offset", "codegen_canonical_x64_vector_result",

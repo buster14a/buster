@@ -198,8 +198,8 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   fixture strictly across AArch64 Linux/Android/UEFI and x86-64 Android, every
   MIR allocator, both frontend forms and PIC/non-PIC; it requires the relevant
   soft-float imports, and on native Linux AArch64 links with the host runtime
-  and executes. The canonical `none` emitter still refuses binary128 widening
-  and loads through pointers; those functions need a MIR allocator.
+  and executes. All retained allocator spellings use this MIR lowering;
+  `none` aliases MIR_STACK.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and
