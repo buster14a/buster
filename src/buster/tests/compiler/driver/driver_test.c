@@ -7709,8 +7709,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_compiler_runtime(Uni
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             Arena* arena = temporary.arena;
-            String8 directory = buster_test_temporary_path(arena, S8("buster-compiler-runtime-libs"), S8(""));
-            String8 later = buster_test_temporary_path(arena, S8("buster-compiler-runtime-later"), S8(""));
+            // Temporary paths are stable by name, so every ABI/scenario owns
+            // its search directories and cannot inherit an earlier provider.
+            String8 directory = buster_test_temporary_path(arena,
+                string_format(arena, S8("buster-compiler-runtime-libs-{u32}-{u32}"), target, scenario), S8(""));
+            String8 later = buster_test_temporary_path(arena,
+                string_format(arena, S8("buster-compiler-runtime-later-{u32}-{u32}"), target, scenario), S8(""));
             BUSTER_TEST(arguments, os_make_directory_attempt(directory));
             BUSTER_TEST(arguments, os_make_directory_attempt(later));
             String8 runtime_path = string_format_z(arena, S8("{S8}/libgcc_s.so.1"), directory);
