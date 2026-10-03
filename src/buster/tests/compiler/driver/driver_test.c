@@ -16628,8 +16628,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bare_dwarf_sections(Unit
                                                section.alignment == expected_alignment && section.data.length == expected_length &&
                                                section.data.pointer[0] == row + 1);
                     }
-                    BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && rows[row].kind < read.section_count);
-                    if (read.error == OBJECT_ERROR_NONE && rows[row].kind < read.section_count)
+                    BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && (u32)rows[row].kind < read.section_count);
+                    if (read.error == OBJECT_ERROR_NONE && (u32)rows[row].kind < read.section_count)
                     {
                         ObjectSection section = read.sections[rows[row].kind];
                         BUSTER_TEST(arguments, section.alignment == expected_alignment && section.data.length == expected_length &&
