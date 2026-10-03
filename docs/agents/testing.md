@@ -209,7 +209,13 @@
   command-monitor result and final protocol EOF. The collector requires a
   complete helper token, real completion-pipe EOF and matching actual invocation
   wait status. It snapshots only that closed private generation before writing
-  its admission receipt. Expiry, cancellation, malformed handoffs or a shim's
+  its admission receipt. One batch copies the valid regular, non-symlink
+  snapshot files, including binary output, within the existing caller clock;
+  symlink or nonregular stable destinations and failed or interrupted copies
+  refuse admission. This removes repeated
+  copy/rename launches after an observed interruption during stable receipt
+  promotion, without establishing the runner's delay cause or a future native
+  result. Expiry, cancellation, malformed handoffs or a shim's
   mismatched exit refuse admission; a residual old owner can only publish in
   its old generation. Caller cancellation retains status 130/143. Residual
   cleanup and unknown reaps remain failures, rather than synchronized-cleanup

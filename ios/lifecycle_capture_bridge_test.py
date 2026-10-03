@@ -6,6 +6,7 @@ All fixture processes are finite. Cleanup uses live owned Popen handles and
 release markers; protocol PID/PGID/SID numbers are never signal targets.
 """
 
+import json
 import os
 from pathlib import Path
 import select
@@ -229,7 +230,7 @@ class BridgeTests(unittest.TestCase):
         environment["PATH"] = str(directory) + os.pathsep + environment.get("PATH", "")
         return environment
 
-    def start_cap(self, command, environment=None, prefix=None, command_seconds=1, capture_seconds=12):
+    def start_cap(self, command, environment=None, prefix=None, command_seconds=1, capture_seconds=12, cwd=None):
         self.sequence += 1
         prefix = prefix or self.root / ("phase-%d" % self.sequence)
         arguments = [TIMEOUT, "--signal=KILL", "%ds" % capture_seconds, "bash", str(BRIDGE),
@@ -240,8 +241,10 @@ class BridgeTests(unittest.TestCase):
         self.bootstrap_bounds.append(started + command_seconds + 0.25)
         with output.open("wb") as stdout, errors.open("wb") as stderr:
             process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=stdout,
-                                       stderr=stderr, close_fds=True, env=environment)
+                                       stderr=stderr, close_fds=True, env=environment, cwd=cwd)
         self.owned.append(process)
+        if not Path(prefix).is_absolute():
+            prefix = Path(cwd or os.getcwd()) / prefix
         return process, prefix, started, errors
 
     def finish_cap(self, case, capture_seconds=12):
@@ -256,9 +259,176 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(positional, expected)
         self.assertRegex(fields["generation"], r"^[A-Za-z0-9]{8}$")
         private = Path(Path(str(prefix) + ".caller-private-directory.log").read_text().strip())
+        if not private.is_absolute():
+            private = prefix.parent / private.name
         self.assertTrue(private.is_dir())
         self.assertTrue(str(private).startswith(str(prefix) + ".capture."))
         return status, fields, prefix, private, elapsed, errors.read_bytes()
+
+    def copy_overlay(self, state, mode):
+        state.mkdir()
+        real_cp = shutil.which("cp")
+        self.assertIsNotNone(real_cp)
+        wrapper = state / "cp"
+        wrapper.write_text("#!" + sys.executable + "\n" + '''import json,pathlib,subprocess,sys,time
+state=pathlib.Path(STATE)
+arguments=sys.argv[1:]
+with (state/'calls.jsonl').open('a') as output:output.write(json.dumps(arguments)+'\\n')
+operands=arguments[1:] if arguments[:1]==['--'] else arguments
+if MODE in ('partial','delay'):
+    subprocess.run([REAL,operands[0],operands[-1]],check=True)
+    (state/'partial-entered').write_text(str(time.monotonic_ns()))
+    if MODE=='partial':sys.exit(70)
+    time.sleep(13.3)
+    (state/'late-copy-entered').touch()
+sys.exit(subprocess.run([REAL,*arguments]).returncode)
+'''.replace("STATE", repr(str(state))).replace("MODE", repr(mode)).replace("REAL", repr(real_cp)))
+        wrapper.chmod(0o700)
+        environment = dict(os.environ)
+        environment["PATH"] = str(state) + os.pathsep + environment.get("PATH", "")
+        return environment
+
+    def test_snapshot_uses_one_batch_and_preserves_binary_bytes_for_relative_prefixes(self):
+        payload = bytes(range(256)) * 256
+        for spelling in ("phase name", "relative parent/phase name", "nested/relative parent/phase name"):
+            with self.subTest(prefix=spelling):
+                state = self.root / ("copy-%d" % self.sequence)
+                environment = self.copy_overlay(state, "normal")
+                cwd = state / "work"
+                cwd.mkdir()
+                (cwd / Path(spelling).parent).mkdir(parents=True, exist_ok=True)
+                command = [sys.executable, "-c", "import os;os.write(1,bytes(range(256))*256)"]
+                status, fields, prefix, private, elapsed, errors = self.finish_cap(
+                    self.start_cap(command, environment, prefix=Path(spelling), cwd=cwd))
+                self.assertEqual(status, 0, errors)
+                self.assertEqual(fields["admission"], "1")
+                self.assertEqual(fields["helper_status"], fields["invocation_status"])
+                self.assertEqual(Path(str(prefix) + ".log").read_bytes(), payload)
+                calls = [json.loads(line) for line in (state / "calls.jsonl").read_text().splitlines()]
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(len(calls[0]), 9)  # --, seven optional sources, parent
+                self.assertEqual(calls[0][-1], str(Path(spelling).parent))
+                for suffix in (".log", ".native-status.log", ".command-elapsed.log", ".capture-elapsed.log",
+                               ".log.capture-status.log", ".supervisor-fields.log", ".supervisor-status.log"):
+                    self.assertEqual(Path(str(prefix) + suffix).read_bytes(),
+                                     Path(str(private / prefix.name) + suffix).read_bytes())
+
+    def test_snapshot_partial_copy_failure_cannot_admit_missing_last_receipts(self):
+        state = self.root / "partial-copy"
+        environment = self.copy_overlay(state, "partial")
+        prefix = self.root / "partial-stable-prefix"
+        # A previous admitted generation must not survive this failed copy.
+        Path(str(prefix) + ".caller-status.log").write_text(
+            "BUSTER_IOS_CALLER version=1 generation=OldValid admission=1 helper_status=0 "
+            "invocation_status=0 command_monitor_status=0 reason=complete\n")
+        Path(str(prefix) + ".caller-fields.log").write_text("1 0 0 OldValid 0 complete\n")
+        status, fields, prefix, private, elapsed, errors = self.finish_cap(
+            self.start_cap([sys.executable, "-c", "print('partial')"], environment, prefix=prefix))
+        self.assertEqual(status, 1, errors)
+        self.assertEqual(fields["admission"], "0")
+        self.assertEqual(fields["reason"], "snapshot")
+        self.assertEqual(fields["helper_status"], "0")
+        self.assertEqual(fields["invocation_status"], "0")
+        self.assertEqual(Path(str(prefix) + ".log").read_bytes(), b"partial\n")
+        self.assertFalse(Path(str(prefix) + ".log.capture-status.log").exists())
+        self.assertFalse(Path(str(prefix) + ".supervisor-status.log").exists())
+        self.assertTrue(Path(str(private / prefix.name) + ".supervisor-status.log").exists())
+        self.assertEqual(len((state / "calls.jsonl").read_text().splitlines()), 1)
+
+    def test_snapshot_partial_copy_interruption_retains_capture_cap_and_refuses_admission(self):
+        state = self.root / "delayed-copy"
+        environment = self.copy_overlay(state, "delay")
+        status, fields, prefix, private, elapsed, errors = self.finish_cap(
+            self.start_cap([sys.executable, "-c", "print('bounded')"], environment))
+        self.assertIn(status, (124, 137), errors)
+        self.assertEqual(fields["admission"], "0")
+        self.assertGreaterEqual(elapsed, 11.8)
+        self.assertLess(elapsed, 13)
+        self.assertFalse(Path(str(prefix) + ".supervisor-status.log").exists())
+        self.assertTrue(Path(str(private / prefix.name) + ".supervisor-status.log").exists())
+        entered_ns = int((state / "partial-entered").read_text())
+        time.sleep(max(0, (entered_ns + 13_300_000_000 - time.monotonic_ns()) / 1_000_000_000))
+        self.assertFalse((state / "late-copy-entered").exists())
+
+    def test_snapshot_keeps_native_status_optional_for_actual_launch_failure(self):
+        state = self.root / "optional-native"
+        environment = self.copy_overlay(state, "normal")
+        status, fields, prefix, private, elapsed, errors = self.finish_cap(
+            self.start_cap([str(self.root / "missing-command")], environment))
+        self.assertEqual(status, 0, errors)
+        self.assertEqual(fields["admission"], "1")
+        self.assertEqual(fields["helper_status"], "127")
+        self.assertEqual(fields["invocation_status"], "127")
+        self.assertFalse(Path(str(prefix) + ".native-status.log").exists())
+        self.assertEqual(self.supervisor(prefix)["native_status"], "unavailable")
+        calls = [json.loads(line) for line in (state / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0]), 8)
+
+    def test_snapshot_refuses_symlink_or_nonregular_destinations_before_copy(self):
+        for kind in ("symlink", "dangling-symlink", "directory"):
+            with self.subTest(destination=kind):
+                state = self.root / ("blocked-copy-" + kind)
+                environment = self.copy_overlay(state, "normal")
+                prefix = self.root / ("blocked-stable-" + kind)
+                destination = Path(str(prefix) + ".log")
+                sentinel = state / "sentinel"
+                payload = b"retain\x00\xff"
+                if kind == "directory":
+                    destination.mkdir()
+                    sentinel = destination / "sentinel"
+                    sentinel.write_bytes(payload)
+                else:
+                    if kind == "symlink":
+                        sentinel.write_bytes(payload)
+                    destination.symlink_to(sentinel)
+                status, fields, prefix, private, elapsed, errors = self.finish_cap(
+                    self.start_cap([sys.executable, "-c", "print('must not replace')"],
+                                   environment, prefix=prefix))
+                self.assertEqual(status, 1, errors)
+                self.assertEqual(fields["admission"], "0")
+                self.assertEqual(fields["reason"], "snapshot")
+                self.assertEqual(fields["helper_status"], "0")
+                self.assertEqual(fields["invocation_status"], "0")
+                self.assertFalse((state / "calls.jsonl").exists())
+                self.assertFalse(Path(str(prefix) + ".supervisor-status.log").exists())
+                self.assertTrue(Path(str(private / prefix.name) + ".supervisor-status.log").exists())
+                if kind == "dangling-symlink":
+                    self.assertFalse(sentinel.exists())
+                else:
+                    self.assertEqual(sentinel.read_bytes(), payload)
+                if kind != "directory":
+                    self.assertTrue(destination.is_symlink())
+                    self.assertEqual(destination.readlink(), sentinel)
+
+    def test_extracted_phase_partial_copy_is_evidence_failure_with_complete_private_owner(self):
+        state = self.root / "phase-partial-copy"
+        environment = self.copy_overlay(state, "partial")
+        shutil.copyfile(HELPER, state / HELPER.name)
+        shutil.copyfile(BRIDGE, state / BRIDGE.name)
+        source = LAUNCHER.read_text()
+        phase = source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
+        prefix = state / "console"
+        script = state / "phase.sh"
+        script.write_text("#!/bin/bash\nset -euo pipefail\nmonitor_command_timeout_seconds=1\n"
+            "timeout_bin=" + shlex.quote(TIMEOUT) + "\nconsole_log_base=" + shlex.quote(str(prefix))
+            + "\ncollect_lifecycle_context() { :; }\n" + phase
+            + "\nif run_lifecycle_phase control Test " + shlex.quote(str(prefix))
+            + " 1 " + shlex.quote(sys.executable) + " -c pass; then exit 0; else exit $?; fi\n")
+        process = subprocess.Popen(["bash", str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   env=environment, close_fds=True)
+        self.owned.append(process)
+        output, errors = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 1, errors)
+        status = Path(str(prefix) + ".control.status.log").read_text()
+        self.assertIn("outcome=evidence-failure", status)
+        self.assertIn("BUSTER_IOS_CALLER_GATE monitor_status=1 admission=0 invocation_status=0", status)
+        self.assertIn("reason=snapshot", status)
+        private = Path(Path(str(prefix) + ".control.caller-private-directory.log").read_text().strip())
+        owner = self.supervisor(private / "console.control")
+        self.assertEqual(owner["command_status"], "0")
+        self.assertEqual(owner["capture_status"], "0")
+        self.assertEqual(owner["cleanup_status"], "0")
 
     def supervisor(self, prefix):
         return named_receipt(Path(str(prefix) + ".supervisor-status.log"), "BUSTER_IOS_SUPERVISOR")
@@ -485,7 +655,9 @@ class BridgeTests(unittest.TestCase):
         self.assertNotEqual(old["generation"], new["generation"])
         self.assertNotEqual(old_private, new_private)
         paths = [Path(str(prefix) + suffix) for suffix in
-                 (".caller-status.log", ".supervisor-status.log", ".log")]
+                 (".caller-status.log", ".caller-fields.log", ".log", ".native-status.log",
+                  ".command-elapsed.log", ".capture-elapsed.log", ".log.capture-status.log",
+                  ".supervisor-fields.log", ".supervisor-status.log")]
         before = {path: path.read_bytes() for path in paths}
         self.assertEqual(before[Path(str(prefix) + ".log")], b"new\n")
         self.assertTrue(wait_for_path(state / "owner-wrapper-ended", 4))

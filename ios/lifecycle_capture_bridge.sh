@@ -106,12 +106,24 @@ if wait "$invocation_pid"; then invocation=0; else invocation=$?; fi
 
 # O and its invoking shim have ended. Only this generation's closed snapshot
 # can write stable names; old residual owners keep their private prefixes.
+snapshot_parent=${prefix%/*}
+if [[ $snapshot_parent == "$prefix" ]]; then snapshot_parent=.
+elif [[ -z $snapshot_parent ]]; then snapshot_parent=/; fi
+snapshot_sources=()
 for suffix in .log .native-status.log .command-elapsed.log .capture-elapsed.log \
     .log.capture-status.log .supervisor-fields.log .supervisor-status.log; do
     source="${private_prefix}${suffix}"
     [[ -f $source && ! -L $source ]] || continue
-    cp "$source" "$run/snapshot" && mv -f "$run/snapshot" "${prefix}${suffix}" || refuse snapshot
+    target="${prefix}${suffix}"
+    [[ ! -L $target && ( ! -e $target || -f $target ) ]] || refuse snapshot
+    snapshot_sources+=("$source")
 done
+# One batch preserves binary bytes without a copy/rename process pair for each
+# receipt. Partial copies are never admitted: the final caller receipt follows
+# only a successful batch, still inside the caller's unchanged capture clock.
+if [[ ${snapshot_sources[0]:-} ]]; then
+    cp -- "${snapshot_sources[@]}" "$snapshot_parent" || refuse snapshot
+fi
 admission=1 reason=complete
 record_caller || exit 125
 exit 0
