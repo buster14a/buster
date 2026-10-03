@@ -4362,12 +4362,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_timestamps(UnitTestAr
     }
     // Inline authorization is instruction-local: another gated mnemonic in
     // the same template still fails. Explicit RDTSCP operands remain invalid.
-    String8 assembler_rejected[] = {S8("rdtscp %eax"), S8("rdtscp $1"), S8("rdrand %eax"), S8("rdtscp; rdrand %eax")};
+    String8 assembler_rejected[] = {S8("rdtscp %eax"), S8("rdtscp $1"), S8("rdrand %eax"), S8("rdtscp\nrdrand %eax")};
     for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(assembler_rejected); invalid += 1)
     {
         AssemblyEncodeResult encoded = assembly_encode(arguments->arena, assembler_rejected[invalid],
             (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT, .inline_assembly = true});
-        BUSTER_TEST(arguments, encoded.diagnostic_count != 0 && encoded.bytes.length == 0);
+        BUSTER_TEST_RAW(arguments, encoded.diagnostic_count != 0 && encoded.bytes.length == 0, assembler_rejected[invalid]);
     }
     String8 rejected[] = {S8("rdtsc %eax"), S8("rdtscp $1"), S8("rdtscx")};
     for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(rejected); invalid += 1)
