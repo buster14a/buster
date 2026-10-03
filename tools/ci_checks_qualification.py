@@ -28,6 +28,9 @@ Each test also binds the native buster-desktop-unit-observation-v1 receipt at
 <phase_directory>.parent/unit-observations/<taskID>/observation.json. Its adjacent
 inventory.log/test.log bytes, binary hash, source/run identity and command must
 match the same phase and sample; the independent inventory query is replayed.
+Its CI_UNIT_HOST_V1 record must match identity.native_host_profile and is part
+of the exact per-row census; CPU model names or assertion counts cannot supply
+a missing effective native feature/build-SIMD profile.
 The manifest log must be that exact retained test.log. Its elapsed_us must equal
 the native test phase, and its toolchain identity is
 {compiler,path_hash,identity,target,version} from that row's detected capability.
@@ -44,6 +47,13 @@ adds zero runner seconds and has no conditions entry. Empty toolchains/caches ar
 explicit only for jobs using none. Missing/unknown observations fail pending.
 Split checks conditions map to their platform's combined checks role; all three
 must match that role. Other job conditions must match across every sample.
+Required role keys are declared by condition_keys(). Cache scope is the existing
+exact desktop Zig receipt, Android requested-package initial validity, and
+explicit Actions-cache policy elsewhere; it is not equality of all OS caches.
+The selected Go, iOS/analyzer/UEFI Ninja and Android adb observations additionally
+need selected_tools={tool:REF} receipts from ci_checks_tools.py. Their source,
+run/attempt and workflow job key are verified; only hash/version enter equality.
+Legacy logs without these observations remain pending.
 
 Native phase journals report CPU time and peak RSS as unknown. This consumer
 can meet or reject timing/census thresholds, but cannot accept either issue's
@@ -81,6 +91,13 @@ VARIANTS = ("combined-overlap", "combined-all-builds", "split-overlap")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 CAP_KEYS = ("compiler", "path_hash", "identity", "target", "version")
+SELECTED_TOOL_ROLES = {
+    "Workflow lint": ("lint", "go", "go"),
+    "iOS AArch64": ("mobile", "ninja", "ninja"),
+    "Clang analyzer shards": ("analyzer", "ninja", "ninja"),
+    "UEFI firmware boot": ("uefi", "ninja", "ninja"),
+    "Android x86-64": ("mobile", "adb", "adb_version"),
+}
 
 
 def require(condition, message):
@@ -159,6 +176,103 @@ def timing(run, variant):
     return measured
 
 
+def condition_keys(name):
+    """Required observed inputs within the documented workflow receipt scopes."""
+    name = role(name)
+    if name in github.COMBINATION_PLATFORMS:
+        tools = {"clang", "gcc", "zig"}
+        if name.startswith("Windows "):
+            tools.add("cl")
+        if name.startswith("Windows AArch64 "):
+            tools = {"cl", "clang"}
+        caches = {"BUSTER_CI_ZIG_CACHE_HIT"}
+    elif name in github.NATIVE:
+        tools, caches = {"compiler", "cmake", "ninja"}, {"explicit_actions_cache"}
+    elif name == "Workflow lint":
+        tools, caches = {"gcc", "actionlint_commit", "go"}, {"explicit_actions_cache"}
+    elif name == "iOS AArch64":
+        tools = {"cmake", "configure_compiler", "ios_sdk", "ios_simulator", "ninja"}
+        caches = {"explicit_actions_cache"}
+    elif name == "Android x86-64":
+        tools = {"cmake", "configure_compiler", "ninja_banner", "ndk_path", "android_build_tools",
+                 "emulator", "android_system_image", "android_system_image_revision", "adb_version"}
+        caches = {"explicit_actions_cache", "android_sdk_package_state_before"}
+    elif name == "Clang analyzer shards":
+        tools, caches = {"clang", "cmake", "ninja"}, {"explicit_actions_cache"}
+    elif name == "UEFI firmware boot":
+        tools, caches = {"compiler", "cmake", "ninja", "qemu_x86_64", "qemu_aarch64"}, {"explicit_actions_cache"}
+    elif name in ("CI complete", github.MAIN_REUSE_JOB):
+        tools, caches = set(), set()
+    else:
+        raise ValueError("unknown conditions role: " + name)
+    return tools, caches
+
+
+def selected_tool(root, reference, run, job, tool):
+    """Replay the retained selected executable witness without probing locally."""
+    receipt = record(root, reference)
+    require(isinstance(receipt, dict), "selected tool receipt is not an object")
+    job_key = SELECTED_TOOL_ROLES[role(job["name"])][0]
+    require(receipt.get("schema") == "buster-ci-selected-tool-v1" and receipt.get("status") == "observed" and
+            receipt.get("tool") == tool, "missing/failed selected tool observation")
+    expected = {"repository": "buster14a/buster", "source_revision": run["head_sha"], "run_id": str(run["id"]),
+                "run_attempt": str(run["run_attempt"]), "job": job_key}
+    require(all(receipt.get(key) == value for key, value in expected.items()), "selected tool source/run/attempt/job mismatch")
+    selection = receipt.get("selection", {})
+    require(isinstance(selection, dict), "selected tool selection is not an object")
+    paths = (selection.get("path"), selection.get("resolved_path"))
+    require(all(isinstance(path, str) and "\x00" not in path and (posixpath.isabs(path) or ntpath.isabs(path)) for path in paths),
+            "missing selected tool executable path")
+    kind = "executable" if tool in ("go", "adb") else "cmake-cache"
+    require(selection.get("kind") == kind, "selected tool has wrong selection authority")
+    if kind == "cmake-cache":
+        cache = selection.get("cmake_cache")
+        require(isinstance(cache, str) and "\x00" not in cache and (posixpath.isabs(cache) or ntpath.isabs(cache)) and
+                selection.get("requested") == selection["path"],
+                "missing selected CMake tool authority")
+    else:
+        request = selection.get("requested")
+        require(isinstance(request, str) and "\x00" not in request and known(request.strip()), "missing selected executable request")
+    argument = "version" if tool in ("go", "adb") else "--version"
+    require(receipt.get("command") == [selection["resolved_path"], argument], "selected tool version command mismatch")
+    comparable = receipt.get("comparable", {})
+    require(isinstance(comparable, dict), "selected tool comparison is not an object")
+    require(set(comparable) == {"sha256", "version"} and isinstance(comparable.get("sha256"), str) and HASH.fullmatch(comparable["sha256"]) and
+            isinstance(comparable.get("version"), str) and known(comparable["version"].strip()) and
+            len(comparable["version"].encode("utf-8")) <= 64 * 1024, "missing bounded selected tool identity/version")
+    return comparable
+
+
+def condition_inputs(root, entry, run, job):
+    name = role(job["name"])
+    tools, caches = condition_keys(name)
+    require(tools <= set(entry["toolchains"]) and caches <= set(entry["caches"]), "missing required role tool/cache keys: " + name)
+    require(all(entry["toolchains"][key] for key in tools), "empty required tool observation: " + name)
+    if name in ("CI complete", github.MAIN_REUSE_JOB):
+        require(not entry["toolchains"] and not entry["caches"], "metadata-only role has tool/cache observations")
+    if "explicit_actions_cache" in caches:
+        require(entry["caches"]["explicit_actions_cache"] == "not-used", "unsupported explicit Actions-cache condition")
+    if "BUSTER_CI_ZIG_CACHE_HIT" in caches:
+        require(entry["caches"]["BUSTER_CI_ZIG_CACHE_HIT"] in ("true", "false"), "invalid observed Zig cache condition")
+    if name == "Android x86-64":
+        states = entry["caches"]["android_sdk_package_state_before"]
+        require(isinstance(entry["toolchains"]["android_system_image"], str), "missing Android requested system-image identity")
+        packages = {"emulator", "platforms;android-35", entry["toolchains"]["android_system_image"]}
+        require(isinstance(states, dict) and set(states) == packages and all(value in ("success", "failure") for value in states.values()),
+                "missing Android requested-package initial validity")
+        revision = entry["toolchains"]["android_system_image_revision"]
+        require((type(revision) is int and revision > 0) or
+                (isinstance(revision, str) and re.fullmatch(r"[1-9][0-9]*", revision)), "missing Android installed system-image revision")
+    witnesses = entry.get("selected_tools", {})
+    require(isinstance(witnesses, dict), "selected tool references are not an object")
+    if name in SELECTED_TOOL_ROLES:
+        _, tool, key = SELECTED_TOOL_ROLES[name]
+        require(set(witnesses) == {tool}, "missing exact selected tool receipt: " + name)
+        require(entry["toolchains"][key] == selected_tool(root, witnesses[tool], run, job, tool), "selected tool differs from condition map")
+    else:
+        require(not witnesses, "selected tool receipt belongs to a different role")
+
+
 def conditions(root, reference, run):
     data = record(root, reference)
     require(data.get("schema") == "buster-ci-checks-conditions-v1" and str(data.get("run_id")) == str(run["id"]), "conditions run/schema mismatch")
@@ -173,6 +287,7 @@ def conditions(root, reference, run):
         require(entry["runner"] in job.get("labels", []), "conditions runner label differs from GitHub assignment")
         require(all(isinstance(entry.get(k), dict) and known(entry[k]) for k in ("toolchains", "caches")), "missing toolchain/cache condition map")
         require(entry["toolchains"] or job["name"] in ("CI complete", github.MAIN_REUSE_JOB), "missing compiler/toolchain observations")
+        condition_inputs(root, entry, run, job)
         value = {k: entry[k] for k in ("image_os", "image_version", "runner", "toolchains", "caches")}
         key = role(job["name"])
         require(key not in normalized or normalized[key] == value, "split jobs have different runner/cache conditions")
@@ -254,6 +369,11 @@ def observation(root, item, test, unit, manifest_path, event, identity):
     manifest = phases.read(manifest_path)
     require((manifest_path.parent / manifest["log"]).resolve() == log_path.resolve() and test["log_sha256"] == value["log_sha256"], "manifest did not consume the native test log")
     require(unit["inventory"] == unit_campaign.inventory(inventory_path), "native independent inventory differs from test manifest")
+    profile = unit_campaign.host_profile(inventory_path, required=True)
+    declared_profile = unit["identity"].get("native_host_profile")
+    require(profile["architecture"] == identity["architecture"] and
+            declared_profile == profile and json.dumps(declared_profile, sort_keys=True) == json.dumps(profile, sort_keys=True),
+            "native host profile differs from same-binary inventory query")
     return value
 
 
@@ -308,6 +428,7 @@ def desktop(root, item, run, condition, variant):
         require(unit["wall_us"] == event["end_us"] - event["child_start_us"] and unit["test_workers"] == int(event["test_jobs"]), "test census is not the native invocation interval/quota")
         observation(root, item, test, unit, manifest_path, event, identity)
         census[test["row_id"]] = {"inventory": unit["inventory"], "skipped_table_audits": unit["skipped_table_audits"],
+            "native_host_profile": provenance["native_host_profile"],
             "external": unit["external"], "modules": {name: {k: module[k] for k in ("index", "assertions", "passed", "failed", "status")} for name, module in unit["modules"].items()}}
     caps = [{k: cap.get(k) for k in ("id", *CAP_KEYS, "state", "reason")} for cap in capabilities.values()]
     normalized_rows = [{k: v for k, v in row.items() if k != "owner_shard"} for row in expected]

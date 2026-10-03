@@ -8,8 +8,10 @@ output. Only the first OUTPUT_LIMIT bytes are retained, while the pipe is draine
 """
 import argparse
 import errno
+import fcntl
 import os
 from pathlib import Path
+import re
 import select
 import signal
 import subprocess
@@ -22,6 +24,161 @@ READ_QUANTUM = 65536
 KILL_GRACE_NS = 10_000_000_000
 MAX_SECONDS = 9223372036854775807
 CANCEL_SIGNALS = {signal.SIGINT, signal.SIGTERM}
+
+
+class BridgeProtocolError(RuntimeError):
+    pass
+
+
+class CallerBridge:
+    """Private caller custody; positive command proof requires the whole frame."""
+    def __init__(self, generation, control, ready, completion, lifetime, adjudication):
+        self.generation = generation
+        self.readers = dict(control=control, lifetime=lifetime, adjudication=adjudication)
+        self.ready = ready
+        self.completion = completion
+        self.buffers = {key: b"" for key in self.readers}
+        self.eof = set()
+        self.go = False
+        self.done_sent = False
+        self.command_authenticated = False
+        self.command_final = False
+        self.caller_lost = False
+
+    def write(self, descriptor, text):
+        payload = text.encode("ascii")
+        if os.write(descriptor, payload) != len(payload):
+            raise BridgeProtocolError("short protocol write")
+
+    def prepare(self, owner):
+        for descriptor, mode in ((self.readers["control"], os.O_RDONLY),
+                                 (self.ready, os.O_WRONLY), (self.completion, os.O_WRONLY),
+                                 (self.readers["lifetime"], os.O_RDONLY),
+                                 (self.readers["adjudication"], os.O_RDONLY)):
+            if fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE != mode:
+                raise BridgeProtocolError("incorrect private descriptor access")
+        for descriptor in (*self.readers.values(), self.ready, self.completion):
+            os.set_inheritable(descriptor, False)
+        for descriptor in self.readers.values():
+            os.set_blocking(descriptor, False)
+        # No child has been created. Both GNU monitored groups are left before
+        # READY can authorize GO and keeper/native admission.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, CANCEL_SIGNALS | {signal.SIGUSR1, signal.SIGALRM})
+        signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+        os.setsid()
+        owner.facts["bridge_generation"] = self.generation
+        owner.facts["command_monitor_status"] = "pending"
+        owner.facts["command_authenticated"] = 0
+        owner.facts["caller_lost"] = 0
+        owner.facts["bridge_control_eof"] = 0
+        self.write(self.ready, "READY %s %d %d %d\n" %
+                   (self.generation, os.getpid(), os.getpgrp(), os.getsid(0)))
+
+    def read_channels(self):
+        for key, descriptor in tuple(self.readers.items()):
+            if descriptor is None:
+                continue
+            try:
+                chunk = os.read(descriptor, 256)
+            except BlockingIOError:
+                continue
+            if chunk:
+                self.buffers[key] += chunk
+                if len(self.buffers[key]) > 256:
+                    raise BridgeProtocolError("oversized protocol frame")
+            else:
+                self.readers[key] = None
+                self.eof.add(key)
+                os.close(descriptor)
+
+    def pump(self, owner):
+        self.read_channels()
+        expected = ("GO %s\n" % self.generation).encode("ascii")
+        control = self.buffers["control"]
+        if b"\n" in control:
+            if control != expected:
+                raise BridgeProtocolError("invalid GO frame")
+            self.go = True
+        elif "control" in self.eof and control:
+            raise BridgeProtocolError("partial GO frame")
+        if "control" in self.eof:
+            owner.facts["bridge_control_eof"] = 1
+            if not self.done_sent:
+                owner.begin_term(time.monotonic_ns())
+
+        lifetime = self.buffers["lifetime"]
+        if b"\n" in lifetime:
+            messages = [("CANCEL %s %d\n" % (self.generation, signum)).encode("ascii")
+                        for signum in CANCEL_SIGNALS]
+            if lifetime not in messages:
+                raise BridgeProtocolError("invalid cancellation frame")
+            owner.note_signal(int(lifetime.split()[-1]), None)
+        elif "lifetime" in self.eof and lifetime:
+            raise BridgeProtocolError("partial cancellation frame")
+        if "lifetime" in self.eof:
+            if not self.caller_lost:
+                elapsed = (time.monotonic_ns() - owner.started) // 1_000_000_000
+                owner.facts["caller_loss_elapsed"] = elapsed
+                if not owner.facts["capture_eof"]:
+                    owner.facts["capture_elapsed"] = elapsed
+            self.caller_lost = True
+            owner.facts["caller_lost"] = 1
+            owner.facts["capture_status"] = 124
+            owner.begin_term(time.monotonic_ns())
+            # Caller authority has ended. Never grant a new post-cap grace.
+            owner.final_cleanup(time.monotonic_ns())
+
+        if "adjudication" in self.eof and not self.command_final:
+            self.command_final = True
+            pieces = self.buffers["adjudication"].split(b" ")
+            if (len(pieces) != 3 or pieces[0] != b"COMMAND-MONITOR"
+                    or pieces[1] != self.generation.encode("ascii")
+                    or not pieces[2].endswith(b"\n") or pieces[2].count(b"\n") != 1):
+                raise BridgeProtocolError("invalid command monitor frame")
+            raw = pieces[2][:-1]
+            if not raw.isdigit() or len(raw) > 3 or (len(raw) > 1 and raw.startswith(b"0")) or int(raw) > 255:
+                raise BridgeProtocolError("invalid command monitor status")
+            status = int(raw)
+            owner.facts["command_monitor_status"] = status
+            if status == 0:
+                if not self.done_sent:
+                    raise BridgeProtocolError("monitor0 without native DONE")
+                self.command_authenticated = True
+                owner.facts["command_authenticated"] = 1
+            elif status in (124, 137):
+                owner.facts["deadline_reached"] = 1
+                owner.facts["command_status"] = 124
+                owner.begin_term(time.monotonic_ns())
+            else:
+                raise BridgeProtocolError("command monitor failed")
+        owner.reconcile_cancellation()
+
+    def done(self):
+        if not self.done_sent:
+            self.done_sent = True
+            try:
+                self.write(self.ready, "DONE %s\n" % self.generation)
+            except BrokenPipeError:
+                # B can be killed at its deadline. Its separate actual monitor
+                # result, not a successful write, decides command acceptance.
+                pass
+
+    def close(self, owner):
+        for key, descriptor in tuple(self.readers.items()):
+            self.readers[key] = None
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError as error:
+                    owner.helper_failure(error)
+        for attribute in ("ready", "completion"):
+            descriptor = getattr(self, attribute)
+            setattr(self, attribute, None)
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError as error:
+                    owner.helper_failure(error)
 
 
 def seconds_value(value):
@@ -61,11 +218,12 @@ def keeper_main(ready_fd, control_fd):
 
 
 class Supervisor:
-    def __init__(self, prefix, command_seconds, capture_seconds, command):
+    def __init__(self, prefix, command_seconds, capture_seconds, command, bridge=None):
         self.prefix = Path(prefix)
         self.command_seconds = command_seconds
         self.capture_seconds = capture_seconds
         self.command = command
+        self.bridge = bridge
         self.keeper = None
         self.native = None
         self.group_authority = False
@@ -114,6 +272,20 @@ class Supervisor:
             self.facts["command_status"] = 128 + self.cancellation
         return changed
 
+    def pump_bridge(self):
+        if self.bridge is not None:
+            self.bridge.pump(self)
+
+    def native_done(self):
+        if self.bridge is not None and self.command_terminal:
+            self.bridge.done()
+
+    def command_proof_final(self):
+        return self.bridge is None or self.bridge.command_final
+
+    def command_proof_positive(self):
+        return self.bridge is None or self.bridge.command_authenticated
+
     def helper_failure(self, error):
         self.facts["helper_error"] = type(error).__name__
         self.facts["cleanup_status"] = 1
@@ -158,6 +330,7 @@ class Supervisor:
                 self.facts["command_elapsed"] = (now - self.started) // 1_000_000_000
                 if not self.facts["deadline_reached"] and not self.cancellation and self.facts["helper_error"] == "none":
                     self.facts["command_status"] = self.facts["native_status"]
+                self.native_done()
         self.reconcile_cancellation()
 
     def signal_native(self, signum, fact):
@@ -313,6 +486,9 @@ class Supervisor:
         ready = b""
         os.set_blocking(self.ready_fd, False)
         while b"\n" not in ready and time.monotonic_ns() < self.command_deadline and not self.cancellation:
+            self.pump_bridge()
+            if self.bridge is not None and self.bridge.caller_lost:
+                break
             if select.select([self.ready_fd], [], [], 0.02)[0]:
                 chunk = os.read(self.ready_fd, 128)
                 if not chunk:
@@ -326,7 +502,9 @@ class Supervisor:
         self.group_authority = True
         self.facts["keeper_pid"] = self.keeper.pid
         self.facts["keeper_pgid"] = self.keeper.pid
-        if self.cancellation or time.monotonic_ns() >= self.command_deadline:
+        self.pump_bridge()
+        if (self.cancellation or self.facts["deadline_reached"] or time.monotonic_ns() >= self.command_deadline
+                or self.bridge is not None and (self.bridge.caller_lost or "control" in self.bridge.eof)):
             self.command_terminal = True
         else:
             blocked = signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
@@ -349,11 +527,14 @@ class Supervisor:
                 self.facts["command_elapsed"] = (time.monotonic_ns() - self.started) // 1_000_000_000
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+                self.pump_bridge()
         self.close_fd("output_write_fd")
+        self.native_done()
 
     def loop(self):
         while True:
             now = time.monotonic_ns()
+            self.pump_bridge()
             # Completion first observed after the deadline is not evidence of
             # an earlier kernel exit. Latch the deadline before a fresh poll.
             if not self.command_terminal and now >= self.command_deadline:
@@ -369,12 +550,13 @@ class Supervisor:
             self.observe_native(now)
             if self.facts["deadline_reached"]:
                 self.begin_term(time.monotonic_ns())
-            if now < self.capture_deadline:
+            if now < self.capture_deadline and not (self.bridge is not None and self.bridge.caller_lost):
                 self.drain(now)
             now = time.monotonic_ns()
             if self.command_terminal and not self.facts["capture_eof"]:
                 self.begin_term(now)
-            if self.command_terminal and self.facts["capture_eof"]:
+            if (self.command_terminal and self.facts["capture_eof"]
+                    and (self.command_proof_positive() or self.term_started is not None)):
                 self.final_cleanup(now, ordinary=self.term_started is None)
             elif self.term_started is not None and now >= self.term_started + KILL_GRACE_NS:
                 self.final_cleanup(now)
@@ -387,7 +569,12 @@ class Supervisor:
                 self.reap_keeper(now)
                 break
             self.reap_keeper(now)
-            if self.command_terminal and self.facts["capture_eof"] and (self.keeper is None or self.facts["keeper_reaped"]):
+            if self.bridge is not None and self.bridge.caller_lost:
+                self.observe_native(now)
+                self.reap_keeper(now)
+                break
+            if (self.command_terminal and self.facts["capture_eof"] and self.command_proof_final()
+                    and (self.keeper is None or self.facts["keeper_reaped"])):
                 break
             descriptors = [] if self.output_fd is None else [self.output_fd]
             select.select(descriptors, [], [], min(0.02, (self.capture_deadline - now) / 1_000_000_000))
@@ -426,7 +613,23 @@ class Supervisor:
                 self.path(suffix).unlink(missing_ok=True)
             self.output = self.path(".log").open("wb", buffering=0)
             try:
-                self.spawn()
+                if self.bridge is not None:
+                    self.bridge.prepare(self)
+                    while (not self.bridge.go and not self.cancellation and not self.facts["deadline_reached"]
+                           and not self.bridge.caller_lost and time.monotonic_ns() < self.command_deadline):
+                        self.pump_bridge()
+                        if not self.bridge.go:
+                            select.select([fd for fd in self.bridge.readers.values() if fd is not None], [], [], 0.02)
+                    self.pump_bridge()
+                if (self.bridge is None or self.bridge.go) and not self.cancellation and not self.facts["deadline_reached"] \
+                        and not (self.bridge is not None and (self.bridge.caller_lost or "control" in self.bridge.eof)):
+                    self.spawn()
+                else:
+                    self.command_terminal = True
+                    self.facts["deadline_reached"] = int(not self.cancellation and not (self.bridge is not None and self.bridge.caller_lost))
+                    self.facts["command_status"] = 124 if self.facts["deadline_reached"] else 125
+                    self.native_done()
+                    self.final_cleanup(time.monotonic_ns())
             except Exception as error:
                 self.facts["helper_error"] = type(error).__name__
                 if self.native is None:
@@ -445,6 +648,7 @@ class Supervisor:
                     self.facts["command_status"] = 124
                 self.close_fd("output_write_fd")
                 self.final_cleanup(time.monotonic_ns())
+                self.native_done()
             try:
                 self.loop()
             except Exception as error:
@@ -478,6 +682,9 @@ class Supervisor:
         # too; updating receipts never revives released signal authority.
         if self.reconcile_cancellation() or self.facts_dirty:
             self.publish()
+        return self.result()
+
+    def result(self):
         result = self.facts["command_status"]
         if result == 0 and (self.facts["capture_status"] != 0 or self.facts["cleanup_status"] != 0):
             result = 1
@@ -493,6 +700,9 @@ def main(argv=None):
         parser.add_argument("--prefix", required=True)
         parser.add_argument("--command-seconds", required=True, type=seconds_value)
         parser.add_argument("--capture-seconds", required=True, type=seconds_value)
+        parser.add_argument("--bridge-generation", help=argparse.SUPPRESS)
+        for channel in ("control", "ready", "completion", "lifetime", "adjudication"):
+            parser.add_argument("--bridge-%s-fd" % channel, type=int, help=argparse.SUPPRESS)
         parser.add_argument("command", nargs=argparse.REMAINDER)
         options = parser.parse_args(arguments)
         if options.capture_seconds <= options.command_seconds + 10:
@@ -500,7 +710,32 @@ def main(argv=None):
         command = options.command[1:] if options.command[:1] == ["--"] else options.command
         if not command:
             parser.error("command is required")
-        result = Supervisor(options.prefix, options.command_seconds, options.capture_seconds, command).run()
+        descriptors = [getattr(options, "bridge_%s_fd" % channel) for channel in
+                       ("control", "ready", "completion", "lifetime", "adjudication")]
+        bridge = None
+        if options.bridge_generation is not None or any(fd is not None for fd in descriptors):
+            if (options.bridge_generation is None or re.fullmatch(r"[A-Za-z0-9]{8,64}", options.bridge_generation) is None
+                    or any(fd is None or fd < 3 for fd in descriptors) or len(set(descriptors)) != 5):
+                parser.error("complete private bridge descriptors and generation are required")
+            bridge = CallerBridge(options.bridge_generation, *descriptors)
+        owner = Supervisor(options.prefix, options.command_seconds, options.capture_seconds, command, bridge)
+        try:
+            result = owner.run()
+            if bridge is not None:
+                try:
+                    bridge.pump(owner)
+                except Exception as error:
+                    owner.helper_failure(error)
+                if owner.reconcile_cancellation() or owner.facts_dirty or bridge.caller_lost:
+                    owner.publish()
+                result = owner.result()
+                bridge.write(bridge.completion, "COMPLETE %s %d\n" % (bridge.generation, result))
+        finally:
+            if bridge is not None:
+                bridge.close(owner)
+                if owner.reconcile_cancellation() or owner.facts_dirty:
+                    owner.publish()
+                    result = owner.result()
     return result
 
 

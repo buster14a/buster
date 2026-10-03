@@ -42,6 +42,7 @@ env:
   # second workflow default would conceal precedence regressions.
   BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
   BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && 'split' || 'combined' }}
+  BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
 
 jobs:
   lint:
@@ -71,6 +72,7 @@ jobs:
           python3 -B tools/ci_unit_tests_measure_test.py -v
           python3 -B tools/ci_unit_tests_campaign_test.py -v
           python3 -B tools/ci_checks_qualification_test.py -v
+          python3 -B tools/ci_checks_tools_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
@@ -115,10 +117,14 @@ jobs:
         env:
           GOTOOLCHAIN: local
           GOSUMDB: sum.golang.org
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
         run: |
           set -euo pipefail
           # The pinned actionlint predates GitHub's queue: max field. The
           # preceding policy test confines that field to the reviewed workflow.
+          if [[ "$BUSTER_CI_CONDITIONS_EVIDENCE" == 1 ]]; then
+            python3 tools/ci_checks_tools.py --tool go --executable go --output "$RUNNER_TEMP/selected-go.json"
+          fi
           go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -ignore 'unexpected key "queue" for "concurrency" section' -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
       - name: Lint result and reproduction
         if: ${{ always() }}
@@ -134,7 +140,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workflow-lint-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/actionlint.log
+          path: |
+            ${{ runner.temp }}/actionlint.log
+            ${{ runner.temp }}/selected-go.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -1035,6 +1043,7 @@ jobs:
         if: ${{ matrix.os == 'android' }}
         shell: bash
         env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
           BUSTER_ANDROID_AVD: buster-ci
           BUSTER_ANDROID_DEVICE: pixel_6
           BUSTER_ANDROID_EMULATOR_GPU: swiftshader_indirect
@@ -1086,6 +1095,7 @@ jobs:
         if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
           BUSTER_IOS_ARCH: arm64
           BUSTER_IOS_CONSOLE_LOG: ${{ runner.temp }}/buster-ci/ios-console.log
         run: |
@@ -1166,9 +1176,14 @@ jobs:
           build/uefi-driver test_uefi --self-test build/uefi-self-test
       - name: Build compiler and boot both architectures in all allocators
         shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
         run: |
           set -euo pipefail
           build/uefi-driver generate --build-directory build/uefi-compiler --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
+          if [[ "$BUSTER_CI_CONDITIONS_EVIDENCE" == 1 ]]; then
+            python3 tools/ci_checks_tools.py --tool ninja --cmake-cache build/uefi-compiler/CMakeCache.txt --output "$RUNNER_TEMP/buster-ci/selected-ninja.json"
+          fi
           build/uefi-driver build --build-directory build/uefi-compiler --config Release -t ide -- -j2
           build/uefi-driver test_uefi build/uefi-compiler/Release/ide build/uefi
       - name: Retain firmware execution evidence
@@ -1181,6 +1196,7 @@ jobs:
             !build/uefi/**/VARS.fd
             build/uefi-self-test
             build/uefi-compiler/CMakeCache.txt
+            ${{ runner.temp }}/buster-ci/selected-ninja.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -1285,9 +1301,14 @@ jobs:
       - name: Configure the authoritative split-source database
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
         run: |
           set -euo pipefail
           build/analyzer-driver generate --build-directory build/analyzer-tree --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+          if [[ "$BUSTER_CI_CONDITIONS_EVIDENCE" == 1 ]]; then
+            python3 tools/ci_checks_tools.py --tool ninja --cmake-cache build/analyzer-tree/CMakeCache.txt --output "$RUNNER_TEMP/buster-analyzer/selected-ninja.json"
+          fi
       - name: Compare reference analysis and aggregate all module shards
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash

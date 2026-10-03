@@ -565,17 +565,24 @@ without facts for identical bitcode and diagnostics.
   Sibling intervals must remain disjoint; equal-range nesting resolves to the
   deepest child. Empty siblings sort before nonempty siblings at the same
   start. Queries before index construction retain the unindexed fallback.
-- `CAggregateLookup` doubles its slot array at half occupancy. Its stable
-  header and every rehashed slot survive speculative rollback; live type IDs
+- `CAggregateLookup` starts with a complete zero-slot header. Units without
+  unqualified tagged types allocate no slot array; anonymous aggregates and
+  qualified aliases do not trigger it. The first tag owner reserves and zeroes
+  the existing 16,384-slot array, then the array doubles at half occupancy.
+  Its stable header and every rehashed slot survive speculative rollback; live type IDs
   are revalidated, qualified aliases cannot own tags, and duplicate scoped
   tags retain the scope-aware fallback. Only arena exhaustion or count overflow
-  makes the index incomplete. `c_test_aggregate_lookup_growth` covers both
-  8,192 and 16,384 tag boundaries and rollback across growth. With
+  makes the index incomplete. A failed initial reservation leaves no slots
+  and requires scope-aware scanning; a complete empty header certifies absence.
+  `c_test_aggregate_lookup_growth` covers untagged and anonymous source controls,
+  both 8,192 and 16,384 tag boundaries and rollback across growth. Identity and
+  unique-search tests also cover first-reservation failure, dirty slot reuse
+  and rollback of the first insertion. With
   `BUSTER_BENCH_ALLOCATIONS=ON`, it also bounds production probes/rehash work
   and requires zero fallback type visits for unique tags;
   `BUSTER_AGGREGATE_CENSUS=1` prints these diagnostic-only counts. Lowering's
   tag type names (`c_ir_type_name_prefix`) ask `c_parse_aggregate_unique`
-  first: an unused slot on a complete index means no row, and a live slot
+  first: a complete empty header or unused slot means no row, and a live slot
   not marked `multiple` is the only row, whatever the reference scope. Only
   duplicated, stale or incomplete keys search the type table (#1467);
   `c_test_aggregate_unique_search` requires zero lowering search rows for

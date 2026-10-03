@@ -8818,6 +8818,8 @@ BUSTER_C_SHARED void c_parse_infer_file_array_bounds(CTypeParseMachine* machine,
     }
 }
 
+#define C_AGGREGATE_LOOKUP_INITIAL_SLOT_COUNT 16384u
+
 // Diagnostic counts stay out of ordinary compilers and timing builds.
 #if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
 #define C_AGGREGATE_LOOKUP_COUNT(lookup, field) do { if (lookup) { (lookup)->field += 1; } } while (0)
@@ -8846,7 +8848,7 @@ BUSTER_C_INTERNAL bool c_parse_aggregate_lookup_grow(CParseResult* result)
     bool grown = false;
     if (lookup->slot_count <= UINT32_MAX / 2)
     {
-        u32 slot_count = lookup->slot_count * 2;
+        u32 slot_count = lookup->slot_count ? lookup->slot_count * 2 : C_AGGREGATE_LOOKUP_INITIAL_SLOT_COUNT;
         u64 size = (u64)slot_count * sizeof(CAggregateLookupSlot);
         if (c_parse_arena_can_allocate(result->arena, size, BUSTER_ALIGN_OF(CAggregateLookupSlot)))
         {
@@ -8878,37 +8880,46 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
     // Qualified aliases carry the tag but never own its identity.
     if (lookup && type->tag.length && !type->has_unqualified_type)
     {
-        CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
-        if (slot->used)
+        // A complete empty header needs no slots until its first tag owner.
+        // Failed initial admission leaves it incomplete, with no slots to probe.
+        if (!lookup->slot_count && !lookup->incomplete)
         {
-            u32 existing = slot->type_index;
-            if (existing < id.value && result->types[existing].kind == type->kind &&
-                !result->types[existing].has_unqualified_type && string_equal(result->types[existing].tag, type->tag))
-            {
-                slot->multiple = true;
-            }
-            else
-            {
-                slot->type_index = id.value;
-            }
+            lookup->incomplete = !c_parse_aggregate_lookup_grow(result);
         }
-        else if (!lookup->incomplete)
+        if (lookup->slot_count)
         {
-            if (lookup->fill >= lookup->slot_count / 2)
+            CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
+            if (slot->used)
             {
-                lookup->incomplete = !c_parse_aggregate_lookup_grow(result);
-                // Growth invalidates the slot pointer, including its empty slot.
-                slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
+                u32 existing = slot->type_index;
+                if (existing < id.value && result->types[existing].kind == type->kind &&
+                    !result->types[existing].has_unqualified_type && string_equal(result->types[existing].tag, type->tag))
+                {
+                    slot->multiple = true;
+                }
+                else
+                {
+                    slot->type_index = id.value;
+                }
             }
-            if (!lookup->incomplete)
+            else if (!lookup->incomplete)
             {
-                lookup->fill += 1;
-                *slot = (CAggregateLookupSlot){
-                    .tag = type->tag,
-                    .kind = (u32)type->kind,
-                    .type_index = id.value,
-                    .used = true,
-                };
+                if (lookup->fill >= lookup->slot_count / 2)
+                {
+                    lookup->incomplete = !c_parse_aggregate_lookup_grow(result);
+                    // Growth invalidates the slot pointer, including its empty slot.
+                    slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
+                }
+                if (!lookup->incomplete)
+                {
+                    lookup->fill += 1;
+                    *slot = (CAggregateLookupSlot){
+                        .tag = type->tag,
+                        .kind = (u32)type->kind,
+                        .type_index = id.value,
+                        .used = true,
+                    };
+                }
             }
         }
     }
@@ -9766,13 +9777,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKi
     if (tag.length)
     {
         CAggregateLookup* lookup = result->aggregate_lookup;
-        bool scan = !lookup;
-        bool scan_by_scope = false;
-        if (lookup)
+        bool scan = !lookup || lookup->incomplete;
+        bool scan_by_scope = lookup && lookup->incomplete;
+        if (lookup && lookup->slot_count)
         {
             CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
-            scan = lookup->incomplete;
-            scan_by_scope = lookup->incomplete;
             if (slot->used)
             {
                 u32 type_index = slot->type_index;
@@ -9851,9 +9860,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_tag_lookup(CParseResult* result, String8 tag, 
 // The only row a (kind, tag) type name can mean, when the aggregate-tag index
 // vouches for it: every unqualified tagged row enters the index as it is
 // added, and a second live one marks its slot `multiple`, so a complete
-// index's unused slot means no row carries the tag and a single live slot
-// row means no other does. `*decided` stays false -- the caller must search
-// -- for duplicate or stale slots and for an incomplete index.
+// index's empty header or unused slot means no row carries the tag and a
+// single live slot row means no other does. `*decided` stays false -- the
+// caller must search -- for duplicate or stale slots and for an incomplete index.
 BUSTER_C_SHARED CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided)
 {
     CTypeId found = C_TYPE_ID_INVALID;
@@ -9861,16 +9870,23 @@ BUSTER_C_SHARED CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind
     *decided = false;
     if (lookup && !lookup->incomplete && tag.length)
     {
-        CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
-        if (!slot->used)
+        if (!lookup->slot_count)
         {
             *decided = true;
         }
-        else if (!slot->multiple && slot->type_index < result->type_count && result->types[slot->type_index].kind == kind &&
-                 !result->types[slot->type_index].has_unqualified_type && string_equal(result->types[slot->type_index].tag, tag))
+        else
         {
-            found = (CTypeId){.value = slot->type_index};
-            *decided = true;
+            CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
+            if (!slot->used)
+            {
+                *decided = true;
+            }
+            else if (!slot->multiple && slot->type_index < result->type_count && result->types[slot->type_index].kind == kind &&
+                     !result->types[slot->type_index].has_unqualified_type && string_equal(result->types[slot->type_index].tag, tag))
+            {
+                found = (CTypeId){.value = slot->type_index};
+                *decided = true;
+            }
         }
     }
     return found;
@@ -27564,15 +27580,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         result.binding_undo_capacity = result.entity_capacity + 1;
         result.binding_undo = arena_allocate(arena, CParseBindingUndo, result.binding_undo_capacity);
     }
-    {
-        u32 aggregate_slot_count = 16384;
-        result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
-        *result.aggregate_lookup = (CAggregateLookup){
-            // Reused arena bytes can be dirty; empty slots must be zeroed.
-            .slots = arena_allocate_zeroed(arena, CAggregateLookupSlot, aggregate_slot_count),
-            .slot_count = aggregate_slot_count,
-        };
-    }
+    // The stable header survives rollback even before the first tag owner.
+    result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
+    *result.aggregate_lookup = (CAggregateLookup){0};
     {
         u32 definition_slot_count = 1024;
         result.definition_index = arena_allocate(arena, CDefinitionIndex, 1);

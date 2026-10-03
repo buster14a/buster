@@ -20,6 +20,7 @@ SCHEMA = "buster-desktop-phases-v1"
 PHASES = {"configure", "build", "validation", "test", "post_test", "self_host", "scheduler", "clean", "census", "evidence"}
 ID = re.compile(r"[A-Za-z0-9_-]+\Z")
 MAX_BYTES = 4 * 1024 * 1024
+RESOURCE_SCHEMA = "buster-process-resources-v1"
 
 
 def require(condition, message):
@@ -62,6 +63,37 @@ def index(items, label):
 
 def task_id(tree, phase, config=""):
     return f"{tree}-{phase}-{config or 'all'}"
+
+
+def validate_resources(resources, platform):
+    require(isinstance(resources, dict) and set(resources) == {"schema", "cpu", "peak_memory"} and
+            resources["schema"] == RESOURCE_SCHEMA, "malformed process resource witness")
+    if platform == "windows":
+        cpu_source, memory_source = "get-process-times", "k32-get-process-memory-info"
+        scope, kind = "process", "peak-working-set"
+    else:
+        require(platform in ("linux", "macos"), "unsupported resource witness platform")
+        cpu_source, memory_source = "wait4", "wait4-ru_maxrss"
+        scope, kind = "process-and-waited-descendants", "largest-individual-high-water"
+    for label, fields, source, unit in (("cpu", ("user", "system"), cpu_source, "microseconds"),
+                                         ("peak_memory", ("value",), memory_source, "bytes")):
+        metric = resources[label]
+        keys = {"status", "source", "scope", "unit", "error", *fields}
+        if label == "peak_memory":
+            keys.add("kind")
+        require(isinstance(metric, dict) and set(metric) == keys, f"malformed resource metric: {label}")
+        require(metric["source"] == source and metric["scope"] == scope and metric["unit"] == unit,
+                f"changed resource source/scope/unit: {label}")
+        if label == "peak_memory":
+            require(metric["kind"] == kind, "changed peak memory kind")
+        require(metric["status"] in ("observed", "unknown", "error", "unsupported"), f"unknown resource status: {label}")
+        require(integer(metric["error"]) and metric["error"] < 2 ** 32 and
+                (metric["error"] > 0) == (metric["status"] == "error"), f"invalid resource error authority: {label}")
+        if metric["status"] == "observed":
+            require(all(integer(metric[field]) and metric[field] < 2 ** 64 for field in fields),
+                    f"invalid observed resource value: {label}")
+        else:
+            require(all(metric[field] == "unknown" for field in fields), f"unmeasured resource must remain unknown: {label}")
 
 
 def row_selected(row, shard):
@@ -235,6 +267,9 @@ def analyze(root, coverage, environment=None):
         require(isinstance(end["argv"], list) and end["argv"] and all(isinstance(a, str) for a in end["argv"]), "missing child command")
         require(not task["argv"] or task["argv"] == end["argv"], f"changed child command: {name}")
         require(end.get("cpu_time") == end.get("peak_rss") == "unknown", "unavailable resources must remain unknown")
+        if "resources" in end:
+            require(task["phase"] != "evidence", "driver callback cannot report child resources")
+            validate_resources(end["resources"], plan["identity"]["platform"])
         if task["dependency"] == "ready":
             ready_path = root / f"{name}.ready.json"
             ready = read(ready_path)

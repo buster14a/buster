@@ -703,6 +703,7 @@ class BootReadinessContinuationTest(unittest.TestCase):
     def invoke(
         self, mode: str, *, continuation: bool = True,
         hosted: bool = True, explicit: bool = False, empty_capture: bool = False,
+        malformed_capture: bool = False,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix="buster-ios-readiness-") as temporary:
             state = Path(temporary)
@@ -713,17 +714,30 @@ class BootReadinessContinuationTest(unittest.TestCase):
             tool.chmod(0o755)
             for name in ("codesign", "xcodebuild", "xcrun"):
                 (fake_bin / name).symlink_to(tool)
-            if empty_capture:
+            if empty_capture or malformed_capture:
                 python = fake_bin / "python3"
                 python.write_text(
                     '#!/usr/bin/env bash\n'
-                    'if [[ ${1:-} == -c && ${2:-} == *"remaining = 65536"* ]]; then\n'
-                    '    path=${@: -1}\n'
-                    '    if [[ $path == *.bootstatus.log ]]; then\n'
-                    '        : >"$path"\n'
-                    '        : >"${path}.capture-status.log"\n'
-                    '        cat >/dev/null\n'
-                    '        exit 0\n'
+                    'set -euo pipefail\n'
+                    'if [[ ${1:-} == */lifecycle_capture.py ]]; then\n'
+                    '    prefix= previous=\n'
+                    '    for argument in "$@"; do\n'
+                    '        if [[ $previous == --prefix ]]; then prefix=$argument; break; fi\n'
+                    '        previous=$argument\n'
+                    '    done\n'
+                    '    if [[ $prefix == *.bootstatus ]]; then\n'
+                    '        if "$BUSTER_BOOT_TEST_REAL_PYTHON" "$@"; then status=0; else status=$?; fi\n'
+                    '        receipt="${prefix}.log.capture-status.log"\n'
+                    '        proof_prefix="$BUSTER_SHUTDOWN_TEST_STATE/${prefix##*/}"\n'
+                    '        [[ -s $receipt ]] || exit 98\n'
+                    '        cp "$receipt" "${proof_prefix}.log.capture-before-fixture.log"\n'
+                    '        if [[ $BUSTER_BOOT_TEST_CAPTURE_FAULT == empty ]]; then\n'
+                    '            : >"$receipt"\n'
+                    '        else\n'
+                    '            printf "%s\\n" "BUSTER_IOS_CAPTURE total_bytes=invalid retained_bytes=0 truncated=0" >"$receipt"\n'
+                    '        fi\n'
+                    '        printf "fault=%s helper_status=%s\\n" "$BUSTER_BOOT_TEST_CAPTURE_FAULT" "$status" >"${proof_prefix}.log.capture-fixture.log"\n'
+                    '        exit "$status"\n'
                     '    fi\n'
                     'fi\n'
                     'exec "$BUSTER_BOOT_TEST_REAL_PYTHON" "$@"\n',
@@ -760,8 +774,9 @@ class BootReadinessContinuationTest(unittest.TestCase):
                 "BUSTER_BOOT_TEST_REPLACEMENT_UDID": REPLACEMENT_TEST_UDID,
                 "BUSTER_BOOT_TEST_MODE": mode,
             })
-            if empty_capture:
+            if empty_capture or malformed_capture:
                 env["BUSTER_BOOT_TEST_REAL_PYTHON"] = shutil.which("python3") or "python3"
+                env["BUSTER_BOOT_TEST_CAPTURE_FAULT"] = "empty" if empty_capture else "malformed"
             if continuation:
                 env["BUSTER_IOS_BOOT_CONTINUATION_SECONDS"] = "1"
             if hosted:
@@ -860,7 +875,48 @@ class BootReadinessContinuationTest(unittest.TestCase):
         self.assertIn("capture_status=0", phase)
         self.assertIn("capture_receipt=incomplete", phase)
         self.assertIn("BUSTER_IOS_CAPTURE incomplete=1 reason=missing-or-empty-receipt", phase)
+        self.assertRegex(
+            result["evidence"]["boot.attempt-1.bootstatus.log.capture-before-fixture.log"],
+            r"\ABUSTER_IOS_CAPTURE total_bytes=[0-9]+ retained_bytes=[0-9]+ truncated=[01]\n\Z",
+        )
+        self.assertEqual(
+            result["evidence"]["boot.attempt-1.bootstatus.log.capture-fixture.log"],
+            "fault=empty helper_status=124\n",
+        )
         self.assertNotIn("simctl install", "\n".join(result["commands"]))
+        self.assertNotIn("simctl launch", "\n".join(result["commands"]))
+
+    def test_capture_receipt_faults_alone_refuse_successful_readiness(self) -> None:
+        for fault in ("empty", "malformed"):
+            with self.subTest(fault=fault):
+                result = self.invoke(
+                    "success", explicit=True, empty_capture=fault == "empty",
+                    malformed_capture=fault == "malformed",
+                )
+                self.assertEqual(result["status"], 1, result["output"])
+                evidence = result["evidence"]
+                phase = evidence["boot.attempt-1.bootstatus.status.log"]
+                self.assertIn("outcome=evidence-failure status=0 native_status=0 capture_status=0", phase)
+                self.assertIn("capture_receipt=incomplete", phase)
+                self.assertIn("helper_status=0 supervisor_valid=1 deadline_reached=0 cleanup_status=0", phase)
+                self.assertIn("capture_eof=1", phase)
+                self.assertRegex(
+                    evidence["boot.attempt-1.bootstatus.log.capture-before-fixture.log"],
+                    r"\ABUSTER_IOS_CAPTURE total_bytes=[0-9]+ retained_bytes=[0-9]+ truncated=[01]\n\Z",
+                )
+                self.assertEqual(
+                    evidence["boot.attempt-1.bootstatus.log.capture-fixture.log"],
+                    f"fault={fault} helper_status=0\n",
+                )
+                receipt = evidence["boot.attempt-1.bootstatus.log.capture-status.log"]
+                if fault == "empty":
+                    self.assertEqual(receipt, "")
+                    self.assertIn("BUSTER_IOS_CAPTURE incomplete=1 reason=missing-or-empty-receipt", phase)
+                else:
+                    self.assertEqual(receipt, "BUSTER_IOS_CAPTURE total_bytes=invalid retained_bytes=0 truncated=0\n")
+                commands = "\n".join(result["commands"])
+                self.assertNotIn("simctl install", commands)
+                self.assertNotIn("simctl launch", commands)
 
 
 if __name__ == "__main__":

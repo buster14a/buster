@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """First-party POSIX controls for lifecycle command and output ownership.
 
-Run directly with Python; no simulator, timeout utility, or compiler is used.
+Run directly with Python; no simulator or compiler is used. The shell gate
+control also exercises the real GNU clock bridge.
 LifecycleCaptureTests executes the supervisor with real pipes and children.
 Escaped fixtures have finite release markers; tests never signal saved PIDs.
 """
@@ -12,6 +13,7 @@ from pathlib import Path
 import re
 import signal
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -344,7 +346,10 @@ class LifecycleCaptureTests(unittest.TestCase):
                  "duplicate-keeper-reap", "duplicate-authority", "missing-ownership",
                  "hidden-native-failure", "unattributed-success", "false-deadline-success",
                  "false-cancel-success",
-                 "wrong-native", "wrong-helper", "missing-capture", "false-eof", "cleanup-failure")
+                 "wrong-native", "wrong-helper", "missing-capture", "false-eof", "cleanup-failure",
+                 "duplicate-version", "coherent-monitor125-success") + tuple("v5-%s-%s" % (fault, key)
+                    for key in ("bridge_generation", "command_monitor_status", "command_authenticated", "caller_lost")
+                    for fault in ("missing", "duplicate", "malformed", "wrong"))
         helper_source = '''import pathlib,sys
 mode=MODE
 prefix=pathlib.Path(sys.argv[sys.argv.index('--prefix')+1])
@@ -357,6 +362,22 @@ named=('BUSTER_IOS_SUPERVISOR version=1 command_status=0 native_status=0 '
        'cleanup_status=%d native_kind=exit launch_error=none capture_eof=1 '
        'native_reaped=1 keeper_reaped=1 group_authority_released=1 '
        'native_launch=1 cancellation_signal=0 helper_error=none\\n')%cleanup
+generation=sys.argv[sys.argv.index('--bridge-generation')+1]
+v5={'bridge_generation':generation,'command_monitor_status':'0','command_authenticated':'1','caller_lost':'0'}
+named=named.strip()+''.join(' %s=%s'%item for item in v5.items())+'\\n'
+if mode.startswith('v5-'):
+ _,fault,key=mode.split('-',2)
+ token=' %s=%s'%(key,v5[key])
+ if fault=='missing': named=named.replace(token,'')
+ elif fault=='duplicate': named=named.strip()+token+'\\n'
+ elif fault=='malformed': named=named.replace(token,' %s=invalid'%key)
+ else:
+  wrong={'bridge_generation':'wrongGEN000','command_monitor_status':'137','command_authenticated':'0','caller_lost':'1'}
+  named=named.replace(token,' %s=%s'%(key,wrong[key]))
+if mode=='duplicate-version': named=named.strip()+' version=1\\n'
+if mode=='coherent-monitor125-success':
+ named=named.replace('command_monitor_status=0','command_monitor_status=125').replace('command_authenticated=1','command_authenticated=0')
+ (prefix.parent/'command-monitor-status').write_text('125\\n')
 if mode=='extra-field': fields=fields.strip()+' extra\\n'
 if mode=='named-mismatch': named=named.replace('command_status=0','command_status=70')
 if mode=='duplicate-key': named=named.strip()+' command_status=70\\n'
@@ -389,11 +410,32 @@ sys.exit(70 if mode=='wrong-helper' else cleanup)
             with self.subTest(mode=mode):
                 state = self.root / ("shell-" + mode)
                 state.mkdir()
-                state.joinpath("lifecycle_capture.py").write_text(helper_source.replace("MODE", repr(mode)))
+                mutation = helper_source.replace("MODE", repr(mode)).rsplit("sys.exit", 1)[0]
+                # Keep real READY/DONE, completion and actual exit custody.
+                # Receipt faults happen inside publication, before terminal
+                # status/EOF, rather than bypassing the new bridge protocol.
+                state.joinpath("lifecycle_capture.py").write_text(
+                    "import importlib.util,pathlib,sys\n"
+                    + "spec=importlib.util.spec_from_file_location('real_capture'," + repr(str(HELPER)) + ")\n"
+                    + "module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)\n"
+                    + "original=module.Supervisor.publish\n"
+                    + "def publish(owner):\n"
+                    + (" owner.facts['cleanup_status']=1\n" if mode == "cleanup-failure" else "")
+                    + " original(owner)\n"
+                    + " for suffix in ('.native-status.log','.log.capture-status.log','.supervisor-fields.log','.supervisor-status.log'):\n"
+                    + "  pathlib.Path(str(owner.prefix)+suffix).unlink(missing_ok=True)\n"
+                    + " exec(" + repr(mutation) + ",{})\n"
+                    + "module.Supervisor.publish=publish\n"
+                    + "result=module.main()\n"
+                    + ("sys.exit(70)\n" if mode == "wrong-helper" else "sys.exit(result)\n"))
+                state.joinpath("lifecycle_capture_bridge.sh").write_bytes(HELPER.with_name("lifecycle_capture_bridge.sh").read_bytes())
+                timeout_tool = shutil.which("timeout") or shutil.which("gtimeout")
+                self.assertIsNotNone(timeout_tool, "GNU timeout is required for shell custody controls")
                 prefix = state / "console"
                 script = state / "phase.sh"
                 script.write_text("#!/usr/bin/env bash\nset -euo pipefail\n"
                     + "monitor_command_timeout_seconds=1\nconsole_log_base=" + shlex.quote(str(prefix)) + "\n"
+                    + "timeout_bin=" + shlex.quote(timeout_tool) + "\n"
                     + "collect_lifecycle_context() { :; }\n" + phase_function
                     + "\nif run_lifecycle_phase diagnostic-control Test " + shlex.quote(str(prefix))
                     + " 1 /usr/bin/true; then exit 0; else exit $?; fi\n")
@@ -408,6 +450,82 @@ sys.exit(70 if mode=='wrong-helper' else cleanup)
                     self.assertIn("outcome=success", status)
                 else:
                     self.assertIn("outcome=evidence-failure", status)
+                if mode.startswith("v5-") or mode in ("duplicate-version", "coherent-monitor125-success"):
+                    self.assertIn("BUSTER_IOS_CALLER_GATE monitor_status=0 admission=1 invocation_status=0", status)
+                    self.assertIn("helper_status=0 supervisor_valid=0", status)
+
+    def test_caller_receipt_requires_unique_typed_coherent_terminal_facts(self):
+        launcher = HELPER.with_name("launch_simulator.sh").read_text()
+        phase = launcher[launcher.index("run_lifecycle_phase() {"):launcher.index("simulator_udid_is_valid() {")]
+        keys = ("version", "generation", "admission", "helper_status", "invocation_status", "command_monitor_status", "reason")
+        compact_keys = ("admission", "helper_status", "invocation_status", "generation", "command_monitor_status", "reason")
+        modes = ("valid", "missing-named", "missing-fields", "extra-fields") \
+            + tuple("named-%s-%s" % (fault, key) for key in keys for fault in ("missing", "duplicate", "malformed")) \
+            + tuple("compact-malformed-" + key for key in compact_keys) \
+            + tuple("coherent-" + key for key in compact_keys)
+        timeout_tool = shutil.which("timeout") or shutil.which("gtimeout")
+        self.assertIsNotNone(timeout_tool)
+        for mode in modes:
+            with self.subTest(mode=mode):
+                state = self.root / ("caller-" + mode)
+                state.mkdir()
+                for name in ("lifecycle_capture.py", "lifecycle_capture_bridge.sh"):
+                    state.joinpath(name).write_bytes(HELPER.with_name(name).read_bytes())
+                marker = state / "fault-applied"
+                wrapper = state / "timeout"
+                wrapper.write_text("#!/usr/bin/env python3\n" + "REAL=" + repr(timeout_tool) + "\n"
+                    + "MODE=" + repr(mode) + "\nMARKER=" + repr(str(marker)) + "\n" + r'''
+import os,pathlib,subprocess,sys
+args=sys.argv[1:]
+if '--bootstrap' in args: os.execv(REAL,[REAL,*args])
+status=subprocess.run([REAL,*args]).returncode
+if status: sys.exit(status if status>=0 else 128-status)
+prefix=pathlib.Path(args[5])
+named_path=pathlib.Path(str(prefix)+'.caller-status.log')
+fields_path=pathlib.Path(str(prefix)+'.caller-fields.log')
+fields=fields_path.read_text().split()
+named=named_path.read_text().strip().split()
+indices={'admission':0,'helper_status':1,'invocation_status':2,'generation':3,'command_monitor_status':4,'reason':5}
+if MODE.startswith('named-'):
+ _,fault,key=MODE.split('-',2)
+ original=next(token for token in named if token.startswith(key+'='))
+ if fault=='missing': named.remove(original)
+ elif fault=='duplicate': named.append(original)
+ else: named[named.index(original)]=key+'=invalid!'
+elif MODE.startswith('compact-malformed-'):
+ key=MODE[len('compact-malformed-'):]
+ fields[indices[key]]='invalid!'
+elif MODE.startswith('coherent-'):
+ key=MODE[len('coherent-'):]
+ wrong={'admission':'0','helper_status':'70','invocation_status':'70','generation':'wrongGEN000','command_monitor_status':'137','reason':'starting'}[key]
+ fields[indices[key]]=wrong
+ original=next(token for token in named if token.startswith(key+'='))
+ named[named.index(original)]=key+'='+wrong
+ if key=='helper_status':
+  fields[2]='70'
+  original=next(token for token in named if token.startswith('invocation_status='))
+  named[named.index(original)]='invocation_status=70'
+named_path.write_text(' '.join(named)+'\n')
+fields_path.write_text(' '.join(fields)+(' extra' if MODE=='extra-fields' else '')+'\n')
+if MODE=='missing-named': named_path.unlink()
+if MODE=='missing-fields': fields_path.unlink()
+pathlib.Path(MARKER).write_text(MODE)
+sys.exit(0)
+''')
+                wrapper.chmod(0o755)
+                prefix = state / "console"
+                script = state / "phase.sh"
+                script.write_text("#!/usr/bin/env bash\nset -euo pipefail\nmonitor_command_timeout_seconds=1\n"
+                    + "timeout_bin=" + shlex.quote(str(wrapper)) + "\nconsole_log_base=" + shlex.quote(str(prefix)) + "\n"
+                    + "collect_lifecycle_context() { :; }\n" + phase
+                    + "\nif run_lifecycle_phase diagnostic-control Test " + shlex.quote(str(prefix))
+                    + " 1 /usr/bin/true; then exit 0; else exit $?; fi\n")
+                result = subprocess.run(["bash", str(script)], capture_output=True, timeout=5)
+                self.assertTrue(marker.exists(), result.stderr.decode(errors="replace"))
+                self.assertEqual(marker.read_text(), mode, "the intended fault must actually reach the real closed receipt")
+                status = Path(str(prefix) + ".diagnostic-control.status.log").read_text()
+                self.assertEqual(result.returncode, 0 if mode == "valid" else 1, result.stderr.decode(errors="replace"))
+                self.assertIn("outcome=success" if mode == "valid" else "outcome=evidence-failure", status)
 
     def tearDown(self):
         # Every signal targets a still-owned direct Popen handle. No receipt PID
