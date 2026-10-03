@@ -177,6 +177,11 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // allocator-visible state.  The shared assembler, not the legacy direct
     // emitter, owns their bytes once the transaction is represented in MIR.
     S8_INITIALIZER("nop"), S8_INITIALIZER("pause"),
+    // Optional bit counts and AVX state cleanup retain the shared assembler's
+    // feature authorization.
+    S8_INITIALIZER("vzeroupper"),
+    S8_INITIALIZER("popcnt"), S8_INITIALIZER("popcntw"), S8_INITIALIZER("popcntl"), S8_INITIALIZER("popcntq"),
+    S8_INITIALIZER("lzcnt"), S8_INITIALIZER("lzcntw"), S8_INITIALIZER("lzcntl"), S8_INITIALIZER("lzcntq"),
     S8_INITIALIZER("mov"), S8_INITIALIZER("movb"), S8_INITIALIZER("movw"), S8_INITIALIZER("movl"), S8_INITIALIZER("movq"), S8_INITIALIZER("movzx"), S8_INITIALIZER("movsx"), S8_INITIALIZER("movzb"), S8_INITIALIZER("movzw"), S8_INITIALIZER("movzl"),
     S8_INITIALIZER("movsxb"), S8_INITIALIZER("movsxw"), S8_INITIALIZER("movsxl"), S8_INITIALIZER("add"), S8_INITIALIZER("addb"), S8_INITIALIZER("addw"), S8_INITIALIZER("addl"), S8_INITIALIZER("addq"), S8_INITIALIZER("sub"), S8_INITIALIZER("subb"),
     S8_INITIALIZER("subw"), S8_INITIALIZER("subl"), S8_INITIALIZER("subq"), S8_INITIALIZER("xor"), S8_INITIALIZER("xorb"), S8_INITIALIZER("xorw"), S8_INITIALIZER("xorl"), S8_INITIALIZER("xorq"), S8_INITIALIZER("or"), S8_INITIALIZER("orb"), S8_INITIALIZER("orw"),
@@ -190,6 +195,9 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // are exactly what a C-level constraint and clobber list already state.
     // It is what a libc's system-call layer is written against.
     S8_INITIALIZER("syscall"),
+    // Byte port I/O names its AL/DX operands through fixed constraints. The
+    // shared assembler validates those architectural registers and owns bytes.
+    S8_INITIALIZER("inb"), S8_INITIALIZER("outb"),
     // The read-modify-write instructions a libc's atomics are written in, the
     // LOCK prefix that makes them atomic, the bit scans its ctz/clz reduce to,
     // and the HLT its abort path ends on. Each writes only its named operands.

@@ -1270,6 +1270,7 @@ struct CParsePromotedMemberWork
 };
 
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);
+BUSTER_C_EXTERN String8 c_semantic_asm_clobber_name(Target target, String8 clobber);
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint);
 
 BUSTER_C_EXTERN void c_parse_index_declarations(CParseResult* result, Arena* arena);
@@ -1360,6 +1361,8 @@ BUSTER_C_EXTERN bool c_semantic_asm_vector_operand(IrType* type);
 BUSTER_C_EXTERN bool c_semantic_asm_x87_operand(IrType* type);
 
 BUSTER_C_EXTERN bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_out);
+
+BUSTER_C_EXTERN u64 c_semantic_asm_register_alternative(String8 text, bool output);
 
 BUSTER_C_EXTERN u64 c_semantic_asm_bound_register(Target target, String8 label);
 

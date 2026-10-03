@@ -21,6 +21,14 @@ fixture as well as compiling both architectures.
 
 ## Machine instruction selection and scheduling
 
+- X86 inline assembly admits `vzeroupper` and `popcnt`/`lzcnt`
+  with unsuffixed and AT&T `w`/`l`/`q` spellings through the shared checked
+  assembler. Template authors retain responsibility for declared clobbers and
+  runtime CPU checks. `machine_test_inline_assembly_counters` pins independent instruction
+  bytes, both frontend forms, all allocators, and Linux/Windows/macOS objects.
+  Rejected neighbours cover byte-width bit counts, mismatched operand widths,
+  and extra operands on `vzeroupper`, with no partial bytes.
+  Matching native hosts execute optional instructions only when supported.
 - System V indirect variadic calls keep the vector-register count in AL
   through the call instruction. The canonical emitter reloads the callee from
   its frame home into caller-saved R10 after argument staging; the MIR allocators
