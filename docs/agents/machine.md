@@ -857,6 +857,18 @@ fixture as well as compiling both architectures.
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
   sequence too (`link_elf_relax_local_dynamic`).
 
+The x86 inline-assembly vocabulary admits zero-operand `rdtsc` and `rdtscp`
+through the shared assembler. `AssemblyEncodeOptions.inline_assembly` supplies
+the existing RDTSCP metadata row's feature token only for that zero-operand
+instruction; standalone and module-level assembly keep target feature gating.
+GNU fixed outputs or explicit clobbers name
+RAX/RDX and, for RDTSCP, RCX; ordinary transaction staging preserves live
+values and captures the declared 32-bit outputs. Memory and flags effects
+remain source-declared. `machine_test_x64_inline_timestamps` checks exact
+instruction bytes, output registers, clobbers and rejected operand forms
+across native targets, frontend forms and allocator modes. Runtime availability
+and ordering of timestamp reads remain the caller's responsibility.
+
 ## Wide integer conversion rounding
 
 - AArch64 i128-to-f32/f64 casts normalize the magnitude as two scalar MIR
@@ -878,6 +890,13 @@ chains them against every pending slot access. No architecture-specific
 scheduler exception is needed. The stack-alias tests explicitly recognize
 incoming reads independently of that metadata; otherwise a missing descriptor
 bit could disappear from both the scheduler and its test oracle.
+
+Windows AArch64 pre-C23 unprototyped calls use the same integer-register
+argument image as variadic calls. Both the machine caller plan and the callee's
+entry capture classify those promoted values with `IR_ABI_USE_VARIADIC_ARGUMENT`,
+but only a real variadic function emits `MACHINE_A64_VA_HOME_WINDOWS` or owns a
+`va_list` save area. Keep those properties separate when changing parameter
+placement.
 
 ## AArch64 large aggregate copies
 

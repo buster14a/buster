@@ -6,16 +6,58 @@ Native completion, real pipe EOF and owned cleanup are separate observations.
 keeper_main handles the private ready/control protocol; it never owns payload
 output. Only the first OUTPUT_LIMIT bytes are retained, while the pipe is drained.
 """
+import os
+import signal
+import sys
+
+CANCEL_SIGNALS = {signal.SIGINT, signal.SIGTERM}
+MAX_DESCRIPTOR = 2147483647
+
+
+def keeper_arguments(arguments):
+    if len(arguments) != 3:
+        raise ValueError("keeper requires exactly two private descriptors")
+    if any(not value.isascii() or not value.isdecimal() or len(value) > 10 for value in arguments[1:]):
+        raise ValueError("keeper descriptors must be decimal integers")
+    ready_fd, control_fd = (int(value) for value in arguments[1:])
+    if (ready_fd < 3 or control_fd < 3 or ready_fd == control_fd
+            or ready_fd > MAX_DESCRIPTOR or control_fd > MAX_DESCRIPTOR):
+        raise ValueError("keeper requires distinct private descriptors")
+    return ready_fd, control_fd
+
+
+def keeper_main(ready_fd, control_fd):
+    # A caught handler resets at argv exec; SIG_IGN would survive exec.
+    signal.signal(signal.SIGTERM, lambda signum, frame: None)
+    signal.signal(signal.SIGINT, lambda signum, frame: None)
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    os.setpgid(0, 0)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, CANCEL_SIGNALS)
+    os.write(ready_fd, ("%d %d\n" % (os.getpid(), os.getpgrp())).encode("ascii"))
+    while os.read(control_fd, 1):
+        pass
+    os.close(control_fd)
+    os.write(ready_fd, b"released\n")
+    os.close(ready_fd)
+    # This dedicated keeper owns no payload or buffered output. Its complete
+    # protocol and descriptor cleanup must lead directly to the real zero exit,
+    # without an interpreter-finalization tail inside the bounded release join.
+    os._exit(0)
+
+
+
+# The private keeper has no owner responsibilities or owner-only imports.
+if __name__ == "__main__" and sys.argv[1:2] == ["--keeper"]:
+    keeper_main(*keeper_arguments(sys.argv[1:]))
+
+
 import argparse
 import errno
 import fcntl
-import os
 from pathlib import Path
 import re
 import select
-import signal
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -23,7 +65,6 @@ OUTPUT_LIMIT = 65536
 READ_QUANTUM = 65536
 KILL_GRACE_NS = 10_000_000_000
 MAX_SECONDS = 9223372036854775807
-CANCEL_SIGNALS = {signal.SIGINT, signal.SIGTERM}
 
 
 class BridgeProtocolError(RuntimeError):
@@ -199,25 +240,6 @@ def atomic_text(path, text):
     finally:
         if os.path.exists(staging):
             os.unlink(staging)
-
-
-def keeper_main(ready_fd, control_fd):
-    # A caught handler resets at argv exec; SIG_IGN would survive exec.
-    signal.signal(signal.SIGTERM, lambda signum, frame: None)
-    signal.signal(signal.SIGINT, lambda signum, frame: None)
-    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-    os.setpgid(0, 0)
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, CANCEL_SIGNALS)
-    os.write(ready_fd, ("%d %d\n" % (os.getpid(), os.getpgrp())).encode("ascii"))
-    while os.read(control_fd, 1):
-        pass
-    os.close(control_fd)
-    os.write(ready_fd, b"released\n")
-    os.close(ready_fd)
-    # This dedicated keeper owns no payload or buffered output. Its complete
-    # protocol and descriptor cleanup must lead directly to the real zero exit,
-    # without an interpreter-finalization tail inside the bounded release join.
-    os._exit(0)
 
 
 class Supervisor:
@@ -698,7 +720,7 @@ class Supervisor:
 def main(argv=None):
     arguments = sys.argv[1:] if argv is None else argv
     if arguments and arguments[0] == "--keeper":
-        result = keeper_main(int(arguments[1]), int(arguments[2]))
+        result = keeper_main(*keeper_arguments(arguments))
     else:
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--prefix", required=True)

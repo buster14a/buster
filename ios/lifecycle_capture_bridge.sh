@@ -42,8 +42,9 @@ observe_stage() {
 observe_stage 1 private-created
 generation=${run##*.}
 private_prefix="$run/${prefix##*/}"
-ipc="$run/ipc"
-mkdir "$ipc" || exit 125
+# Endpoints share the already-private generation directory; no second
+# directory process is needed before monitor/helper startup.
+ipc="$run"
 mkfifo "$ipc/control" "$ipc/ready" "$ipc/completion" "$ipc/lifetime" \
     "$ipc/adjudication" "$ipc/setup" "$ipc/authorize" || exit 125
 observe_stage 2 ipc-created

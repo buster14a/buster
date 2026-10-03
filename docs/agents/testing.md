@@ -236,7 +236,10 @@
   records, including matching helper/invocation statuses. Private fixed-order
   Bash `SECONDS` stages observe setup, monitor launch, interpreter handoff and
   publication without changing either clock or authorizing admission. Builtin
-  path trimming and caller writes remove known external launches; a retained
+  path trimming and caller writes remove known external launches. The seven
+  private IPC endpoints use the same fresh generation directory as the receipts,
+  removing a redundant directory-process launch before monitor/helper startup;
+  the existing clocks and descriptor protocol are unchanged. A retained
   late-start failure does not establish the cause of its post-setup delay or
   a hosted speed improvement. Startup refusal preserves any already observed
   command-monitor deadline even when the caller is then lost.
@@ -244,6 +247,10 @@
   [`-S`](https://docs.python.org/3/using/cmdline.html#cmdoption-S), which disables
   automatic [`site`](https://docs.python.org/3/library/site.html) initialization
   and its customization hooks. Payload arguments and environment are unchanged.
+  The dedicated keeper enters its unchanged ready/control/acknowledgment protocol
+  after importing only `os`, `signal` and `sys`; owner-only imports are skipped.
+  Its two private descriptor arguments are validated before descriptor access.
+  Imported-module and owner entry paths retain their ordinary initialization.
   A finite thirteen-second site hook remains unentered while both roles complete
   and are reaped; separate retained counterfactuals show this is a reachable
   startup delay class, not the established cause of the hosted late-start failure.

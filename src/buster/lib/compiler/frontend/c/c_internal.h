@@ -1026,6 +1026,7 @@ typedef enum CParseExpressionTypeOperation
     C_PARSE_EXPRESSION_TYPE_INDIRECTION,
     C_PARSE_EXPRESSION_TYPE_ADDRESS_OF,
     C_PARSE_EXPRESSION_TYPE_COMPLEX_PART,
+    C_PARSE_EXPRESSION_TYPE_SUBSCRIPT,
 } CParseExpressionTypeOperation;
 
 typedef enum CTypeParseFrameKind
@@ -1063,6 +1064,7 @@ struct CParseExpressionTypeTask
     u32 end;
     u32 split;
     u32 colon;
+    u32 trailing_subscript_plus_one;
     CTypeId left_type;
     CParseExpressionTypeOperation operation;
     u8 state;
