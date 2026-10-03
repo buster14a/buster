@@ -1,5 +1,7 @@
 name: Benchmark service workflow policy
 
+# Exact-source main reuse: docs/ci-benchmark-policy-reuse.md (#2462).
+
 on:
   pull_request:
   push:
@@ -21,6 +23,9 @@ jobs:
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Require CI admission to be enabled
         shell: bash
@@ -34,7 +39,15 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Test benchmark policy reuse
+        run: python3 -B tools/bench_policy_reuse_test.py -v
+      - name: Decide verified queue reuse
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tools/bench_policy_reuse.py decide --receipt "$RUNNER_TEMP/bench-policy-reuse.json"
       - name: Prove exclusive fixed-gateway dispatch
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: |
           python3 -B tools/bench_service/workflow_policy_test.py
           python3 -B tools/bench_service/dispatch_recipe_test.py
@@ -43,14 +56,17 @@ jobs:
           python3 -B tools/bench_service/deploy/verify_github_admission_test.py
           python3 -B tools/bench_service/deploy/verify_github_queue_test.py
       - name: Replay Zen 5 qualification formats
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: |
           python3 -B tools/zen5_host_qualification.py --self-test
           python3 -B tools/zen5_aa_noise.py --self-test
           python3 -B tools/zen5_build_control.py --self-test
           python3 -B tools/zen5_aa_evaluator.py --self-test
       - name: Replay micro-architecture lab formats
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: python3 -B tools/uarch_lab_test.py
       - name: Exercise atomic exclusive admission
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -61,6 +77,7 @@ jobs:
             -o "$RUNNER_TEMP/exclusive-admission-test"
           "$RUNNER_TEMP/exclusive-admission-test"
       - name: Reject contaminated broker account groups before state inspection
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -70,6 +87,7 @@ jobs:
             -o "$RUNNER_TEMP/systemd-broker-group-test"
           "$RUNNER_TEMP/systemd-broker-group-test"
       - name: Build and exercise the static effective-credential gate
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -86,6 +104,7 @@ jobs:
           fi
           "$RUNNER_TEMP/buster-bench-credential-gate" --self-test
       - name: Exercise credential and numeric account receipt rejection
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -97,3 +116,8 @@ jobs:
           "$RUNNER_TEMP/credential_gate_test"
           "$RUNNER_TEMP/credential_gate_elf_test" "$RUNNER_TEMP/buster-bench-credential-gate" "$RUNNER_TEMP/gate-dynamic-negative"
           "$RUNNER_TEMP/systemd_broker_account_test"
+      - name: Verify reused benchmark policy evidence
+        if: ${{ steps.reuse.outputs.reused == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tools/bench_policy_reuse.py finish --receipt "$RUNNER_TEMP/bench-policy-reuse.json"
