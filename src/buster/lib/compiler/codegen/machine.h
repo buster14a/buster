@@ -1551,7 +1551,7 @@ typedef enum MachineEditKind
 } MachineEditKind;
 
 // Result of selecting one canonical typed-IR function into machine IR.
-// `supported` false is an explicit per-function fallback: `failed_opcode`
+// `supported` false is an explicit selection refusal: `failed_opcode`
 // names the first construct outside the selected subset.
 // How the relocation at a call-target site resolves. DIRECT uses the target's
 // default form (rip-relative on x86-64). GOT
@@ -1576,6 +1576,10 @@ typedef struct MachineSelectResult MachineSelectResult;
 struct MachineSelectResult
 {
     MachineFunction function;
+    // Canonical block ID -> selected MIR entry block after expansion/layout.
+    // Null means identity. Owned by the selector arena and valid until the
+    // caller releases that function's scratch, like the selected MIR itself.
+    u32* canonical_block_entries;
     IrOpcode failed_opcode;
     // Rule-specific selector refusal, if present. The caller copies these
     // bytes before releasing the selector's scratch arena.

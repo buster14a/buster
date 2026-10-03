@@ -7833,6 +7833,30 @@ BUSTER_GLOBAL_LOCAL CodegenError codegen_plan_module_capacity(IrProgram* program
     return error;
 }
 
+// Global label initializers name canonical blocks. Encoded offsets instead
+// name MIR blocks, whose IDs change when selection expands rows or emits the
+// canonical entry first. Retain the selector's projection before scratch ends.
+BUSTER_GLOBAL_LOCAL u32* codegen_machine_canonical_block_offsets(Arena* arena, IrFunction* function, MachineSelectResult* selected,
+                                                                 MachineEncodeResult* encoded)
+{
+    u32* offsets = 0;
+    if (encoded->block_offsets && function->block_count <= selected->function.block_count)
+    {
+        offsets = arena_allocate(arena, u32, function->block_count);
+        for (u32 block = 0; block < function->block_count; block += 1)
+        {
+            u32 machine_block = selected->canonical_block_entries ? selected->canonical_block_entries[block] : block;
+            if (machine_block >= selected->function.block_count)
+            {
+                offsets = 0;
+                break;
+            }
+            offsets[block] = encoded->block_offsets[machine_block];
+        }
+    }
+    return offsets;
+}
+
 // One generation of the whole module -- globals, functions and global assembly
 // -- into a code buffer reserved at `capacity_scale` times the flat estimate
 // below. Everything it produces comes out of `arena`, so a caller that does not
@@ -8544,8 +8568,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 machine_function_emitted = true;
                                 if (label_address_relocation_count)
                                 {
-                                    machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
-                                    memcpy(machine_block_offsets, encoded.block_offsets, sizeof(u32) * function->block_count);
+                                    machine_block_offsets = codegen_machine_canonical_block_offsets(machine_scratch.arena, function, &selected, &encoded);
+                                    if (!machine_block_offsets)
+                                    {
+                                        result.error = CODEGEN_ERROR_INVALID_IR;
+                                        scratch_end(machine_scratch);
+                                        return result;
+                                    }
                                 }
                                 machine_stack_frame_size = placement.frame_size;
                                 result.statistics.allocator_reload_count += placement.reload_count;
@@ -8739,8 +8768,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 machine_function_emitted = true;
                                 if (label_address_relocation_count)
                                 {
-                                    machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
-                                    memcpy(machine_block_offsets, encoded.block_offsets, sizeof(u32) * function->block_count);
+                                    machine_block_offsets = codegen_machine_canonical_block_offsets(machine_scratch.arena, function, &selected, &encoded);
+                                    if (!machine_block_offsets)
+                                    {
+                                        result.error = CODEGEN_ERROR_INVALID_IR;
+                                        scratch_end(machine_scratch);
+                                        return result;
+                                    }
                                 }
                                 machine_stack_frame_size = placement.frame_size;
                                 result.statistics.allocator_reload_count += placement.reload_count;

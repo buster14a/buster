@@ -2833,7 +2833,25 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, I
         // Only the register conversions below read this, and only where the
         // operand lookup that fills it succeeded.
         u32 source_register = UINT32_MAX;
-        if (machine_x64_type_is_f80(selector, source_type_id) || machine_x64_type_is_f80(selector, instruction->canonical_type))
+        IrType* identity_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (instruction->conversion_operation == IR_CONVERSION_IDENTITY && source_type_id.value == instruction->canonical_type.value &&
+            identity_type && (identity_type->kind == IR_TYPE_STRUCT || identity_type->kind == IR_TYPE_UNION))
+        {
+            u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
+            u32 target_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+            selected = identity_type->layout.resolved && identity_type->layout.size <= UINT32_MAX &&
+                       source_slot != UINT32_MAX && target_slot != UINT32_MAX;
+            if (selected && identity_type->layout.size)
+            {
+                // Identity preserves the complete aggregate image, including
+                // partial eightbytes and indirect argument tails, in its own home.
+                machine_x64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot), machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                    .payload = (u32)identity_type->layout.size, .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                });
+            }
+        }
+        else if (machine_x64_type_is_f80(selector, source_type_id) || machine_x64_type_is_f80(selector, instruction->canonical_type))
         {
             selected = (source_integer128 || target_integer128)
                            ? machine_x64_select_cast_i128_float(selector, instruction, ir_type_from_id(&program->types, source_type_id),
@@ -9662,6 +9680,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
+    result.canonical_block_entries = selector.block_entries;
     result.supported = true;
     result.selector_certified = true;
     result.returns_value = returns_value;

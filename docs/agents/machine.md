@@ -21,6 +21,17 @@ fixture as well as compiling both architectures.
 
 ## Machine instruction selection and scheduling
 
+- Selection retains a canonical-block-to-MIR-entry projection when expansion
+  or entry-first layout changes block IDs. Module label-address initializers
+  resolve through that projection before selector scratch is released. The
+  expanded-label-table regression executes both destinations after an i128
+  divide in every native allocator mode.
+- Struct/union identity casts retain an independent complete MIR frame image,
+  using the exact resolved type size rather than its first ABI part. The
+  aggregate-comma regression covers three-byte structs, thirteen-byte unions
+  and twenty-four-byte indirect values, preserving tail bytes and expression
+  side effects across every native allocator spelling and frontend form.
+
 - System V indirect variadic calls keep the vector-register count in AL
   through the call instruction. The canonical emitter reloads the callee from
   its frame home into caller-saved R10 after argument staging; the MIR allocators

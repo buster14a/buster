@@ -43,7 +43,8 @@ preprocess + parse
 The per-attempt arena owns global images, descriptors, relocations, code bytes
 and debug arrays. The wrapper owns the ABI and slot-cost caches across attempts;
 the machine path uses a per-function scratch arena. A failed attempt is discarded
-by rewinding the arena. Every retained native allocator spelling uses MIR; `none` aliases MIR_STACK.
+by rewinding the arena. Every retained native allocator spelling uses MIR;
+`none` aliases MIR_STACK.
 A machine failure fails the complete module. The wrapper clears unpublished
 code, data, relocations and debug/unwind tables while preserving diagnostics,
 attempted-work counters and the active failure phase. Moving a boundary must
@@ -52,7 +53,6 @@ keep the machine path's flat iteration and data layout.
 The public native result identifies a failing function, instruction and opcode
 for many backend errors and names the active native owner in
 `CodegenModule.failed_phase`. A successful result reports `CODEGEN_PHASE_NONE`;
-the retained legacy fallback counters stay zero. The
-frontend has no comparable phase error field, and neither side yet reports
+the retained legacy fallback counters stay zero. The frontend has no comparable phase error field, and neither side yet reports
 per-phase time and arena high-water. Those require more explicit boundary
 results rather than inferring success from shared partially mutated arrays.

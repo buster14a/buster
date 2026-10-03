@@ -25420,7 +25420,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                         c_flat_initializer_frontends[frontend_index], c_designator_optimizations[optimization_index],
                         selected_allocator, fixture.diagnostic));
                 BUSTER_TEST(arguments, fixture.codegen_statistics.verified_ir_module_count != 0 &&
-                                       (native_allocator || fixture.codegen_statistics.verified_mir_function_count == 0));
+                                       fixture.codegen_statistics.verified_mir_function_count != 0 &&
+                                       fixture.codegen_statistics.fallback_function_count == 0);
                 if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
                 {
                     String8 fixture_arguments[] = {fixture_path};
@@ -28651,12 +28652,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_float_abi_windows.error == COMPILER_DRIVER_ERROR_NONE);
     if (c_float_abi_windows.error == COMPILER_DRIVER_ERROR_NONE)
     {
-        static u8 const load_indirect_second_part[] = {
-            0x48,
-            0x8b,
-            0x41,
-            0x08,
-        };
         ByteSlice text = c_float_abi_windows.object.sections[OBJECT_SECTION_TEXT].data;
         ByteSlice xdata = c_float_abi_windows.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
         u32 text_function_count = 0;
@@ -28669,7 +28664,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         bool full_body_stack_store_bounds_valid = true;
         bool unwind_matches_frame = true;
         bool unwind_allocation_count_matches = true;
-        bool found_indirect_second_part = false;
         for (u32 relocation_index = 0; relocation_index < c_float_abi_windows.object.relocation_count; relocation_index += 1)
         {
             ObjectRelocation* relocation = c_float_abi_windows.object.relocations + relocation_index;
@@ -28836,14 +28830,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             unwind_matches_frame &= unwind_stack_bytes == prolog_stack_bytes;
             unwind_allocation_count_matches &= unwind_stack_adjust_count == prolog_stack_adjust_count;
         }
-        for (u64 byte_index = 0; byte_index < text.length; byte_index += 1)
-        {
-            if (byte_index + sizeof(load_indirect_second_part) <= text.length &&
-                memcmp(text.pointer + byte_index, load_indirect_second_part, sizeof(load_indirect_second_part)) == 0)
-            {
-                found_indirect_second_part = true;
-            }
-        }
         BUSTER_TEST(arguments, found_call_with_fixed_frame);
         BUSTER_TEST(arguments, found_single_fixed_allocation);
         BUSTER_TEST(arguments, fixed_frame_alignment_valid);
@@ -28856,7 +28842,28 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, c_float_abi_windows.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length != 0);
         BUSTER_TEST(arguments, unwind_matches_frame);
         BUSTER_TEST(arguments, unwind_allocation_count_matches);
-        BUSTER_TEST(arguments, found_indirect_second_part);
+        // An indirect Win64 argument must retain all sixteen bytes. Its
+        // machine copy can use vector moves or any allocated GPR, so inspect
+        // the complete MIR image rather than RCX/RAX instruction bytes.
+        Target indirect_target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+        String8 indirect_source = S8("struct Pair { double first, second; }; double tail(struct Pair value) { return value.second; }");
+        CPreprocessResult indirect_tokens = c_preprocess(arguments->arena, indirect_source,
+            (CPreprocessOptions){.target = indirect_target, .data_layout = target_data_layout(indirect_target)});
+        CParseResult indirect_parsed = c_parse(arguments->arena, indirect_tokens);
+        CIRLowerResult indirect_lowered = c_lower_to_ir(arguments->arena, S8("win64-indirect-pair.c"), indirect_tokens, indirect_parsed, indirect_target);
+        bool indirect_complete = false;
+        if (!indirect_tokens.error_count && !indirect_parsed.diagnostic_count && !indirect_lowered.diagnostic_count &&
+            indirect_lowered.program && indirect_lowered.program->modules->function_count == 1)
+        {
+            MachineSelectResult indirect_selected = machine_select_canonical_function(arguments->arena, indirect_lowered.program,
+                indirect_lowered.program->modules->functions, indirect_target);
+            for (u32 row_index = 0; indirect_selected.supported && row_index < indirect_selected.function.instruction_count; row_index += 1)
+            {
+                MachineInstruction* row = indirect_selected.function.instructions + row_index;
+                indirect_complete |= row->opcode == MACHINE_X64_COPY_FRAME_FROM_PTR && row->payload == 16;
+            }
+        }
+        BUSTER_TEST(arguments, indirect_complete);
     }
     // The machine register allocators on Win64: every mode must select part
     // of the fixture, and the unwind data it writes for those functions must
