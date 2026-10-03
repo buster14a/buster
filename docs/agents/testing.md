@@ -53,6 +53,20 @@
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
+- The Linux x86-64 parameter-alignment driver regression uses a separately
+  host-compiled caller and observer with the Buster-compiled callee at every
+  registered optimization level and allocator. Its expanded caller, callee
+  and header are private fixture inputs under
+  `src/buster/tests/compiler/driver/fixtures/parameter_alignment/`; the frozen
+  `tests/basic_c_parameter_alignment*` corpus stays byte-for-byte unchanged.
+  The existing host observer remains shared because its ABI is unchanged.
+  These files are loaded by the registered driver test, not compiled as test
+  modules. The regression asserts the selected
+  allocator after parsing, verifies every function's intended canonical or
+  machine path without native fallback, and executes aligned
+  parameter reads/writes after integer, vector and combined bank exhaustion.
+  Volatile caller objects independently check that callee writes stay in the
+  callee's by-value copies.
 - Dormant `.bbb` fixtures remain under `tests/` as preservation material. Do
   not register, compile, parse, benchmark, package, or execute them in the
   default build or CI until the custom frontend is deliberately reactivated.
