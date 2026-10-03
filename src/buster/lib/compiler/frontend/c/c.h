@@ -279,6 +279,9 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_INVALID_UTF8,
     C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
     C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+    // A reachable direct call to a function declared with GNU
+    // `__attribute__((error("message")))`.
+    C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
