@@ -7494,24 +7494,35 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_switch(MachineX64Selector* selector,
     if (machine_x64_operand_register(selector, instruction->operands[0], &condition_register) && instruction->target_count &&
         instruction->target_count == instruction->immediate_count + 1 && instruction->immediates)
     {
-        u16 compare_width = 64;
+        u32 value_width = 64;
         if (instruction->operands[0].value < selector->function->value_count)
         {
-            MachineTypeClass condition_class =
-                machine_x64_type_class(selector, selector->function->values[instruction->operands[0].value].canonical_type);
-            // An integer at most 32 bits wide is one the class does not call
-            // wide.
-            if (condition_class.kind == IR_TYPE_BOOLEAN ||
-                (condition_class.kind == IR_TYPE_INTEGER && !(condition_class.flags & MACHINE_TYPE_CLASS_WIDE)))
+            IrType* condition_type = ir_type_from_id(&selector->program->types,
+                                                      selector->function->values[instruction->operands[0].value].canonical_type);
+            if (condition_type && condition_type->kind == IR_TYPE_BOOLEAN)
             {
-                compare_width = 32;
+                value_width = 1;
             }
+            else if (condition_type && condition_type->kind == IR_TYPE_INTEGER && condition_type->bit_width < 64)
+            {
+                value_width = condition_type->bit_width;
+            }
+        }
+        u16 compare_width = value_width <= 32 ? 32 : 64;
+        u64 value_mask = value_width == 64 ? UINT64_MAX : (UINT64_C(1) << value_width) - 1;
+        // SWITCH compares selector-width images, independently of signedness
+        // and of any extension left in a register by its producer.
+        if (value_width < compare_width)
+        {
+            u32 mask_register = machine_x64_select_immediate_register(selector, value_mask);
+            condition_register = machine_x64_select_arithmetic_row(selector, compare_width == 32 ? MACHINE_X64_AND32 : MACHINE_X64_AND64,
+                                                                   condition_register, mask_register);
         }
         u32 first_case = selector->switch_cases.total_count;
         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
         {
             machine_x64_append_switch_case(selector, (MachineSwitchCase){
-                                                         .value = instruction->immediates[case_index],
+                                                         .value = instruction->immediates[case_index] & value_mask,
                                                          .target_block = machine_x64_select_block_entry(selector, instruction->targets[case_index].value),
                                                          .compare_width = compare_width,
                                                      });

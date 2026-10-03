@@ -2,6 +2,24 @@
 
 [Agent instructions](../../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+Generic `__builtin_isfinite`, `__builtin_isinf`, `__builtin_isinf_sign` and
+`__builtin_isnan` retain a wide argument's original floating format. Narrower
+floating arguments keep their existing exact binary64 widening. Their
+infinity operands widen exactly from binary32/binary64, so a finite x87 or
+binary128 argument never becomes infinite through a classifier conversion.
+The explicit `__builtin_isinff` and `__builtin_isnanf` spellings retain their
+float parameter conversion. This preserves the existing comparison semantics;
+it adds no floating-exception guarantee.
+
+`c_test_float_classifier_widths` checks comparison operand types and absence
+of narrowing in both canonical frontend forms on six native layouts.
+`c_test_x87_classifier_runtime` builds values from independent integer images
+and checks both signs of zero, finite values beyond binary64's range, x87
+normal/subnormal boundaries, infinity and quiet NaNs, plus exactly-once
+argument evaluation. Its native allocator/frontend matrix and independent
+GCC/Clang controls run on supported hosted x86-64 platforms; the registered
+coverage itself is not an execution result.
+
 `signbit` reads the original float representation through canonical memory
 operations: bit 31 for binary32, bit 63 for binary64, byte-eight bit 15 for
 x87 and byte-eight bit 63 for binary128. It does not widen or narrow a value

@@ -6289,15 +6289,6 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             }
             destination->sealed = true;
         }
-        u32 value_count = 0;
-        IR_CONSTRUCTION_RECORD(SSA_REMAP_VALUE_ROWS, (u64)count * 3);
-        for (u32 value = 0; value < count; value += 1)
-        {
-            if (value_map[value] != UINT32_MAX)
-            {
-                value_map[value] = value_count++;
-            }
-        }
         // A promoted named local has no surviving LOCAL/LOAD/STORE row. When
         // its sole entry initializer remains an instruction-defined value,
         // retain the local identity on that definition before value IDs are
@@ -6321,11 +6312,20 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                 instruction->canonical_local = local->id;
             }
         }
+        // Resolve named-local provenance before overwriting any old value row.
+        // Dense IDs follow ascending old IDs, so a retained row's destination
+        // cannot exceed its source and cannot overwrite a later source row.
+        u32 value_count = 0;
+        IR_CONSTRUCTION_RECORD(SSA_REMAP_VALUE_ROWS, (u64)count * 2);
         for (u32 value = 0; value < count; value += 1)
         {
-            if (replacements[value] == value && value_map[value] != UINT32_MAX)
+            if (value_map[value] != UINT32_MAX)
             {
-                function->values[value_map[value]] = function->values[value];
+                value_map[value] = value_count++;
+                if (replacements[value] == value)
+                {
+                    function->values[value_map[value]] = function->values[value];
+                }
             }
         }
         for (u32 value = 0; value < count; value += 1)
@@ -16750,6 +16750,23 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_signbit_value(CIntegerIrBuilder* builder, 
     return result;
 }
 
+// Infinity widens exactly into the classifier operand's format. Keep the
+// operand itself in that format so a finite wide value never overflows here.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_classifier_infinity(CIntegerIrBuilder* builder, IrTypeId type_id, bool negative, IrSourceRange source)
+{
+    IrType* type = ir_type_from_id(&builder->program->types, type_id);
+    bool single = type && type->bit_width == 32;
+    u64 bits = single ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+    bits |= negative ? single ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000) : 0;
+    IrValueId result = c_ir_emit_builtin_float_bits(builder, single ? builder->f32_type : builder->f64_type,
+        bits, source, negative ? S8("-INF") : S8("INF"));
+    if (result.value != IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_emit_cast(builder, result, type_id, source);
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CToken token, String8 link_name, IrValueId* arguments, u32 argument_count)
 {
     // `__builtin_huge_val()` is a constant-valued compiler intrinsic.  Keep
@@ -16812,20 +16829,26 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         {
             return IR_VALUE_ID_INVALID;
         }
+        bool single = string_equal(link_name, S8("isnanf")) || string_equal(link_name, S8("isinff"));
+        IrTypeId argument_type = arguments[0].value < builder->function->value_count
+            ? builder->function->values[arguments[0].value].canonical_type : IR_TYPE_ID_INVALID;
+        IrType* argument = ir_type_from_id(&builder->program->types, argument_type);
+        bool wide = argument && argument->kind == IR_TYPE_FLOAT && argument->bit_width > 64;
+        IrTypeId value_type = single ? builder->f32_type : wide ? argument_type : builder->f64_type;
         if (isfinite_builtin)
         {
-            // `isfinite` accepts any real scalar and returns an int.  Compare
-            // in binary64 against both signed infinities; NaN is unordered,
-            // so it fails both comparisons as required.  This avoids a libc
-            // dependency and keeps the result identical for Buster/Clang.
+            // NaN is unordered and fails both comparisons. Generic predicates
+            // retain a wide floating operand's format. Narrower operands keep
+            // the existing exact binary64 widening, and explicit f variants
+            // keep their float parameter conversion.
             IrSourceRange source = c_ir_token_source_range(builder, token);
-            IrValueId value = c_ir_emit_cast(builder, arguments[0], builder->f64_type, source);
+            IrValueId value = c_ir_emit_cast(builder, arguments[0], value_type, source);
             if (value.value == IR_ID_UNDERLYING_INVALID)
             {
                 return IR_VALUE_ID_INVALID;
             }
-            IrValueId positive_infinity = c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0x7ff0000000000000), source, S8("INF"));
-            IrValueId negative_infinity = c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0xfff0000000000000), source, S8("-INF"));
+            IrValueId positive_infinity = c_ir_emit_classifier_infinity(builder, value_type, false, source);
+            IrValueId negative_infinity = c_ir_emit_classifier_infinity(builder, value_type, true, source);
             if (positive_infinity.value == IR_ID_UNDERLYING_INVALID || negative_infinity.value == IR_ID_UNDERLYING_INVALID)
             {
                 return IR_VALUE_ID_INVALID;
@@ -16839,10 +16862,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
             IrValueId finite = c_ir_emit_binary_value(builder, below_positive, above_negative, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
             return finite.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, finite, builder->s32_type, source);
         }
-        bool single = string_equal(link_name, S8("isnanf")) || string_equal(link_name, S8("isinff"));
-        IrTypeId value_type = single ? builder->f32_type : builder->f64_type;
         IrType* type = ir_type_from_id(&builder->program->types, value_type);
-        if (!type || type->kind != IR_TYPE_FLOAT || type->bit_width > 64)
+        if (!type || type->kind != IR_TYPE_FLOAT)
         {
             return IR_VALUE_ID_INVALID;
         }
@@ -16857,10 +16878,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
             IrValueId result = c_ir_emit_binary_value(builder, value, value, builder->bool_type, IR_BINARY_FLOAT_NOT_EQUAL, source);
             return result.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, result, builder->s32_type, source);
         }
-        u64 positive_bits = type->bit_width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
-        u64 negative_bits = type->bit_width == 32 ? UINT64_C(0xff800000) : UINT64_C(0xfff0000000000000);
-        IrValueId positive_infinity = c_ir_emit_builtin_float_bits(builder, value_type, positive_bits, source, S8("INF"));
-        IrValueId negative_infinity = c_ir_emit_builtin_float_bits(builder, value_type, negative_bits, source, S8("-INF"));
+        IrValueId positive_infinity = c_ir_emit_classifier_infinity(builder, value_type, false, source);
+        IrValueId negative_infinity = c_ir_emit_classifier_infinity(builder, value_type, true, source);
         if (positive_infinity.value == IR_ID_UNDERLYING_INVALID || negative_infinity.value == IR_ID_UNDERLYING_INVALID)
         {
             return IR_VALUE_ID_INVALID;

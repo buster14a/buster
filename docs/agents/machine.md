@@ -4,6 +4,13 @@
 
 The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+`machine_x64_select_switch`, `machine_a64_select_switch` and the direct
+canonical emitters compare matching selector-width bit images. Mask raw keys
+and any excess register bits at that boundary, while leaving the caller's
+immediates and targets unchanged. Signedness does not change SWITCH equality.
+The registered raw-ARGUMENT controls and the exact contract are described in
+[IR validation boundaries](../ir-validation-boundaries.md#switch-case-images).
+
 Canonical fallback identity casts of structs and unions copy the complete
 resolved layout between value frame homes on x86-64 and AArch64. The frontend
 keeps these casts on aggregate comma results to preserve their non-lvalue

@@ -5328,8 +5328,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* pr
 }
 
 // A block's parameters against its predecessors: one incoming value per
-// predecessor, in the same order, at the parameter's type.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* function, IrBlock* block)
+// predecessor, in the same order, at the parameter's type. Empty function
+// metadata makes the subsequent provenance calculation vacuous; the incoming
+// list's exact tail remains part of the structural checks before that choice.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* function, IrBlock* block, bool validate_label_provenance)
 {
     IrValidationResult result = ir_validation_ok();
     if (function->published_cfg)
@@ -5349,9 +5351,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* 
                 IrValueId value = ir_label_incoming_value(&incoming, predecessor);
                 valid = value.value < function->value_count && function->values[value.value].canonical_type.value == parameter->canonical_type.value;
             }
-            IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETER_PROVENANCE_CHECKS, valid);
-            if (valid)
+            if (valid && validate_label_provenance)
             {
+                IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETER_PROVENANCE_CHECKS, 1);
                 valid = ir_label_parameter_provenance_values_valid(function, parameter->value, &incoming);
             }
             if (!valid)
@@ -5373,6 +5375,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* 
             else
             {
                 IrIncoming* incoming = parameter->first_incoming;
+                IrIncoming* last_incoming = 0;
                 IrPredecessor* predecessor = block->first_predecessor;
                 for (u32 index = 0; index < parameter->incoming_count && result.error == IR_VALIDATION_NONE; index += 1)
                 {
@@ -5384,15 +5387,22 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* 
                     }
                     else
                     {
+                        last_incoming = incoming;
                         incoming = incoming->next;
                         predecessor = predecessor->next;
                     }
                 }
-                IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETER_PROVENANCE_CHECKS,
-                                       result.error == IR_VALIDATION_NONE && !incoming && !predecessor);
-                if (result.error == IR_VALIDATION_NONE && (incoming || predecessor || !ir_label_block_parameter_provenance_valid(function, parameter)))
+                if (result.error == IR_VALIDATION_NONE && (incoming || predecessor || last_incoming != parameter->last_incoming))
                 {
                     result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+                }
+                if (result.error == IR_VALIDATION_NONE && validate_label_provenance)
+                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_PARAMETER_PROVENANCE_CHECKS, 1);
+                    if (!ir_label_block_parameter_provenance_valid(function, parameter))
+                    {
+                        result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+                    }
                 }
             }
         }
@@ -6168,6 +6178,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram*
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_blocks(IrProgram* program, IrFunction* function, IrType* signature)
 {
     IrValidationResult result = ir_validation_ok();
+    bool validate_label_provenance = function->label_metadata_count != 0;
     for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
     {
         IR_CONSTRUCTION_RECORD(VALIDATION_BLOCKS, 1);
@@ -6179,7 +6190,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_blocks(IrProgram* pr
         }
         else
         {
-            result = ir_validate_block_parameters(function, block);
+            result = ir_validate_block_parameters(function, block, validate_label_provenance);
             if (result.error == IR_VALIDATION_NONE)
             {
                 result = ir_validate_block_instructions(program, function, signature, block);
