@@ -71,6 +71,10 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   python3 -B tools/uarch_lab_test.py
   ```
 
+  Its `compare` mode is the A/B benchmark for a compiler change; see
+  [Benchmarking a compiler change (A/B)](#benchmarking-a-compiler-change-ab).
+  Both modes also write `summary.json`, the machine-readable result.
+
   Contracts learned on the first Zen 5 run (perf 7.2.4):
   - Wall time is the harness's monotonic span around each `perf stat` child
     (`timed/runs.json`, or `commands.log` for older directories), reported
@@ -528,6 +532,98 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   same process. Confirm the extracted return addresses too — each one must
   disassemble to the instruction immediately after a `call` to the callee the
   callchain names (`objdump -d --start-address=... --stop-address=...`).
+
+## Benchmarking a compiler change (A/B)
+
+`tools/uarch_lab.py compare` answers "did this change make the stage-1
+self-host compile faster or slower, and why" with one verdict line, a report
+for people and a JSON summary for agents. The reference numbers for the
+dedicated Zen 5 host are in the
+[baseline audit](../performance-audits/2026-10-03T100722Z.md) (stage-1 compile
+about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
+
+1. Build both Release compilers and freeze them. Two worktrees are separate
+   build roots, so keep the provenance rules above in mind: for an effect near
+   the noise, also compare the base built in each root (an A/A cross-root
+   control), or build both revisions serially in one checkout.
+
+   ```sh
+   git worktree add ../ab-base "$(git merge-base origin/main HEAD)"
+   (cd ../ab-base && ./build.sh generate && ./build.sh build --config Release -t ide)
+   ./build.sh build --config Release -t ide
+   cp ../ab-base/build/Release/ide /tmp/ide-base && cp build/Release/ide /tmp/ide-cand
+   ```
+
+2. Compare them on one frozen, configured source tree (it needs
+   `build/generated`; do not edit or rebuild it during the run):
+
+   ```sh
+   python3 tools/uarch_lab.py compare --baseline /tmp/ide-base --candidate /tmp/ide-cand \
+       --repo-root ../ab-base --cpu 2 --output /tmp/ab [--target-minutes 15 | --pairs N] \
+       [--profile-steps topdown,sampling] [--sudo] [--require-identical-output]
+   python3 tools/uarch_lab.py report /tmp/ab     # re-render report.md and summary.json
+   ```
+
+   Each binary is probed for `-fsource-metrics`/`-fmetrics-out`, warmed up and
+   checked for byte-identical output across its own runs; whether A and B
+   outputs match is reported (`--require-identical-output` stops before timing
+   when they differ, for pure refactors). Runs alternate in ABBA blocks; the
+   pair count is `--pairs` or is fixed once after a 2-pair pilot so the whole
+   comparison fits `--target-minutes` (profile steps included). Profile steps
+   are off by default.
+3. Read the first line of `report.md` or `verdict` in `summary.json`:
+   - `faster`/`slower`: the 95% CI of wall-time B/A excludes 1.0. The ratio is
+     the median of per-pair ratios; its CI comes from sign-test order
+     statistics (exact and distribution-free; it assumes only independent
+     pairs and needs at least 6). A seeded bootstrap CI of the geometric mean
+     is the cross-check; a disagreement is a warning that the effect sits at
+     the edge of detectability.
+   - `no detectable difference`: the CI includes 1.0; `bound_percent` says how
+     large a change the run could have missed. It is not proof of equality.
+     More pairs (or a quieter host) narrow it.
+   - `inconclusive`: fewer than 6 complete pairs.
+
+   Only wall time (the harness span) decides. Instructions, cycles, IPC,
+   branch MPKI, faults and per-phase times explain the change; a proxy
+   change without a wall-time change is reported as a warning, never as a win.
+   Treat `warnings` as part of the result: an order effect (AB and BA pairs
+   disagree), drift (first and second half disagree), nondeterministic
+   output, failed runs or a task-clock/wall disagreement each need a look
+   before the verdict is used. With `--profile-steps`, the top-down table and
+   the per-symbol share movers show where the time moved; a mover inside its
+   sampling-noise bound is not evidence.
+4. Record a result worth keeping with `tools/new_audit.py "..."`, quoting the
+   verdict line, both binary sha256s, the command, the pair count and seed,
+   and the host state.
+
+`summary.json` keys (golden-tested in `tools/uarch_lab_test.py`; a change of
+meaning or a removal bumps the schema id):
+
+- `buster-uarch-lab-compare-v1`: `schema`, `directory`, `command`,
+  `repo_root`, `cpu`, `host`, `baseline`/`candidate` (`path`, `sha256`,
+  `size_bytes`, `runs`, `failed`, `identical_runs`, `deterministic`,
+  `metrics_out`, `source_metrics`), `outputs_identical`, `plan` (`pairs`,
+  `reason`, `order`, `seed`, `confidence`, `bootstrap_resamples`,
+  `complete_pairs`), `method`, `verdict` (`metric`, `outcome`, `ratio`,
+  `ci_low`, `ci_high`, `ci_coverage`, `change_percent`, `bound_percent`, `n`,
+  `explanation`, `text`), `metrics` and `phases` (per name: `unit`,
+  `direction`, `n`, `a_median`, `b_median`, `a_min`, `b_min`, `a_mad`,
+  `b_mad`, `delta`, `ratio`, `ci_low`, `ci_high`, `ci_coverage`,
+  `geomean_ratio`, `bootstrap_ci_low`, `bootstrap_ci_high`,
+  `ratio_of_medians`, `min_ratio`, `change_percent`, `outcome`; metrics also
+  carry `label`), `checks` (`order_effect`, `drift`), `profile`, `steps`,
+  `warnings`. Metric names: `wall`, `task_clock`, `compiler_wall`,
+  `instructions`, `cycles`, `ipc`, `branch_misses`, `branch_mpki`,
+  `page_faults`, `minor_faults`, `major_faults`; phases are the
+  `-fmetrics-out` phases plus `total` (ms), or null.
+- `buster-uarch-lab-run-v1`: `schema`, `directory`, `command`, `cpu`, `ide`
+  (`path`, `sha256`), `host`, `capabilities`, `steps` (`status`, `problems`),
+  `timed` (`runs`, `failed`, `identical`, `plan`, `metrics` with the metric
+  names above, each `n`, `min`, `p10`, `median`, `p90`, `max`, `mean`, `mad`,
+  `unit`, `label`), `phases` (`median_ms`, `share`), `work`, `topdown`
+  (`group`, `metric`, `value`, `unit`, `source`),
+  `dominant_topdown_category`, `hot_symbols` (per capture: `symbol`,
+  `share`), `findings`.
 
 ## Performance audit notes
 

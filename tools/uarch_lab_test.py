@@ -2,7 +2,10 @@
 """Offline regressions for tools/uarch_lab.py: every parser on recorded perf
 and compiler output shapes, the statistics, phase attribution, and one full
 `run` against a fake `perf` and a fake `ide` so each step's code path executes
-without a PMU.  Run: python3 -B tools/uarch_lab_test.py
+without a PMU; for `compare`, the sign-test and bootstrap statistics on
+synthetic paired data, ABBA order, verdict logic, golden summary.json keys and
+end-to-end runs against a second fake `ide-b`.
+Run: python3 -B tools/uarch_lab_test.py
 """
 
 import json
@@ -315,8 +318,9 @@ class TimelineTests(unittest.TestCase):
 
 
 FAKE_IDE = r'''#!/usr/bin/env python3
-import sys
+import sys, time
 args = sys.argv[1:]
+time.sleep(globals().get("DELAY", 0.0))
 if args[:1] == ["bench"]:
     print("BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=30 bytes=21042 min_ns=3359552 median_ns=3983033")
     sys.exit(0)
@@ -329,7 +333,7 @@ for arg in args:
             sys.stderr.write("cc: error: unknown argument\n")
             sys.exit(1)
         open(arg.split("=", 1)[1], "w").write(METRICS)
-open(out, "wb").write(b"\x7fELF same bytes")
+open(out, "wb").write(globals().get("OUTPUT", b"\x7fELF same bytes"))
 '''
 
 FAKE_PERF = r'''#!/usr/bin/env python3
@@ -346,6 +350,9 @@ def sort():
         if arg == "--sort":
             return args[index + 1]
     return None
+# The compare fixtures name the candidate fake `ide-b`: fewer instructions,
+# a shifted cycles profile.
+CANDIDATE = "ide-b" in " ".join(args)
 SPLIT = {"frontend_bound": 22.25, "bad_speculation": 7.5, "backend_bound": 40.125, "retiring": 30.125}
 command = args[0]
 if command == "--version":
@@ -369,6 +376,8 @@ elif command == "stat":
             text = TOPDOWN_JSON if "-j" in args else TOPDOWN
     elif "-I" in args:
         text = INTERVAL
+    elif CANDIDATE:
+        text = text.replace("16934571004", "16595879584")
     if option("-o"):
         open(option("-o"), "w").write(text)
     sys.exit(status)
@@ -378,10 +387,12 @@ elif command == "record":
         sys.stderr.write("The dTLB-load-misses event is not supported.\n")
         sys.exit(255)
     status = child()
-    open(option("-o"), "w").write(event)
+    open(option("-o"), "w").write(event + ("|b" if CANDIDATE else ""))
     sys.exit(status)
 elif command == "report":
-    event = open(option("-i")).read()
+    event, _, variant = open(option("-i")).read().partition("|")
+    if variant:
+        SELF = SELF.replace("4.32%  [.] ir_validate", "2.32%  [.] ir_validate")
     if sort() == "pid,dso":
         print(TASKS)
     elif "--tid" in args:
@@ -483,6 +494,18 @@ class FlowTests(Fakes, unittest.TestCase):
         self.assertIn("BENCH_C_FRONTEND", report)
         rerendered = lab.render_report(output)
         self.assertEqual(rerendered, report)
+        with open(os.path.join(output, "summary.json")) as handle:
+            summary = json.load(handle)
+        self.assertEqual(summary["schema"], lab.RUN_SCHEMA)
+        self.assertEqual(set(summary), RUN_SUMMARY_KEYS)
+        self.assertEqual(set(summary["timed"]["metrics"]), set(COMPARE_METRIC_NAMES))
+        self.assertEqual(summary["timed"]["metrics"]["instructions"]["median"], 16934571004)
+        self.assertEqual(set(summary["timed"]["metrics"]["wall"]), set(lab.SUMMARY_KEYS) | {"unit", "label"})
+        self.assertEqual(summary["phases"]["analysis"]["median_ms"], 30.0)
+        self.assertEqual(summary["dominant_topdown_category"], {"category": "backend_bound", "percent": 40.125})
+        self.assertEqual(summary["hot_symbols"]["cycles"][0], {"symbol": "ir_validate_canonical_function", "share": 4.32})
+        self.assertEqual(summary["steps"]["timed"]["status"], "ok")
+        self.assertEqual(summary["work"]["translated_bytes"], 33560496)
 
     def test_ibs_step(self):
         root, ide, perf = self.fakes("new")
@@ -770,6 +793,227 @@ class Lab2ReviewTests(unittest.TestCase):
         summary = lab.fault_summary(REUSED_FAULT_SCRIPT, buckets=2)
         self.assertEqual(dict(summary["regions"])[lab.TRANSIENT_FILES], 2)
         self.assertNotIn("driver_diagnostic", " ".join(label for label, _ in summary["regions"]))
+
+
+# Golden keys of the machine-readable summaries; a change here is a schema
+# change and needs a new schema id (RUN_SCHEMA / COMPARE_SCHEMA).
+RUN_SUMMARY_KEYS = {"schema", "directory", "command", "cpu", "ide", "host", "capabilities", "steps", "timed", "phases", "work",
+                    "topdown", "dominant_topdown_category", "hot_symbols", "findings"}
+COMPARE_SUMMARY_KEYS = {"schema", "directory", "command", "repo_root", "cpu", "host", "baseline", "candidate", "outputs_identical",
+                        "plan", "method", "verdict", "metrics", "phases", "checks", "profile", "steps", "warnings"}
+COMPARE_METRIC_KEYS = {"unit", "direction", "label", "n", "a_median", "b_median", "a_min", "b_min", "a_mad", "b_mad", "delta", "ratio",
+                       "ci_low", "ci_high", "ci_coverage", "geomean_ratio", "bootstrap_ci_low", "bootstrap_ci_high",
+                       "ratio_of_medians", "min_ratio", "change_percent", "outcome"}
+VARIANT_KEYS = {"path", "sha256", "size_bytes", "runs", "failed", "identical_runs", "deterministic", "metrics_out", "source_metrics"}
+VERDICT_KEYS = {"metric", "outcome", "ratio", "ci_low", "ci_high", "ci_coverage", "change_percent", "bound_percent", "n",
+                "explanation", "text"}
+COMPARE_METRIC_NAMES = ["wall", "task_clock", "compiler_wall", "instructions", "cycles", "ipc", "branch_misses", "branch_mpki",
+                        "page_faults", "minor_faults", "major_faults"]
+
+
+def paired_sample(count, ratio, seed, noise=0.002):
+    """Synthetic paired wall times: B = A x ratio with independent noise."""
+    generator = lab.random.Random(seed)
+    pairs = []
+    for _ in range(count):
+        base = 1.55 * (1.0 + generator.gauss(0.0, noise))
+        pairs.append((base * (1.0 + generator.gauss(0.0, noise)), base * ratio * (1.0 + generator.gauss(0.0, noise))))
+    return pairs
+
+
+class CompareStatisticsTests(unittest.TestCase):
+    def test_sign_test_ranks_match_binomial_tables(self):
+        self.assertEqual(lab.sign_test_rank(5), (0, None))
+        self.assertEqual(lab.sign_test_rank(6), (1, 1 - 2 / 64))
+        self.assertEqual(lab.sign_test_rank(10)[0], 2)
+        self.assertAlmostEqual(lab.sign_test_rank(10)[1], 1 - 22 / 1024)
+        self.assertEqual(lab.sign_test_rank(20)[0], 6)
+        self.assertEqual(lab.sign_test_rank(100)[0], 40)
+        self.assertGreaterEqual(lab.sign_test_rank(1000)[1], 0.95)
+        self.assertEqual(lab.median_ci(list(range(10, 0, -1))), (2, 9, lab.sign_test_rank(10)[1]))
+        self.assertEqual(lab.median_ci([1, 2, 3]), (None, None, None))
+
+    def test_ci_brackets_a_known_ratio(self):
+        result = lab.compare_series(paired_sample(40, 0.99, 7), "s", "lower", 1, time_metric=True)
+        self.assertEqual(result["n"], 40)
+        self.assertLess(result["ci_low"], 0.99)
+        self.assertGreater(result["ci_high"], 0.99)
+        self.assertLess(result["ci_high"], 1.0)
+        self.assertEqual(result["outcome"], "faster")
+        self.assertAlmostEqual(result["ratio"], 0.99, places=2)
+        self.assertLess(result["bootstrap_ci_low"], result["geomean_ratio"])
+        self.assertGreater(result["bootstrap_ci_high"], result["geomean_ratio"])
+        self.assertEqual(set(result) | {"label"}, COMPARE_METRIC_KEYS)
+
+    def test_ci_coverage_on_synthetic_data(self):
+        covered = 0
+        for trial in range(300):
+            low, high, _ = lab.median_ci([b / a for a, b in paired_sample(20, 1.0, 1000 + trial)])
+            covered += low <= 1.0 <= high
+        self.assertGreaterEqual(covered / 300, 0.93)
+
+    def test_seeded_bootstrap_is_deterministic(self):
+        ratios = [b / a for a, b in paired_sample(30, 1.01, 3)]
+        self.assertEqual(lab.bootstrap_geomean_ci(ratios, 5), lab.bootstrap_geomean_ci(ratios, 5))
+        self.assertNotEqual(lab.bootstrap_geomean_ci(ratios, 5), lab.bootstrap_geomean_ci(ratios, 6))
+        self.assertEqual(lab.bootstrap_geomean_ci([1.0], 5), (None, None))
+
+    def test_deterministic_counts_and_zero_values(self):
+        exact = lab.compare_series([(22287659805, 21841906609)] * 8, "count", "lower", 1)
+        self.assertAlmostEqual(exact["ratio"], 0.98, places=6)
+        self.assertEqual((exact["ci_low"], exact["ci_high"]), (exact["ratio"], exact["ratio"]))
+        self.assertEqual(exact["outcome"], "lower")
+        zero = lab.compare_series([(0, 0)] * 8, "count", "lower", 1)
+        self.assertEqual((zero["outcome"], zero["ratio"], zero["delta"]), ("no ratio (a zero value)", None, 0))
+        self.assertEqual(lab.compare_series([(None, 1.0)], "s", "lower", 1)["outcome"], "no data")
+
+    def test_verdict_logic(self):
+        self.assertEqual(lab.classify(0.98, 1.01, True), "no detectable difference")
+        self.assertEqual(lab.classify(0.97, 0.99, True), "faster")
+        self.assertEqual(lab.classify(1.01, 1.02, True), "slower")
+        self.assertEqual(lab.classify(1.01, 1.02), "higher")
+        self.assertEqual(lab.classify(None, None, True), "inconclusive")
+        metrics = {name: lab.compare_series(paired_sample(30, 1.0, 11), "s", "lower", 1, time_metric=True) for name in COMPARE_METRIC_NAMES}
+        verdict = lab.compare_verdict(metrics, None)
+        self.assertEqual(verdict["outcome"], "no detectable difference")
+        self.assertIn("includes 1.0", verdict["text"])
+        self.assertEqual(set(verdict), VERDICT_KEYS)
+        metrics["wall"] = lab.compare_series(paired_sample(4, 0.9, 1), "s", "lower", 1, time_metric=True)
+        self.assertEqual(lab.compare_verdict(metrics, None)["outcome"], "inconclusive")
+        metrics["wall"] = lab.compare_series(paired_sample(30, 0.95, 1), "s", "lower", 1, time_metric=True)
+        self.assertTrue(lab.compare_verdict(metrics, None)["text"].startswith("Candidate is FASTER: wall time B/A 0.9499 (-5.01%), 95% CI [0.9481, 0.9516] over 30 pairs."))
+
+    def test_proxy_alone_is_not_a_win(self):
+        metrics = {name: lab.compare_series(paired_sample(30, 1.0, 11), "s", "lower", 1, time_metric=True) for name in COMPARE_METRIC_NAMES}
+        metrics["instructions"] = lab.compare_series([(100.0, 97.0)] * 30, "count", "lower", 1)
+        variants = {role: dict.fromkeys(VARIANT_KEYS, 0) | {"deterministic": True, "metrics_out": True} for role in ("baseline", "candidate")}
+        warnings = lab.compare_warnings(variants, True, metrics, {}, {"config": {"cpu": 2}, "steps": {}})
+        self.assertEqual(warnings, ["instructions changed -3.00% but wall time shows no detectable difference: a proxy is not a win"])
+
+    def test_abba_schedule_and_pair_count(self):
+        self.assertEqual(lab.abba_schedule(4), [(1, "a"), (1, "b"), (2, "b"), (2, "a"), (3, "a"), (3, "b"), (4, "b"), (4, "a")])
+        count, reason = lab.choose_pair_count(3.2, 1.6, 20.0, 15.0, 0)
+        self.assertEqual(count % 2, 0)
+        self.assertEqual(count, 2 + int((900 - 20) / 3.2) + (2 + int((900 - 20) / 3.2)) % 2)
+        self.assertIn("3.200 s per pair", reason)
+        self.assertEqual(lab.choose_pair_count(3.2, 1.6, 20.0, 0.01, 0)[0], lab.MIN_PAIRS)
+        self.assertEqual(lab.compare_profile_cost(["g1", "g2"], ["topdown", "sampling"]),
+                         2 * (2 * lab.TOPDOWN_COMPILES_PER_GROUP + len(lab.SAMPLE_EVENTS) + 1))
+
+    def test_order_effect_and_drift_checks(self):
+        def pairs(values):
+            return [{"pair": index + 1, "order": lab.abba_order(index + 1), "metrics_a": {"wall": a}, "metrics_b": {"wall": b}}
+                    for index, (a, b) in enumerate(values)]
+        clean = lab.compare_checks(pairs(paired_sample(40, 1.0, 21)))
+        self.assertFalse(clean["order_effect"]["flag"])
+        self.assertFalse(clean["drift"]["flag"])
+        self.assertEqual(len(clean["drift"]["tenth_medians_ratio"]), 10)
+        # The second run of each pair 2% faster: AB ratios ~0.98, BA ~1.02.
+        positional = [(a, b * (0.98 if lab.abba_order(index + 1) == "AB" else 1.02)) for index, (a, b) in enumerate(paired_sample(40, 1.0, 22))]
+        checks = lab.compare_checks(pairs(positional))
+        self.assertTrue(checks["order_effect"]["flag"])
+        self.assertAlmostEqual(checks["order_effect"]["second_position_factor"], 0.98, places=2)
+        drifting = [(a, b * (1.0 + 0.002 * index)) for index, (a, b) in enumerate(paired_sample(40, 1.0, 23))]
+        self.assertTrue(lab.compare_checks(pairs(drifting))["drift"]["flag"])
+        self.assertFalse(lab.compare_checks(pairs(paired_sample(6, 1.0, 1)))["drift"]["checked"])
+
+    def test_symbol_movers(self):
+        movers = lab.symbol_movers(REPORT_SELF, REPORT_SELF.replace("4.32%  [.] ir_validate", "2.32%  [.] ir_validate"))
+        self.assertEqual(movers["a_event_count"], 5074350792)
+        top = movers["movers"][0]
+        self.assertEqual((top["symbol"], round(top["delta_share"], 6)), ("ir_validate_canonical_function", -2.0))
+        self.assertAlmostEqual(top["delta_estimate"], -0.02 * 5074350792)
+        self.assertEqual(movers["movers"][1]["delta_share"], 0.0)
+
+
+@unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
+class CompareFlowTests(Fakes, unittest.TestCase):
+    def compare(self, arguments, candidate=None):
+        root, ide, perf = self.fakes("new")
+        other = os.path.join(root, "ide-b")
+        write_script(other, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new"}, **(candidate or {})))
+        output = os.path.join(root, "cmp")
+        stdout = sys.stdout
+        try:
+            sys.stdout = open(os.devnull, "w")
+            lab.main(["compare", "--baseline", ide, "--candidate", other, "--repo-root", root, "--cpu", "-1", "--output", output,
+                      "--perf", perf] + arguments)
+        finally:
+            sys.stdout.close()
+            sys.stdout = stdout
+        with open(os.path.join(output, "summary.json")) as handle:
+            summary = json.load(handle)
+        with open(os.path.join(output, "report.md")) as handle:
+            return summary, handle.read(), output
+
+    def test_slower_candidate_end_to_end(self):
+        summary, report, output = self.compare(
+            ["--pairs", "6", "--profile-steps", "topdown,sampling"],
+            {"DELAY": 0.25, "OUTPUT": b"\x7fELF other bytes", "METRICS": CC_METRICS.replace("analysis_ns=30000000", "analysis_ns=25000000")})
+        self.assertEqual(summary["schema"], lab.COMPARE_SCHEMA)
+        self.assertEqual(set(summary), COMPARE_SUMMARY_KEYS)
+        self.assertEqual(set(summary["metrics"]), set(COMPARE_METRIC_NAMES))
+        for row in summary["metrics"].values():
+            self.assertEqual(set(row), COMPARE_METRIC_KEYS)
+        self.assertEqual(set(summary["baseline"]), VARIANT_KEYS)
+        self.assertEqual(set(summary["verdict"]), VERDICT_KEYS)
+        self.assertEqual(summary["plan"]["pairs"], 6)
+        self.assertEqual(summary["plan"]["complete_pairs"], 6)
+        self.assertEqual(summary["plan"]["seed"], lab.DEFAULT_SEED)
+        self.assertEqual(summary["verdict"]["outcome"], "slower", summary["verdict"])
+        self.assertTrue(summary["verdict"]["text"].startswith("Candidate is SLOWER"))
+        self.assertAlmostEqual(summary["metrics"]["instructions"]["ratio"], 16595879584 / 16934571004)
+        self.assertEqual(summary["metrics"]["instructions"]["outcome"], "lower")
+        self.assertEqual(summary["phases"]["analysis"]["delta"], -5.0)
+        self.assertEqual(summary["phases"]["read"]["outcome"], "no ratio (a zero value)")
+        self.assertTrue(summary["baseline"]["deterministic"] and summary["candidate"]["deterministic"])
+        self.assertFalse(summary["outputs_identical"])
+        self.assertIn("baseline and candidate outputs differ (expected for a code-generation change; a pure refactor should be identical)",
+                      summary["warnings"])
+        self.assertEqual(summary["baseline"]["sha256"], lab.sha256_file(summary["baseline"]["path"]))
+        with open(os.path.join(output, "pairs.json")) as handle:
+            order = [(record["pair"], record["variant"]) for record in json.load(handle)]
+        self.assertEqual(order, lab.abba_schedule(6))
+        movers = summary["profile"]["sampling"]["events"]["cycles"]["movers"]
+        self.assertEqual((movers[0]["symbol"], round(movers[0]["delta_share"], 6)), ("ir_validate_canonical_function", -2.0))
+        self.assertEqual(summary["profile"]["topdown"]["status"], "ok")
+        self.assertIn({"group": "PipelineL1", "metric": "backend_bound", "unit": "%", "a": 40.125, "b": 40.125, "delta": 0.0,
+                       "relative_change_percent": 0.0, "a_source": "alone", "b_source": "alone"}, summary["profile"]["topdown"]["metrics"])
+        self.assertTrue(report.startswith("# A/B compile-time comparison\n\n**Candidate is SLOWER"))
+        self.assertIn("| analysis | 30.00 | 25.00 | -5.00 | 0.8333 |", report)
+        self.assertIn("## Why: symbol share movers, sampling", report)
+        before = open(os.path.join(output, "summary.json")).read()
+        self.assertEqual(lab.render_compare(output), report)
+        self.assertEqual(open(os.path.join(output, "summary.json")).read(), before)
+
+    def test_identical_compilers_with_too_few_pairs(self):
+        summary, report, _ = self.compare(["--pairs", "2"])
+        self.assertEqual(summary["verdict"]["outcome"], "inconclusive")
+        self.assertTrue(summary["outputs_identical"])
+        self.assertEqual(summary["metrics"]["instructions"]["ratio"], 16595879584 / 16934571004)
+        self.assertEqual(summary["profile"], {})
+        self.assertIn("INCONCLUSIVE", report)
+
+    def test_target_minutes_chooses_whole_blocks(self):
+        summary, report, _ = self.compare(["--target-minutes", "0.001"])
+        self.assertEqual(summary["plan"]["pairs"], lab.MIN_PAIRS)
+        self.assertEqual(summary["plan"]["complete_pairs"], lab.MIN_PAIRS)
+        self.assertIn("--target-minutes 0.001:", summary["plan"]["reason"])
+        self.assertTrue(summary["checks"]["drift"]["checked"] is False or summary["checks"]["drift"]["subsets"][0]["n"] == 5)
+
+    def test_capabilities_detected_per_binary(self):
+        summary, report, output = self.compare(["--pairs", "2"], {"MODE": "old"})
+        self.assertTrue(summary["baseline"]["metrics_out"])
+        self.assertFalse(summary["candidate"]["metrics_out"])
+        self.assertIsNone(summary["phases"])
+        self.assertIn("candidate: no measured -fmetrics-out record, so no phase comparison", summary["warnings"])
+        self.assertTrue(os.path.exists(os.path.join(output, "pairs", "0001-a.ccmetrics")))
+        self.assertFalse(os.path.exists(os.path.join(output, "pairs", "0001-b.ccmetrics")))
+        self.assertIn("NA -- a variant wrote no measured `-fmetrics-out` record.", report)
+
+    def test_require_identical_output_stops_before_timing(self):
+        with self.assertRaises(SystemExit):
+            self.compare(["--pairs", "2", "--require-identical-output"], {"OUTPUT": b"different"})
 
 
 if __name__ == "__main__":
