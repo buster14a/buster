@@ -6294,6 +6294,216 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_named_f80_varargs(U
     return result;
 }
 
+// Complete MEMORY-class copies preserve 32/48-byte f80 aggregates and the
+// independent GP/FP cursors, including overflow alignment and va_copy.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_wide_aggregate_va_arg(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#include <stdarg.h>\n"
+        "#ifdef WIDE_AGG_HOST\n"
+        "#define WIDE_AGG(name) host_##name\n"
+        "#else\n"
+        "#define WIDE_AGG(name) name\n"
+        "#endif\n"
+        "typedef struct { char c; long double ld; } Lead;\n"
+        "typedef struct { long double ld; char c; } Trail;\n"
+        "typedef struct { int i; long double ld; } Integer;\n"
+        "typedef struct { double d; long double ld; } Float;\n"
+        "typedef struct { long double ld; long double second; } Pair;\n"
+        "typedef struct { struct { long double ld; }; int k; } Nested;\n"
+        "typedef struct { long double ld; int a[8]; } Array;\n"
+        "typedef int WideReader(int, ...);\n"
+        "#define WIDE_PRECISION 9223372036854775809.0L\n"
+        "#define WIDE_PREFIX 1ll, 1.5, 2ll, 2.5, 3ll, 3.5, 4ll, 4.5, 5ll, 5.5, 6ll, 6.5, \\\n"
+        "                    7ll, 7.5, 8ll, 8.5, 9ll, 9.5, 10ll, 10.5, 11ll, 11.5, 12ll, 12.5\n"
+        "int WIDE_AGG(wide_agg_overflow)(int marker, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_list copy;\n"
+        "    va_start(ap, marker);\n"
+        "    int bad = marker != 17;\n"
+        "    for (int i = 1; i <= 12; i += 1)\n"
+        "    {\n"
+        "        bad |= va_arg(ap, long long) != i;\n"
+        "        bad |= va_arg(ap, double) != i + 0.5;\n"
+        "    }\n"
+        "    bad |= va_arg(ap, long long) != 77ll;\n"
+        "    va_copy(copy, ap);\n"
+        "    Lead duplicate = va_arg(copy, Lead);\n"
+        "    va_end(copy);\n"
+        "    Lead lead = va_arg(ap, Lead);\n"
+        "    bad |= lead.ld != 2.5L || lead.c != 7 || duplicate.ld != lead.ld || duplicate.c != lead.c;\n"
+        "    bad |= va_arg(ap, long long) != 101ll;\n"
+        "    Trail trail = va_arg(ap, Trail);\n"
+        "    bad |= trail.ld != 2.5L || trail.c != 8;\n"
+        "    bad |= va_arg(ap, long long) != 102ll;\n"
+        "    Integer integer = va_arg(ap, Integer);\n"
+        "    bad |= integer.ld != 2.5L || integer.i != 19;\n"
+        "    Float floating = va_arg(ap, Float);\n"
+        "    bad |= floating.ld != 2.5L || floating.d != 3.25;\n"
+        "    Pair pair = va_arg(ap, Pair);\n"
+        "    bad |= pair.ld != 2.5L || pair.second != WIDE_PRECISION;\n"
+        "    Nested nested = va_arg(ap, Nested);\n"
+        "    bad |= nested.ld != 2.5L || nested.k != 29;\n"
+        "    Array array = va_arg(ap, Array);\n"
+        "    bad |= array.ld != 2.5L || array.a[0] != 31 || array.a[7] != 38;\n"
+        "    bad |= va_arg(ap, long long) != 103ll;\n"
+        "    bad |= va_arg(ap, double) != 13.5;\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+        "int WIDE_AGG(wide_agg_available)(int marker, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, marker);\n"
+        "    int bad = marker != 23;\n"
+        "    bad |= va_arg(ap, int) != 41;\n"
+        "    bad |= va_arg(ap, double) != 1.25;\n"
+        "    Lead lead = va_arg(ap, Lead);\n"
+        "    Pair pair = va_arg(ap, Pair);\n"
+        "    Array array = va_arg(ap, Array);\n"
+        "    bad |= lead.ld != 2.5L || lead.c != 7;\n"
+        "    bad |= pair.ld != 2.5L || pair.second != WIDE_PRECISION;\n"
+        "    bad |= array.ld != 2.5L || array.a[0] != 31 || array.a[7] != 38;\n"
+        "    bad |= va_arg(ap, int) != 42;\n"
+        "    bad |= va_arg(ap, double) != 2.25;\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+        "int WIDE_AGG(wide_agg_calls)(WideReader* overflow, WideReader* available)\n"
+        "{\n"
+        "    Lead lead = {7, 2.5L};\n"
+        "    Trail trail = {2.5L, 8};\n"
+        "    Integer integer = {19, 2.5L};\n"
+        "    Float floating = {3.25, 2.5L};\n"
+        "    Pair pair = {2.5L, WIDE_PRECISION};\n"
+        "    Nested nested = {{2.5L}, 29};\n"
+        "    Array array = {2.5L, {31, 32, 33, 34, 35, 36, 37, 38}};\n"
+        "    int bad = sizeof(Lead) != 32 || sizeof(Trail) != 32 || sizeof(Integer) != 32;\n"
+        "    bad |= sizeof(Float) != 32 || sizeof(Pair) != 32 || sizeof(Nested) != 32 || sizeof(Array) != 48;\n"
+        "    bad |= overflow(17, WIDE_PREFIX, 77ll, lead, 101ll, trail, 102ll, integer, floating, pair, nested, array, 103ll, 13.5);\n"
+        "    bad |= available(23, 41, 1.25, lead, pair, array, 42, 2.25) << 1;\n"
+        "    return bad;\n"
+        "}\n"
+        "#ifdef WIDE_AGG_HOST\n"
+        "int wide_agg_overflow(int, ...);\n"
+        "int wide_agg_available(int, ...);\n"
+        "int wide_agg_calls(WideReader*, WideReader*);\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = host_wide_agg_calls(wide_agg_overflow, wide_agg_available);\n"
+        "    bad |= wide_agg_calls(host_wide_agg_overflow, host_wide_agg_available) << 2;\n"
+        "    bad |= wide_agg_calls(wide_agg_overflow, wide_agg_available) << 4;\n"
+        "    return bad;\n"
+        "}\n"
+        "#endif\n"
+    );
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-sysv-wide-aggregate-va"), S8(".c"));
+    bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, source_written);
+    // Android x86-64 long double is binary128, so only the x87 targets apply.
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-ios")};
+    String8 modes[] = {S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 host_compilers[2] = {S8(BUSTER_HOST_C_COMPILER)};
+    String8 host_argument = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    String8 host_prefixes[2] = {S8("buster-sysv-wide-aggregate-va-host"), S8("buster-sysv-wide-aggregate-va-gcc")};
+    String8 host_objects[2] = {0};
+    bool host_compiled[2] = {0};
+    u32 host_compiler_count = 1;
+#if BUSTER_LINUX
+    // The configured reference is normally Clang. Keep GCC's independent
+    // register classification live too when the hosted image provides it.
+    String8 gcc = executable_resolve_in_path(arguments->arena, S8("gcc"));
+    if (gcc.length && !string_equal(gcc, host_compilers[0]))
+    {
+        host_compilers[host_compiler_count++] = gcc;
+    }
+#endif
+    for (u32 reference = 0; reference < host_compiler_count; reference += 1)
+    {
+        host_objects[reference] = buster_test_temporary_path(arguments->arena, host_prefixes[reference], S8(".o"));
+        String8 host_command[12];
+        u32 host_count = 0;
+        host_command[host_count++] = host_compilers[reference];
+        if (reference == 0 && host_argument.length) { host_command[host_count++] = host_argument; }
+        host_command[host_count++] = S8("-O0");
+        host_command[host_count++] = S8("-fno-inline");
+        host_command[host_count++] = S8("-DWIDE_AGG_HOST=1");
+        host_command[host_count++] = S8("-c");
+        host_command[host_count++] = source_path;
+        host_command[host_count++] = S8("-o");
+        host_command[host_count++] = host_objects[reference];
+        ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        host_compiled[reference] = source_written && host_spawn.handle &&
+                                  os_process_wait_deadline(arguments->arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST_RAW(arguments, host_compiled[reference], host_compilers[reference]);
+    }
+#endif
+    for (u32 target = 0; source_written && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            String8 syntax_command[] = {S8("-fsyntax-only"), S8("-target"), targets[target], frontends[frontend], source_path};
+            CompilerDriverResult syntax = compiler_driver_execute_invocation(arguments->arena,
+                compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+            BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE && !syntax.has_object, syntax.diagnostic);
+        }
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 pic = 0; pic < 2; pic += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-sysv-wide-aggregate-va"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], S8("-march=baseline"), modes[mode],
+                        frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), source_path, S8("-o"), object};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 3 && compiled.codegen_statistics.fallback_function_count == 0);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                    for (u32 reference = 0; reference < host_compiler_count; reference += 1)
+                    {
+                        if (host_compiled[reference] && compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                            ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
+                        {
+                            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-sysv-wide-aggregate-va-run"), S8(""));
+                            String8 link_command[10];
+                            u32 link_count = 0;
+                            link_command[link_count++] = host_compilers[reference];
+                            if (reference == 0 && host_argument.length) { link_command[link_count++] = host_argument; }
+#if BUSTER_LINUX
+                            link_command[link_count++] = S8("-no-pie");
+#endif
+                            link_command[link_count++] = object;
+                            link_command[link_count++] = host_objects[reference];
+                            link_command[link_count++] = S8("-o");
+                            link_command[link_count++] = executable;
+                            ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                            bool link_ok = linked.handle &&
+                                           os_process_wait_deadline(temporary.arena, linked, 30000000).result == PROCESS_RESULT_SUCCESS;
+                            BUSTER_TEST(arguments, link_ok);
+                            if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                        }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+
 // The aligned foreign callees have a zero address byte, so reloading their
 // addresses into RAX cannot accidentally preserve a nonzero variadic AL count.
 // Keep the inline sources outside the frozen native-retirement test inventory.
@@ -17466,6 +17676,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_va_list);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_named_f80_varargs);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_wide_aggregate_va_arg);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_padding_eightbytes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_empty_aggregates);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_indirect_variadic);

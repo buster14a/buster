@@ -21563,18 +21563,15 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             // the value in a sixteen-aligned overflow slot and never in the
             // register save area; an aggregate whose classification carries
             // no x87 class at all is copied by the ordinary eightbyte path.
-            // That second arm stops at the two eightbytes the emitter's
-            // va_arg copies -- `long double _Complex` is the shape past it --
-            // so a wide value it cannot read back is named here rather than
-            // reaching code generation.  Every other wide-float shape still
-            // has no lowering at all.
-            IrType* wide_result_type = ir_type_from_id(&builder->program->types, result_type);
+            // MEMORY-class aggregates copy their complete storage image from
+            // the overflow area, including values past two eightbytes.  The
+            // opaque predicate rejects COMPLEX_X87 results; those still need
+            // a separate wide-float variadic transport contract.
             bool binary128_va_arg = c_ir_type_is_binary128_runtime(builder, result_type);
             bool wide_va_arg_supported =
                 binary128_va_arg || c_ir_type_is_binary128_aggregate(builder, result_type) ||
                 c_ir_type_is_f80_x87_shape(builder->program, builder->wide_float_cache, result_type, builder->target) ||
-                (c_ir_type_is_f80_opaque_aggregate(builder->program, builder->wide_float_cache, result_type, builder->target) &&
-                 wide_result_type && wide_result_type->layout.resolved && wide_result_type->layout.size <= 16);
+                c_ir_type_is_f80_opaque_aggregate(builder->program, builder->wide_float_cache, result_type, builder->target);
             if (!wide_va_arg_supported && c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, result_type))
             {
                 builder->failure_message = S8("C IR lowering does not yet support wide floating-point va_arg");
