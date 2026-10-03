@@ -11961,7 +11961,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_stack_alignment(Uni
 }
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
-#if BUSTER_LINK_LIBC && !BUSTER_SANITIZE
 BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_test_host_command(Arena* arena, SliceString8 options)
 {
     String8* items = arena_allocate(arena, String8, options.length + 2);
@@ -11974,7 +11973,6 @@ BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_test_host_command(Arena* arena,
     memcpy(items + count, options.pointer, options.length * sizeof(*items));
     return (SliceString8){.pointer = items, .length = count + options.length};
 }
-#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(UnitTestArguments* arguments)
 {
@@ -11987,8 +11985,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(Unit
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(host_sources); index += 1)
     {
         host_objects[index] = buster_test_temporary_path(arena, S8("buster-parameter-alignment-host"), string_format(arena, S8("-{u32}.o"), index));
-        String8 command[] = {S8(BUSTER_HOST_C_COMPILER), S8("-O2"), S8("-fno-pic"), S8("-g0"), S8("-c"), host_sources[index], S8("-o"), host_objects[index]};
-        ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+        String8 options[] = {S8("-O2"), S8("-fno-pic"), S8("-g0"), S8("-c"), host_sources[index], S8("-o"), host_objects[index]};
+        SliceString8 command = compiler_driver_test_host_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(options));
+        ProcessSpawnResult spawned = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         bool compiled = spawned.handle && os_process_wait_sync(arena, spawned).result == PROCESS_RESULT_SUCCESS;
         BUSTER_TEST(arguments, compiled);
