@@ -21,6 +21,16 @@ fixture as well as compiling both architectures.
 
 ## Machine instruction selection and scheduling
 
+- Debug-location seed storage starts with a small arena-backed array and grows
+  with actual emitted ranges in both canonical and machine emission. Never
+  reserve the product of lexical locals and CFG blocks or machine rows.
+  Growth checks aligned remaining arena capacity before allocating, retains
+  all earlier records, and reports `CODEGEN_ERROR_CAPACITY` without advancing
+  the arena when the actual records cannot fit. Spare doubling capacity may
+  be reduced to fit; an existing seed error must survive final publication.
+  `codegen_test_debug_seed_capacity` checks fixed and growing storage, exact
+  remaining capacity, alignment and count-overflow refusals; the registered
+  block-local source cases compile with debug information in a bounded arena.
 - System V indirect variadic calls keep the vector-register count in AL
   through the call instruction. The canonical emitter reloads the callee from
   its frame home into caller-saved R10 after argument staging; the MIR allocators
