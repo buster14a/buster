@@ -82,6 +82,10 @@ Uniqueness checks adjacent IDs, set relations merge sorted views, and shape
 validation uses indexed membership plus coverage marks sized to the aggregate
 set rather than the function's entire block universe. The complete value check
 reuses its shape proof instead of recomputing uniqueness (#2445).
+Each path's temporary block sort rewinds after updating coverage, so resident
+scratch is bounded by the aggregate set, the largest path set and the path-order
+view even when many paths share one unordered block array. The cumulative
+requested-byte counter still counts those repeated temporary copies.
 
 Path shape validation checks adjacent intervals in offset order after proving
 their extents cannot overflow. Exact subrange transfer walks sorted source and
