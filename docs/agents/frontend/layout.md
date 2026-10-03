@@ -63,6 +63,33 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Linux) and `c_test_tagged_member_microsoft_anonymous` (x86-64 and AArch64
   Windows) name their targets, and the Clang corpus pins both answers byte for
   byte on every native target.
+- File-scope object redeclarations compare each declaration's effective explicit
+  alignment in `c_parse_validate_alignment_redeclarations` before canonical IR
+  construction (#1561). The strictest request within one declaration is its
+  effective alignment; requests on separate declarations must agree. A conflict
+  is reported once at the later explicit declaration and names both alignments,
+  including when every declaration is tentative or `extern`. Zero-only runs
+  compare as the declared type's natural alignment; zero mixed with a stronger
+  request leaves that stronger request in force.
+  Buster merges compatible explicit requests across tentative declarations in
+  both source orders: `_Alignas(16) int x; int x;` and
+  `int x; _Alignas(16) int x;` produce the same aligned object. Lowering records
+  whether the selected global declaration has an initializer; a tentative
+  omission cannot refuse the merged alignment. Its existing declaration site,
+  composite type and symbol linkage remain authoritative.
+  `c_test_tentative_alignment_merging` pins source identity, static linkage,
+  composite array types and direct-lowering initialized-definition refusals.
+  An initialized definition must still carry a
+  specifier when another declaration used standard `_Alignas`, while GNU
+  `aligned` can supply the alignment of a bare initialized definition. The
+  agreement rule applies to GNU requests too; it preserves their existing
+  rejection of unequal requests on a defined object and checks extern-only
+  disagreements during semantics. These tentative, extern-only and zero cases
+  are Buster compatibility policy, not a claim to settle WG14 open issue 1044.
+  `c_test_alignment_redeclarations` pins semantic-only analysis, both canonical
+  forms, target layouts, malformed-specifier ownership and accepted neighbors.
+  The structured driver `alignment_redeclaration` record deliberately changes
+  from syntax-only success to the same later-declaration error as object mode.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,
