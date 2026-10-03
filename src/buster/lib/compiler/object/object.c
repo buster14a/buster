@@ -7,6 +7,8 @@
 // string is bounds-checked before use, and malformed bytes produce an
 // invalid ObjectFile, never a crash — object_fuzz_test_input keeps that
 // honest.
+// object_read_elf64 also refuses allocated section/symbol semantics the model
+// cannot preserve, with a named diagnostic; unallocated metadata stays skippable.
 //
 // The three formats spell "this definition may be dropped for another one"
 // differently. ELF STB_WEAK and Mach-O N_WEAK_DEF read into ObjectSymbol.weak.
@@ -4913,6 +4915,41 @@ BUSTER_GLOBAL_LOCAL bool object_reader_merge_initializer_arrays(Arena* arena, Ob
     return result;
 }
 
+// FEATURE_1_AND records describe optional compatibility. Buster's generated
+// code has no feature assertion, so the ABI intersection is zero and the
+// output omits the property. Unknown or mandatory properties cannot be dropped.
+BUSTER_GLOBAL_LOCAL ObjectError object_read_elf_optional_property(ByteSlice bytes, u64 offset, u64 size, u64 flags, u64 alignment, CpuArch architecture)
+{
+    ObjectError result = OBJECT_ERROR_INVALID_INPUT;
+    if (offset <= bytes.length && size <= bytes.length - offset)
+    {
+        result = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        if (size == 32 && flags == 2 && alignment == 8)
+        {
+            u32 name_size = 0;
+            u32 descriptor_size = 0;
+            u32 note_type = 0;
+            u32 property_type = 0;
+            u32 property_size = 0;
+            u32 feature_bits = 0;
+            bool read = object_read_u32(bytes, offset, &name_size) && object_read_u32(bytes, offset + 4, &descriptor_size) &&
+                        object_read_u32(bytes, offset + 8, &note_type) && object_read_u32(bytes, offset + 16, &property_type) &&
+                        object_read_u32(bytes, offset + 20, &property_size) && object_read_u32(bytes, offset + 24, &feature_bits);
+            if (read && name_size == 4 && descriptor_size == 16 && note_type == 5 && property_size == 4 &&
+                memcmp(bytes.pointer + offset + 12, "GNU\0", 4) == 0)
+            {
+                u32 supported_type = architecture == CPU_ARCH_X86_64 ? 0xc0000002u : 0xc0000000u;
+                u32 supported_bits = architecture == CPU_ARCH_X86_64 ? 3u : 7u;
+                if (property_type == supported_type && !(feature_bits & ~supported_bits))
+                {
+                    result = OBJECT_ERROR_NONE;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, Target target)
 {
     bool read_ok = true;
@@ -5064,6 +5101,20 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     read_ok = false;
                 }
             }
+            if (read_ok && section_type == 7 && (flags & 2) && string_equal(name, S8(".note.gnu.property")))
+            {
+                ObjectError property_error = object_read_elf_optional_property(bytes, offset, size, flags, alignment, target.cpu_arch);
+                if (property_error == OBJECT_ERROR_NONE)
+                {
+                    continue;
+                }
+                result.error = property_error;
+                if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                {
+                    result.diagnostic = string_format(arena, S8("unsupported ELF section {S8} (type {u32})"), name, section_type);
+                }
+                read_ok = false;
+            }
             bool unwind = false;
             if (read_ok)
             {
@@ -5094,11 +5145,26 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             ObjectSectionKind debug_kind = {0};
             if (read_ok)
             {
-                debug_kind = flags & 0x2 ? OBJECT_SECTION_COUNT : object_debug_section_kind_from_name(name);
-                if ((!(flags & 0x2) && debug_kind == OBJECT_SECTION_COUNT) ||
-                    (unwind ? !unwind_type : !initializer_array && section_type != 1 && section_type != 8) || ignored)
+                bool allocated = (flags & 0x2) != 0;
+                bool supported_type = unwind ? unwind_type : initializer_array || section_type == 1 || section_type == 8;
+                debug_kind = allocated ? OBJECT_SECTION_COUNT : object_debug_section_kind_from_name(name);
+                if (!allocated && (debug_kind == OBJECT_SECTION_COUNT || !supported_type || ignored))
                 {
                     continue;
+                }
+                // These names carry execution/ordering semantics that ordinary
+                // text/data cannot preserve. Unallocated metadata remains skippable.
+                bool legacy_lifecycle = allocated && (string_equal(name, S8(".ctors")) || string_starts_with_sequence(name, S8(".ctors.")) ||
+                                        string_equal(name, S8(".dtors")) || string_starts_with_sequence(name, S8(".dtors.")) ||
+                                        string_equal(name, S8(".init")) || string_equal(name, S8(".fini")));
+                if (!supported_type || ignored || legacy_lifecycle)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    {
+                        result.diagnostic = string_format(arena, S8("unsupported ELF section {S8} (type {u32})"), name, section_type);
+                    }
+                    read_ok = false;
                 }
                 if (!alignment)
                 {
@@ -5395,15 +5461,22 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     continue;
                 }
-                // Absolute, common, processor-specific, and SHN_XINDEX symbols do
-                // not identify one of the ordinary section headers represented by an
-                // ObjectFile.  Keep them unsupported-but-skippable, as the previous
-                // reader did, while still rejecting malformed ordinary indexes.
-                if (section_index >= ELF_SHN_LORESERVE)
+                if (!object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
                 {
-                    continue;
+                    read_ok = false;
                 }
-                if (section_index != 0 && section_index >= section_count)
+                // Absolute/common values and extended indexes need representation;
+                // dropping their definitions turns weak references into zero.
+                if (read_ok && section_index >= ELF_SHN_LORESERVE)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    {
+                        result.diagnostic = string_format(arena, S8("unsupported ELF symbol {S8} (section index {u32})"), name, (u32)section_index);
+                    }
+                    read_ok = false;
+                }
+                if (read_ok && section_index != 0 && section_index >= section_count)
                 {
                     read_ok = false;
                 }
@@ -5411,11 +5484,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     continue;
                 }
-            }
-            if (read_ok)
-            {
-                if (!object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
+                // NOTYPE, OBJECT, FUNC, SECTION and TLS are represented. IFUNC
+                // resolves through a resolver, never a direct call to its value.
+                if (read_ok && symbol_type != 0 && symbol_type != 1 && symbol_type != 2 && symbol_type != 3 && symbol_type != 6)
                 {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    {
+                        result.diagnostic = string_format(arena, S8("unsupported ELF symbol {S8} (type {u32})"), name, (u32)symbol_type);
+                    }
                     read_ok = false;
                 }
             }
@@ -9291,6 +9368,13 @@ BUSTER_GLOBAL_LOCAL ObjectArchive object_archive_read_core(Arena* arena, ByteSli
                             if (object.error != OBJECT_ERROR_NONE || result.object_count == member_capacity)
                             {
                                 result.error = object.error;
+                                result.failed_member = result.object_count;
+                                if (object.diagnostic.length && member_name.length <= UINT64_MAX - 128 &&
+                                    object.diagnostic.length <= UINT64_MAX - member_name.length - 128 &&
+                                    object_reader_arena_can_allocate_bytes(arena, member_name.length + object.diagnostic.length + 128, BUSTER_ALIGN_OF(char8)))
+                                {
+                                    result.diagnostic = string_format(arena, S8("member {S8}: {S8}"), member_name, object.diagnostic);
+                                }
                                 return result;
                             }
                             if (lazy)
