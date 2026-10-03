@@ -254,6 +254,20 @@ does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
 
+Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`
+and their dot-delimited suffixes, exact `.init`/`.fini`, and the existing
+DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_str`,
+`.debug_loc`, `.debug_ranges`, `.debug_addr`, `.debug_str_offsets`,
+`.debug_line_str`, `.debug_rnglists`, `.debug_loclists`). DWARF sections
+retain nonallocated object identities through the driver. Raw-prefix
+lookalikes such as `.initdata` cannot acquire executable flags. Other bare
+names are diagnosed while the wider explicit flag/type and generic
+nonallocated section contract remains tracked in
+[#1279](https://github.com/buster14a/buster/issues/1279). These known bare
+DWARF names cover the section directives emitted by the current `-S` printer;
+quoted instruction operands and the broader round trip are tracked in
+[#2519](https://github.com/buster14a/buster/issues/2519).
+
 Statement boundaries follow the target: x86-64 and non-Apple AArch64 use
 `;` between statements; Apple AArch64 uses `%%` and treats `;` as a line
 comment. `#` starts an x86-64 comment and remains part of AArch64 immediates.

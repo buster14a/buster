@@ -215,32 +215,47 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern(AssemblyUnitBuilder* builder
 
 // --------------------------------------------------------------- sections
 
-// The section a name selects when the directive carries no flags. musl's
-// crti.s writes `.section .init` with nothing else, and GNU as places `.init`
-// and `.fini` in executable sections by name.
+// Bare section defaults are an exact name, or a dot-delimited member of
+// an ordinary code/data family. DWARF names retain their nonallocated kinds;
+// unsupported bare names cannot silently acquire flags from a raw prefix.
 BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, AssemblyUnitSectionKind* kind)
 {
     static const struct
     {
-        String8 prefix;
+        String8 name;
         AssemblyUnitSectionKind kind;
+        bool suffix;
     } rows[] = {
-        {S8_INITIALIZER(".text"), ASSEMBLY_UNIT_SECTION_TEXT},
-        {S8_INITIALIZER(".init"), ASSEMBLY_UNIT_SECTION_TEXT},
-        {S8_INITIALIZER(".fini"), ASSEMBLY_UNIT_SECTION_TEXT},
-        {S8_INITIALIZER(".rodata"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
-        {S8_INITIALIZER(".data"), ASSEMBLY_UNIT_SECTION_DATA},
-        {S8_INITIALIZER(".bss"), ASSEMBLY_UNIT_SECTION_ZERO},
+        {S8_INITIALIZER(".text"), ASSEMBLY_UNIT_SECTION_TEXT, true},
+        {S8_INITIALIZER(".init"), ASSEMBLY_UNIT_SECTION_TEXT, false},
+        {S8_INITIALIZER(".fini"), ASSEMBLY_UNIT_SECTION_TEXT, false},
+        {S8_INITIALIZER(".rodata"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA, true},
+        {S8_INITIALIZER(".data"), ASSEMBLY_UNIT_SECTION_DATA, true},
+        {S8_INITIALIZER(".bss"), ASSEMBLY_UNIT_SECTION_ZERO, true},
+        {S8_INITIALIZER(".debug_info"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO, false},
+        {S8_INITIALIZER(".debug_abbrev"), ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV, false},
+        {S8_INITIALIZER(".debug_line"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE, false},
+        {S8_INITIALIZER(".debug_str"), ASSEMBLY_UNIT_SECTION_DEBUG_STR, false},
+        {S8_INITIALIZER(".debug_loc"), ASSEMBLY_UNIT_SECTION_DEBUG_LOC, false},
+        {S8_INITIALIZER(".debug_ranges"), ASSEMBLY_UNIT_SECTION_DEBUG_RANGES, false},
+        {S8_INITIALIZER(".debug_addr"), ASSEMBLY_UNIT_SECTION_DEBUG_ADDR, false},
+        {S8_INITIALIZER(".debug_str_offsets"), ASSEMBLY_UNIT_SECTION_DEBUG_STR_OFFSETS, false},
+        {S8_INITIALIZER(".debug_line_str"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE_STR, false},
+        {S8_INITIALIZER(".debug_rnglists"), ASSEMBLY_UNIT_SECTION_DEBUG_RNGLISTS, false},
+        {S8_INITIALIZER(".debug_loclists"), ASSEMBLY_UNIT_SECTION_DEBUG_LOCLISTS, false},
     };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rows); index += 1)
+    bool matched = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rows) && !matched; index += 1)
     {
-        if (string_starts_with_sequence(name, rows[index].prefix))
+        matched = string_equal(name, rows[index].name) ||
+                  (rows[index].suffix && name.length > rows[index].name.length &&
+                   name.pointer[rows[index].name.length] == '.' && string_starts_with_sequence(name, rows[index].name));
+        if (matched)
         {
             *kind = rows[index].kind;
-            return true;
         }
     }
-    return false;
+    return matched;
 }
 
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_section_select(AssemblyUnitBuilder* builder, String8 name, AssemblyUnitSectionKind kind)
