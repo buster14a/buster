@@ -721,6 +721,177 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_assignment_accesses(UnitTest
     return result;
 }
 
+// #1255 covers the raw unit separately from truth conversion and promotion.
+// Fixed runtime expectations preserve neighboring fields and ordinary _Bool.
+BUSTER_GLOBAL_LOCAL String8 const c_test_bool_bit_field_load_source = S8_INITIALIZER(
+    "struct S { _Bool b:1; int x; };\n"
+    "int get(struct S *q) { return q->b; }\n"
+    "void put(struct S *q) { q->b = 1; }\n"
+    "struct Bits { unsigned char left:3; _Bool b:1; unsigned char right:3; };\n"
+    "static struct Bits state = {5, 0, 3};\n"
+    "int read_static(void) { return state.b; }\n"
+    "int get_volatile(volatile struct Bits *q) { return q->b; }\n"
+    "struct __attribute__((packed)) Packed\n"
+    "{ unsigned char lead; unsigned char left:3; _Bool b:1; unsigned char right:3; unsigned char tail; };\n"
+    "int get_packed(struct Packed *q) { return q->b; }\n"
+    "int ordinary(_Bool *q) { return *q; }\n"
+    "int direct(int n)\n"
+    "{ struct Bits s = {5, 0, 3}; s.b = n; return s.b != (n != 0) || s.left != 5 || s.right != 3; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    struct S s = {0, 5}; put(&s);\n"
+    "    int result = get(&s) != 1 || s.x != 5;\n"
+    "    result |= read_static() != 0;\n"
+    "    state.b = 1; result |= read_static() != 1;\n"
+    "    state.b = 0; result |= read_static() != 0 || state.left != 5 || state.right != 3;\n"
+    "    volatile int n = -2; result |= direct(n);\n"
+    "    n = 0; result |= direct(n); n = 2; result |= direct(n);\n"
+    "    struct Packed p = {165, 5, 0, 3, 90};\n"
+    "    result |= get_packed(&p) != 0;\n"
+    "    p.b = 1; result |= get_packed(&p) != 1;\n"
+    "    p.b = 0; result |= get_packed(&p) != 0 || p.lead != 165 || p.tail != 90 || p.left != 5 || p.right != 3;\n"
+    "    volatile struct Bits v = {5, 0, 3};\n"
+    "    result |= get_volatile(&v) != 0;\n"
+    "    v.b = 1; result |= get_volatile(&v) != 1;\n"
+    "    v.b = 0; result |= get_volatile(&v) != 0 || v.left != 5 || v.right != 3;\n"
+    "    _Bool b = 0; result |= ordinary(&b) != 0; b = 1; result |= ordinary(&b) != 1;\n"
+    "    return result;\n"
+    "}\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bool_bit_field_loads(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 names[] = {S8("get"), S8("read_static"), S8("get_volatile"), S8("get_packed"), S8("ordinary")};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_bool_bit_field_load_source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("bool-bit-field-loads.c"), tokens, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    IrProgram* program = lowered.program;
+                    IrModule* module = program->modules;
+                    bool canonical = ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE;
+                    BUSTER_TEST(arguments, canonical);
+                    for (u32 name_index = 0; canonical && name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                    {
+                        IrFunction* function = c_test_find_ir_function(module, names[name_index]);
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            u32 loads = 0;
+                            for (u32 index = 0; index < function->instruction_count; index += 1)
+                            {
+                                IrInstruction* instruction = function->instructions + index;
+                                if (instruction->opcode == IR_OPCODE_LOAD)
+                                {
+                                    IrValue* place = function->values + instruction->operands[0].value;
+                                    IrType* place_type = ir_type_from_id(&program->types, place->canonical_type);
+                                    if (place_type && place_type->kind == IR_TYPE_BOOLEAN)
+                                    {
+                                        IrType* access = ir_type_from_id(&program->types, instruction->canonical_type);
+                                        bool ordinary = name_index == BUSTER_ARRAY_LENGTH(names) - 1;
+                                        loads += 1;
+                                        BUSTER_TEST(arguments, access && (ordinary ? access->kind == IR_TYPE_BOOLEAN :
+                                            access->kind == IR_TYPE_INTEGER && !access->is_signed && access->layout.size == place_type->layout.size));
+                                        BUSTER_TEST(arguments, instruction->volatile_access == (name_index == 2));
+                                        if (name_index == 0 && access)
+                                        {
+                                            // The exception must still reject a signed raw unit and
+                                            // a same-size integer load from an ordinary boolean place.
+                                            bool saved_signed = access->is_signed;
+                                            access->is_signed = true;
+                                            IrValidationResult signed_unit = ir_validate_canonical_module(program, module);
+                                            BUSTER_TEST(arguments, signed_unit.error == IR_VALIDATION_OPERAND_TYPE &&
+                                                signed_unit.function.value == function->id.value && signed_unit.instruction.value == index);
+                                            access->is_signed = saved_signed;
+                                            IrInstruction* field_instruction = place->definition.value < function->instruction_count
+                                                ? function->instructions + place->definition.value : 0;
+                                            if (BUSTER_REQUIRE(arguments, field_instruction && field_instruction->opcode == IR_OPCODE_FIELD))
+                                            {
+                                                IrType* aggregate = ir_type_from_id(&program->types,
+                                                    function->values[field_instruction->operands[0].value].canonical_type);
+                                                u64 field_index = field_instruction->immediates[0];
+                                                if (BUSTER_REQUIRE(arguments, aggregate && field_index < aggregate->field_count))
+                                                {
+                                                    IrField* field = aggregate->fields + field_index;
+                                                    BUSTER_TEST(arguments, field->access_size == 0);
+                                                    bool saved_bit_field = field->is_bit_field;
+                                                    field->is_bit_field = false;
+                                                    IrValidationResult ordinary_place = ir_validate_canonical_module(program, module);
+                                                    BUSTER_TEST(arguments, ordinary_place.error == IR_VALIDATION_OPERAND_TYPE &&
+                                                        ordinary_place.function.value == function->id.value && ordinary_place.instruction.value == index);
+                                                    field->is_bit_field = saved_bit_field;
+                                                }
+                                            }
+                                            BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                                        }
+                                    }
+                                }
+                            }
+                            BUSTER_TEST_RAW(arguments, loads == 1, string_format(temporary.arena,
+                                S8("bool field loads {S8} target={u32} form={u32}: loads={u32}"), names[name_index], target_index, form, loads));
+                        }
+                    }
+                    BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = buster_test_temporary_path(arguments->arena, S8("bool-bit-field-loads"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_bool_bit_field_load_source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("bool-bit-field-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-fverify-codegen"), modes[mode], frontends[form], S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("bool field {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("bool field runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                scratch_end(temporary);
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(source));
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_lowering(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -31997,6 +32168,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
+    BUSTER_TEST_FIXTURE(arguments, c_test_bool_bit_field_loads);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successors);
