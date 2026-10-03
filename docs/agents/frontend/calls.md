@@ -239,6 +239,24 @@ function-pointer declarators. Pointer return types keep their array/function
 pointees. Ordinary function declarators also reject a second array or function
 suffix instead of silently discarding it.
 
+`c_parse_parameter_list_unprototyped` records the empty-list distinction at
+construction: `()` leaves parameters unspecified before C23 and is a
+zero-parameter prototype in C23/GNU23, as is `(void)` in every dialect.
+Direct, parenthesized, nested and block-local function declarators share this
+rule, so compatibility sees the same fact as call validation and canonical
+type mapping. A C23 `int f();` conflicts with `int f(int);`, including when
+the mismatch is inside a function pointer, typedef or callback signature.
+Pre-C23 compatible redeclarations retain their existing behavior. The rule
+follows [WG14 N3096](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3096.pdf)
+6.7.6.3 paragraphs 13–14.
+
+`c_test_c23_empty_list_prototypes` checks explicit C17/GNU17/C23/GNU23
+expectations through semantic-only validation and both canonical frontend
+forms on three native target layouts. It inspects the original function-type
+markers, checks structured diagnostic parity and refused programs, and
+independently validates accepted canonical IR. Local declaration controls
+avoid the separately tracked repeated-linkage restriction (#1562).
+
 All parameter-list paths share the void and ellipsis constraints. The void
 sentinel is sole, unnamed and unqualified, including through a void typedef;
 ellipsis terminates the list and requires a fixed parameter before C23. C23

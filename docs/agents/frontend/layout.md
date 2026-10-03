@@ -443,6 +443,39 @@ and is accepted by Clang releases older than 19, unlike `znver5`. The approved r
 corpus and its pre-existing C ABI header stay unchanged: #507 explicitly
 leaves this new frontend feature to #73, separate from retirement coverage.
 
+## Offsetof member promotion
+
+Runtime `__builtin_offsetof` enters `c_ir_offsetof_evaluate`, and static
+initializers use the OFFSETOF query child. Both dispatch
+`c_ir_constant_offsetof_attempt`, which selects each member through the
+existing `c_ir_promoted_member_path`. Anonymous struct/union promotion, missing
+or ambiguous members, and bit-field refusal therefore use the same lowering
+walk. Member sums, array-index multiplication and accumulated array offsets
+are checked before publication. Array-index expressions are constant-query
+children on the explicit query stack; a dot must separate member selections.
+
+Parser enumerators and static assertions still use
+`c_parse_constant_offsetof` / `c_parse_constant_member_offset`. They already
+promote anonymous members and refuse bit-fields. Issue #1570 remains open for
+a shared parser/lowering designator authority, signed-index policy, the
+parser's unchecked offset arithmetic and nested `offsetof` in array indices.
+The parser's index evaluator accepts `sizeof` but does not evaluate nested
+`offsetof`; this lowering repair does not settle those contracts.
+
+`c_test_offsetof_members` pins direct and anonymous member offsets, a nested
+anonymous struct within a union, and an anonymous array element through
+parser constants, scalar initializer bits, aggregate initializer bytes and both canonical frontend forms
+on Linux, Windows and macOS x86-64/AArch64 in GNU17/GNU23. It also refuses
+direct/promoted bit-fields in enumerators, assertions, static initializers and
+runtime expressions, plus missing members, malformed dot separators and lowering arithmetic overflow.
+The positive source also includes a named multidimensional member chain.
+Static initializer and runtime witnesses use an array index containing nested
+`sizeof` and `offsetof` queries; the matching parser enumerator uses literal
+index 1 so it remains independent of the parser's nested-index limitation.
+`c_test_offsetof_members_runtime` compares all three constant contexts with
+addresses of real subobjects in generated programs, using both frontend forms
+and all four register allocators. Runtime execution is omitted on Android/iOS.
+
 ## Parse-side layout solve: ordered passes and the agenda
 
 `c_parse_type_layout_core` answers `sizeof`/`_Alignof`/`offsetof` during

@@ -76,8 +76,8 @@
 //   c_parse_word_bits_compute,                    specifier words answered
 //   c_parse_word_bits_token                       from the interned symbol
 //                                                 id (C_WORD_* bits), with
-//                                                 the spelling ladders as
-//                                                 the symbol-0 fallback
+//                                                 spelling fallback only for
+//                                                 identifiers/unclassified rows
 //   c_type_parse_alignment_step ..                the type-parse machine
 //   c_type_parse_machine_run                      steps
 //   c_parse_scalar_type_core_begin,               declarators: pointers,
@@ -193,8 +193,9 @@ enum
 // The `_token` specifier predicates: same answers as their String8
 // counterparts, but an interned token settles on one word_bits load instead
 // of a spelling ladder. Symbol 0 (pasted, synthesized, or test-built tokens)
-// falls back to the spelling compute, so a missed path costs speed and never
-// correctness; a symbol above predefined_limit is a constant-time "no"
+// falls back to the spelling compute for identifier or unclassified hand-built
+// kinds, so a missed path costs speed and never correctness; a symbol above
+// predefined_limit is a constant-time "no"
 // because every specifier-word spelling is interned into the predefined
 // range. Defined after the spelling ladders they derive from.
 BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CToken token);
@@ -8817,6 +8818,8 @@ BUSTER_C_SHARED void c_parse_infer_file_array_bounds(CTypeParseMachine* machine,
     }
 }
 
+#define C_AGGREGATE_LOOKUP_INITIAL_SLOT_COUNT 16384u
+
 // Diagnostic counts stay out of ordinary compilers and timing builds.
 #if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
 #define C_AGGREGATE_LOOKUP_COUNT(lookup, field) do { if (lookup) { (lookup)->field += 1; } } while (0)
@@ -8845,7 +8848,7 @@ BUSTER_C_INTERNAL bool c_parse_aggregate_lookup_grow(CParseResult* result)
     bool grown = false;
     if (lookup->slot_count <= UINT32_MAX / 2)
     {
-        u32 slot_count = lookup->slot_count * 2;
+        u32 slot_count = lookup->slot_count ? lookup->slot_count * 2 : C_AGGREGATE_LOOKUP_INITIAL_SLOT_COUNT;
         u64 size = (u64)slot_count * sizeof(CAggregateLookupSlot);
         if (c_parse_arena_can_allocate(result->arena, size, BUSTER_ALIGN_OF(CAggregateLookupSlot)))
         {
@@ -8877,37 +8880,46 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
     // Qualified aliases carry the tag but never own its identity.
     if (lookup && type->tag.length && !type->has_unqualified_type)
     {
-        CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
-        if (slot->used)
+        // A complete empty header needs no slots until its first tag owner.
+        // Failed initial admission leaves it incomplete, with no slots to probe.
+        if (!lookup->slot_count && !lookup->incomplete)
         {
-            u32 existing = slot->type_index;
-            if (existing < id.value && result->types[existing].kind == type->kind &&
-                !result->types[existing].has_unqualified_type && string_equal(result->types[existing].tag, type->tag))
-            {
-                slot->multiple = true;
-            }
-            else
-            {
-                slot->type_index = id.value;
-            }
+            lookup->incomplete = !c_parse_aggregate_lookup_grow(result);
         }
-        else if (!lookup->incomplete)
+        if (lookup->slot_count)
         {
-            if (lookup->fill >= lookup->slot_count / 2)
+            CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
+            if (slot->used)
             {
-                lookup->incomplete = !c_parse_aggregate_lookup_grow(result);
-                // Growth invalidates the slot pointer, including its empty slot.
-                slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
+                u32 existing = slot->type_index;
+                if (existing < id.value && result->types[existing].kind == type->kind &&
+                    !result->types[existing].has_unqualified_type && string_equal(result->types[existing].tag, type->tag))
+                {
+                    slot->multiple = true;
+                }
+                else
+                {
+                    slot->type_index = id.value;
+                }
             }
-            if (!lookup->incomplete)
+            else if (!lookup->incomplete)
             {
-                lookup->fill += 1;
-                *slot = (CAggregateLookupSlot){
-                    .tag = type->tag,
-                    .kind = (u32)type->kind,
-                    .type_index = id.value,
-                    .used = true,
-                };
+                if (lookup->fill >= lookup->slot_count / 2)
+                {
+                    lookup->incomplete = !c_parse_aggregate_lookup_grow(result);
+                    // Growth invalidates the slot pointer, including its empty slot.
+                    slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
+                }
+                if (!lookup->incomplete)
+                {
+                    lookup->fill += 1;
+                    *slot = (CAggregateLookupSlot){
+                        .tag = type->tag,
+                        .kind = (u32)type->kind,
+                        .type_index = id.value,
+                        .used = true,
+                    };
+                }
             }
         }
     }
@@ -9765,13 +9777,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKi
     if (tag.length)
     {
         CAggregateLookup* lookup = result->aggregate_lookup;
-        bool scan = !lookup;
-        bool scan_by_scope = false;
-        if (lookup)
+        bool scan = !lookup || lookup->incomplete;
+        bool scan_by_scope = lookup && lookup->incomplete;
+        if (lookup && lookup->slot_count)
         {
             CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
-            scan = lookup->incomplete;
-            scan_by_scope = lookup->incomplete;
             if (slot->used)
             {
                 u32 type_index = slot->type_index;
@@ -9850,9 +9860,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_tag_lookup(CParseResult* result, String8 tag, 
 // The only row a (kind, tag) type name can mean, when the aggregate-tag index
 // vouches for it: every unqualified tagged row enters the index as it is
 // added, and a second live one marks its slot `multiple`, so a complete
-// index's unused slot means no row carries the tag and a single live slot
-// row means no other does. `*decided` stays false -- the caller must search
-// -- for duplicate or stale slots and for an incomplete index.
+// index's empty header or unused slot means no row carries the tag and a
+// single live slot row means no other does. `*decided` stays false -- the
+// caller must search -- for duplicate or stale slots and for an incomplete index.
 BUSTER_C_SHARED CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided)
 {
     CTypeId found = C_TYPE_ID_INVALID;
@@ -9860,16 +9870,23 @@ BUSTER_C_SHARED CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind
     *decided = false;
     if (lookup && !lookup->incomplete && tag.length)
     {
-        CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
-        if (!slot->used)
+        if (!lookup->slot_count)
         {
             *decided = true;
         }
-        else if (!slot->multiple && slot->type_index < result->type_count && result->types[slot->type_index].kind == kind &&
-                 !result->types[slot->type_index].has_unqualified_type && string_equal(result->types[slot->type_index].tag, tag))
+        else
         {
-            found = (CTypeId){.value = slot->type_index};
-            *decided = true;
+            CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
+            if (!slot->used)
+            {
+                *decided = true;
+            }
+            else if (!slot->multiple && slot->type_index < result->type_count && result->types[slot->type_index].kind == kind &&
+                     !result->types[slot->type_index].has_unqualified_type && string_equal(result->types[slot->type_index].tag, tag))
+            {
+                found = (CTypeId){.value = slot->type_index};
+                *decided = true;
+            }
         }
     }
     return found;
@@ -11345,9 +11362,15 @@ BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CTok
     {
         bits = token.symbol <= preprocess.symbols->predefined_limit ? preprocess.symbols->word_bits[token.symbol] : 0;
     }
-    else
+    else if (c_token_may_spell_word(token))
     {
         bits = c_parse_word_bits_compute(c_token_spelling(preprocess.spelling_base, token));
+    }
+    else
+    {
+        // Known non-word kinds cannot match a specifier. Keep unclassified
+        // hand-built rows on the spelling path, as identifier queries do.
+        bits = 0;
     }
     return bits;
 }
@@ -11436,6 +11459,28 @@ BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix_token(CPreprocessResult
     c_parse_qualifier_bits_apply(bits, qualifiers);
     return (bits & mask) != 0;
 }
+
+#if BUSTER_INCLUDE_TESTS
+u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token)
+{
+    CType qualifier = {0};
+    CType prefix = {0};
+    u32 classes = 0;
+    classes |= c_parse_type_word_for_dialect_token(preprocess, token) ? C_TEST_WORD_CLASS_TYPE : 0;
+    classes |= c_parse_auto_type_word_token(preprocess, token) ? C_TEST_WORD_CLASS_AUTO_TYPE : 0;
+    classes |= c_parse_type_name_start_word_token(preprocess, token) ? C_TEST_WORD_CLASS_TYPE_NAME_START : 0;
+    classes |= c_parse_type_qualifier_word_token(preprocess, token, &qualifier) ? C_TEST_WORD_CLASS_QUALIFIER : 0;
+    classes |= c_parse_atomic_declaration_prefix_token(preprocess, token, &prefix) ? C_TEST_WORD_CLASS_ATOMIC_PREFIX : 0;
+    classes |= qualifier.is_const ? C_TEST_WORD_CLASS_CONST : 0;
+    classes |= qualifier.is_volatile ? C_TEST_WORD_CLASS_VOLATILE : 0;
+    classes |= qualifier.is_restrict ? C_TEST_WORD_CLASS_RESTRICT : 0;
+    classes |= qualifier.is_atomic ? C_TEST_WORD_CLASS_ATOMIC : 0;
+    classes |= prefix.is_const == qualifier.is_const && prefix.is_volatile == qualifier.is_volatile &&
+                       prefix.is_restrict == qualifier.is_restrict && prefix.is_atomic == qualifier.is_atomic
+                   ? C_TEST_WORD_CLASS_QUALIFIERS_AGREE : 0;
+    return classes;
+}
+#endif
 
 BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
@@ -13481,15 +13526,15 @@ BUSTER_C_INTERNAL u32 c_parse_parameter_list_reserved_count(CPreprocessResult pr
     return reserved;
 }
 
-// `()` -- an empty parameter list -- declares a function with no prototype,
-// which C11 6.2.7p3 makes compatible with a non-variadic prototype; `(void)`
-// declares a prototype with zero parameters and is compatible with no other
-// list. Both produce zero parameter records, so the shape is read back off
-// the tokens: the list is empty exactly when its closing parenthesis abuts
-// its opening one.
+// Before C23, `()` leaves the parameters unspecified; `(void)` declares a
+// zero-parameter prototype. C23 makes both spellings zero-parameter
+// prototypes (N3096 6.7.6.3p13). Every function-type constructor records
+// that distinction here, before type compatibility or call checks consume it.
+// Both spellings produce zero parameter rows, so token adjacency identifies
+// the empty list.
 BUSTER_C_INTERNAL bool c_parse_parameter_list_unprototyped(CPreprocessResult preprocess, u32 list_close)
 {
-    return list_close && list_close - 1 < preprocess.token_count &&
+    return !c_preprocess_dialect_is_c23(preprocess.dialect) && list_close && list_close - 1 < preprocess.token_count &&
            c_token_is_punctuator(&preprocess.tokens[list_close - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
 }
 
@@ -16000,7 +16045,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                     if (list_end) list_close = index;
                     if (list_end && !segment_count && !written_parameter_count)
                     {
-                        unprototyped = true;
+                        unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close);
                         break;
                     }
                     if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_ELLIPSIS))
@@ -27535,15 +27580,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         result.binding_undo_capacity = result.entity_capacity + 1;
         result.binding_undo = arena_allocate(arena, CParseBindingUndo, result.binding_undo_capacity);
     }
-    {
-        u32 aggregate_slot_count = 16384;
-        result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
-        *result.aggregate_lookup = (CAggregateLookup){
-            // Reused arena bytes can be dirty; empty slots must be zeroed.
-            .slots = arena_allocate_zeroed(arena, CAggregateLookupSlot, aggregate_slot_count),
-            .slot_count = aggregate_slot_count,
-        };
-    }
+    // The stable header survives rollback even before the first tag owner.
+    result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
+    *result.aggregate_lookup = (CAggregateLookup){0};
     {
         u32 definition_slot_count = 1024;
         result.definition_index = arena_allocate(arena, CDefinitionIndex, 1);

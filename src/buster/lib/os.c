@@ -8,6 +8,8 @@
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
 // process spawn/wait with deadlines, executable lookup, dynamic libraries, and
 // the crash/failure printers. Replacement publication follows os_file_close.
+// Opt-in child resource witnesses in os_process_wait_deadline retain native
+// accounting scope; they do not alter process ownership or cleanup.
 // os_process_capture_step separates ordinary POSIX pipe drain transitions
 // from native observations in os_process_wait_deadline; its private replay
 // contract lives in os_internal.h, without process-group identity changes.
@@ -3204,6 +3206,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 
     result.capture_limits = options.capture_limits;
     result.capture_overflow_policy = options.capture_overflow_policy;
+    result.observe_resources = options.observe_resources;
     memcpy(result.capture_overflow_files, options.capture_overflow_files, sizeof(result.capture_overflow_files));
     if (options.capture_overflow_policy >= PROCESS_CAPTURE_OVERFLOW_COUNT)
     {
@@ -5063,6 +5066,53 @@ bool os_process_group_ownership_loss_self_test(void)
 #endif
 #endif
 
+#if BUSTER_WINDOWS
+// TinyCC has neither psapi.h nor its import stubs. This is the fixed ABI of
+// PROCESS_MEMORY_COUNTERS; resolve the existing kernel32 export at runtime.
+typedef struct OsProcessMemoryCounters OsProcessMemoryCounters;
+struct OsProcessMemoryCounters
+{
+    DWORD cb;
+    DWORD page_fault_count;
+    SIZE_T peak_working_set_size;
+    SIZE_T working_set_size;
+    SIZE_T quota_peak_paged_pool_usage;
+    SIZE_T quota_paged_pool_usage;
+    SIZE_T quota_peak_non_paged_pool_usage;
+    SIZE_T quota_non_paged_pool_usage;
+    SIZE_T pagefile_usage;
+    SIZE_T peak_pagefile_usage;
+};
+
+BUSTER_GLOBAL_LOCAL ProcessResourceStatus os_windows_process_memory_counters(HANDLE handle, OsProcessMemoryCounters* counters, OsError* error)
+{
+    ProcessResourceStatus result = PROCESS_RESOURCE_UNSUPPORTED;
+    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, OsProcessMemoryCounters*, DWORD);
+    GetProcessMemoryInfoProc get_process_memory_info =
+        (GetProcessMemoryInfoProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
+    counters->cb = sizeof(*counters);
+    if (get_process_memory_info)
+    {
+        if (get_process_memory_info(handle, counters, sizeof(*counters))) { result = PROCESS_RESOURCE_OBSERVED; }
+        else
+        {
+            *error = os_get_last_error();
+            if (!error->v) { error->v = ERROR_GEN_FAILURE; }
+            result = PROCESS_RESOURCE_ERROR;
+        }
+    }
+    return result;
+}
+#else
+BUSTER_GLOBAL_LOCAL bool os_process_usage_microseconds(struct timeval value, u64* output)
+{
+    bool result = value.tv_sec >= 0 && value.tv_usec >= 0 && value.tv_usec < 1000000 &&
+        (u64)value.tv_sec <= ((u64)-1 - (u64)value.tv_usec) / 1000000;
+    if (result) { *output = (u64)value.tv_sec * 1000000 + (u64)value.tv_usec; }
+    return result;
+}
+#endif
+
 ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds)
 {
     ProcessWaitResult result = {0};
@@ -5248,6 +5298,25 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 result.process_tree_cleanup_failed = 1;
             }
             CloseHandle((HANDLE)spawn.process_tree);
+        }
+        if (spawn.observe_resources && wait_result == WAIT_OBJECT_0)
+        {
+            FILETIME created, exited, kernel, user;
+            if (GetProcessTimes((HANDLE)spawn.handle, &created, &exited, &kernel, &user))
+            {
+                result.resources.user_cpu_us = (((u64)user.dwHighDateTime << 32) | (u64)user.dwLowDateTime) / 10;
+                result.resources.system_cpu_us = (((u64)kernel.dwHighDateTime << 32) | (u64)kernel.dwLowDateTime) / 10;
+                result.resources.cpu_status = PROCESS_RESOURCE_OBSERVED;
+            }
+            else
+            {
+                result.resources.cpu_status = PROCESS_RESOURCE_ERROR;
+                result.resources.cpu_error = os_get_last_error();
+                if (!result.resources.cpu_error.v) { result.resources.cpu_error.v = ERROR_GEN_FAILURE; }
+            }
+            OsProcessMemoryCounters counters = {0};
+            result.resources.memory_status = os_windows_process_memory_counters((HANDLE)spawn.handle, &counters, &result.resources.memory_error);
+            if (result.resources.memory_status == PROCESS_RESOURCE_OBSERVED) { result.resources.peak_memory_bytes = (u64)counters.peak_working_set_size; }
         }
         CloseHandle(spawn.handle);
         if (result.process_tree_cleanup_failed)
@@ -5599,6 +5668,26 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 } while (wait_result < 0 && errno == EINTR);
                 if (wait_result != pid) { wait_failed = true; }
             }
+        }
+
+        if (spawn.observe_resources && wait_result == pid)
+        {
+            bool cpu_valid = os_process_usage_microseconds(usage.ru_utime, &result.resources.user_cpu_us) &&
+                os_process_usage_microseconds(usage.ru_stime, &result.resources.system_cpu_us);
+            result.resources.cpu_status = cpu_valid ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (!cpu_valid) { result.resources.cpu_error.v = (u32)EOVERFLOW; }
+#if BUSTER_LINUX
+            bool memory_valid = usage.ru_maxrss >= 0 && (u64)usage.ru_maxrss <= (u64)-1 / 1024;
+            result.resources.memory_status = memory_valid ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (memory_valid) { result.resources.peak_memory_bytes = (u64)usage.ru_maxrss * 1024; }
+            else { result.resources.memory_error.v = (u32)EOVERFLOW; }
+#elif BUSTER_MACOS
+            result.resources.memory_status = usage.ru_maxrss >= 0 ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (result.resources.memory_status == PROCESS_RESOURCE_OBSERVED) { result.resources.peak_memory_bytes = (u64)usage.ru_maxrss; }
+            else { result.resources.memory_error.v = (u32)EOVERFLOW; }
+#else
+            result.resources.memory_status = PROCESS_RESOURCE_UNSUPPORTED;
+#endif
         }
 
         if (program_flag_get(PROGRAM_FLAG_VERBOSE))
@@ -6139,34 +6228,9 @@ BUSTER_GLOBAL_LOCAL u64 os_resident_memory(bool peak)
         result = (u64)usage.ru_maxrss;
     }
 #else
-    // Resolved at runtime for the same reason GlobalMemoryStatusEx is below:
-    // tcc's bundled import stubs do not carry it. K32GetProcessMemoryInfo is
-    // the kernel32 export, so no psapi import library is needed either.
-    //
-    // The counters are declared here rather than taken from psapi.h, which
-    // tcc's bundled headers do not ship: build.c includes this file and is
-    // bootstrapped with tcc, so naming PROCESS_MEMORY_COUNTERS is an "invalid
-    // type" there long before any Windows compiler sees it. The layout is
-    // fixed by the ABI, and `cb` tells the callee which version it received.
-    typedef struct
-    {
-        DWORD cb;
-        DWORD page_fault_count;
-        SIZE_T peak_working_set_size;
-        SIZE_T working_set_size;
-        SIZE_T quota_peak_paged_pool_usage;
-        SIZE_T quota_paged_pool_usage;
-        SIZE_T quota_peak_non_paged_pool_usage;
-        SIZE_T quota_non_paged_pool_usage;
-        SIZE_T pagefile_usage;
-        SIZE_T peak_pagefile_usage;
-    } OsProcessMemoryCounters;
-    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, OsProcessMemoryCounters*, DWORD);
-    GetProcessMemoryInfoProc get_process_memory_info =
-        (GetProcessMemoryInfoProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
     OsProcessMemoryCounters counters = {0};
-    counters.cb = sizeof(counters);
-    if (get_process_memory_info && get_process_memory_info(GetCurrentProcess(), &counters, sizeof(counters)))
+    OsError error = {0};
+    if (os_windows_process_memory_counters(GetCurrentProcess(), &counters, &error) == PROCESS_RESOURCE_OBSERVED)
     {
         result = (u64)(peak ? counters.peak_working_set_size : counters.working_set_size);
     }

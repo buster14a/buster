@@ -30,9 +30,11 @@
   `python3 tools/bootstrap_wrapper_cases_test.py -v` on each Release lane,
   covering deadlines, launch/startup failures, cancellation, descendant cleanup,
   failure status and stable diagnostics. See [wrapper CI](../ci-bootstrap-wrapper.md).
-  The whole original suite's obsolete workflow assertions remain tracked by
-  [#1835](https://github.com/buster14a/buster/issues/1835); they are not an executed
-  CI contract.
+  `python3 tests/bootstrap_wrapper_test.py -v` runs the full local behavior,
+  child-process and immutable-driver build-graph harness. The authoritative
+  workflow guard, budgets, logs and required-summary failure checks live in
+  `tools/ci_zig_cache_test.py`, which the policy step executes on each Release
+  lane. The wrapper module has no duplicate workflow contract.
 - Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
@@ -66,7 +68,7 @@
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
 - Active CI is defined under `.github/workflows/`; the current tree has no
-  Forgejo workflow definitions. The historical source-free broker contract is
+  Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
   runs the combination matrix, execution-mode matrix, Android and iOS on
   GitHub standard runners. Its five desktop lanes cover Linux and Windows at
@@ -116,10 +118,12 @@
   push runs, revalidates exact-key Zig archive caches, and treats UBSan reports
   as failures. Independent later suites run after earlier test failures;
   captured logs and fail-closed summaries remain outside generated build trees.
-  See `docs/ci-github-actions.md` for timing cohorts and exact reproductions. Do not add source mirroring, Actions artifacts/caches,
-  durable GitHub-side credentials, verbose broker logs, or untrusted-PR
-  triggers to the broker; see
-  `docs/ci-github-hosted-runners.md`.
+  See `docs/ci-github-actions.md` for timing cohorts and exact reproductions.
+  The removed Forgejo broker has no current setup or validation commands.
+  Its regression source is preserved as
+  `tests/retired/github_runner_bridge_test.py.txt`, outside Python discovery,
+  with the same dependency-only support identity. It is historical input,
+  not executed bridge coverage; see `docs/ci-github-hosted-runners.md`.
 
 - The workflow-tools aggregate regression executes the actual `CI complete`
   shell body for all 633 shard outcomes. Git Bash on Windows has a 120-second
@@ -215,6 +219,17 @@
   the mobile artifact. Every required package is validated after each attempt;
   a nonzero installer status or invalid package still fails setup. Run
   `python3 tools/ci_android_sdk_test.py -v` for the hermetic setup controls.
+- Qualification tool observations use `tools/ci_checks_tools.py` only when
+  `BUSTER_CI_CONDITIONS_EVIDENCE=1`. `python3 tools/ci_checks_tools_test.py -v`
+  exercises selected CMake/override paths, exact source/run/job binding,
+  deadlines, output limits, tool replacement and disabled no-op behavior using
+  Python-only fake tools. `python3 tools/ci_checks_qualification_test.py -v`
+  covers required role keys, wrong/unknown observations, digest-bound selected
+  tools, unchanged split-role maps and the existing Android validity scope.
+  Workflow lint runs both controls normally; the qualification branches alone
+  retain real selected Go/Ninja/adb receipts. No compiler build or measurement
+  dispatch is needed to run these controls. Missing historical observations
+  remain pending; see [checks qualification](../ci-combination-shards.md#further-checks-partition-qualification-2120).
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),

@@ -315,6 +315,18 @@ obligation remain intact, and the census inventory keeps the same cardinality.
 That path move is a later policy transition; this reader bootstrap leaves both
 the bridge and the reviewed ledger at their existing paths.
 
+For #2203, the next trusted-reader bootstrap admits exact successor digest
+`7d4e4ed4fc74ff57eb3005550457751cc8841f113277c116d67fb1358da09d51`.
+It is the #1836 declaration with only `tests/basic_c_ir_validation_values.c`
+changed from 3,124 bytes and SHA-256
+`9ed89c0ff3750cb6c9bc66a894fc617c15cde5732c857e5b9cccf55ddf233080` to
+3,241 bytes and SHA-256
+`8c565e3b33d5630695289da2aa0030423dc833c9dfc4346d2b67d5165df89e65`;
+all 559 inputs, 411 subjects, roles, compilation obligations and 78,912 row
+identities remain fixed. The bootstrap leaves the reviewed ledger, fixture and
+blocked profiles unchanged. After it lands, a separate policy transition may
+update that fixture row and the matching blocked-profile pins.
+
 `authorization_mode: solo-maintainer` is explicit owner authorization of one
 bootstrap or policy transition. It is recorded separately from independent
 review; `maintainer_approvals` remains empty. The CLI default remains `independent-review`. The workflow default `configured`
