@@ -21,6 +21,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 40
 MAIN_ID, SOURCE_ID, JOB_ID = 202, 101, 303
 WORKFLOW = (ROOT / reuse.WORKFLOW_PATH).read_bytes()
+STATELESS_CONTROL_NAME = "Prove stateless validation survives merge bursts"
+STATELESS_CONTROL_COMMAND = "python3 -B tools/bench_service/workflow_concurrency_test.py -v"
+STATELESS_CONTROL_BLOCK = ("      - name: " + STATELESS_CONTROL_NAME + "\n"
+                           "        run: " + STATELESS_CONTROL_COMMAND + "\n")
 
 
 def run_record(run_id, event, branch, created, updated):
@@ -213,6 +217,16 @@ class EvidenceTests(unittest.TestCase):
             api.job["steps"].append(dict(name="New policy test", number=100, status=status, conclusion=conclusion))
             self.assert_refused(api)
 
+    def test_additional_fresh_stateless_control_is_bound(self):
+        api = FakeApi()
+        api.job["steps"].append(dict(name=STATELESS_CONTROL_NAME, number=100,
+                                      status="completed", conclusion="success"))
+        receipt = self.verify(api)
+        self.assertEqual(receipt["job"]["steps"][-1],
+                         dict(name=STATELESS_CONTROL_NAME, number=100, conclusion="success"))
+        api.job["steps"][-1]["conclusion"] = "skipped"
+        self.assert_refused(api)
+
     def test_source_movement_during_collection_refused(self):
         for call in (3, 6, 7):
             api = FakeApi()
@@ -353,8 +367,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("    timeout-minutes: 5\n", text)
         self.assertIn("          persist-credentials: false\n", text)
 
-    def test_all_and_only_original_work_steps_are_gated(self):
-        text = WORKFLOW.decode()
+    def assert_workflow_step_contract(self, text):
         blocks = {}
         for block in re.split(r"(?m)^      - ", text)[1:]:
             first = block.splitlines()[0]
@@ -366,6 +379,14 @@ class WorkflowTests(unittest.TestCase):
                  if "        if: ${{ steps.reuse.outputs.reused != 'true' }}\n" in block]
         self.assertEqual(gated, list(reuse.WORK_STEPS))
         expected = set(reuse.REQUIRED_STEPS) | {reuse.FINISH_STEP}
+        # #2463 is independently mergeable. Its exact control stays fresh on
+        # every event whether it lands before or after the reuse implementation.
+        if STATELESS_CONTROL_NAME in blocks:
+            expected.add(STATELESS_CONTROL_NAME)
+            block = blocks[STATELESS_CONTROL_NAME]
+            self.assertNotIn("        if:", block)
+            self.assertEqual(block, "name: " + STATELESS_CONTROL_NAME + "\n"
+                             "        run: " + STATELESS_CONTROL_COMMAND + "\n")
         self.assertEqual(set(blocks), expected)
         for name in ("Require CI admission to be enabled", reuse.CONTROL_STEP, reuse.DECISION_STEP):
             self.assertNotIn("        if:", blocks[name])
@@ -376,6 +397,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("        if: ${{ steps.reuse.outputs.reused == 'true' }}\n", blocks[reuse.FINISH_STEP])
         self.assertIn(" finish --receipt \"$RUNNER_TEMP/bench-policy-reuse.json\"", blocks[reuse.FINISH_STEP])
         self.assertEqual(list(blocks)[-1], reuse.FINISH_STEP)
+
+    def test_all_and_only_original_work_steps_are_gated(self):
+        self.assert_workflow_step_contract(WORKFLOW.decode())
+
+    def test_stateless_control_composition_and_mutations(self):
+        standalone = WORKFLOW.decode().replace(STATELESS_CONTROL_BLOCK, "")
+        composed = standalone.replace("      - name: Test benchmark policy reuse\n",
+                                      STATELESS_CONTROL_BLOCK + "      - name: Test benchmark policy reuse\n")
+        self.assert_workflow_step_contract(standalone)
+        self.assert_workflow_step_contract(composed)
+        for replacement in ("        if: ${{ steps.reuse.outputs.reused != 'true' }}\n"
+                            "        run: " + STATELESS_CONTROL_COMMAND + "\n",
+                            "        run: python3 -B tools/other_test.py\n"):
+            mutated = composed.replace("        run: " + STATELESS_CONTROL_COMMAND + "\n", replacement)
+            with self.subTest(replacement=replacement), self.assertRaises(AssertionError):
+                self.assert_workflow_step_contract(mutated)
+
+    def test_unknown_named_control_remains_refused(self):
+        text = WORKFLOW.decode().replace("      - name: Test benchmark policy reuse\n",
+                                        "      - name: Unexpected policy control\n"
+                                        "        run: true\n"
+                                        "      - name: Test benchmark policy reuse\n")
+        with self.assertRaises(AssertionError):
+            self.assert_workflow_step_contract(text)
 
     def test_reconciler_filters_upstream_branch_not_its_own_main_ref(self):
         text = (ROOT / ".github/workflows/merge-queue-reconcile.yml").read_text()
