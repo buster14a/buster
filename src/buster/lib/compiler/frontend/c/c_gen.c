@@ -33901,9 +33901,20 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
     // shape through the expression path and recover its final load's
     // operand in EXPRESSION_PLACE (the same recovery used for
     // parenthesized member assignments above).
+    bool parenthesized_base_suffix = false;
+    if (start < assignment && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, start, assignment, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                   C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        parenthesized_base_suffix =
+            close < assignment && close + 1 < assignment &&
+            (c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_DOT) ||
+             c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_ARROW) ||
+             c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACKET));
+    }
     bool parenthesized_place =
         start < assignment &&
-        (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+        ((c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) && !parenthesized_base_suffix) ||
          (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
           c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)));
     // `*d++ = value` — the copy loop in sbase's strlcpy — advances the

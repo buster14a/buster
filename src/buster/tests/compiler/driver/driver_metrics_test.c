@@ -397,6 +397,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics(UnitTestAr
     CompilerDriverInvocation suppressed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(suppressed_command));
     suppressed.suppress_diagnostic_records = true;
     BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, suppressed).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    CompilerDriverInvocation functions = suppressed;
+    functions.collect_input_metrics = false;
+    functions.collect_function_sizes = true;
+    functions.suppress_diagnostic_records = false;
+    CompilerDriverResult functions_refused = compiler_driver_execute_invocation(arena, functions);
+    BUSTER_TEST(arguments, functions_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                               string_equal(functions_refused.diagnostic, S8("function sizes require per-input metrics")));
+    // Native count limits still refuse before reading an input when its
+    // metrics records are requested; no interval or partial result opens.
+    for (u32 count_kind = 0; count_kind < 3; count_kind += 1)
+    {
+        CompilerDriverInvocation limits = suppressed;
+        limits.suppress_diagnostic_records = false;
+        limits.library_count = count_kind == 0 ? UINT32_MAX : 0;
+        limits.framework_count = count_kind == 1 ? UINT32_MAX : 0;
+        limits.library_path_count = count_kind == 2 ? UINT32_MAX : 0;
+        CompilerDriverResult refused = compiler_driver_execute_invocation(arena, limits);
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                                   string_equal(refused.diagnostic, S8("native library counts exceed driver limits")));
+        if (BUSTER_REQUIRE(arguments, refused.input_result_count == 1))
+        {
+            BUSTER_TEST(arguments, refused.inputs[0].status == COMPILER_DRIVER_INPUT_STATUS_NOT_RUN && !refused.inputs[0].measured &&
+                                       !refused.failed_input_count && !refused.output.length);
+        }
+    }
     (void)os_file_delete(path);
 
     // Both assembly spellings hand -E text to the emit phase. Measuring

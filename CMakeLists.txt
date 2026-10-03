@@ -1183,6 +1183,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/x86_64_test.h
     src/buster/tests/compiler/metamorphic/metamorphic_test.h
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
+    src/buster/tests/compiler/codegen/ebpf_call_test_internal.h
     src/buster/tests/compiler/frontend/c/c_test.h
     src/buster/tests/compiler/frontend/c/once_test.h
     src/buster/tests/compiler/frontend/c/type_layout_test.h
@@ -1226,6 +1227,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/gpu/gpu_test.h
     src/buster/tests/compiler/spirv/spirv_test.h
     src/buster/tests/compiler/driver/driver_test.h
+    src/buster/tests/compiler/driver/wasm_switch_test_internal.h
     src/buster/tests/compiler/driver/object_path_test.h
 )
 set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)

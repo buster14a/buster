@@ -619,6 +619,28 @@ disagrees with the target, so a cross link never reads the host's own libc.
 A cross link that finds no target libc cannot tell a missing symbol from a
 libc import and keeps every strong undefined reference as an import (GitHub
 #1729).
+
+Native Linux links also supply the compiler-runtime calls used for binary16
+conversion and binary128 arithmetic/conversion (GitHub #1272). After merging
+objects and reading explicitly requested shared libraries, a remaining strong
+undefined function helper selects `libgcc_s.so.1` from the same `-L`, target
+and sysroot roots. Its ELF machine must match the target, and it must export a
+default-version callable definition of every required helper. An earlier
+explicit data/TLS/unknown definition cannot preempt that call as code.
+Hidden/internal definitions and non-default versions provide no helper;
+truncated version-symbol metadata is refused. Missing runtime files or helpers
+fail the link before replacing the output, including cross links with no
+readable libc. Existing object/archive definitions and explicit shared-library
+providers take precedence; weak optional references add no runtime dependency.
+Data references with helper-like names also add none; untyped external-object
+references retain the separate #1242 boundary.
+An explicit `-l:libgcc_s.so.1` is reused without a duplicate `DT_NEEDED` entry.
+Normal library symbol-version binding records the GCC version the selected
+runtime publishes. Ordinary links with no such unresolved helper do not read
+or name libgcc_s. This uses an installed target runtime; it installs or embeds
+none. Apple, Windows, Android and freestanding runtime provisioning remain
+separate #1272 work.
+
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
 
