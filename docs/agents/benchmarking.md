@@ -577,6 +577,8 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    The report records support and enabled collection separately: timings
    with collection enabled include metrics instrumentation. Single-binary
    `run` continues collecting whenever its own compiler supports the flag.
+   With `run --warmups 0`, one untimed reference compile uses those
+   capability flags before measured runs start.
    Each binary is checked for byte-identical output across its own runs; whether A and B
    outputs match is reported (`--require-identical-output` stops before timing
    when they differ, for pure refactors). With `--warmups 0`, each variant

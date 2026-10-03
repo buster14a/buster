@@ -476,8 +476,10 @@ class Fakes:
         write_script(os.path.join(root, "sudo"), FAKE_SUDO, {})
         return root, ide, perf
 
-    def run_lab(self, mode, stat=STAT_CSV, runs=("--runs", "3")):
+    def run_lab(self, mode, stat=STAT_CSV, runs=("--runs", "3"), compiler=None):
         root, ide, perf = self.fakes(mode, stat)
+        write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": mode,
+                                        "COMPILE_LOG": os.path.join(root, "compile.jsonl")}, **(compiler or {})))
         output = os.path.join(root, "out")
         stdout = sys.stdout
         try:
@@ -585,6 +587,35 @@ class FlowTests(Fakes, unittest.TestCase):
         self.assertEqual(meta["steps"]["timed"]["status"], "ok")
         self.assertIn("Phase breakdown: NA -- the binary does not accept -fmetrics-out=", report)
         self.assertIn("Phase attribution: NA", report)
+
+    def test_zero_warmups_prepares_single_binary_reference(self):
+        arguments = ["--runs", "2", "--warmups", "0", "--skip"] + [step for step in lab.STEPS if step != "timed"]
+        for mode in ("new", "old"):
+            with self.subTest(mode=mode):
+                meta, report, output = self.run_lab(mode, runs=arguments)
+                self.assertEqual(meta["steps"]["timed"]["status"], "ok")
+                with open(os.path.join(output, "timed", "runs.json")) as handle:
+                    records = json.load(handle)
+                self.assertEqual(len(records), 2)
+                self.assertEqual([record["exit"] for record in records], [0, 0])
+                self.assertTrue(all(record["identical"] for record in records))
+                with open(os.path.join(os.path.dirname(output), "compile.jsonl")) as handle:
+                    calls = [json.loads(line) for line in handle]
+                self.assertEqual(len(calls), 5)  # Two probes, untimed reference, two measured runs.
+                self.assertEqual([any(arg.startswith("-fmetrics-out=") for arg in call) for call in calls[2:]], [mode == "new"] * 3)
+                self.assertEqual(meta["capabilities"]["metrics_out"], mode == "new")
+                self.assertTrue(os.path.exists(os.path.join(output, "timed", "reference-run.log")))
+                self.assertFalse(os.path.exists(os.path.join(output, "timed", "warmup-0.log")))
+                self.assertIn("2 runs (0 failed), 2 byte-identical", report)
+
+    def test_zero_warmup_single_reference_failure_stops_before_timing(self):
+        arguments = ["--runs", "2", "--warmups", "0", "--skip"] + [step for step in lab.STEPS if step != "timed"]
+        meta, _, output = self.run_lab("old", runs=arguments, compiler={"FAIL_PLAIN": True})
+        self.assertEqual(meta["steps"]["timed"]["status"], "failed")
+        self.assertIn("reference compile failed: cc: error: requested plain compile failure", meta["steps"]["timed"]["note"])
+        self.assertFalse(os.path.exists(os.path.join(output, "timed", "runs.json")))
+        self.assertFalse(os.path.exists(os.path.join(output, "timed", "reference.exe")))
+        self.assertFalse(os.path.exists(os.path.join(output, "timed", "run-0001.csv")))
 
 
 def write_files(root, files):

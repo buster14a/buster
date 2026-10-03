@@ -1321,6 +1321,11 @@ def step_timed(lab, runs, warmups, target_minutes=15.0, lab_started=None, other_
     directory = lab.directory("timed")
     out = os.path.join(directory, "out.exe")
     probe_workload(lab, directory, out)
+    if warmups == 0:
+        status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(directory, "reference.ccmetrics"))),
+                                         log=os.path.join(directory, "reference-run.log"))
+        if status != 0:
+            raise RuntimeError("reference compile failed: " + err.strip()[-400:])
     for index in range(warmups):
         status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(directory, "warmup.ccmetrics"))),
                                          log=os.path.join(directory, "warmup-%d.log" % index))
