@@ -49,6 +49,9 @@ BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256 = "6d975980cc6df4945334fc2846dac8e03a
 RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256 = "5834270ef2b01798b25547751fd91631295a84ccb23116bf1502d8bae0c0b115"
 # #2203 successor: #1836 with only the aligned-typedef validation fixture row updated.
 ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256 = "7d4e4ed4fc74ff57eb3005550457751cc8841f113277c116d67fb1358da09d51"
+# #2428 successors: the exact mobile dependency row, alone or with #2203.
+MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "f17dbde795c3afc99f4b3cfd59087d4a63721218dab5018e7e77e090228b3741"
+ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -612,7 +615,9 @@ def validate_profile(manifest, inputs, row_count):
             MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
             BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
             RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
-            ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256)
+            ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
+            MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+            ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256)
         assert manifest.get("inputs") == "559"
         assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
         assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""
