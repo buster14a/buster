@@ -33,6 +33,9 @@
 // a C identifier after the ordinary sections of its kind, one name at a time,
 // and defines the `__start_NAME`/`__stop_NAME` references GNU `ld` would
 // (link_section_sets_define, issue 1276); its output is one section per kind.
+// link_section_set_members_sort indexes names with bounded heap work; each
+// group retains input order and first appearance for placement, and its
+// name-sorted range supplies binary bound lookup (issue 2238).
 //
 // One rule crosses every writer that synthesizes an entry point: C 5.1.2.2.3
 // makes a return from `main` equivalent to calling `exit` with that value, so
@@ -2198,8 +2201,74 @@ struct LinkSectionSet
     u64 start;
     u64 end;
     ObjectSectionKind kind;
+    u32 first_member;
+    u32 member_count;
+};
+
+typedef struct LinkSectionSetMember LinkSectionSetMember;
+struct LinkSectionSetMember
+{
+    ObjectSection* section;
+    u64 slot;
+    u32 ordinal;
     u32 reserved;
 };
+
+#if BUSTER_INCLUDE_TESTS
+#define BUSTER_LINK_SET_COUNTS_PARAMETER , LinkSectionSetCounts* counts
+#define BUSTER_LINK_SET_COUNTS_ARGUMENT , counts
+#define BUSTER_LINK_SET_COUNTS_NONE , 0
+#define BUSTER_LINK_SET_RECORD(field) do { if (counts) counts->field += 1; } while (0)
+#else
+#define BUSTER_LINK_SET_COUNTS_PARAMETER
+#define BUSTER_LINK_SET_COUNTS_ARGUMENT
+#define BUSTER_LINK_SET_COUNTS_NONE
+#define BUSTER_LINK_SET_RECORD(field) ((void)0)
+#endif
+
+BUSTER_GLOBAL_LOCAL bool link_section_set_member_above(LinkSectionSetMember left, LinkSectionSetMember right BUSTER_LINK_SET_COUNTS_PARAMETER)
+{
+    BUSTER_LINK_SET_RECORD(name_comparisons);
+    s32 order = link_comdat_string_compare(left.section->name, right.section->name);
+    return order > 0 || (!order && left.ordinal > right.ordinal);
+}
+
+BUSTER_GLOBAL_LOCAL void link_section_set_member_sift(LinkSectionSetMember* members, u32 count, u32 root BUSTER_LINK_SET_COUNTS_PARAMETER)
+{
+    while (root < count / 2)
+    {
+        u32 child = 2 * root + 1;
+        if (child + 1 < count && link_section_set_member_above(members[child + 1], members[child] BUSTER_LINK_SET_COUNTS_ARGUMENT))
+        {
+            child += 1;
+        }
+        if (!link_section_set_member_above(members[child], members[root] BUSTER_LINK_SET_COUNTS_ARGUMENT))
+        {
+            break;
+        }
+        LinkSectionSetMember swapped = members[root];
+        members[root] = members[child];
+        members[child] = swapped;
+        root = child;
+    }
+}
+
+// The ordinal tie-break makes equal-name contributions stable without an
+// auxiliary merge buffer or hash-dependent/adversarial probe bound.
+BUSTER_GLOBAL_LOCAL void link_section_set_members_sort(LinkSectionSetMember* members, u32 count BUSTER_LINK_SET_COUNTS_PARAMETER)
+{
+    for (u32 root = count / 2; root > 0; root -= 1)
+    {
+        link_section_set_member_sift(members, count, root - 1 BUSTER_LINK_SET_COUNTS_ARGUMENT);
+    }
+    for (u32 remaining = count; remaining > 1; remaining -= 1)
+    {
+        LinkSectionSetMember swapped = members[0];
+        members[0] = members[remaining - 1];
+        members[remaining - 1] = swapped;
+        link_section_set_member_sift(members, remaining - 1, 0 BUSTER_LINK_SET_COUNTS_ARGUMENT);
+    }
+}
 
 // Whether an input section is a member of a linker set: a section of its own
 // past the kinds, named by a C identifier.
@@ -2233,7 +2302,7 @@ BUSTER_GLOBAL_LOCAL bool link_section_place(ObjectSection* section, ObjectSectio
 // A name no input placed stays undefined, strong references to it are refused
 // and weak ones resolve to zero, as under `ld`. A program's own definition of
 // the name is left alone.
-BUSTER_GLOBAL_LOCAL void link_section_sets_define(ObjectFile* object, LinkSectionSet const* sets, u32 set_count)
+BUSTER_GLOBAL_LOCAL void link_section_sets_define(ObjectFile* object, LinkSectionSet const* sets, u32 set_count BUSTER_LINK_SET_COUNTS_PARAMETER)
 {
     String8 start_prefix = S8("__start_");
     String8 stop_prefix = S8("__stop_");
@@ -2248,9 +2317,15 @@ BUSTER_GLOBAL_LOCAL void link_section_sets_define(ObjectFile* object, LinkSectio
         }
         String8 prefix = start ? start_prefix : stop_prefix;
         String8 set_name = string_slice(symbol->name, prefix.length, symbol->name.length);
-        for (u32 set = 0; set < set_count; set += 1)
+        BUSTER_LINK_SET_RECORD(bound_queries);
+        u32 first = 0;
+        u32 end = set_count;
+        while (first < end)
         {
-            if (string_equal(sets[set].name, set_name))
+            u32 set = first + (end - first) / 2;
+            BUSTER_LINK_SET_RECORD(bound_comparisons);
+            s32 order = link_comdat_string_compare(sets[set].name, set_name);
+            if (!order)
             {
                 symbol->section = (u32)sets[set].kind;
                 symbol->value = start ? sets[set].start : sets[set].end;
@@ -2261,11 +2336,19 @@ BUSTER_GLOBAL_LOCAL void link_section_sets_define(ObjectFile* object, LinkSectio
                 symbol->thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO;
                 break;
             }
+            if (order < 0)
+            {
+                first = set + 1;
+            }
+            else
+            {
+                end = set;
+            }
         }
     }
 }
 
-LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options)
+BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_arena, ObjectFile* objects, u32 object_count, LinkOptions options BUSTER_LINK_SET_COUNTS_PARAMETER)
 {
     LinkObjectResult result = {0};
     if (!arena || !objects || !object_count)
@@ -2326,6 +2409,11 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 return result;
             }
             set_section_count += link_section_is_set(object, section_index);
+            if (set_section_count > UINT32_MAX)
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
         }
         section_slots[object_index + 1] = section_slots[object_index] + BUSTER_MAX(object->section_count, (u32)OBJECT_SECTION_COUNT);
     }
@@ -2340,81 +2428,98 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     // where `ld`'s one output section of mixed flags would be writable too;
     // code cannot share a set with data. link_section_sets_define gives the
     // bounds to the references that ask for them.
-    LinkSectionSet* sets = arena_allocate(arena, LinkSectionSet, set_section_count ? set_section_count : 1);
+    LinkSectionSet* sets = arena_allocate(set_arena, LinkSectionSet, set_section_count);
+    LinkSectionSetMember* members = arena_allocate(set_arena, LinkSectionSetMember, set_section_count);
+    u32* first_sets = arena_allocate(set_arena, u32, set_section_count);
     u32 set_count = 0;
-    for (u32 pass = 0; pass < 2; pass += 1)
+    u32 member_count = 0;
+    for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
-        for (u32 object_index = 0; object_index < object_count; object_index += 1)
+        ObjectFile* object = &objects[object_index];
+        for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
         {
-            ObjectFile* object = &objects[object_index];
-            for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
+            ObjectSection* section = &object->sections[section_index];
+            u64 slot = section_slots[object_index] + section_index;
+            BUSTER_LINK_SET_RECORD(input_rows);
+            output_kinds[slot] = section->kind;
+            if (link_section_is_set(object, section_index))
             {
-                ObjectSection* section = &object->sections[section_index];
-                bool set_member = link_section_is_set(object, section_index);
-                if (pass == 0)
-                {
-                    output_kinds[section_slots[object_index] + section_index] = section->kind;
-                }
-                if (pass == 0 && !set_member)
-                {
-                    if (!link_section_place(section, section->kind, section_sizes, section_alignments,
-                                            &section_offsets[section_slots[object_index] + section_index]))
-                    {
-                        result.error = LINK_ERROR_INVALID_INPUT;
-                        return result;
-                    }
-                }
-                if (pass == 1 && set_member)
-                {
-                    u32 set = 0;
-                    while (set < set_count && !string_equal(sets[set].name, section->name))
-                    {
-                        set += 1;
-                    }
-                    if (set == set_count)
-                    {
-                        sets[set_count++] = (LinkSectionSet){
-                            .name = section->name,
-                            .kind = section->kind,
-                        };
-                    }
-                    else if (sets[set].kind != section->kind)
-                    {
-                        if (sets[set].kind == OBJECT_SECTION_TEXT || section->kind == OBJECT_SECTION_TEXT)
-                        {
-                            result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
-                            result.symbol = link_string_copy(arena, section->name);
-                            return result;
-                        }
-                        sets[set].kind = OBJECT_SECTION_DATA;
-                    }
-                }
+                members[member_count] = (LinkSectionSetMember){.section = section, .slot = slot, .ordinal = member_count};
+                first_sets[member_count] = UINT32_MAX;
+                member_count += 1;
+                BUSTER_LINK_SET_RECORD(members);
+            }
+            else if (!link_section_place(section, section->kind, section_sizes, section_alignments, &section_offsets[slot]))
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
             }
         }
     }
-    for (u32 set = 0; set < set_count; set += 1)
+    link_section_set_members_sort(members, member_count BUSTER_LINK_SET_COUNTS_ARGUMENT);
+    u32 first_conflict = UINT32_MAX;
+    String8 conflict_name = {0};
+    for (u32 member = 0; member < member_count; member += 1)
     {
-        LinkSectionSet* current = sets + set;
-        bool first = true;
-        for (u32 object_index = 0; object_index < object_count; object_index += 1)
+        LinkSectionSetMember* contribution = members + member;
+        ObjectSection* section = contribution->section;
+        bool same = false;
+        BUSTER_LINK_SET_RECORD(group_rows);
+        if (set_count)
         {
-            ObjectFile* object = &objects[object_index];
-            for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
+            BUSTER_LINK_SET_RECORD(name_comparisons);
+            same = string_equal(sets[set_count - 1].name, section->name);
+        }
+        if (!same)
+        {
+            first_sets[contribution->ordinal] = set_count;
+            sets[set_count++] = (LinkSectionSet){.name = section->name, .kind = section->kind, .first_member = member};
+        }
+        LinkSectionSet* current = sets + set_count - 1;
+        current->member_count += 1;
+        if (current->kind != section->kind)
+        {
+            if (current->kind == OBJECT_SECTION_TEXT || section->kind == OBJECT_SECTION_TEXT)
             {
-                ObjectSection* section = &object->sections[section_index];
-                if (link_section_is_set(object, section_index) && string_equal(section->name, current->name))
+                if (contribution->ordinal < first_conflict)
                 {
-                    u64* offset = &section_offsets[section_slots[object_index] + section_index];
-                    output_kinds[section_slots[object_index] + section_index] = current->kind;
-                    if (!link_section_place(section, current->kind, section_sizes, section_alignments, offset))
-                    {
-                        result.error = LINK_ERROR_INVALID_INPUT;
-                        return result;
-                    }
-                    current->start = first ? *offset : current->start;
-                    current->end = section_sizes[current->kind];
-                    first = false;
+                    first_conflict = contribution->ordinal;
+                    conflict_name = section->name;
                 }
+            }
+            else
+            {
+                current->kind = OBJECT_SECTION_DATA;
+            }
+        }
+    }
+    if (first_conflict != UINT32_MAX)
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        result.symbol = link_string_copy(arena, conflict_name);
+        return result;
+    }
+    // Names are indexed lexically; placement still visits sets by the ordinal
+    // of their first input contribution, and members retain input order.
+    for (u32 ordinal = 0; ordinal < member_count; ordinal += 1)
+    {
+        u32 set = first_sets[ordinal];
+        if (set != UINT32_MAX)
+        {
+            LinkSectionSet* current = sets + set;
+            for (u32 member = 0; member < current->member_count; member += 1)
+            {
+                LinkSectionSetMember* contribution = members + current->first_member + member;
+                u64* offset = section_offsets + contribution->slot;
+                output_kinds[contribution->slot] = current->kind;
+                BUSTER_LINK_SET_RECORD(placements);
+                if (!link_section_place(contribution->section, current->kind, section_sizes, section_alignments, offset))
+                {
+                    result.error = LINK_ERROR_INVALID_INPUT;
+                    return result;
+                }
+                current->start = member ? current->start : *offset;
+                current->end = section_sizes[current->kind];
             }
         }
     }
@@ -2757,7 +2862,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         }
     }
     link_initializer_arrays_order(arena, &result.object);
-    link_section_sets_define(&result.object, sets, set_count);
+    link_section_sets_define(&result.object, sets, set_count BUSTER_LINK_SET_COUNTS_ARGUMENT);
     if (!options.allow_undefined_symbols)
     {
         for (u32 symbol_index = 0; symbol_index < result.object.symbol_count; symbol_index += 1)
@@ -2773,6 +2878,44 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     }
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_scoped(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options BUSTER_LINK_SET_COUNTS_PARAMETER)
+{
+    LinkObjectResult result;
+    bool needs_sets = false;
+    for (u32 index = 0; objects && !needs_sets && index < object_count; index += 1)
+    {
+        needs_sets = objects[index].section_count > OBJECT_SECTION_COUNT;
+    }
+    if (arena && needs_sets)
+    {
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        result = link_objects_impl(arena, temporary.arena, objects, object_count, options BUSTER_LINK_SET_COUNTS_ARGUMENT);
+        scratch_end(temporary);
+    }
+    else
+    {
+        result = link_objects_impl(arena, arena, objects, object_count, options BUSTER_LINK_SET_COUNTS_ARGUMENT);
+    }
+    return result;
+}
+
+LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options)
+{
+    return link_objects_scoped(arena, objects, object_count, options BUSTER_LINK_SET_COUNTS_NONE);
+}
+
+#if BUSTER_INCLUDE_TESTS
+LinkObjectResult link_objects_section_sets_test(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options, LinkSectionSetCounts* counts)
+{
+    return link_objects_scoped(arena, objects, object_count, options, counts);
+}
+#endif
+
+#undef BUSTER_LINK_SET_COUNTS_PARAMETER
+#undef BUSTER_LINK_SET_COUNTS_ARGUMENT
+#undef BUSTER_LINK_SET_COUNTS_NONE
+#undef BUSTER_LINK_SET_RECORD
 
 ObjectFile link_windows_runtime_object(Arena* arena, Target target)
 {
