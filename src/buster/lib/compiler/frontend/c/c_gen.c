@@ -1116,6 +1116,26 @@ BUSTER_C_INTERNAL IrTypeId c_ir_parameter_value_type(IrProgram* program, IrTypeI
     return result;
 }
 
+// The callable side of an identifier-list definition receives the same
+// values an unprototyped call produces.  Keep this type-only form beside the
+// ordinary parameter adjustment; expression lowering applies the identical
+// conversions to actual argument values.
+BUSTER_C_INTERNAL IrTypeId c_ir_default_argument_promotion_type(IrProgram* program, IrTypeId type, IrTypeId s32_type,
+                                                                  IrTypeId f64_type)
+{
+    IrType* value = ir_type_from_id(&program->types, type);
+    if (value && (value->kind == IR_TYPE_BOOLEAN || value->kind == IR_TYPE_ENUM ||
+                  (value->kind == IR_TYPE_INTEGER && value->bit_width < 32)))
+    {
+        return s32_type;
+    }
+    if (value && value->kind == IR_TYPE_FLOAT && value->bit_width < 64)
+    {
+        return f64_type;
+    }
+    return type;
+}
+
 // A copy of `base` whose alignment is the one a typedef declarator asked for
 // on the name it declares.  GNU `aligned` on a type replaces the natural
 // alignment rather than raising it, and leaves the size alone -- Clang and GCC
@@ -1814,7 +1834,7 @@ BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, 
 
 BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* program, CIrPointerTypeCache* pointer_types,
                                                          CIrWideFloatCache* wide_float_cache, CParseResult* parse, CDeclaration declaration,
-                                                         IrTypeId* c_type_ir_map, Target target)
+                                                         IrTypeId* c_type_ir_map, IrTypeId s32_type, IrTypeId f64_type, Target target)
 {
     CIrSignature result = {
         .return_type = IR_TYPE_ID_INVALID,
@@ -1914,6 +1934,11 @@ BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* 
                         result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, result.parameter_types[parameter_index]);
                     }
                     result.parameter_types[parameter_index] = c_ir_parameter_value_type(program, result.parameter_types[parameter_index]);
+                    if (declaration.is_identifier_list_definition)
+                    {
+                        result.parameter_types[parameter_index] = c_ir_default_argument_promotion_type(
+                            program, result.parameter_types[parameter_index], s32_type, f64_type);
+                    }
                     if (result.parameter_types[parameter_index].value == IR_ID_UNDERLYING_INVALID)
                     {
                         return (CIrSignature){0};
@@ -13815,6 +13840,7 @@ BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult
         bool duplicate_entity = false;
         bool declaration_prototyped =
             declaration.type.value < parse->type_count && !parse->types[declaration.type.value].is_unprototyped;
+        bool declaration_defines_identifier_parameters = declaration.is_identifier_list_definition && declaration.parameter_count;
         for (u32 candidate_index = group->first_candidate; candidate_index != UINT32_MAX; candidate_index = index->candidates[candidate_index].next)
         {
             u32 candidate_declaration = index->candidates[candidate_index].declaration_index;
@@ -13832,7 +13858,8 @@ BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult
             // declarations share the entity's IrFunction, which takes the
             // moved candidate's type when c_lower_to_ir_with_options builds
             // the rows, so calls, the row and its symbol agree on one type.
-            if (declaration_prototyped && candidate.type.value < parse->type_count && parse->types[candidate.type.value].is_unprototyped)
+            if ((declaration_prototyped || declaration_defines_identifier_parameters) && candidate.type.value < parse->type_count &&
+                parse->types[candidate.type.value].is_unprototyped)
             {
                 index->candidates[candidate_index].declaration_index = declaration_index;
                 if (group->declaration_index == candidate_declaration)
@@ -13983,7 +14010,7 @@ BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u3
         candidate_count += 1;
         u32 rank = signature.is_variadic || signature.is_unprototyped ? 16 : 0;
         bool viable = true;
-        for (u32 argument_index = 0; argument_index < signature.parameter_count; argument_index += 1)
+        for (u32 argument_index = 0; !signature.is_unprototyped && argument_index < signature.parameter_count; argument_index += 1)
         {
             IrTypeId argument_type = c_ir_predict_expression_type(builder, argument_starts[argument_index], argument_ends[argument_index]);
             u32 conversion_rank = c_ir_implicit_conversion_rank(builder, argument_type, signature.parameter_types[argument_index]);
@@ -16151,7 +16178,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     // the symbol's `()` type describes no call, and the backends read the
     // argument placement off the type the reference names.
     IrTypeId callee_type = target->canonical_type;
-    if (signature.is_unprototyped && argument_count > signature.parameter_count)
+    if (signature.is_unprototyped && (argument_count || signature.parameter_count))
     {
         callee_type = c_ir_unprototyped_call_type(builder, signature.return_type, arguments, argument_count);
         if (callee_type.value == IR_ID_UNDERLYING_INVALID)
@@ -22021,7 +22048,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             IrSourceRange source =
                 c_ir_token_source_range(builder, builder->preprocess.tokens[index]);
-            if (argument_count < signature.parameter_count)
+            if (!signature.is_unprototyped && argument_count < signature.parameter_count)
             {
                 value = c_ir_decay_array(builder, value, signature.parameter_types[argument_count], source);
                 if (value.value < builder->function->value_count &&
@@ -22064,7 +22091,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 return false;
             }
-            if (argument_count >= signature.parameter_count &&
+            if ((signature.is_unprototyped || argument_count >= signature.parameter_count) &&
                 c_ir_type_is_binary128_runtime(builder, builder->function->values[value.value].canonical_type))
             {
                 IrTypeId carrier = c_ir_binary128_variadic_carrier_type(builder);
@@ -22081,7 +22108,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             // needs nothing extra here, and neither does an aggregate whose
             // classification carries no x87 class at all.  Every other
             // wide-float shape still has no argument lowering.
-            if (argument_count >= signature.parameter_count &&
+            if ((signature.is_unprototyped || argument_count >= signature.parameter_count) &&
                 c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache,
                                               builder->function->values[value.value].canonical_type) &&
                 !c_ir_type_is_f80_x87_shape(builder->program, builder->wide_float_cache,
@@ -22165,7 +22192,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         // reaches an indirect callee: without this the shortfall used to
         // travel to IR validation and be reported as a code generation
         // failure naming an opcode.
-        if (argument_count < signature.parameter_count)
+        if (!signature.is_unprototyped && argument_count < signature.parameter_count)
         {
             builder->failure_token_index = selected->open_index;
             builder->failure_message =
@@ -22190,7 +22217,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             // Through a pre-C23 `()` pointer the call names its own
             // parameters, so the pointer takes the call's signature; see
             // c_ir_unprototyped_call_type.
-            if (signature.is_unprototyped && argument_count > signature.parameter_count)
+            if (signature.is_unprototyped && (argument_count || signature.parameter_count))
             {
                 IrTypeId callee_type =
                     c_ir_unprototyped_call_type(builder, signature.return_type, selected->arguments, argument_count);
@@ -34828,7 +34855,8 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_function_target(CIntegerIrBuilder* builder, 
         .kind = C_DECLARATION_FUNCTION,
     };
     CIrSignature signature = c_ir_function_signature(builder->arena, builder->program, builder->pointer_types, builder->wide_float_cache,
-                                                      &builder->parse, synthetic, builder->c_type_ir_map, builder->target);
+                                                      &builder->parse, synthetic, builder->c_type_ir_map, builder->s32_type,
+                                                      builder->f64_type, builder->target);
     if (!signature.valid)
     {
         return false;
@@ -51235,6 +51263,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                             parameter_type = c_ir_add_pointer_type(program, &pointer_types, parameter_type);
                         }
                         parameter_types[parameter_index] = c_ir_parameter_value_type(program, parameter_type);
+                        if (c_type->is_unprototyped && c_type->parameter_count)
+                        {
+                            parameter_types[parameter_index] = c_ir_default_argument_promotion_type(
+                                program, parameter_types[parameter_index], s32_type, f64_type);
+                        }
                     }
                     c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
                                                                                  .name = S8("C function"),
@@ -52467,7 +52500,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         if (declaration.kind == C_DECLARATION_FUNCTION)
         {
             signatures[declaration_index] = c_ir_function_signature(arena, program, &pointer_types, &wide_float_cache, &parse, declaration,
-                                                                     c_type_ir_map, target);
+                                                                     c_type_ir_map, s32_type, f64_type, target);
             signatures[declaration_index].is_noreturn = c_ir_declaration_is_noreturn(preprocess, declaration);
             if (declaration.entity.value < parse.entity_count)
             {
@@ -53096,10 +53129,16 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             CParameter parameter = signature.parameters[parameter_index];
             IrTypeId value_type = signature.parameter_types[parameter_index];
             IrTypeId object_type = parameter.type.value < parse.type_count ? c_type_ir_map[parameter.type.value] : IR_TYPE_ID_INVALID;
+            CType* parameter_type = c_type_from_id(&builder.parse, parameter.type);
             // Arrays, function parameters and ABI-specific va_list shapes keep
             // their adjusted type. Ordinary qualified objects retain the type
             // of the definition, independently of the callable value type.
-            if (c_ir_parameter_value_type(program, object_type).value != value_type.value)
+            // Identifier-list scalar objects additionally keep the narrow
+            // type to which the default-promoted incoming value is assigned.
+            bool identifier_object_type = declaration.is_identifier_list_definition && parameter_type &&
+                                          parameter_type->kind != C_TYPE_ARRAY && parameter_type->kind != C_TYPE_FUNCTION &&
+                                          !(parameter_type->kind == C_TYPE_VA_LIST && c_ir_va_list_parameter_decays(target));
+            if (!identifier_object_type && c_ir_parameter_value_type(program, object_type).value != value_type.value)
             {
                 object_type = value_type;
             }
@@ -53109,7 +53148,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                 parameters_lowered = false;
                 break;
             }
-            CType* parameter_type = c_type_from_id(&builder.parse, parameter.type);
             if (parameter_type && parameter_type->kind == C_TYPE_ARRAY)
             {
                 IrType* adjusted_parameter_type = ir_type_from_id(&program->types, signature.parameter_types[parameter_index]);
