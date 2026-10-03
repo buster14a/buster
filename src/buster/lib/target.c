@@ -413,6 +413,7 @@ TargetParseResult target_parse_triple(String8 triple)
 
     u64 component_start = 0;
     u32 component_index = 0;
+    String8 gnu_environment = {0};
     // The execution environment is part of this exact spelling. Generic
     // SPIR-V triples remain owned by the external GPU pipeline parser.
     if (string_equal(triple, S8("spirv-vulkan1.2-compute")))
@@ -519,10 +520,21 @@ TargetParseResult target_parse_triple(String8 triple)
                 result.target.os = OPERATING_SYSTEM_LINUX;
             }
         }
+        else if (target_component_equal(component, S8("mingw32")))
+        {
+            result.invalid_component = component;
+            result.error = TARGET_PARSE_ERROR_ENVIRONMENT;
+            return result;
+        }
         else if (target_component_equal(component, S8("windows")) || target_component_equal(component, S8("win32")) ||
-                 target_component_equal(component, S8("mingw32")) || target_component_equal(component, S8("msvc")))
+                 target_component_equal(component, S8("msvc")))
         {
             result.target.os = OPERATING_SYSTEM_WINDOWS;
+        }
+        else if (target_component_equal(component, S8("gnu")) || target_component_equal(component, S8("gnullvm")))
+        {
+            // Free-form on every other system; on Windows it names MinGW.
+            gnu_environment = component;
         }
         else if (target_component_equal(component, S8("uefi")))
         {
@@ -544,6 +556,11 @@ TargetParseResult target_parse_triple(String8 triple)
     {
         result.invalid_component = triple;
         result.error = TARGET_PARSE_ERROR_OPERATING_SYSTEM;
+    }
+    else if (result.target.os == OPERATING_SYSTEM_WINDOWS && gnu_environment.length)
+    {
+        result.invalid_component = gnu_environment;
+        result.error = TARGET_PARSE_ERROR_ENVIRONMENT;
     }
     return result;
 }
