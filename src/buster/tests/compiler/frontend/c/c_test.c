@@ -746,7 +746,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_bit_field_assignment_val
                         "    value = (((p)->a += 2));\n"
                         "    failed |= value != 1 || s.a != 1;\n"
                         "    trace = 0;\n"
-                        "    value = consume(((*locate(&s)).a = 9));\n"
+                        "    value = consume(((locate(&s))->a = 9));\n"
                         "    failed |= value != 1 || s.a != 1 || trace != 12u;\n"
                         "    return failed != 0;\n"
                         "}\n");
