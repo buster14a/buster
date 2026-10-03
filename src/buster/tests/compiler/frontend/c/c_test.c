@@ -24780,12 +24780,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         {S8("void atomic_store(_Atomic(long double) *value) { __c11_atomic_store(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
         {S8("long double atomic_exchange(_Atomic(long double) *value) { return __c11_atomic_exchange(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
         {S8("int atomic_compare(_Atomic(long double) *value, long double *expected) { return __c11_atomic_compare_exchange_strong(value, expected, 0.0L, __ATOMIC_RELAXED, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
-        // `va_arg` reads a wide value back in the two shapes the argument side
-        // passes one in; the shapes past the two eightbytes its copy covers --
-        // a `long double _Complex`, an aggregate with a tail behind the
-        // payload -- are named here rather than at code generation.
+        // COMPLEX_X87 still lacks a complete variadic transport contract.
+        // Ordinary MEMORY-class f80 aggregates belong in accepted below.
         {S8("typedef __builtin_va_list va_list; int take(int count, ...) { va_list arguments; long double _Complex value = __builtin_va_arg(arguments, long double _Complex); return value != 0; } int main(void) { return 0; }"), false},
-        {S8("typedef __builtin_va_list va_list; struct ldlarge { long double f; int tail; }; int take(int count, ...) { va_list arguments; struct ldlarge value = __builtin_va_arg(arguments, struct ldlarge); return value.tail; } int main(void) { return 0; }"), false},
         {S8("long double malformed_exponent = 0x1pL; int main(void) { return 0; }"), false},
         {S8("long double invalid_i_suffix = 123i; int main(void) { return 0; }"), true},
         {S8("long double invalid_i65_suffix = 123i65; int main(void) { return 0; }"), true},
@@ -24861,6 +24858,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
             S8("void fixed_f80_variadic(long double value, ...) { (void)value; } int main(void) { return 0; }"),
             S8("typedef __builtin_va_list va_list; int take(int count, ...) { va_list arguments; long double value = __builtin_va_arg(arguments, long double); return value != 0; } int main(void) { return 0; }"),
             S8("typedef __builtin_va_list va_list; union ldshape { long double f; struct { unsigned long m; unsigned short se; } i; }; unsigned long take(int count, ...) { va_list arguments; union ldshape value = __builtin_va_arg(arguments, union ldshape); return value.i.m; } int main(void) { return 0; }"),
+            S8("typedef __builtin_va_list va_list; struct ldlarge { long double f; int tail; }; int take(int count, ...) { va_list arguments; struct ldlarge value = __builtin_va_arg(arguments, struct ldlarge); return value.tail; } int main(void) { return 0; }"),
             S8("long double arithmetic = 1.0L + 2.0L; int main(void) { return 0; }"),
             S8("long double parenthesized_arithmetic = (1.0L + 2.0L); int main(void) { return 0; }"),
             S8("long double aggregate[1] = { 1.0L }; int main(void) { return 0; }"),
