@@ -104,7 +104,7 @@ existing configured tree, use `build` for incremental work. `--sanitize`,
 | Sanitized validation | With the build directory idle: `./build.sh generate --sanitize`, then `./build.sh build -t test_all`. |
 | Full local compiler/configuration matrix | `./build.sh test_all_combinations`. |
 | External compatibility work | Read the [harness index](docs/agents/compatibility.md); use its pristine pinned inputs and affected harness. |
-| Documentation only | Check commands against their implementation, local links, and `git diff --check`; compiler tests are unnecessary unless behavior also changes. |
+| Documentation only | Check commands against their implementation, local links, and `git diff --check`; compiler tests are unnecessary unless behavior also changes. Raw audit evidence is byte-exact and [exempt from the whitespace check](docs/agents/benchmarking.md#performance-audit-notes); audit prose is not. |
 
 Preserve Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and supported
 platform coverage. Routine Apple CI validates AArch64 only; Apple x86-64
