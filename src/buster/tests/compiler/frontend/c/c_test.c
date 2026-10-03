@@ -9218,7 +9218,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_digraphs(UnitTestArguments* arguments)
     CPunctuator punctuators[] = {C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET, C_PUNCTUATOR_LEFT_BRACE,
         C_PUNCTUATOR_RIGHT_BRACE, C_PUNCTUATOR_HASH, C_PUNCTUATOR_HASH_HASH, C_PUNCTUATOR_HASH_HASH, C_PUNCTUATOR_HASH,
         C_PUNCTUATOR_NONE, C_PUNCTUATOR_NONE};
-    String8 tail = S8("<: :> <% %> %: %:%: %:%:%: \"<:%>\" '<' /* <: %:%: */");
+    String8 tail = S8("<: :> <% %> %: %:%: %:%:%: \"<:%>\" '<' /* <: %:%: "
+        "scanner padding scanner padding scanner padding scanner padding scanner padding scanner padding "
+        "scanner padding scanner padding scanner padding scanner padding scanner padding scanner padding */");
     for (u32 phase = 0; phase < 64; phase += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
