@@ -397,6 +397,150 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_binary_families(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_binary_categories_case(UnitTestArguments* arguments, IrBinaryOperation operation,
+                                                                          u32 operand_type, u32 result_type)
+{
+    UnitTestResult result = {0};
+    for (u32 variant = 0; variant < 9; variant += 1)
+    {
+        // Raw complete-module data, independent of the builder/frontend:
+        // LOCAL defines a place; LOAD defines the corresponding value.
+        IrType types[] = {
+            {.id = {.value = 0}, .kind = IR_TYPE_INTEGER, .bit_width = 64, .is_signed = true,
+             .layout = {.size = 8, .alignment = 8, .resolved = true}},
+            {.id = {.value = 1}, .kind = IR_TYPE_FLOAT, .bit_width = 64,
+             .layout = {.size = 8, .alignment = 8, .resolved = true}},
+            {.id = {.value = 2}, .kind = IR_TYPE_BOOLEAN, .bit_width = 1,
+             .layout = {.size = 1, .alignment = 1, .resolved = true}},
+            {.id = {.value = 3}, .kind = IR_TYPE_POINTER, .element_type = {.value = 0},
+             .layout = {.size = 8, .alignment = 8, .resolved = true}},
+            {.id = {.value = 4}, .kind = IR_TYPE_VECTOR, .element_type = {.value = 0}, .element_count = 2,
+             .layout = {.size = 16, .alignment = 16, .resolved = true}},
+            {.id = {.value = 5}, .kind = IR_TYPE_VECTOR, .element_type = {.value = 1}, .element_count = 2,
+             .layout = {.size = 16, .alignment = 16, .resolved = true}},
+            {.id = {.value = 6}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 7}},
+            {.id = {.value = 7}, .kind = IR_TYPE_VOID},
+        };
+        IrValueId places[] = {{.value = 0}, {.value = 1}};
+        bool uses_memory[] = {true, true};
+        u32 place_mask = variant < 8 ? variant : 0;
+        IrValueId binary_operands[] = {{.value = place_mask & 1 ? 0 : 2}, {.value = place_mask & 2 ? 1 : 3}};
+        IrValue values[] = {
+            {.canonical_type = {.value = operand_type}, .definition = {.value = 0}, .category = IR_VALUE_PLACE},
+            {.canonical_type = {.value = operand_type}, .definition = {.value = 1}, .category = IR_VALUE_PLACE},
+            {.canonical_type = {.value = operand_type}, .definition = {.value = 2}, .category = IR_VALUE_VALUE},
+            {.canonical_type = {.value = operand_type}, .definition = {.value = 3}, .category = IR_VALUE_VALUE},
+            {.canonical_type = {.value = result_type}, .definition = {.value = 4},
+             .category = variant == 8 ? IR_VALUE_COUNT : (place_mask & 4 ? IR_VALUE_PLACE : IR_VALUE_VALUE)},
+        };
+        IrInstruction instructions[] = {
+            {.opcode = IR_OPCODE_LOCAL, .canonical_type = {.value = operand_type}, .canonical_local = {.value = 0},
+             .result = {.value = 0}, .next = {.value = 1}},
+            {.opcode = IR_OPCODE_LOCAL, .canonical_type = {.value = operand_type}, .canonical_local = {.value = 1},
+             .result = {.value = 1}, .next = {.value = 2}},
+            {.opcode = IR_OPCODE_LOAD, .canonical_type = {.value = operand_type},
+             .operands = places, .operand_count = 1, .result = {.value = 2}, .next = {.value = 3}},
+            {.opcode = IR_OPCODE_LOAD, .canonical_type = {.value = operand_type},
+             .operands = places + 1, .operand_count = 1, .result = {.value = 3}, .next = {.value = 4}},
+            {.opcode = IR_OPCODE_BINARY, .binary_operation = (u8)operation, .canonical_type = {.value = result_type},
+             .operands = binary_operands, .operand_count = 2, .result = {.value = 4}, .next = {.value = 5}},
+            // The binary result is unused: RETURN cannot mask its category.
+            {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 7}, .result = IR_VALUE_ID_INVALID,
+             .next = IR_INSTRUCTION_ID_INVALID},
+        };
+        IrBlock block = {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 5},
+                         .sealed = true, .terminated = true};
+        IrFunction function = {.canonical_type = {.value = 6}, .state = IR_FUNCTION_LOWERED, .entry = {.value = 0},
+                               .blocks = &block, .block_count = 1, .instructions = instructions,
+                               .instruction_count = BUSTER_ARRAY_LENGTH(instructions), .values = values,
+                               .value_count = BUSTER_ARRAY_LENGTH(values), .local_places = places,
+                               .local_uses_memory = uses_memory, .local_count = BUSTER_ARRAY_LENGTH(places)};
+        IrModule module = {.functions = &function, .function_count = 1};
+        IrProgram program = {.arena = arguments->arena, .modules = &module, .module_count = 1,
+                             .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+        IrValidationResult validation = ir_validate_canonical_module(&program, &module);
+        BUSTER_TEST(arguments, validation.error == (variant ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE));
+        if (variant && validation.error == IR_VALIDATION_OPERATION)
+        {
+            BUSTER_TEST(arguments, validation.function.value == 0 && validation.block.value == 0 && validation.instruction.value == 4);
+            IrValidationResult prepared = ir_prepare_canonical_module(&program, &module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_OPERATION);
+            BUSTER_TEST(arguments, prepared.function.value == 0 && prepared.block.value == 0 && prepared.instruction.value == 4);
+            BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+            BUSTER_TEST(arguments, !function.published_cfg && !module.local_promotion_complete && !module.fast_complete);
+            BUSTER_TEST(arguments, instructions[4].operands == binary_operands && instructions[4].result.value == 4 &&
+                                   values[4].category == (variant == 8 ? IR_VALUE_COUNT : (place_mask & 4 ? IR_VALUE_PLACE : IR_VALUE_VALUE)));
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_binary_categories(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct IrTestBinaryCategoryCase IrTestBinaryCategoryCase;
+    struct IrTestBinaryCategoryCase
+    {
+        IrBinaryOperation operation;
+        u32 operand_type;
+        u32 result_type;
+    };
+    // Explicit operation/type expectations, including every scalar family
+    // and the neighboring Boolean, pointer and vector controls.
+    IrTestBinaryCategoryCase cases[] = {
+        {IR_BINARY_INTEGER_ADD, 0, 0},
+        {IR_BINARY_INTEGER_SUBTRACT, 0, 0},
+        {IR_BINARY_INTEGER_MULTIPLY, 0, 0},
+        {IR_BINARY_SIGNED_DIVIDE, 0, 0},
+        {IR_BINARY_UNSIGNED_DIVIDE, 0, 0},
+        {IR_BINARY_FLOAT_ADD, 1, 1},
+        {IR_BINARY_FLOAT_SUBTRACT, 1, 1},
+        {IR_BINARY_FLOAT_MULTIPLY, 1, 1},
+        {IR_BINARY_FLOAT_DIVIDE, 1, 1},
+        {IR_BINARY_SIGNED_REMAINDER, 0, 0},
+        {IR_BINARY_UNSIGNED_REMAINDER, 0, 0},
+        {IR_BINARY_SHIFT_LEFT, 0, 0},
+        {IR_BINARY_SIGNED_SHIFT_RIGHT, 0, 0},
+        {IR_BINARY_UNSIGNED_SHIFT_RIGHT, 0, 0},
+        {IR_BINARY_INTEGER_BITWISE_AND, 0, 0},
+        {IR_BINARY_INTEGER_BITWISE_OR, 0, 0},
+        {IR_BINARY_INTEGER_BITWISE_XOR, 0, 0},
+        {IR_BINARY_INTEGER_EQUAL, 0, 2},
+        {IR_BINARY_INTEGER_NOT_EQUAL, 0, 2},
+        {IR_BINARY_FLOAT_EQUAL, 1, 2},
+        {IR_BINARY_FLOAT_NOT_EQUAL, 1, 2},
+        {IR_BINARY_SIGNED_LESS, 0, 2},
+        {IR_BINARY_SIGNED_LESS_EQUAL, 0, 2},
+        {IR_BINARY_SIGNED_GREATER, 0, 2},
+        {IR_BINARY_SIGNED_GREATER_EQUAL, 0, 2},
+        {IR_BINARY_UNSIGNED_LESS, 0, 2},
+        {IR_BINARY_UNSIGNED_LESS_EQUAL, 0, 2},
+        {IR_BINARY_UNSIGNED_GREATER, 0, 2},
+        {IR_BINARY_UNSIGNED_GREATER_EQUAL, 0, 2},
+        {IR_BINARY_FLOAT_LESS, 1, 2},
+        {IR_BINARY_FLOAT_LESS_EQUAL, 1, 2},
+        {IR_BINARY_FLOAT_GREATER, 1, 2},
+        {IR_BINARY_FLOAT_GREATER_EQUAL, 1, 2},
+        {IR_BINARY_BOOLEAN_AND, 2, 2},
+        {IR_BINARY_BOOLEAN_OR, 2, 2},
+        {IR_BINARY_POINTER_EQUAL, 3, 2},
+        {IR_BINARY_POINTER_NOT_EQUAL, 3, 2},
+        {IR_BINARY_VECTOR_INTEGER_ADD, 4, 4},
+        {IR_BINARY_VECTOR_FLOAT_ADD, 5, 5},
+        {IR_BINARY_VECTOR_INTEGER_EQUAL, 4, 4},
+        {IR_BINARY_VECTOR_FLOAT_EQUAL, 5, 4},
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(cases) == 41);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        UnitTestResult categories = ir_test_canonical_binary_categories_case(arguments, cases[index].operation,
+                                                                            cases[index].operand_type, cases[index].result_type);
+        result.test_count += categories.test_count;
+        result.succeeded_test_count += categories.succeeded_test_count;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1173,6 +1317,10 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult binary_families = ir_test_canonical_binary_families(arguments);
     result.succeeded_test_count += binary_families.succeeded_test_count;
     result.test_count += binary_families.test_count;
+
+    UnitTestResult binary_categories = ir_test_canonical_binary_categories(arguments);
+    result.test_count += binary_categories.test_count;
+    result.succeeded_test_count += binary_categories.succeeded_test_count;
 
     UnitTestResult call_validation = ir_test_canonical_call_validation(arguments);
     result.succeeded_test_count += call_validation.succeeded_test_count;
