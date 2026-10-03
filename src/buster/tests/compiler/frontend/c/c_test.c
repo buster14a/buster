@@ -20393,13 +20393,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_string_subscripts(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_auto_local_declarations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 typed = S8("typedef int T; int f(void) { auto int value = 1; auto T alias = 2; "
+                      "auto _Atomic(int) atomic_value = 3; return value + alias + atomic_value; }\n");
+    struct { String8 source; CPreprocessDialect dialect; } accepted[] = {
+        {typed, C_PREPROCESS_DIALECT_C17}, {typed, C_PREPROCESS_DIALECT_GNU17},
+        {typed, C_PREPROCESS_DIALECT_C23}, {typed, C_PREPROCESS_DIALECT_GNU23},
+        {S8("int f(void) { auto __typeof__(1) value = 1; return value; }\n"), C_PREPROCESS_DIALECT_GNU23},
+        {S8("int f(void) { auto value = 1; auto real = 2.5; auto pointer = &value; "
+            "const auto prefixed = 2; auto const suffixed = 3; "
+            "_Static_assert(_Generic(value, int: 1, default: 0), \"int auto\"); "
+            "_Static_assert(_Generic(real, double: 1, default: 0), \"double auto\"); "
+            "_Static_assert(_Generic(pointer, int *: 1, default: 0), \"pointer auto\"); "
+            "return *pointer + prefixed + suffixed; }\n"), C_PREPROCESS_DIALECT_C23},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(accepted); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, accepted[index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = accepted[index].dialect});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && checked.analysis_complete && !checked.diagnostic_count,
+            checked.diagnostic_count ? checked.diagnostics[0].message : accepted[index].source);
+        scratch_end(temporary);
+    }
+    struct { String8 source; String8 message; CDiagnosticKind kind; } rejected[] = {
+        {S8("int f(void) { auto value; return 0; }\n"), S8("C23 auto requires an initialized data declaration"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS},
+        {S8("int f(void) { auto left = 1, right = 2; return 0; }\n"), S8("C23 auto may only be used with a single declarator"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS},
+        {S8("int f(void) { auto *value = (int *)0; return 0; }\n"), S8("C23 auto requires a plain identifier as declarator"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS},
+        {S8("int f(void) { auto auto value = 1; return 0; }\n"), S8("multiple storage-class specifiers in declaration"), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS},
+        {S8("int f(void) { auto value = value; return 0; }\n"), S8("use of undeclared identifier 'value'"), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER},
+        {S8("int f(void) { static auto value = 1; return 0; }\n"), S8("C23 auto inference currently requires an automatic object declaration"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS},
+        {S8("int f(void) { extern auto value = 1; return 0; }\n"), S8("C23 auto inference currently requires an automatic object declaration"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS},
+        {S8("int f(void) { __thread auto value = 1; return 0; }\n"), S8("C23 auto inference currently requires an automatic object declaration"), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+        c_test_auto_type_diagnostic(arguments, &result, rejected[index].source, C_PREPROCESS_DIALECT_GNU23,
+            rejected[index].kind, rejected[index].message);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 c_test_character_literal_query_source(Arena* arena, Target target, bool c23)
 {
     String8 literals[] = {S8("'a'"), S8("L'a'"), S8("u'a'"), S8("U'a'"), S8("u8'a'")};
     String8 wchar_type = target_uses_16_bit_wchar(target) ? S8("unsigned short") :
         target_uses_unsigned_wchar(target) ? S8("unsigned int") : S8("int");
     String8 types[] = {S8("int"), wchar_type, S8("unsigned short"), S8("unsigned int"), S8("unsigned char")};
-    String8 source = S8("int main(void) { int failures = 0;\n");
+    String8 source = S8("int main(void) { int failures = 0;\n"
+        "typedef int ExplicitType; auto int typed = 2; auto ExplicitType typed_alias = 3;\n"
+        "_Static_assert(_Generic(typed, int: 1, default: 0), \"typed auto\");\n"
+        "_Static_assert(_Generic(typed_alias, int: 1, default: 0), \"typedef auto\");\n"
+        "failures += typed + typed_alias != 5;\n");
+    if (c23)
+    {
+        source = string_format(arena,
+            S8("{S8}int outer = 7; int array[2] = {{7, 9}};\n"
+               "auto plain = 1; auto real = 2.5; auto pointer = &outer; auto decayed = array;\n"
+               "const auto prefixed = 3; auto const suffixed = 4; auto volatile qualified = 5;\n"
+               "_Static_assert(_Generic(plain, int: 1, default: 0), \"plain auto\");\n"
+               "_Static_assert(_Generic(real, double: 1, default: 0), \"double auto\");\n"
+               "_Static_assert(_Generic(pointer, int *: 1, default: 0), \"pointer auto\");\n"
+               "_Static_assert(_Generic(decayed, int *: 1, default: 0), \"array auto decay\");\n"
+               "_Static_assert(__builtin_types_compatible_p(__typeof__(&prefixed), const int *), \"prefix qualifier\");\n"
+               "_Static_assert(__builtin_types_compatible_p(__typeof__(&suffixed), const int *), \"suffix qualifier\");\n"
+               "_Static_assert(__builtin_types_compatible_p(__typeof__(&qualified), volatile int *), \"volatile qualifier\");\n"
+               "failures += plain != 1 || real != 2.5 || *pointer != 7 || decayed[1] != 9;\n"
+               "failures += prefixed != 3 || suffixed != 4 || qualified != 5;\n"), source);
+        // Static source is a substitution, so its braces remain literal.
+        source = string_format(arena, S8("{S8}{S8}"), source, S8("{ auto outer = outer; failures += outer != 7; }\n"));
+        source = string_format(arena, S8("{S8}{S8}"), source,
+            S8("typedef int HiddenType; { int HiddenType = 6; { auto HiddenType = HiddenType; failures += HiddenType != 6; } }\n"));
+    }
     for (u32 literal = 0; literal < (c23 ? 5u : 4u); literal += 1)
     {
         String8 promoted = literal == 3 || (literal == 1 && target_uses_unsigned_wchar(target) && !target_uses_16_bit_wchar(target))
@@ -20458,7 +20525,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_character_literal_query_types(UnitTest
             {
                 c_test_set_literal_query_machine_only(query_mode != 0);
                 CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
-                if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && checked.analysis_complete && !checked.diagnostic_count))
+                bool valid = !tokens.diagnostic_count && !syntax.diagnostic_count && checked.analysis_complete && !checked.diagnostic_count;
+                if (!valid)
+                {
+                    buster_test_error_arguments(arguments, __LINE__, BUSTER_FUNCTION, S8(__FILE__),
+                        S8("character query target={u32} dialect={u32} query_mode={u32} complete={u32} preprocessing={u32} syntax={u32} semantics={u32}\n{S8}"),
+                        target_index, dialect, query_mode, (u32)checked.analysis_complete,
+                        tokens.diagnostic_count, syntax.diagnostic_count, checked.diagnostic_count, source);
+                    CDiagnostic* diagnostics[] = {tokens.diagnostics, syntax.diagnostics, checked.diagnostics};
+                    u32 counts[] = {tokens.diagnostic_count, syntax.diagnostic_count, checked.diagnostic_count};
+                    for (u32 phase = 0; phase < BUSTER_ARRAY_LENGTH(diagnostics); phase += 1)
+                    {
+                        for (u32 diagnostic = 0; diagnostic < counts[phase]; diagnostic += 1)
+                        {
+                            CDiagnostic row = diagnostics[phase][diagnostic];
+                            buster_test_error_arguments(arguments, __LINE__, BUSTER_FUNCTION, S8(__FILE__),
+                                S8("character query phase={u32} kind={u32} line={u32} column={u32}: {S8}"),
+                                phase, (u32)row.kind, row.location.line, row.location.column, row.message);
+                        }
+                    }
+                }
+                if (BUSTER_REQUIRE(arguments, valid))
                 {
                     for (u32 form = 0; form < 2; form += 1)
                     {
@@ -33765,6 +33852,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_constant_query_isolation);
     BUSTER_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
+    BUSTER_TEST_FIXTURE(arguments, c_test_c23_auto_local_declarations);
     BUSTER_TEST_FIXTURE(arguments, c_test_character_literal_query_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);

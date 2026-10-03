@@ -278,6 +278,19 @@ expectations on six native layouts in GNU17/GNU23 through both query routes and
 both frontend forms. Its embedded native fixture checks signedness after `-1`
 assignment for `typeof`, GNU `__auto_type` and C23 `auto` in every allocator.
 
+Local C23 `auto name = expression` inference uses the existing initializer
+binding, value conversion and qualified type publication. The initializer is
+bound before its new identifier becomes visible, so an outer identifier may
+be shadowed. Prefix and suffix qualifiers are retained on the inferred object.
+An explicit type, including a visible typedef, `typeof` or `_Atomic(type)`,
+keeps `auto` as a storage specifier; pre-C23 typed declarations retain their
+existing behavior. `c_test_c23_auto_local_declarations` checks these controls
+and rejects missing initializers, multiple or non-identifier declarators,
+duplicate inferred specifiers and self-reference without an outer binding.
+This local automatic-object slice does not complete issue #1254: file-scope,
+`constexpr`, static, external and thread-local inference, and broader
+statement-expression queries remain outside its contract.
+
 Function types reject array and function return types when their declarators
 are formed, including unused prototypes, typedef return types and nested
 function-pointer declarators. Pointer return types keep their array/function

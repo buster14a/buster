@@ -18253,6 +18253,7 @@ struct CAutoDeclarationInfo
     u32 initializer_start;
     u32 initializer_end;
     bool has_auto_type;
+    bool is_c23_auto;
     bool has_initializer;
     bool has_multiple_declarators;
     bool invalid_declarator;
@@ -18308,7 +18309,8 @@ BUSTER_C_INTERNAL bool c_parse_auto_storage_word(String8 spelling, CAutoDeclarat
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preprocess, u32 start, u32 end, CAutoDeclarationInfo* info)
+BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CParseResult* parse, CPreprocessResult preprocess, CScopeId scope,
+                                                       u32 start, u32 end, CAutoDeclarationInfo* info)
 {
     *info = (CAutoDeclarationInfo){
         .auto_index = UINT32_MAX,
@@ -18338,6 +18340,7 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preproces
             break;
         }
     }
+    u32 c23_auto_index = UINT32_MAX;
     u32 scan = start;
     while (scan < specifier_end)
     {
@@ -18359,7 +18362,57 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preproces
                 info->auto_index = scan;
             }
         }
+        else if (c_preprocess_dialect_is_c23(preprocess.dialect) &&
+                 c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[scan], C_SYMBOL_WELL_KNOWN_AUTO))
+        {
+            c23_auto_index = scan;
+        }
         scan += 1;
+    }
+    if (!info->has_auto_type && c23_auto_index != UINT32_MAX)
+    {
+        // `auto` remains a storage word when an explicit type follows it,
+        // including a visible typedef. Only a declaration's specifier prefix
+        // participates; initializer words and declarator groups cannot supply
+        // a type or introduce inference.
+        bool explicit_type = false;
+        scan = start;
+        while (scan < specifier_end)
+        {
+            u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, specifier_end);
+            if (skipped != scan)
+            {
+                scan = skipped;
+                continue;
+            }
+            CToken token = preprocess.tokens[scan];
+            if (token.kind != C_TOKEN_IDENTIFIER)
+            {
+                break;
+            }
+            if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_AUTO))
+            {
+                info->conflicting_specifier |= info->auto_index != UINT32_MAX;
+                info->auto_index = scan;
+            }
+            else if ((c_parse_word_bits_token(preprocess, token) & C_WORD_QUALIFIER_ATOMIC) && scan + 1 < specifier_end &&
+                     c_token_is_punctuator(&preprocess.tokens[scan + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                explicit_type = true;
+                break;
+            }
+            else if (!c_parse_type_qualifier_word_token(preprocess, token, &info->qualifiers) &&
+                     !c_parse_auto_storage_word(c_token_spelling(preprocess.spelling_base, token), info))
+            {
+                CEntityId entity = c_parse_lookup_entity_token(parse, preprocess.spelling_base, scope, &token);
+                explicit_type = c_parse_type_word_for_dialect_token(preprocess, token) ||
+                    (entity.value < parse->entity_count && parse->entities[entity.value].kind == C_ENTITY_TYPEDEF);
+                break;
+            }
+            scan += 1;
+        }
+        info->has_auto_type = info->auto_index != UINT32_MAX && !explicit_type;
+        info->is_c23_auto = info->has_auto_type;
     }
     bool result;
     if (!info->has_auto_type)
@@ -18794,7 +18847,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                                                     CScopeId scope, u32 declaration_index, u32 start, u32 end)
 {
     CAutoDeclarationInfo auto_info = {0};
-    bool is_auto_type = c_parse_auto_declaration_info(preprocess, start, end, &auto_info);
+    bool is_auto_type = c_parse_auto_declaration_info(result, preprocess, scope, start, end, &auto_info);
     if (is_auto_type && !c_parse_storage_classes_valid(result, preprocess, scope, start, end))
     {
         return false;
@@ -18846,7 +18899,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         is_static_storage |= auto_info.is_static_storage;
         is_extern |= auto_info.is_extern;
         is_thread_local |= auto_info.is_thread_local;
-        if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
+        if (!auto_info.is_c23_auto && !c_preprocess_dialect_is_gnu(preprocess.dialect))
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                S8("GNU __auto_type is only available in GNU dialects"));
@@ -18855,31 +18908,36 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         if (auto_info.has_multiple_declarators)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("GNU __auto_type may only be used with a single declarator"));
+                               auto_info.is_c23_auto ? S8("C23 auto may only be used with a single declarator") :
+                                                       S8("GNU __auto_type may only be used with a single declarator"));
             return false;
         }
         if (is_typedef || is_static_storage || is_extern || is_thread_local)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("GNU __auto_type requires an automatic object declaration"));
+                               auto_info.is_c23_auto ? S8("C23 auto inference currently requires an automatic object declaration") :
+                                                       S8("GNU __auto_type requires an automatic object declaration"));
             return false;
         }
         if (auto_info.conflicting_specifier)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("GNU __auto_type cannot be combined with another type specifier"));
+                               auto_info.is_c23_auto ? S8("C23 auto cannot be combined with another inferred type specifier") :
+                                                       S8("GNU __auto_type cannot be combined with another type specifier"));
             return false;
         }
         if (auto_info.invalid_declarator || auto_info.name_index >= end)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("GNU __auto_type requires a plain identifier as declarator"));
+                               auto_info.is_c23_auto ? S8("C23 auto requires a plain identifier as declarator") :
+                                                       S8("GNU __auto_type requires a plain identifier as declarator"));
             return false;
         }
         if (!auto_info.has_initializer || auto_info.initializer_start >= auto_info.initializer_end)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("GNU __auto_type requires an initialized data declaration"));
+                               auto_info.is_c23_auto ? S8("C23 auto requires an initialized data declaration") :
+                                                       S8("GNU __auto_type requires an initialized data declaration"));
             return false;
         }
         u32 diagnostic_checkpoint = result->diagnostic_count;
@@ -18890,7 +18948,8 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             if (result->diagnostic_count == diagnostic_checkpoint)
             {
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                                   S8("could not infer the type of the GNU __auto_type initializer"));
+                                   auto_info.is_c23_auto ? S8("could not infer the type of the C23 auto initializer") :
+                                                           S8("could not infer the type of the GNU __auto_type initializer"));
             }
             return false;
         }
@@ -18899,7 +18958,8 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                                                         .element_type = result->types[inferred.value].element_type, .is_restrict = true}))
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("restrict-qualified GNU __auto_type must infer an object pointer type"));
+                               auto_info.is_c23_auto ? S8("restrict-qualified C23 auto must infer an object pointer type") :
+                                                       S8("restrict-qualified GNU __auto_type must infer an object pointer type"));
             return false;
         }
         if (auto_info.qualifiers.is_const || auto_info.qualifiers.is_volatile || auto_info.qualifiers.is_restrict || auto_info.qualifiers.is_atomic)
@@ -20381,7 +20441,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 end += 1;
             }
             CAutoDeclarationInfo auto_declaration_info = {0};
-            bool auto_declaration = c_parse_auto_declaration_info(preprocess, index, end, &auto_declaration_info);
+            bool auto_declaration = c_parse_auto_declaration_info(result, preprocess, scope_stack[scope_count - 1], index, end, &auto_declaration_info);
             if (end < body_end &&
                 c_parse_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index, index, end))
             {
