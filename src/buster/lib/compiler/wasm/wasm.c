@@ -7,6 +7,8 @@
 // defined and which are called once per module, not once per symbol, before it
 // orders imports; wasm64_prepare_wasi_imports reserves command imports before
 // definitions, and wasm64_fe_emit_wasi_start writes the adapter.
+// wasm64_fe_emit_instruction keeps scalar bit counts at their semantic width,
+// with zero extended operands, CLZ padding bias and a narrow CTZ zero sentinel.
 // Local aggregate snapshots use private shadow-stack slots. Their SSA locals
 // carry slot addresses; loads copy immediately, so later stores cannot change
 // an earlier value. Function ABIs and block parameters remain scalar-only.
@@ -3285,7 +3287,14 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
             instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
             instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)
         {
-            wasm64_fe_emit_integer_value(emitter, instruction->operands[0], operand_type && operand_type->kind == IR_TYPE_INTEGER && operand_type->is_signed);
+            u32 bit_width = wasm64_integer_bits(type);
+            u32 carrier_width = bit_width <= 32 ? 32 : 64;
+            bool count_bits = bit_width != 0 &&
+                              (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                               instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
+                               instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT);
+            wasm64_fe_emit_integer_value(emitter, instruction->operands[0],
+                                         !count_bits && operand_type && operand_type->kind == IR_TYPE_INTEGER && operand_type->is_signed);
             if (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE)
             {
                 if (wasm64_integer_bits(type) > 32)
@@ -3313,7 +3322,34 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
             }
             else
             {
+                // Count semantic bits, with zero extended carrier padding.
+                // The sentinel makes CTZ(0) return the semantic width too.
+                bool narrow = count_bits && bit_width < carrier_width;
+                if (narrow && instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
+                {
+                    if (carrier_width == 64)
+                    {
+                        wasm64_fe_i64_const(emitter, (s64)(UINT64_C(1) << bit_width));
+                    }
+                    else
+                    {
+                        wasm64_fe_i32_const(emitter, (s32)(UINT32_C(1) << bit_width));
+                    }
+                    wasm64_fe_emit_binary_opcode(emitter, IR_BINARY_INTEGER_BITWISE_OR, type);
+                }
                 wasm64_fe_emit_unary_opcode(emitter, instruction->unary_operation, type);
+                if (narrow && instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS)
+                {
+                    if (carrier_width == 64)
+                    {
+                        wasm64_fe_i64_const(emitter, (s64)(carrier_width - bit_width));
+                    }
+                    else
+                    {
+                        wasm64_fe_i32_const(emitter, (s32)(carrier_width - bit_width));
+                    }
+                    wasm64_fe_emit_binary_opcode(emitter, IR_BINARY_INTEGER_SUBTRACT, type);
+                }
             }
             wasm64_fe_emit_result_set(emitter, instruction, true, type->kind == IR_TYPE_INTEGER && type->is_signed);
         }

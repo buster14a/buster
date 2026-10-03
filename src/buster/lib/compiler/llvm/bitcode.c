@@ -7,7 +7,9 @@
 // layout, llvm_bc_collect_instruction_constants builds the constant pool and
 // records each constant instruction's pool value id, llvm_bc_plan_function
 // assigns SSA ids from those records, and llvm_bc_emit_module writes the
-// records. LLVM's bitstream is LSB-first. The writer intentionally emits
+// records. llvm_bc_add_lifecycle_global and llvm_bc_lifecycle_initializer
+// preserve canonical module callbacks as LLVM appending registration arrays.
+// LLVM's bitstream is LSB-first. The writer intentionally emits
 // unabbreviated records: this keeps the implementation small and auditable,
 // while remaining a fully conforming, self-describing LLVM bitcode stream.
 //
@@ -146,7 +148,12 @@ enum
     LLVM_BC_CALL_EXPLICIT_TYPE = 1 << 15,
 
     LLVM_BC_LINKAGE_EXTERNAL = 0,
+    LLVM_BC_LINKAGE_APPENDING = 2,
     LLVM_BC_LINKAGE_INTERNAL = 3,
+
+    LLVM_BC_GLOBAL_STRING = 1,
+    LLVM_BC_GLOBAL_CTORS = 2,
+    LLVM_BC_GLOBAL_DTORS = 3,
 
     LLVM_BC_VA_START = 0,
     LLVM_BC_VA_COPY = 1,
@@ -160,6 +167,8 @@ enum
 // Initial slot count of the open-addressed constant and name indexes. Both
 // stay power-of-two sized and at most half full.
 #define LLVM_BC_INDEX_MIN_CAPACITY 64
+// A half-full power-of-two index must fit its u32 slot count.
+#define LLVM_BC_INDEX_MAX_ENTRIES (UINT32_C(1) << 30)
 // Scalar ctlz/cttz/ctpop declarations, one per operation and width 1..64.
 #define LLVM_BC_INTEGER_COUNT_KIND_COUNT 3
 #define LLVM_BC_INTEGER_COUNT_MAX_WIDTH 64
@@ -262,7 +271,7 @@ struct LlvmBcGlobal
     u32 storage_type_id;
     u32 initializer_value_id;
     u32 alignment;
-    bool synthetic;
+    u8 synthetic_kind;
     bool declaration;
     bool read_only;
     bool is_thread_local;
@@ -1801,8 +1810,51 @@ static void llvm_bc_mark_referenced_symbols(LlvmBcContext* context, u8* referenc
     }
 }
 
+// Called before entity value numbering; empty lists add no records or types.
+BUSTER_GLOBAL_LOCAL bool llvm_bc_add_lifecycle_global(LlvmBcContext* context, u64 count, bool destructor)
+{
+    bool result = true;
+    if (count)
+    {
+        String8 name = destructor ? llvm_bc_s8("llvm.global_dtors") : llvm_bc_s8("llvm.global_ctors");
+        if (count > UINT32_MAX || context->global_count >= LLVM_BC_NAME_FUNCTION ||
+            (u64)context->global_count + context->function_count + 1 >= LLVM_BC_INVALID_ID ||
+            context->type_count > UINT32_MAX - 2 || context->name_slot_count >= LLVM_BC_INDEX_MAX_ENTRIES)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM lifecycle registration count exceeds record limits"),
+                         0, 0, 0, IR_SYMBOL_ID_INVALID);
+            result = false;
+        }
+        else if (!llvm_bc_name_available(context, name, 0))
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM lifecycle registration name is already defined"),
+                         0, 0, 0, IR_SYMBOL_ID_INVALID);
+            result = false;
+        }
+        else
+        {
+            u64 entry_types[4] = {0, context->i32_type_id, context->pointer_type_id, context->pointer_type_id};
+            u32 entry_type = llvm_bc_add_type_record(context, LLVM_BC_TYPE_STRUCT_ANON, entry_types, 4);
+            u32 storage_type = llvm_bc_array_type(context, count, entry_type);
+            llvm_bc_vec_reserve(context->arena, (void**)&context->globals, &context->global_capacity, context->global_count + 1,
+                                sizeof(*context->globals), BUSTER_ALIGN_OF(LlvmBcGlobal));
+            LlvmBcGlobal* global = context->globals + context->global_count;
+            *global = (LlvmBcGlobal){.name = name,
+                                     .canonical_type = IR_TYPE_ID_INVALID,
+                                     .value_id = LLVM_BC_INVALID_ID,
+                                     .storage_type_id = storage_type,
+                                     .initializer_value_id = LLVM_BC_INVALID_ID,
+                                     .synthetic_kind = destructor ? LLVM_BC_GLOBAL_DTORS : LLVM_BC_GLOBAL_CTORS};
+            llvm_bc_register_name(context, name, context->global_count);
+            context->global_count += 1;
+        }
+    }
+    return result;
+}
+
 static bool llvm_bc_collect_entities(LlvmBcContext* context)
 {
+    u64 initializer_counts[2] = {0};
     u32 symbol_count = context->program->symbols.count;
     context->symbol_value_ids = arena_allocate(context->arena, u32, symbol_count ? symbol_count : 1);
     context->symbol_seen = arena_allocate(context->arena, u8, symbol_count ? symbol_count : 1);
@@ -1818,6 +1870,10 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
         IrModule* module = context->modules + module_index;
+        for (u32 initializer_index = 0; initializer_index < module->initializer_count; initializer_index += 1)
+        {
+            initializer_counts[module->initializers[initializer_index].is_destructor ? 1 : 0] += 1;
+        }
         for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
         {
             IrGlobal* global = module->globals + global_index;
@@ -1927,7 +1983,7 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
                                          .storage_type_id = storage_type,
                                          .initializer_value_id = LLVM_BC_INVALID_ID,
                                          .alignment = 1,
-                                         .synthetic = true,
+                                         .synthetic_kind = LLVM_BC_GLOBAL_STRING,
                                          .read_only = true};
                 llvm_bc_register_name(context, name, context->global_count);
                 context->global_count += 1;
@@ -2022,6 +2078,12 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
                 }
             }
         }
+    }
+
+    if (!llvm_bc_add_lifecycle_global(context, initializer_counts[0], false) ||
+        !llvm_bc_add_lifecycle_global(context, initializer_counts[1], true))
+    {
+        return false;
     }
 
     u32 value_id = 0;
@@ -2147,6 +2209,13 @@ static u32 llvm_bc_add_constant(LlvmBcContext* context, u32 type_id, u32 code, u
                           : code == LLVM_BC_CST_STRING       ? llvm_bc_s8("LLVM string constant discovered after value numbering")
                                                              : llvm_bc_s8("LLVM constant expression discovered after value numbering");
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, message, 0, 0, 0, IR_SYMBOL_ID_INVALID);
+    }
+    else if (result == LLVM_BC_INVALID_ID &&
+             ((u64)context->module_value_count + context->constant_count >= LLVM_BC_INVALID_ID ||
+              context->constant_count >= LLVM_BC_INDEX_MAX_ENTRIES))
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM constant count exceeds value or index limits"),
+                     0, 0, 0, IR_SYMBOL_ID_INVALID);
     }
     else if (result == LLVM_BC_INVALID_ID)
     {
@@ -2481,6 +2550,61 @@ static LlvmBcString* llvm_bc_string_for_instruction(LlvmBcContext* context, IrFu
     return 0;
 }
 
+// Entity IDs are final here, and constants are still unlocked. The private
+// lifecycle storage type is [count x {i32, ptr, ptr}]; no canonical rows change.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_lifecycle_initializer(LlvmBcContext* context, LlvmBcGlobal* global)
+{
+    u32 result = LLVM_BC_INVALID_ID;
+    LlvmBcTypeRecord array = context->types[global->storage_type_id];
+    u32 count = (u32)array.operands[0];
+    u32 entry_type = (u32)array.operands[1];
+    bool destructor = global->synthetic_kind == LLVM_BC_GLOBAL_DTORS;
+    u64* entries = arena_allocate(context->arena, u64, count);
+    u32 entry_count = 0;
+    u32 associated = llvm_bc_null_constant(context, context->pointer_type_id);
+    for (u32 module_index = 0; module_index < context->module_count && !llvm_bc_failed(context); module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 index = 0; index < module->initializer_count && !llvm_bc_failed(context); index += 1)
+        {
+            IrModuleInitializer initializer = module->initializers[index];
+            if (initializer.is_destructor == destructor)
+            {
+                IrSymbol* symbol = llvm_bc_ir_symbol(context, initializer.symbol);
+                if (entry_count >= count || !symbol || symbol->kind != IR_SYMBOL_FUNCTION || !symbol->is_definition ||
+                    (initializer.priority > UINT16_MAX && initializer.priority != IR_INITIALIZER_PRIORITY_NONE))
+                {
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
+                                 llvm_bc_s8("invalid canonical LLVM lifecycle registration"), 0, 0, 0, initializer.symbol);
+                }
+                else
+                {
+                    u32 priority = initializer.priority == IR_INITIALIZER_PRIORITY_NONE ? UINT16_MAX : initializer.priority;
+                    u64 values[3] = {llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, priority),
+                                     llvm_bc_address_constant(context, initializer.symbol, 0, initializer.symbol), associated};
+                    if (!llvm_bc_failed(context))
+                    {
+                        entries[entry_count++] = llvm_bc_add_constant(context, entry_type, LLVM_BC_CST_AGGREGATE, values, 3);
+                    }
+                }
+            }
+        }
+    }
+    if (!llvm_bc_failed(context))
+    {
+        if (entry_count != count)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM lifecycle registration count changed"),
+                         0, 0, 0, IR_SYMBOL_ID_INVALID);
+        }
+        else
+        {
+            result = llvm_bc_add_constant(context, global->storage_type_id, LLVM_BC_CST_AGGREGATE, entries, count);
+        }
+    }
+    return result;
+}
+
 static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
 {
     for (u32 index = 0; index < context->global_count; index += 1)
@@ -2491,7 +2615,16 @@ static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
             record->initializer_value_id = LLVM_BC_INVALID_ID;
             continue;
         }
-        if (record->synthetic)
+        if (record->synthetic_kind == LLVM_BC_GLOBAL_CTORS || record->synthetic_kind == LLVM_BC_GLOBAL_DTORS)
+        {
+            record->initializer_value_id = llvm_bc_lifecycle_initializer(context, record);
+            if (llvm_bc_failed(context))
+            {
+                return false;
+            }
+            continue;
+        }
+        if (record->synthetic_kind == LLVM_BC_GLOBAL_STRING)
         {
             u64* bytes = arena_allocate(context->arena, u64, record->synthetic_bytes.length ? record->synthetic_bytes.length : 1);
             for (u64 byte = 0; byte < record->synthetic_bytes.length; byte += 1)
@@ -4896,7 +5029,8 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             global->storage_type_id,
             2 | (global->read_only ? 1 : 0), // explicit storage type, optionally constant
             initializer,
-            llvm_bc_linkage(global->symbol, global->declaration),
+            global->synthetic_kind == LLVM_BC_GLOBAL_CTORS || global->synthetic_kind == LLVM_BC_GLOBAL_DTORS
+                ? LLVM_BC_LINKAGE_APPENDING : llvm_bc_linkage(global->symbol, global->declaration),
             alignment,
             section_ids[index],
             0, // visibility

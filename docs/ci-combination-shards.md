@@ -111,6 +111,23 @@ No branch protection, check requirement, write permission or secret is changed;
 only `CI complete` adds job-scoped `actions: read` for this inventory and
 `checks: read` for the annotations of interrupted jobs.
 
+## Long temporary-base regression
+
+The Linux x86-64 Release shard runs its existing correctness matrix with
+`BUSTER_TEST_TEMPORARY_BASE` set to an exclusively created directory at least
+87 bytes long (GitHub #1400). Its parent is the supplied temporary base, when
+present, or `RUNNER_TEMP`; the override therefore stays on the selected
+filesystem. `CI_LONG_TEMPORARY_BASE_V1` reports the prepared byte count and
+successful cleanup. The test harness owns and removes its per-run children;
+the lane then requires the base to be empty and removes it. Failure cleanup
+removes only the directory created by this step.
+
+The existing flat-aggregate initializer fixture writes its real source file
+below that base and compiles/runs every frontend, optimization and allocator
+combination. Its source-path termination was fixed in #1402; the long-base
+run preserves coverage of the original length-dependent file-open abort.
+No extra test suite or configuration row is added.
+
 ## Reproduce
 
 Use the exact checkout SHA, runner image and tool versions recorded in the
