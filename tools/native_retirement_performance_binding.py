@@ -138,6 +138,23 @@ ROW_ELIGIBILITY_FIELDS = [
 SUPPORT_DECLARATION_PATH = "docs/native-retirement-support-v1.tsv"
 SUPPORT_DECLARATION_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"
 NEXT_SUPPORT_DECLARATION_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
+# #1986 scheduling-test bytes only; corpus and target axes are unchanged.
+APPLE_CI_SUPPORT_DECLARATION_SHA256 = "50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210"
+# #1007 successor: current declaration with only the tests/basic_c_f80_machine.c
+# byte/hash row updated; corpus and target axes are unchanged.
+PROPOSED_SUPPORT_DECLARATION_SHA256 = "a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932"
+# #1808 successor: the #1007 declaration with only the tests/ci_tools_test.py
+# byte/hash row updated; corpus and target axes are unchanged.
+MAIN_CI_REUSE_SUPPORT_DECLARATION_SHA256 = "434ef9a356cd11e7af0b37907172becf173a6855c98a6168f640ce769f0bcf61"
+# #1835 successor: only the dependency-only bootstrap wrapper test row changes.
+BOOTSTRAP_WORKFLOW_SUPPORT_DECLARATION_SHA256 = "6d975980cc6df4945334fc2846dac8e03a1480a6c65e516db37be8adbccf1106"
+# #1836 successor: #1835 plus archiving the retired bridge under tests/retired/.
+RETIRED_BRIDGE_SUPPORT_DECLARATION_SHA256 = "5834270ef2b01798b25547751fd91631295a84ccb23116bf1502d8bae0c0b115"
+# #2203 successor: #1836 with only the aligned-typedef validation fixture row updated.
+ALIGNED_TYPEDEF_SUPPORT_DECLARATION_SHA256 = "7d4e4ed4fc74ff57eb3005550457751cc8841f113277c116d67fb1358da09d51"
+# #2428 successors: the exact mobile dependency row, alone or with #2203.
+MOBILE_CAPTURE_SUPPORT_DECLARATION_SHA256 = "f17dbde795c3afc99f4b3cfd59087d4a63721218dab5018e7e77e090228b3741"
+ALIGNED_MOBILE_CAPTURE_SUPPORT_DECLARATION_SHA256 = "8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2"
 SUPPORT_DECLARATION_FIELDS = ["path", "role", "compile_obligation", "bytes", "sha256"]
 INPUT_FIELDS = ["path", "role", "compile_obligation", "bytes", "buster_hash_64",
                 "sha256", "fixture_recipe", "fixture_flags"]
@@ -1644,7 +1661,14 @@ def _check_support_output(root, binding, row_data, native_target=None):
         _fail("#508 support declaration path is not the frozen declaration")
     support_sha256 = support_declaration["sha256"]
     if support_sha256 not in (SUPPORT_DECLARATION_SHA256,
-                             NEXT_SUPPORT_DECLARATION_SHA256):
+                             NEXT_SUPPORT_DECLARATION_SHA256, APPLE_CI_SUPPORT_DECLARATION_SHA256,
+                             PROPOSED_SUPPORT_DECLARATION_SHA256,
+                             MAIN_CI_REUSE_SUPPORT_DECLARATION_SHA256,
+                             BOOTSTRAP_WORKFLOW_SUPPORT_DECLARATION_SHA256,
+                             RETIRED_BRIDGE_SUPPORT_DECLARATION_SHA256,
+                             ALIGNED_TYPEDEF_SUPPORT_DECLARATION_SHA256,
+                             MOBILE_CAPTURE_SUPPORT_DECLARATION_SHA256,
+                             ALIGNED_MOBILE_CAPTURE_SUPPORT_DECLARATION_SHA256):
         _fail("#508 support declaration digest is not the approved immutable input")
     declaration_data = _evidence_bytes(root, support_declaration,
                                        "support.files.support_declaration")

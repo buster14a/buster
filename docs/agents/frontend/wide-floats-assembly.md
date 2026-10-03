@@ -2,6 +2,24 @@
 
 [Agent instructions](../../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+Generic `__builtin_isfinite`, `__builtin_isinf`, `__builtin_isinf_sign` and
+`__builtin_isnan` retain a wide argument's original floating format. Narrower
+floating arguments keep their existing exact binary64 widening. Their
+infinity operands widen exactly from binary32/binary64, so a finite x87 or
+binary128 argument never becomes infinite through a classifier conversion.
+The explicit `__builtin_isinff` and `__builtin_isnanf` spellings retain their
+float parameter conversion. This preserves the existing comparison semantics;
+it adds no floating-exception guarantee.
+
+`c_test_float_classifier_widths` checks comparison operand types and absence
+of narrowing in both canonical frontend forms on six native layouts.
+`c_test_x87_classifier_runtime` builds values from independent integer images
+and checks both signs of zero, finite values beyond binary64's range, x87
+normal/subnormal boundaries, infinity and quiet NaNs, plus exactly-once
+argument evaluation. Its native allocator/frontend matrix and independent
+GCC/Clang controls run on supported hosted x86-64 platforms; the registered
+coverage itself is not an execution result.
+
 `signbit` reads the original float representation through canonical memory
 operations: bit 31 for binary32, bit 63 for binary64, byte-eight bit 15 for
 x87 and byte-eight bit 63 for binary128. It does not widen or narrow a value
@@ -10,8 +28,8 @@ floating exception state. `basic_c_signbit_images.c` and its independent host
 observer cover those images across the native target/mode/frontend/PIC matrix.
 AArch64 binary128 widening and scalar transport use ordinary MIR frame
 images; see the machine guide for their exact conversion and ABI-boundary
-checks. Arithmetic, comparison, truth conversion and general narrowing remain
-separately unsupported.
+checks. Binary128 arithmetic, comparison, truth conversion and rounding
+conversions lower to compiler-runtime calls; see the AAPCS64 bullet below.
 The host FENV fixture in `tests/host_aarch64_float_to_f128.c` uses ordinary
 GNU inline asm for `mrs`/`msr` reads and writes of `fpsr`/`fpcr`; the baseline
 AArch64 inline-assembly vocabulary selects these checked system-register rows
@@ -20,6 +38,27 @@ their source/debug locations.
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Source-format literal rounding
+
+`c_ir_float_literal_value` rounds a float-suffixed literal to binary32 before
+widening its value into the binary64 constant carrier. Exact rational overflow
+materializes source-format infinity; underflow materializes zero only when the
+converter reports that the rounded significand is zero. Nonzero subnormals
+retain their `C_IR_ROUND_OK` image. Unary negation then preserves the sign of
+infinity and zero. Only `C_IR_ROUND_FAILED` retains the existing approximate
+parser fallback; it is separate from representable special results.
+`c_ir_emit_float_spelling` applies the same range statuses to automatic
+expressions, including bounded large mantissas whose approximate accumulator
+would produce infinity divided by infinity instead of the rounded zero.
+
+Registered `c_test_float_literal_initializer_rounding` checks fixed IEEE images
+for scalar and array globals, source-format comparison queries and rejected
+nonfinite integer conversions on six target layouts and both frontend forms.
+Its runtime companion checks the same independently specified images in
+global, automatic and local-static storage through all four native allocators
+and both frontend forms. Decimal/hexadecimal maximum, subnormal, halfway and
+negative-zero rows preserve finite-boundary and per-literal rounding behavior.
+
 - **`_Float16` is IEEE-754 binary16, and it is a real type rather than a
   storage alias.** Two naturally aligned bytes on every supported target
   (`TargetDataLayout.float16_type`, `C_TYPE_FLOAT16`), its own rank below
@@ -27,12 +66,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `vector_size` element ladder, and `_Float16 _Complex` beside it as clang's
   extension (`C_TYPE_FLOAT16_COMPLEX`, two contiguous halves). The C23
   `f16`/`F16` constant suffix and the `__FLT16_*__` prelude macros carry it,
-  and every constant rounds through one encoder pair,
-  `c_ir_float16_bits_from_f64` / `c_ir_float16_to_f64` in `c_gen.c`: no host
+  and typed-half tokens round directly from their exact decimal/hex rational
+  value to binary16 through `c_ir_float16_literal_bits` in `c_gen.c`. Only
+  after rounding may a half value widen into the binary64 carrier; rounding
+  a source token to binary64 first can lose its side of a half midpoint.
+  Genuine double-source conversions still use
+  `c_ir_float16_bits_from_f64` / `c_ir_float16_to_f64`: no host
   half type is used, because the compiler builds under four C compilers and
   cross-compiles. Every static-initializer writer routes its 16-bit case
-  through that pair; the byte strings in `c_test_float16_type` were taken
-  from clang 18 compiling the same spellings.
+  through that pair after rounding the token in its declared source format.
+  `c_test_float16_type` retains Clang 18 goldens and exact-grid #1226
+  regressions for midpoint parity, signs, subnormals and decimal zero padding.
+  The registered driver test observes static bytes and executed literal stores
+  from separately compiled objects in both Clang/Buster link directions.
 
   **Native code generation implements the binary16 runtime vocabulary.**
   Scalar arguments and results use the ABI's real floating position: the low
@@ -42,10 +88,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   same signatures through MIR. Baseline
   targets need no F16C or AVX512-FP16 feature. On x86-64, lowering widens each half through
   `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
-  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`. Darwin x86-64's
-  compiler-runtime entry points carry the half bits in the integer ABI even
-  though ordinary `_Float16` still uses XMM, so lowering bridges those symbols
-  through an internal `unsigned short` view. AArch64 uses baseline scalar `FCVT`
+  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`, and an x87
+  `long double` source (real or complex) uses `__truncxfhf2` with the f80
+  operand in its usual memory position, so it rounds once rather than through
+  binary32. Widening `_Float16` to x87 is exact through `__extendhfsf2`. Other
+  wider-than-64-bit sources (binary128) stay refused. Darwin x86-64's
+  binary32/binary64 compiler-runtime entry points carry the half bits in the
+  integer ABI even though ordinary `_Float16` still uses XMM, so lowering
+  bridges those symbols through an internal `unsigned short` view. The newer
+  `__truncxfhf2` returns its half in XMM0 there, as Clang expects, and takes no
+  bridge. AArch64 uses baseline scalar `FCVT`
   instructions for the same half/wider conversions, without runtime imports.
   Apple AArch64 packs named stack-only scalar arguments at their natural
   alignment; unnamed variadic arguments retain eightbyte-aligned slots;
@@ -95,19 +147,59 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   native intrinsic lowering. `c_test_bfloat16_semantic_acceptance` covers
   source-format rounding on six layouts in both frontend forms, mixed-format
   identity, positive/negative builtin operands, and deep nested calls.
-- **Base AAPCS64 `long double` is IEEE binary128 and supports scalar
-  transport.** A scalar argument or result is one complete sixteen-byte image
-  in a Q register; after V0-V7 are exhausted, named arguments occupy their
-  sixteen-byte-aligned stack slot. Canonical and MIR backends keep the value
-  slot-backed internally and bridge only at the ABI edges, so assignment,
+- **Base AAPCS64 and x86-64 Android `long double` are IEEE binary128.**
+  A scalar argument or result is one complete sixteen-byte image: AAPCS64
+  carries it in a Q register and Android System V x86-64 in an XMM register.
+  After the respective FP argument register file is exhausted, named arguments
+  occupy a sixteen-byte-aligned stack slot. Canonical and MIR backends keep the
+  value slot-backed internally and bridge only at ABI edges, so assignment,
   literal return, direct/indirect calls and mixed Clang/Buster linkage preserve
-  every payload bit, including negative zero. `c_ir_signature_type_supported`
-  admits only the exact scalar shape proven by `ir_type_abi_value`; aggregates,
-  variadic wide parameters, arithmetic, comparisons, truth conversion and
-  general conversions remain behind their existing structured rejections.
-  `compiler_driver_test_aarch64_binary128_transport` covers Q0/Q1, ninth-argument stack
-  spill and both mixed-compiler directions on native Linux AArch64, with strict
-  no-fallback compilation across the AAPCS64 target/mode/frontend/PIC matrix.
+  every payload bit, including negative zero. `c_ir_target_supports_f128_transport`
+  in `c_internal.h` is the one target fact lowering and the parser's
+  lowering-constraint mirror share.
+
+  There is no binary128 instruction vocabulary, so lowering calls the
+  libgcc/compiler-rt soft-float entry points with `long double` operands and
+  results, exactly as Clang does: `__addtf3`/`__subtf3`/`__multf3`/`__divtf3`;
+  `__eqtf2`/`__netf2`/`__lttf2`/`__letf2`/`__gttf2`/`__getf2`, whose int
+  result is compared with zero so a NaN operand gives C's answer; truth
+  conversion as `__netf2(x, +0.0)`; `__trunctf{hf,sf,df}2` for narrowing; and
+  `__fix[uns]tf{si,di,ti}` / `__float[un]{si,di,ti}tf` for integers, where an
+  integer narrower than `int` converts through the `int` entry point.
+  `c_ir_type_is_binary128_runtime` gates these in `c_ir_emit_binary_value`,
+  `c_ir_emit_cast` (`c_ir_emit_binary128_conversion`) and `c_ir_truth_value`.
+  Exact binary16/32/64 widening remains a native MIR image on AArch64; x86-64
+  uses `__extend{hf,sf,df}tf2` because its selector has no binary128 conversion
+  row. Negation flips the high limb's sign bit through a slot
+  (`c_ir_emit_float_image_negate`) so NaN payloads survive. An invalid operation
+  on constant operands folds to the positive quiet NaN, as for narrower
+  formats. Hosted links therefore need libgcc or compiler-rt, as x86-64
+  binary16 and complex links already do.
+
+  Static initializers store the constant evaluator's exact two-limb image
+  (`c_ir_binary128_static_target`), for scalar globals and aggregate elements
+  alike. A variadic binary128 argument, and `va_arg(ap, long double)`, travel
+  as a sixteen-byte two-lane vector image (`c_ir_binary128_variadic_carrier_type`),
+  which both supported ABI classifiers place identically to the scalar, so the
+  backends need no separate reader; a named binary128 parameter before `...`
+  is admitted for the same reason. AAPCS64 gives each binary128 HFA member one
+  sixteen-byte VECTOR part, so `struct { long double a, b; }` and
+  `long double _Complex` use Q registers. System V x86-64 collapses a scalar
+  or one-member wrapper's SSE/SSEUP pair into one sixteen-byte VECTOR part;
+  larger or merged aggregates follow its ordinary register/memory classes.
+  Variadic aggregates therefore use their named classification through
+  `c_ir_type_is_binary128_aggregate` with no separate carrier. Complex
+  arithmetic uses the element operations above, including Smith's division
+  with a high-limb magnitude.
+
+  `compiler_driver_test_aarch64_binary128_transport` covers Q0/Q1,
+  ninth-argument stack spill and both mixed-compiler directions on native Linux
+  AArch64. `compiler_driver_test_binary128_runtime` compiles a Clang-oracled
+  fixture strictly across AArch64 Linux/Android/UEFI and x86-64 Android, every
+  MIR allocator, both frontend forms and PIC/non-PIC; it requires the relevant
+  soft-float imports, and on native Linux AArch64 links with the host runtime
+  and executes. The canonical `none` emitter still refuses binary128 widening
+  and loads through pointers; those functions need a MIR allocator.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and

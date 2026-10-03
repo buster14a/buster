@@ -13,6 +13,7 @@
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 
@@ -98,6 +99,9 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 // them keeps vector values clear of rows that scribble the low XMM file.
 #define MACHINE_X64_FLOAT_SCRATCH_CLOBBER ((1u << MACHINE_X64_ZMM0) | (1u << MACHINE_X64_ZMM1))
 #define MACHINE_X64_FLOAT_BRIDGE_CLOBBER (0xffu << MACHINE_X64_ZMM0)
+// Aggregate copies move whole sixteen-byte chunks through XMM0 (MOVUPS) and
+// the remainder through their general data scratch.
+#define MACHINE_X64_COPY_VECTOR_CLOBBER (1u << MACHINE_X64_ZMM0)
 
 // Shorthand rows for the x86-64 scalar subset: destination-and-source
 // moves, read-modify-write arithmetic, flag producers/consumers, frame and
@@ -431,22 +435,25 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_COPY_FRAME_FROM_FRAME] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
-        .clobber_mask = 1u << MACHINE_X64_RAX,
+        .clobber_mask = (1u << MACHINE_X64_RAX) | MACHINE_X64_COPY_VECTOR_CLOBBER,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .implicit_vector_state = 1,
     },
     [MACHINE_X64_COPY_FRAME_FROM_PTR] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
-        .clobber_mask = 1u << MACHINE_X64_RAX,
+        .clobber_mask = (1u << MACHINE_X64_RAX) | MACHINE_X64_COPY_VECTOR_CLOBBER,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .implicit_vector_state = 1,
     },
     [MACHINE_X64_COPY_PTR_FROM_FRAME] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
-        .clobber_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX),
+        .clobber_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX) | MACHINE_X64_COPY_VECTOR_CLOBBER,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .implicit_vector_state = 1,
     },
     [MACHINE_X64_FARITH] = {
         .operand_count = 3,
@@ -1265,7 +1272,7 @@ BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_regist
 #undef MACHINE_X64_REGISTRY_ROW
 };
 
-BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 7u);
+BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 8u);
 BUSTER_CT_CHECK(MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT == 14u);
 
 // Canonical x86 authority records.  These rows name only the metadata module
@@ -1307,6 +1314,11 @@ BUSTER_GLOBAL_LOCAL MachineX64CanonicalAuthoritySite const
         .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
         .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
         .owner_symbol = S8_INITIALIZER("buster_x86_metadata_relax_tls"),
+    },
+    {
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
+        .owner_symbol = S8_INITIALIZER("buster_x86_metadata_relax_tls_local_dynamic"),
     },
 };
 
@@ -2249,7 +2261,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_function_parameter_edge_target(u32 const* old_to
     return split != UINT32_MAX ? split : old_to_new[destination_block];
 }
 
-bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function)
+bool machine_function_split_parameter_edges_with_canonical_map(Arena* arena, MachineFunction* function,
+                                                                u32** canonical_entries, u32 canonical_count)
 {
     bool result = function && function->target && function->target->unconditional_branch_opcode != MACHINE_OPCODE_INVALID;
     u32 split_count = 0;
@@ -2275,12 +2288,13 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
             u32 new_block_count = (u32)new_block_count64;
             u32 new_instruction_count = (u32)new_instruction_count64;
             u32 new_edge_count = (u32)new_edge_count64;
-            // Publishable storage precedes all temporary maps. No index or
-            // remapping array survives this pass, including on a failed remap.
+            // Publishable storage precedes all temporary maps. Only the caller's
+            // canonical projection survives; the edge/index scratch is reclaimed.
             MachineInstruction* instructions = arena_allocate(arena, MachineInstruction, new_instruction_count);
             MachineBlock* blocks = arena_allocate(arena, MachineBlock, new_block_count);
             MachineEdge* edges = arena_allocate(arena, MachineEdge, new_edge_count);
             MachineSwitchCase* switch_cases = arena_allocate(arena, MachineSwitchCase, function->switch_case_count);
+            u32* projected_entries = canonical_entries ? arena_allocate(arena, u32, canonical_count) : 0;
             MachineInlineAssembly* inline_assemblies = function->inline_assemblies;
             MachineInlineAssemblyRelocation* inline_assembly_relocations = function->inline_assembly_relocations;
             result = (!function->inline_assembly_count || function->inline_assemblies) &&
@@ -2344,6 +2358,19 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                     if (machine_function_parameter_edge_needs_split(function, function->edges + edge_index))
                     {
                         split_blocks[edge_index] = block_cursor++;
+                    }
+                }
+            }
+            if (canonical_entries)
+            {
+                result = result && canonical_count <= old_block_count;
+                for (u32 canonical_block = 0; result && canonical_block < canonical_count; canonical_block += 1)
+                {
+                    u32 old_block = *canonical_entries ? (*canonical_entries)[canonical_block] : canonical_block;
+                    result = old_block < old_block_count;
+                    if (result)
+                    {
+                        projected_entries[canonical_block] = old_to_new[old_block];
                     }
                 }
             }
@@ -2547,10 +2574,20 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                 function->switch_cases = switch_cases;
                 function->inline_assemblies = inline_assemblies;
                 function->inline_assembly_relocations = inline_assembly_relocations;
+                if (canonical_entries)
+                {
+                    *canonical_entries = projected_entries;
+                }
             }
             arena_set_position(arena, scratch_position);
         }
     }
+    return result;
+}
+
+bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function)
+{
+    bool result = machine_function_split_parameter_edges_with_canonical_map(arena, function, 0, 0);
     return result;
 }
 
@@ -3043,13 +3080,33 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
         u32* block_value_counts = arena_allocate(scratch.arena, u32, debug_count);
         memset(block_value_counts, 0, sizeof(*block_value_counts) * (u64)debug_count);
         IrValueId* block_values = arena_allocate(scratch.arena, IrValueId, unresolved_count ? unresolved_count : 1u);
+        // Canonical construction never attaches local_values to a block, so
+        // a block holds a value for an unresolved local only through one of
+        // its parameters. Such blocks start from all-invalid values, record
+        // the entries their parameters fill and reset just those, costing
+        // their parameters instead of every unresolved local per block. A
+        // function whose blocks do carry local_values reloads every entry
+        // per block as before. Either way the rows below are regrouped by
+        // debug index and a local yields at most one row per block, so
+        // emitting filled entries in parameter order builds the same table.
+        bool dense = false;
+        for (u32 block_index = 0; unresolved_count && block_index < ir_function->block_count && !dense; block_index += 1)
+        {
+            dense = ir_function->blocks[block_index].local_values != 0;
+        }
+        u32* filled = arena_allocate(scratch.arena, u32, unresolved_count ? unresolved_count : 1u);
+        for (u32 unresolved_index = 0; unresolved_index < unresolved_count; unresolved_index += 1)
+        {
+            block_values[unresolved_index] = IR_VALUE_ID_INVALID;
+        }
         MachineBuilderStream block_value_stream;
         machine_stream_initialize(&block_value_stream, sizeof(MachineDebugBlockValue));
         for (u32 block_index = 0; result && unresolved_count && block_index < ir_function->block_count; block_index += 1)
         {
             IrBlock const* block = ir_function->blocks + block_index;
             IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
-            for (u32 unresolved_index = 0; unresolved_index < unresolved_count; unresolved_index += 1)
+            u32 filled_count = 0;
+            for (u32 unresolved_index = 0; dense && unresolved_index < unresolved_count; unresolved_index += 1)
             {
                 IrDebugLocal const* local = ir_function->debug_locals + unresolved[unresolved_index];
                 block_values[unresolved_index] = block->local_values && local->id.value < ir_function->local_count
@@ -3065,7 +3122,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                 {
                     slot = (slot + 1u) & local_slot_mask;
                 }
-                if (local_heads[slot] != UINT32_MAX)
+                if (local_heads[slot] != UINT32_MAX && parameter->value.value != IR_ID_UNDERLYING_INVALID)
                 {
                     for (u32 unresolved_index = local_heads[slot]; unresolved_index != UINT32_MAX;
                          unresolved_index = local_next[unresolved_index])
@@ -3073,14 +3130,20 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                         if (block_values[unresolved_index].value == IR_ID_UNDERLYING_INVALID)
                         {
                             block_values[unresolved_index] = parameter->value;
+                            filled[filled_count++] = unresolved_index;
                         }
                     }
                 }
             }
+            u32 row_candidates = dense ? unresolved_count : filled_count;
+            IR_CONSTRUCTION_RECORD(DEBUG_VALUE_BLOCKS, 1);
+            IR_CONSTRUCTION_RECORD(DEBUG_VALUE_LOCAL_VISITS,
+                                   (dense ? unresolved_count : 2u * filled_count) + (published->instruction_count ? row_candidates : 0));
             if (published->instruction_count)
             {
-                for (u32 unresolved_index = 0; result && unresolved_index < unresolved_count; unresolved_index += 1)
+                for (u32 candidate = 0; result && candidate < row_candidates; candidate += 1)
                 {
+                    u32 unresolved_index = dense ? candidate : filled[candidate];
                     IrValueId value = block_values[unresolved_index];
                     if (value.value != IR_ID_UNDERLYING_INVALID)
                     {
@@ -3099,6 +3162,10 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                         }
                     }
                 }
+            }
+            for (u32 index = 0; !dense && index < filled_count; index += 1)
+            {
+                block_values[filled[index]] = IR_VALUE_ID_INVALID;
             }
         }
 
@@ -5169,9 +5236,10 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
         // around establishing RBP. Where the pushes follow it, the save area was
         // included in `running` above and is subtracted back out when sizing the
         // post-save allocation; where they precede it, `push_area` is zero and
-        // the whole run is frame. Either way, add eight bytes for odd push parity
-        // to restore the call boundary before any nested call.
-        placement.frame_size = ((running - push_area + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
+        // the whole run is frame. Round to the smallest allocation that covers
+        // the slots while restoring sixteen-byte alignment after the pushes.
+        u32 push_parity = (push_count & 1u) ? 8u : 0u;
+        placement.frame_size = ((running - push_area + push_parity + 15u) & ~15u) - push_parity + function->outgoing_bytes;
         if (function->outgoing_bytes)
         {
             placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;

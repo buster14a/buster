@@ -20,6 +20,20 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   (GitHub #363); object parsing alone is not runtime-unwind evidence.
   Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
   saves, and keeps saved-register offsets separate from stack-allocation sizes.
+- **Program-symbol identity crosses the object boundary.**
+  `object_from_canonical_codegen_module` resolves a relocation's `IrSymbolId`
+  through `entry_by_symbol`. Entries map to their own index; globals and
+  aliases are seeded with the definition their link name resolves to (the
+  first definition carrying it), which the name-index build records as it
+  places each definition, so their references hash no name. Externs keep the
+  name path, whose first lookup also claims the insertion slot it ended on.
+  DWARF `DW_OP_addr` and CodeView `S_GDATA32` relocations carry the
+  variable's `IrSymbolId` and resolve through the same map when it names a
+  definition; the name path remains for everything else. Non-optimized
+  builds cross-check every such answer against the name lookup, and
+  `compiler_driver_test_debug_global_relocations` pins the first-definition
+  contract with block-scope statics, an asm label, a completed tentative
+  definition and a block-scope extern on ELF x86-64, ELF AArch64 and COFF.
 - **Merged file-backed sections have zeroed background bytes.** `link_objects`
   initializes alignment gaps and each input's virtual tail before copying its
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed
@@ -66,6 +80,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `compiler_driver_test_attribute_queries` reads emitted ELF/Mach-O/COFF
   symbols and initializer arrays, then runs the guarded fixture through
   native source and object links in all four allocators (GitHub #666).
+- **ELF unwind records name the producing object's instruction bytes.**
+  `object_append_dwarf_cfi` uses local text-section symbols plus function
+  offsets on x86-64 and AArch64, with or without PIC and debug information.
+  Named text sections get their own local anchors. A weak default's FDE
+  therefore stays with its own code when a strong definition overrides it.
+  `link_elf_eh_frame_header_write` refuses duplicate initial locations with
+  `LINK_ERROR_RELOCATION`, including legacy function-symbol FDEs that resolve
+  to the same winner; no unwinder search order chooses between their rules.
+  Registered driver tests inspect serialized relocations in all four allocator
+  modes and exercise host-compiled overrides under GNU ld, available LLD and
+  Buster's linker in both input orders on native Linux x86-64 and AArch64.
+  Link tests cover duplicate refusal and distinct local-anchor controls for
+  both architectures on every test host.
 - **`__attribute__((weak))` and `__attribute__((alias("target")))`** reach the
   object file, because musl publishes `malloc`, `free`, `errno` and most of
   its pthread surface as weak aliases of internal names. Weak is
@@ -77,7 +104,23 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   range and relocation range. `link_objects` resolves those groups first:
   ANY keeps one, SAME_SIZE and EXACT_MATCH validate their contracts, LARGEST
   chooses by size independently of input order, and ASSOCIATIVE follows its
-  parent. Only then does the surviving definition enter ordinary weak/strong
+  parent. Associative chains resolve after every non-associative winner is final,
+  through `link_comdat_associations_resolve`: an object-local parent walk marks
+  its current path, rejects cycles, and publishes the terminal KEEP/DISCARD state
+  along that path. A shared ancestor is resolved once. The walk uses the existing
+  state bytes and follows the immutable parent links again to finish a path;
+  it needs no recursion, auxiliary allocation or persistent cache. Its work is
+  O(C + A), where C is the COMDAT population and A the associative population,
+  independent of record order and association depth. This bound describes only
+  association resolution, not key hashing, exact-match comparison or the whole
+  linker. The registered `link_test_comdat_association_scaling` generates ordinary
+  and reverse/permuted parent graphs, compares an independent pass-scan control,
+  checks real group/symbol/relocation survival and rejects malformed associations.
+  Its deterministic work bounds run in ordinary tests without timing thresholds.
+  The [PE/COFF contract](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#comdat-sections-object-only)
+  permits associative parents that are themselves associative, requires a final
+  non-associative root and forbids cycles (GitHub #2232).
+  Only then does the surviving definition enter ordinary weak/strong
   arbitration. A COFF object therefore reads `weak` back but cannot write it
   and carries a compiler-produced weak symbol as an ordinary external. That is the one gap of the
   three formats, and it predates aliases: `object.c`'s header states it. An
@@ -112,6 +155,26 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   and nearly every module has none. And the two targets with no initializer
   array at all -- core Wasm, which starts one function of its own, and eBPF,
   which has no startup -- **diagnose** the attribute rather than dropping it.
+- **`__attribute__((section("name")))` places a definition in a section of
+  its own name on ELF and is refused elsewhere** (issue #1276). The frontend
+  records it in `IrSymbol.section_name`: from the definition, else from any
+  other declaration of the entity (`c_entity_section_name`), and for
+  block-scope statics too. COFF and Mach-O targets, and thread-local
+  variables, are diagnosed at the declaration
+  (`c_section_attribute_unsupported_output`). Codegen lays each named group
+  out after its image's ordinary contents (`codegen_section_group`); a module
+  that names none keeps its layout byte for byte.
+  `object_from_canonical_codegen_module` splits those tails into sections
+  past `OBJECT_SECTION_COUNT` (`object_named_section_plan`). A name that is
+  `.init_array`, `.fini_array` or `.preinit_array`, optionally with a
+  `.NNNNN` suffix, becomes an initializer-array section, and the ELF writer
+  types it `SHT_INIT_ARRAY`, `SHT_FINI_ARRAY` or `SHT_PREINIT_ARRAY`.
+  Functions moved out of `.text` leave the one-range DWARF unit.
+  `object_read_elf64` keeps every C-identifier-named input section as its
+  own section. `link_objects` places each such set contiguously after the
+  ordinary sections of its kind, and defines the `__start_NAME`/`__stop_NAME`
+  references GNU `ld` would (`link_section_sets_define`). The LLVM bitcode
+  writer records the names. Wasm does not yet (#1717).
 - **`.init_array` and `.fini_array` are section kinds**,
   `OBJECT_SECTION_INIT_ARRAY` and `OBJECT_SECTION_FINI_ARRAY`, holding one
   pointer-wide slot per initializer with an `ABSOLUTE64` relocation against
@@ -151,6 +214,18 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   the same order the entry-stub writers do. An input that states no priorities
   (the Mach-O reader, the assembler's objects) has every entry unprioritized,
   which leaves it in link order.
+- **Initializer collection does not search the relocation list once per slot.**
+  `link_initializer_entries_collect` uses the caller's output reservation as a
+  transient slot table, then compacts it in place. Sparse arrays instead sort a
+  bounded prefix of matching relocation indices in that same storage, so holes
+  do not fault in the full reservation. At most E/32 matches take this path;
+  32-bit identities bound heap height to 32. For E complete slots and R
+  relocations, all scans, construction, sorting, compaction and reversal are
+  therefore O(E + R), with no added allocation. The dense transition can scan
+  relocations twice. Zero slots or zero relocations do no collection work, and
+  one slot keeps the first-match early exit. Both paths keep the first aligned
+  `ABSOLUTE64` per slot, omit holes, clear transient keys, and reverse fini
+  results. Input metadata is immutable; priorities were ordered at merge time.
 - **A relocatable object keeps its arrays in all three formats; ELF and COFF
   can also state a priority, Mach-O cannot.** The COFF spelling is
   `.CRT$XCA00101` for a group, `.CRT$XCU` for what named none, and
@@ -324,6 +399,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   symbol's copy-slot address, including aliases. Untyped exported AArch64
   ELF text labels can serve as assembly entry points; explicit object types
   remain data. Mach-O, PE and TLS relocation contracts remain separate.
+
+- Direct AArch64 ELF unsigned-immediate memory references use distinct
+  `ELF_LDST8_LO12`, `ELF_LDST16_LO12`, `ELF_LDST32_LO12`, `ELF_LDST64_LO12`
+  and `ELF_LDST128_LO12` kinds (AAELF64 types 278/284/285/286/299). The
+  relocation's access size must match the instruction's encoding, including
+  sign-extending scalar, SIMD and Q-register forms; scale-three PRFM is
+  accepted too. Reserved, unscaled and register-offset forms fail. The reader
+  clears imm12, keeps RELA's explicit signed addend and sign-extends REL's
+  imm12 before access-size scaling. The shared ELF page helper applies only
+  bits `[11:scale]` of `S+A`, checks arithmetic and final-address alignment,
+  and preserves operation/register bits in object, in-memory and static or
+  dynamic native links. Dynamic imported data uses its copy slot, including
+  aliases. These direct memory references remain separate from GOT relaxation,
+  TLS, Mach-O and PE contracts. See
+  [AAELF64 addends and relocation definitions](https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst).
 
 - Ordinary Windows ARM64 address pairs use the PE-specific
   `PAGEBASE_REL21`/`PAGEOFFSET_12A` object kinds (COFF types 4/6), never the

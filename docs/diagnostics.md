@@ -37,6 +37,25 @@ token leaves the position unavailable. Flat optional notes can supply additional
 messages and locations; publication does not infer expansion stacks or secondary
 locations that the producer did not provide.
 
+Semantic records -- `CDeclaration`, `CEntity`, `CMember`, `CParameter`,
+`CEnumMember` and `CDeferredStaticAssert` -- keep a
+`CSourceSite` rather than a `CSourceLocation`: the naming token's mapped offset
+plus one, and the source that offset lies in. A successful compilation reads
+only those two fields, as the offset and source of an `IrSourceRange`
+(`c_ir_site_source_range`). `c_preprocess_site_location` recovers line, column
+and physical offset when a diagnostic, or the declared-before fallback in
+`c_parse_entity_visible_at`, asks. It calls `c_preprocess_token_location` on
+the same offset through the published map the translation unit retains, so the
+recovered location is exactly the one the record used to store; a zero site is
+the unknown location a zero `CSourceLocation` was. The type change makes every
+consumer convert explicitly. Debug builds check that a site's source equals its
+eager location's. A successful compilation recovers no record location; a
+failing one recovers one site per record-located diagnostic, never more than it
+reports. `compiler_driver_test_record_diagnostic_equivalence` freezes every
+structured record for those diagnostics under syntax-only, `-g0` and `-g`, and
+`tools/diagnostic_equivalence.py` compares two compilers' complete output over
+a generated corpus.
+
 `IrSourceRegion.origin_plus_one` uses the existing four-byte metadata slot:
 TEXT regions store a physical source ID plus one, STAMP regions store an originating
 mapped offset plus one, and zero means unknown. Original resolution follows stamps
@@ -53,6 +72,16 @@ then pipeline stage order, then producer order. Warnings precede a later-stage
 error. All records are available even though the compatibility text selects the
 first error. The shared terminal renderer handles both C and assembler records
 and optional notes; it adds no eager formatting on successful parse paths.
+
+Debug information is on by default; only `-g0` turns it off, and then the
+work that exists only for debug output is skipped rather than built and
+discarded. The driver lowers with `CIRLowerOptions.omit_debug_locals`, so
+functions carry no `IrDebugLocal` records (their readers -- MIR debug values,
+debug locations and the debug model -- run only with debug output), and
+native code generation neither resolves each function's declaration position
+nor reads each canonical instruction's range without a line table. Objects are
+unchanged; the census `debug_locals` field and the position counters measure
+the difference.
 
 A clean compile allocates no record array. API callers can set
 `CompilerDriverInvocation.suppress_diagnostic_records` to avoid retaining the

@@ -345,6 +345,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_scalars(UnitTestArguments* 
     };
     u64 ebpf_values[] = {0, 1, 127, 128, 0x7fffffff, 0x80000000, UINT64_MAX, (u64)1 << 63};
     Target ebpf_target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    CodegenTestEbpfOracle oracle = codegen_test_ebpf_oracle(arguments->arena);
     for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(ebpf_sources); fixture += 1)
     {
         u64 mark = arguments->arena->position;
@@ -386,16 +387,84 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_scalars(UnitTestArguments* 
                         case 17: expected = (u64)((u32)first * (u32)second); break;
                         default: break;
                         }
-                        u64 actual = 0;
-                        bool ran = codegen_test_ebpf_execute(artifact.bytes, first, second, &actual);
-                        if (!ran || actual != expected) arguments->show(arguments, S8("eBPF fixture {u32}, operands {u64}/{u64}, actual {u64}, expected {u64}\n"), fixture, first, second, actual, expected);
-                        BUSTER_TEST(arguments, ran && actual == expected);
+                        bool agreed = codegen_test_ebpf_check(arguments, &oracle, artifact.bytes, first, second, expected);
+                        if (!agreed) arguments->show(arguments, S8("eBPF fixture {u32}\n"), fixture);
+                        BUSTER_TEST(arguments, agreed);
                     }
                 }
             }
         }
         arena_set_position(arguments->arena, mark);
     }
+    codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_scalars"));
+    return result;
+}
+
+// Integer images the eBPF writer builds from canonical constants: a signed
+// switch compares every label in the condition's normalized image, whatever
+// the caller left in the argument register's upper bits, and an integer
+// global initializer is its sign and magnitude at the object's width.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_integer_images(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    Target target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    String8 switch_source = S8("long probe(int a, int b) { (void)b; switch (a) { case -1: return 7; case -2147483647 - 1: return 8; "
+                               "case 5: return 9; default: return 3; } }");
+    CPreprocessResult switch_tokens = c_preprocess(arena, switch_source, (CPreprocessOptions){0});
+    CParseResult switch_parse = c_parse(arena, switch_tokens);
+    CIRLowerResult switch_lowered = c_lower_to_ir(arena, S8("ebpf-switch.c"), switch_tokens, switch_parse, target);
+    BUSTER_TEST(arguments, switch_lowered.program && switch_lowered.diagnostic_count == 0);
+    if (switch_lowered.program && switch_lowered.diagnostic_count == 0)
+    {
+        EbpfArtifact artifact = ebpf_emit_program(arena, switch_lowered.program);
+        BUSTER_TEST(arguments, artifact.success);
+        struct
+        {
+            u64 argument;
+            u64 expected;
+        } cases[] = {
+            {UINT64_MAX, 7},
+            {UINT64_C(0xffffffff), 7},
+            {UINT64_C(0xffffffff80000000), 8},
+            {UINT64_C(0x80000000), 8},
+            {5, 9},
+            {UINT64_C(0x100000005), 9},
+            {0, 3},
+            {UINT64_C(0x7fffffff), 3},
+        };
+        for (u32 index = 0; artifact.success && index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            u64 actual = 0;
+            bool ran = codegen_test_ebpf_execute(artifact.bytes, cases[index].argument, 0, &actual);
+            BUSTER_TEST(arguments, ran && actual == cases[index].expected);
+        }
+    }
+    String8 data_source = S8("int g = -1; long h = -2; short s = -3; unsigned char u = 200; long probe(long a, long b) { return a + b; }");
+    CPreprocessResult data_tokens = c_preprocess(arena, data_source, (CPreprocessOptions){0});
+    CParseResult data_parse = c_parse(arena, data_tokens);
+    CIRLowerResult data_lowered = c_lower_to_ir(arena, S8("ebpf-data.c"), data_tokens, data_parse, target);
+    BUSTER_TEST(arguments, data_lowered.program && data_lowered.diagnostic_count == 0);
+    if (data_lowered.program && data_lowered.diagnostic_count == 0)
+    {
+        EbpfArtifact artifact = ebpf_emit_program(arena, data_lowered.program);
+        BUSTER_TEST(arguments, artifact.success);
+        ByteSlice data = {0};
+        u32 section_count = artifact.success ? (u32)codegen_test_ebpf_read(artifact.bytes.pointer + 60, 2) : 0;
+        for (u32 section = 1; section < section_count; section += 1)
+        {
+            ByteSlice header = codegen_test_ebpf_section(artifact.bytes, section);
+            u64 flags = header.length ? codegen_test_ebpf_read(header.pointer + 8, 8) : 0;
+            if (header.length && codegen_test_ebpf_read(header.pointer + 4, 4) == 1 && (flags & 1) && !(flags & 4))
+            {
+                data = codegen_test_ebpf_section_data(artifact.bytes, section);
+            }
+        }
+        u8 expected[] = {0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfd, 0xff, 200};
+        BUSTER_TEST(arguments, data.length >= sizeof(expected) && memcmp(data.pointer, expected, sizeof(expected)) == 0);
+    }
+    scratch_end(temporary);
     return result;
 }
 
@@ -406,6 +475,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestAr
     BUSTER_TEST(arguments, fixture.length != 0);
     u64 values[] = {0, 1, 127, 128, UINT64_MAX, UINT64_C(1) << 63, (UINT64_C(1) << 63) - 1};
     Target target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    CodegenTestEbpfOracle oracle = codegen_test_ebpf_oracle(arguments->arena);
     for (u32 test_case = 0; fixture.length && test_case < 5; test_case += 1)
     {
         for (u32 ssa = 0; ssa < 2; ssa += 1)
@@ -447,14 +517,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestAr
                             case 3: expected = x + y + 16; break;
                             default: expected = x; break;
                             }
-                            u64 observed = 0;
-                            bool ran = codegen_test_ebpf_execute(artifact.bytes, x, y, &observed);
-                            if (!ran || observed != expected)
+                            bool agreed = codegen_test_ebpf_check(arguments, &oracle, artifact.bytes, x, y, expected);
+                            if (!agreed)
                             {
-                                arguments->show(arguments, S8("eBPF aggregate case {u32}, SSA {u32}, inputs {u64}/{u64}, observed {u64}, expected {u64}\n"),
-                                                test_case, ssa, x, y, observed, expected);
+                                arguments->show(arguments, S8("eBPF aggregate case {u32}, SSA {u32}\n"), test_case, ssa);
                             }
-                            BUSTER_TEST(arguments, ran && observed == expected);
+                            BUSTER_TEST(arguments, agreed);
                         }
                     }
                 }
@@ -482,6 +550,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestAr
         }
         arena_set_position(arguments->arena, mark);
     }
+    codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_local_aggregates"));
     return result;
 }
 
@@ -491,6 +560,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
     Target target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
     u32 lengths[] = {8, 300, 600};
     u64 inputs[] = {0, 1, 127, UINT64_MAX, UINT64_C(1) << 63};
+    CodegenTestEbpfOracle oracle = codegen_test_ebpf_oracle(arguments->arena);
     for (u32 ssa = 0; ssa < 2; ssa += 1)
     {
         for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(lengths); sample += 1)
@@ -525,9 +595,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
                     {
                         for (u32 second = 0; second < BUSTER_ARRAY_LENGTH(inputs); second += 1)
                         {
-                            u64 observed = 0;
-                            bool ran = codegen_test_ebpf_execute(artifact.bytes, inputs[first], inputs[second], &observed);
-                            BUSTER_TEST(arguments, ran && observed == inputs[first] + (u64)count * inputs[second]);
+                            BUSTER_TEST(arguments, codegen_test_ebpf_check(arguments, &oracle, artifact.bytes, inputs[first], inputs[second],
+                                                                           inputs[first] + (u64)count * inputs[second]));
                         }
                     }
                     u32 reloads = 0;
@@ -596,10 +665,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
                         case 4: expected=x+y+(u8)(x*7)+UINT64_C(0x123456789abcdef0); break;
                         default: break;
                         }
-                        u64 observed = 0;
-                        bool ran = codegen_test_ebpf_execute(artifact.bytes, inputs[first], inputs[second], &observed);
-                        if (!ran || observed != expected) arguments->show(arguments, S8("eBPF liveness {u32}, SSA {u32}, input {u64}/{u64}: observed {u64}, expected {u64}\n"), sample, ssa, inputs[first], inputs[second], observed, expected);
-                        BUSTER_TEST(arguments, ran && observed == expected);
+                        bool agreed = codegen_test_ebpf_check(arguments, &oracle, artifact.bytes, inputs[first], inputs[second], expected);
+                        if (!agreed) arguments->show(arguments, S8("eBPF liveness {u32}, SSA {u32}\n"), sample, ssa);
+                        BUSTER_TEST(arguments, agreed);
                     }
                 }
             }
@@ -626,11 +694,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
                 EbpfArtifact artifact = ebpf_emit_program(arena, lowered.program);
                 if (!artifact.success) arguments->show(arguments, S8("eBPF dead branch {u32}, SSA {u32}: {S8}\n"), dead, ssa, artifact.error.message);
                 BUSTER_TEST(arguments, artifact.success);
+                // Issue #1305: the dead branch once left an unreachable block
+                // that the kernel verifier rejects.
                 for (u32 index = 0; artifact.success && index < BUSTER_ARRAY_LENGTH(inputs); index += 1)
                 {
-                    u64 observed = 0;
-                    bool ran = codegen_test_ebpf_execute(artifact.bytes, inputs[index], 0, &observed);
-                    BUSTER_TEST(arguments, ran && observed == (u32)((u32)inputs[index] * 7u + 4u));
+                    BUSTER_TEST(arguments, codegen_test_ebpf_check(arguments, &oracle, artifact.bytes, inputs[index], 0,
+                                                                   (u32)((u32)inputs[index] * 7u + 4u)));
                 }
             }
             scratch_end(temporary);
@@ -668,6 +737,193 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
         }
         scratch_end(temporary);
     }
+    codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_stack_liveness"));
+    return result;
+}
+
+// Issue #1305: expected results for the source fixtures of
+// codegen_test_ebpf_kernel_regressions, computed by the host.
+BUSTER_GLOBAL_LOCAL u64 codegen_test_ebpf_regression_expected(u32 fixture, u64 a, u64 b)
+{
+    u64 result = 0;
+    switch (fixture)
+    {
+    case 0: result = a > b ? 1 : 2; break;
+    case 1: result = (a & 3) == 0 ? b : (a & 3) == 1 ? 7 : a; break;
+    case 2: result = (a ^ b) + 3; break;
+    case 3: result = (s32)a == -1 ? 1 : (s32)a == INT32_MIN ? 3 : (s32)a == 5 ? 4 : 2; break;
+    case 4: result = (s8)a == -1 ? 1 : (s8)a == -128 ? 3 : (s8)a == 127 ? 4 : 2; break;
+    case 5: result = (s32)a == -1 ? 1 : (s32)a == 7 ? 3 : 2; break;
+    case 6: result = (u32)a == UINT32_MAX ? 1 : (u32)a == 0x80000000u ? 3 : 2; break;
+    case 7:
+    case 8: result = (b & 1) == 1; break;
+    case 9: result = a + (u32)b + (u16)(a >> 16) + 1 + (u64)(s64)(s8)b + (0 - b); break;
+    case 10: result = (u16)b + a + (u64)(s64)(s32)(u32)b; break;
+    case 11: result = a / (b | 1) + a % (b | 1); break;
+    default: break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_regressions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CodegenTestEbpfOracle oracle = codegen_test_ebpf_oracle(arguments->arena);
+    Target target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    String8 sources[] = {
+        // F1: control flow that always returns leaves an unreachable block.
+        S8("unsigned long long probe(unsigned long long a, unsigned long long b) { if (a > b) return 1; else return 2; }"),
+        S8("unsigned long long probe(unsigned long long a, unsigned long long b) { switch (a & 3) { case 0: return b; case 1: return 7; default: return a; } }"),
+        S8("unsigned long long probe(unsigned long long a, unsigned long long b) { unsigned i = 0; for (;;) { if (i == 3) return a + i; i += 1; a ^= b; } }"),
+        // F2: labels are extended from the operand's width by its signedness.
+        S8("unsigned long long probe(unsigned long long a, unsigned long long b) { unsigned long long r; switch ((int)a) { case -1: r = 1; break; "
+           "case -2147483647 - 1: r = 3; break; case 5: r = 4; break; default: r = 2; } return r + 0 * b; }"),
+        S8("unsigned long long probe(unsigned long long a, unsigned long long b) { unsigned long long r; switch ((signed char)a) { case -1: r = 1; break; "
+           "case -128: r = 3; break; case 127: r = 4; break; default: r = 2; } return r + 0 * b; }"),
+        // The caller may leave the upper half of an int argument dirty.
+        S8("unsigned long long probe(int a, unsigned long long b) { switch (a) { case -1: return 1 + 0 * b; case 7: return 3; default: return 2; } }"),
+        S8("unsigned long long probe(unsigned a, unsigned long long b) { switch (a) { case 0xffffffffu: return 1 + 0 * b; case 0x80000000u: return 3; "
+           "default: return 2; } }"),
+        // F3: normalizing the unsigned index must not clobber the base in R9.
+        S8("unsigned long long probe(unsigned long long a, unsigned long long b) { unsigned char arr[2]; arr[0] = 0; arr[1] = (unsigned char)a; "
+           "return &arr[b & 1] == &arr[1u]; }"),
+        S8("unsigned long long probe(unsigned long long a, unsigned long long b) { unsigned char arr[2]; arr[0] = (unsigned char)a; arr[1] = 0; "
+           "return &arr[b & 1] == arr + 1u; }"),
+        // F4: packed members sit at unaligned frame offsets.
+        S8("unsigned long long probe(unsigned long long a, unsigned long long b) { struct __attribute__((packed)) P { unsigned char tag; "
+           "unsigned long long wide; unsigned int word; unsigned short half; signed char low; long long signed_wide; } p; "
+           "p.tag = 1; p.wide = a; p.word = (unsigned int)b; p.half = (unsigned short)(a >> 16); p.low = (signed char)b; "
+           "p.signed_wide = (long long)(0 - b); return p.wide + p.word + p.half + p.tag + (unsigned long long)p.low + "
+           "(unsigned long long)p.signed_wide; }"),
+        S8("unsigned long long probe(unsigned long long a, unsigned long long b) { struct __attribute__((packed)) Q { unsigned short half; "
+           "unsigned long long wide; int word; }; struct Q q = {(unsigned short)b, a, (int)b}; struct Q copy = q; "
+           "return copy.half + copy.wide + (unsigned long long)(long long)copy.word; }"),
+        // The VM once refused the unsigned division the emitter produces.
+        S8("unsigned long long probe(unsigned long long a, unsigned long long b) { return a / (b | 1) + a % (b | 1); }"),
+    };
+    u64 inputs[] = {0, 1, 5, 7, 127, 128, 0x7fffffff, 0x80000000, 0xffffffff, UINT64_MAX, UINT64_C(1) << 63, UINT64_C(0xffffffff00000005)};
+    for (u32 ssa = 0; ssa < 2; ssa += 1)
+    {
+        for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources); fixture += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            CPreprocessResult tokens = c_preprocess(arena, sources[fixture], (CPreprocessOptions){0});
+            CParseResult parse = c_parse(arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("ebpf-kernel-regression.c"), tokens, parse, target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = ssa == 0});
+            BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+            if (lowered.program && lowered.diagnostic_count == 0)
+            {
+                EbpfArtifact artifact = ebpf_emit_program(arena, lowered.program);
+                if (!artifact.success) arguments->show(arguments, S8("eBPF regression {u32}, SSA {u32}: {S8}\n"), fixture, ssa, artifact.error.message);
+                BUSTER_TEST(arguments, artifact.success);
+                for (u32 first = 0; artifact.success && first < BUSTER_ARRAY_LENGTH(inputs); first += 1)
+                {
+                    for (u32 second = 0; second < BUSTER_ARRAY_LENGTH(inputs); second += 1)
+                    {
+                        u64 a = inputs[first], b = inputs[second];
+                        bool agreed = codegen_test_ebpf_check(arguments, &oracle, artifact.bytes, a, b, codegen_test_ebpf_regression_expected(fixture, a, b));
+                        if (!agreed) arguments->show(arguments, S8("eBPF regression {u32}, SSA {u32}\n"), fixture, ssa);
+                        BUSTER_TEST(arguments, agreed);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    // The VM refuses what it does not model. A helper placed before the entry
+    // once ran as the entry, and a global's address became stack offset 0.
+    String8 refused[] = {
+        S8("static unsigned long long helper(unsigned long long x) { return x * 3; } "
+           "unsigned long long probe(unsigned long long a, unsigned long long b) { return helper(a) + b; }"),
+        S8("unsigned long long G = 5; unsigned long long probe(unsigned long long a, unsigned long long b) { return G + a + 0 * b; }"),
+    };
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(refused); fixture += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        CPreprocessResult tokens = c_preprocess(arena, refused[fixture], (CPreprocessOptions){0});
+        CParseResult parse = c_parse(arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(arena, S8("ebpf-vm-refusal.c"), tokens, parse, target);
+        BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+        if (lowered.program && lowered.diagnostic_count == 0)
+        {
+            EbpfArtifact artifact = ebpf_emit_program(arena, lowered.program);
+            u64 observed = 0;
+            BUSTER_TEST(arguments, artifact.success && !codegen_test_ebpf_execute(artifact.bytes, 7, 2, &observed));
+        }
+        scratch_end(temporary);
+    }
+    // Hand-assembled functions pin each VM rule. When the kernel is available
+    // it must agree on acceptance and on the result.
+    typedef struct CodegenTestEbpfRule CodegenTestEbpfRule;
+    struct CodegenTestEbpfRule
+    {
+        u8 code[64];
+        u32 length;
+        u64 first;
+        u64 second;
+        u64 expected;
+        bool accepted;
+        bool kernel;
+    };
+    CodegenTestEbpfRule rules[] = {
+        // r0 = 1; exit
+        {{0xb7, 0x00, 0, 0, 1, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 16, 0, 0, 1, true, true},
+        // r0 = 1; exit; r0 = 0; exit: an unreachable instruction.
+        {{0xb7, 0x00, 0, 0, 1, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0, 0xb7, 0x00, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 32, 0, 0, 0, false, true},
+        // r0 = 1: execution falls off the end.
+        {{0xb7, 0x00, 0, 0, 1, 0, 0, 0}, 8, 0, 0, 0, false, true},
+        // goto +5; exit: a jump out of range.
+        {{0x05, 0x00, 5, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 16, 0, 0, 0, false, true},
+        // goto +1; r0 = 0 ll; exit: a jump into the middle of LDDW.
+        {{0x05, 0x00, 1, 0, 0, 0, 0, 0, 0x18, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 32, 0, 0, 0, false, true},
+        // r0 = 1; *(u64 *)(r10 - 8) = r0; exit
+        {{0xb7, 0x00, 0, 0, 1, 0, 0, 0, 0x7b, 0x0a, 0xf8, 0xff, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 24, 0, 0, 1, true, true},
+        // r0 = 1; *(u64 *)(r10 - 7) = r0; exit: a misaligned stack store.
+        {{0xb7, 0x00, 0, 0, 1, 0, 0, 0, 0x7b, 0x0a, 0xf9, 0xff, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 24, 0, 0, 0, false, true},
+        // r0 = r3; exit: R3 is not an argument, so it is uninitialized.
+        {{0xbf, 0x30, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 16, 0, 0, 0, false, true},
+        // r0 = r1; r0 /= r2; exit, with division by zero defined as zero.
+        {{0xbf, 0x10, 0, 0, 0, 0, 0, 0, 0x3f, 0x20, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 24, 7, 0, 0, true, true},
+        {{0xbf, 0x10, 0, 0, 0, 0, 0, 0, 0x3f, 0x20, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 24, 7, 2, 3, true, true},
+        // r0 = r1; r0 %= r2; exit, with remainder by zero keeping the dividend.
+        {{0xbf, 0x10, 0, 0, 0, 0, 0, 0, 0x9f, 0x20, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 24, 7, 0, 7, true, true},
+        {{0xbf, 0x10, 0, 0, 0, 0, 0, 0, 0x9f, 0x20, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 24, 7, 2, 1, true, true},
+        // r0 = r1; w0 %= w2; exit keeps only the low half of the dividend.
+        {{0xbf, 0x10, 0, 0, 0, 0, 0, 0, 0x9c, 0x20, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 24, UINT64_C(0x100000007), 0, 7, true, true},
+        // Encodings outside the modeled subset: a helper call, a JMP32 branch,
+        // signed division and a map-FD LDDW. The kernel may accept them.
+        {{0xb7, 0x00, 0, 0, 0, 0, 0, 0, 0x85, 0, 0, 0, 7, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 24, 0, 0, 0, false, false},
+        {{0xb7, 0x00, 0, 0, 0, 0, 0, 0, 0x16, 0x01, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 24, 0, 0, 0, false, false},
+        {{0xbf, 0x10, 0, 0, 0, 0, 0, 0, 0x3f, 0x20, 1, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 24, 7, 2, 0, false, false},
+        {{0x18, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xb7, 0x00, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0}, 32, 0, 0, 0, false, false},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rules); index += 1)
+    {
+        CodegenTestEbpfRule* rule = rules + index;
+        ByteSlice code = {rule->code, rule->length};
+        u64 observed = 0;
+        bool ran = codegen_test_ebpf_run(code, rule->first, rule->second, &observed);
+        bool vm_agreed = ran == rule->accepted && (!ran || observed == rule->expected);
+        if (!vm_agreed) arguments->show(arguments, S8("eBPF VM rule {u32}: ran {u32}, observed {u64}\n"), index, (u32)ran, observed);
+        BUSTER_TEST(arguments, vm_agreed);
+        if (oracle.kernel_available && rule->kernel)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u64 kernel_observed = 0;
+            String8 reason = {0};
+            CodegenTestEbpfKernel status = codegen_test_ebpf_kernel_run(temporary.arena, code, rule->first, rule->second, &kernel_observed, &reason);
+            bool executed = status == CODEGEN_TEST_EBPF_KERNEL_EXECUTED;
+            bool kernel_agreed = executed == rule->accepted && (!executed || kernel_observed == rule->expected);
+            oracle.kernel_executions += 1;
+            if (!kernel_agreed) arguments->show(arguments, S8("eBPF kernel rule {u32}: {S8}, observed {u64}\n"), index, reason, kernel_observed);
+            BUSTER_TEST(arguments, kernel_agreed);
+            scratch_end(temporary);
+        }
+    }
+    codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_kernel_regressions"));
     return result;
 }
 

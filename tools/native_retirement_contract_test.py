@@ -185,6 +185,46 @@ class ContractTests(unittest.TestCase):
         return contract.validate_shards(list(reversed(self.shards)), output, require_clean,
                                         require_clean_acceptance)
 
+    def test_ios_subjects_require_the_same_adapter_before_the_pinned_sdk(self):
+        directory = self.shards[0]
+        _fields, rows = read_table(directory / "rows.tsv")
+        fixture = "tests/basic_doom_headless.c"
+        sdk_root = directory / "dependencies/project-include/sdk"
+        adapter = ["-isystem", str(sdk_root / "darwin-adapter")]
+        vendor = ["-isystem", str(sdk_root / "darwin")]
+        manifest = {"project_include_sha256": "a" * 64}
+        selected_adapters = frozenset(("dependencies/project-include/sdk/darwin-adapter/Availability.h",))
+        for target in ("x86_64-apple-ios", "aarch64-apple-ios"):
+            for allocator in ("none", "fast"):
+                with self.subTest(target=target, allocator=allocator):
+                    row = next(dict(item) for item in rows
+                               if item["target"] == target and item["allocator"] == allocator)
+                    row["fixture"] = fixture
+                    path = directory / row["argv_evidence"]
+                    argv = contract.read_argv(path)
+                    argv[argv.index(str(directory / "inputs/tests/unit.c"))] = str(directory / "inputs" / fixture)
+                    includes = argv.index("-I" + str(directory / "inputs/tests"))
+                    argv[includes:includes] = adapter + vendor
+                    project = "-I" + str(directory / "dependencies/project-include")
+                    argv.insert(includes + 5, project)
+                    path.write_bytes(b"\0".join(item.encode() for item in argv) + b"\0")
+                    contract.validate_argv(directory, manifest, row, {fixture: []}, selected_adapters)
+                    # Missing or late overlays must not be accepted for either
+                    # subject, even though the remaining argv is unchanged.
+                    for include_order in (vendor, vendor + adapter):
+                        altered = argv[:includes] + include_order + argv[includes + 4:]
+                        path.write_bytes(b"\0".join(item.encode() for item in altered) + b"\0")
+                        with self.assertRaises(AssertionError):
+                            contract.validate_argv(directory, manifest, row, {fixture: []}, selected_adapters)
+                    # Before policy admission, authenticated old declarations
+                    # select no adapter and must still replay the old argv.
+                    legacy = argv[:includes] + vendor + argv[includes + 4:]
+                    path.write_bytes(b"\0".join(item.encode() for item in legacy) + b"\0")
+                    contract.validate_argv(directory, manifest, row, {fixture: []}, frozenset())
+                    path.write_bytes(b"\0".join(item.encode() for item in argv) + b"\0")
+                    with self.assertRaises(AssertionError):
+                        contract.validate_argv(directory, manifest, row, {fixture: []}, frozenset())
+
     def declare_gaps(self, identities):
         """Install the same authenticated self-test gap ledger in every shard."""
         records = []
@@ -370,7 +410,15 @@ class ContractTests(unittest.TestCase):
                     "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "411"}
         inputs = {f"tests/subject-{index}.c": {"role": "subject"} for index in range(contract.FULL_SUBJECT_COUNT)}
         for digest in (contract.FULL_SUPPORT_CONTRACT_SHA256,
-                       contract.NEXT_SUPPORT_CONTRACT_SHA256):
+                       contract.NEXT_SUPPORT_CONTRACT_SHA256,
+                       contract.APPLE_CI_SUPPORT_CONTRACT_SHA256,
+                       contract.PROPOSED_SUPPORT_CONTRACT_SHA256,
+                       contract.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
+                       contract.BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
+                       contract.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
+                       contract.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
+                       contract.MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+                       contract.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256):
             with self.subTest(digest=digest):
                 manifest["support_contract_sha256"] = digest
                 self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
@@ -406,7 +454,12 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(records), contract.FULL_APPLICABILITY_LEDGER_COUNT)
         self.assertEqual(len(set(identities)), contract.FULL_APPLICABILITY_LEDGER_COUNT)
         self.assertEqual(identities, sorted(identities))
-        self.assertEqual(sha(ledger_path.read_bytes()), contract.FULL_APPLICABILITY_LEDGER_SHA256)
+        ledger_sha256 = sha(ledger_path.read_bytes())
+        self.assertIn(ledger_sha256, contract.ACCEPTED_APPLICABILITY_LEDGER_SHA256)
+        producer = (ledger_path.parents[1] / "tools/native_retirement_census.c").read_text(encoding="utf-8")
+        match = re.search(r'nrc_applicability_ledger_sha256 = S8_INITIALIZER\("([0-9a-f]{64})"\);', producer)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), ledger_sha256)
         for record in records:
             self.assertIn(record["applicability"], contract.AUTHENTICATED_APPLICABILITY_CLASSES)
             fixture_path = ledger_path.parents[1] / record["fixture"]

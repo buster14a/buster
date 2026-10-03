@@ -18,6 +18,12 @@ captured stderr diagnostics separately; the retirement census reads its
 reporting a failed compiler invocation. A `-v -E` invocation also prints the
 requested statistics on stdout; use plain `-E` when piping preprocessed C.
 
+With several inputs, only a native link copies each unit's in-memory object
+out of its translation-unit arena into the result arena for `link_objects`.
+Each `-c` unit has already written its own `.o`, and `-S`, `-E`,
+`-fsyntax-only` and `-emit-llvm` finish before the link, so they retain
+nothing per unit and leave `CompilerDriverResult.object` unset.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
@@ -185,7 +191,27 @@ outside the fourteen-fixture floor above. Independent host/compiler observers
 remain the semantic reference; the in-tree direct-native path is not a
 production oracle.
 
+## Plain-char signedness
+
+`-fsigned-char` and `-funsigned-char` override the target's implementation-
+defined plain-`char` signedness; the last option wins. With neither option,
+the target ABI default remains in effect. This policy is carried through
+`TargetDataLayout`, so the C frontend uses it consistently for plain-`char`
+typing and promotions, casts, character constants, `__CHAR_UNSIGNED__`, and
+the `CHAR_MIN`/`CHAR_MAX` definitions in `<limits.h>`. Explicit `signed char`
+and `unsigned char` keep their specified behavior. The options apply to C
+frontend paths for native objects, LLVM bitcode, Wasm64, and eBPF. External GPU
+pipelines reject them because their toolchains do not use Buster's C frontend.
+
 ## C input phase selection
+
+`--target=spirv-vulkan1.2-compute -c` selects the direct Vulkan 1.2 / SPIR-V 1.5
+compute emitter. It accepts one bounded C kernel and no native link inputs,
+external GPU tool flags, LLVM emission, explicit native allocator, debug/PIC,
+or native verification options. The [compute contract](../spirv-compute.md)
+defines the interface, unsigned integer subset, automatic bounds guard and
+pending physical-device evidence. Existing external `spirv` routes are separate.
+Without `-o`, the direct target publishes `<input-path>.spv`.
 
 A `.c` input and any path under `-x c` begin as raw C source and run the full
 preprocessor. In automatic language mode, `.i` begins as preprocessed C;
@@ -211,7 +237,7 @@ layer above `assembly_encode`: it interprets the directive vocabulary, tracks
 one offset per section, resolves labels, and hands each instruction line to
 the instruction layer beneath, and the driver turns its sections, symbols and
 relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
-`.data`, `.bss`, `.rodata` and `.section`; `.globl`/`.global`, `.weak`,
+`.data`, `.bss`, `.rodata` and `.section`; `.globl`/`.global`/`.extern`, `.weak`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
@@ -220,6 +246,38 @@ describes unwinding rather than bytes. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
+
+Statement boundaries follow the target: x86-64 and non-Apple AArch64 use
+`;` between statements; Apple AArch64 uses `%%` and treats `;` as a line
+comment. `#` starts an x86-64 comment and remains part of AArch64 immediates.
+`//` comments are accepted on both architectures. Quoted strings retain these
+markers and block-comment text, including escaped quotes. Diagnostics keep
+physical lines/columns after a separator; numeric labels resolve by statement
+order even when their definitions share one physical line. Scalar AArch64
+constant operands accept an optional `#` through the existing constant parser.
+`mov wN, constant` and `mov xN, constant` accept an unsigned sixteen-bit
+constant through the scalar `movz` form; register aliases keep their existing
+operand rules.
+Pair-exclusive `ldxp`/`ldaxp` and `stxp`/`stlxp` spellings project matching W/X
+data registers, W store status and an X/SP base into the existing typed AArch64
+memory semantic encoder. Data/status ZR roles are retained; store status cannot
+overlap either data register or a non-SP base. The optional address offset must
+be zero. Nonzero/symbolic offsets, mismatched widths, and writeback are source
+operand diagnostics. No pair instruction words or generated identities are
+duplicated in the source adapter.
+Unsupported post-index memory operands are refused with their full spelling,
+so their writeback cannot silently disappear during comment handling.
+
+Integer data expressions retain `.` as the current field's section-relative
+address, including each separate operand in a comma-separated directive.
+`.long symbol - .` and `.quad symbol - .` use ELF PC32/PC64 on x86-64 and
+PREL32/PREL64 on AArch64; `.quad .` and `label + constant` retain absolute
+address relocations. Quoted names printed by `-S` are accepted. Differences
+between defined, non-weak terms in the same section fold after forward labels
+are known. Cross-section symbol differences, negative undefined addresses,
+multiple positive symbolic terms, and symbolic fields narrower than four
+bytes are diagnosed with the directive and source line. Weak definitions
+retain relocations because a linker can replace their addresses.
 
 Text alignment without an explicit fill uses x86-64 NOP bytes or complete
 little-endian AArch64 NOP instructions. A partial AArch64 instruction boundary
@@ -231,14 +289,35 @@ labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
 following or preceding definition in source order, and those names leave the
 symbol table again once every reference to one is folded, the way GNU as drops
 its own `.L` locals. A repeat or lock prefix alone on a line joins the
-instruction on the next one. And a same-section PC-relative reference to a
-label defined in the file is written into the bytes; only a cross-section or
-undefined name becomes a relocation. `@PLT` is dropped: a static link resolves
-such a call the same way it resolves a plain one. Sections keep their own
+instruction on the next one. A same-section PC-relative reference is written
+into the bytes only when its symbol's identity cannot change at link time.
+Weak symbols, including hidden weak definitions, retain references for strong
+replacement. Default-visible ELF globals also retain references for shared
+library interposition; hidden strong and local labels still fold. Cross-section
+and undefined references remain relocations. Direct x86 ELF calls and jumps to
+default-visible globals use PLT32, and an explicit `@PLT` request is preserved
+for a retained direct call/jump. Other `@PLT` operand forms are diagnosed.
+Retained displacement families the object model cannot express (such as an
+8-bit `loop` to a weak symbol) fail before publishing an object. ELF visibility
+rules do not change COFF or Mach-O global fixups. Sections keep their own
 names -- `.init` and `.fini` are neither `.text` nor absent -- and a
 hand-written section gets alignment 1, because `crti.o` and `crtn.o`
 contribute one and two bytes to `.init` and any padding between them would
 run as code.
+
+AArch64 units fold same-section, binding-invariant `b`, `bl`, `b.cond`,
+`cbz`/`cbnz`, and `tbz`/`tbnz` references using the shared control semantic
+fixup, including signed addends and numeric labels. Out-of-range or unaligned
+references are diagnosed at their physical source position. Undefined,
+cross-section, weak, and default-visible ELF global short branches are refused
+because the object model cannot retain their relocation families; `b`/`bl`
+retain the existing object relocations. This unit-local capability does not
+enable machine inline-asm private-label expansion. The registered driver
+fixture assembles pristine `tests/aarch64_atomic_update_pair_oracle.s` through
+`.s` inference and `-x assembler`, checks all 108 text bytes against independent
+literal words, and compares the same words with Clang cross-assembly when a
+configured or PATH Clang is available. An unavailable Clang observer is reported
+explicitly; its comparison is not a passed gate.
 
 A forward branch to a label always uses the near form: the instruction layer
 sizes a statement before the label is known and this assembler does not relax.
@@ -278,6 +357,12 @@ command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
 header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
 output rejects `-emit-llvm`, native link inputs, and `-S`.
 
+The direct backend consumes canonical integer bit-count operations at their
+semantic bit width, independently of the i32/i64 WebAssembly carrier. Leading
+and trailing zeros count within that width; a zero operand produces the width,
+and population count ignores carrier extension bits. This is the canonical IR
+contract rather than a promise about C builtins on undefined zero inputs.
+
 Static archive extraction uses `compiler_driver_archive_extract` in the
 private `driver/archive.c` implementation. Its invocation-owned name table
 records selected definitions and strong/weak undefined references once per
@@ -312,10 +397,63 @@ are included and timing never gates correctness. `state_bytes` is the name
 arena's used prefix (including superseded growth tables) before destruction,
 not physical RSS or the per-archive scratch peak.
 
+Archive input uses `object_archive_read_link`, a borrowed descriptor reader,
+while `object_archive_read` remains the eager public API. The driver retains
+archive mappings through extraction and releases them on every invocation exit;
+fully admitted objects own their payload and names in the result arena. Descriptor
+capacity follows the actual member-header count rather than archive payload bytes.
+
+GNU/COFF first linker-member and GNU64 indexes, plus BSD/Darwin32/64 ranlib
+indexes, provide definition metadata without reading object payloads. BSD
+extended metadata names are classified after decoding; Mach-O index names lose
+exactly the same leading underscore as the full reader. Unindexed ELF, COFF and
+Mach-O members read only symbol/name metadata. An unrelated foreign-target or
+unsupported-relocation member therefore cannot reject a link. A selected member
+runs the ordinary complete object reader before its object or undefined references
+enter extraction state; refusals name its archive member and actual/requested
+targets. The ordered provider worklist keeps the same member-order, duplicate,
+weak-reference and repeated-archive rules. Provider heads are cleared by their
+original indexed names before scratch release, even if admission replaces a
+descriptor's symbol table.
+
+Selection metadata does not extend the object reader's section or symbol
+vocabulary. An index can request a definition in a section the full reader
+cannot retain; selecting that member still reaches the existing admission or
+unresolved-symbol diagnostic. That unsupported-definition limitation remains
+at the full-reader boundary rather than silently publishing a descriptor as a
+linked object.
+
+`compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
+GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
+no-selected-member archives, a required incompatible member, duplicate providers,
+weak references and repeated occurrences. A separate valid ELF `R_X86_64_SIZE64`
+control verifies that an irrelevant same-target unsupported relocation is deferred
+and its selected member still fails.
+
 An undefined weak ELF reference does not select a static archive member.
 It may bind to a member selected for a separate strong dependency, to a
 direct object input, or to an already included shared library. Keep archive
 selection separate from those later resolution rules (GitHub #226).
+
+Linux `-lNAME` static archives are searched in explicit `-L` directories first,
+then the same target roots used by ELF export discovery: `lib/<triple>`,
+`usr/lib/<triple>`, `lib64`, `usr/lib64`, `lib`, and `usr/lib` under a supplied
+sysroot. Without a sysroot, the absolute host roots also include
+`/usr/<triple>/lib` after the two multiarch roots. The sysroot replaces these
+default host paths; explicit `-L` directories retain their literal meaning.
+Each directory prefers `libNAME.so` to `libNAME.a`, so an earlier explicit
+archive wins over a later default shared library. `-l:FILE.a` searches the
+exact archive name without that shared-library probe and retains its existing
+bare-path fallback. Other target search policies are unchanged.
+
+`compiler_driver_archive_test_default_roots`, invoked by the registered lazy
+archive fixture, checks both ELF CPUs and all six literal sysroot roots,
+named/exact/direct image parity, distinct provider precedence, explicit `-L`,
+shared preference, exact archive bypass and output preservation on refusal.
+Its configured native Linux control builds a real archive with host compiler
+and archiver, links an independent host control, and runs both Buster's direct
+and sysroot-default named links. GNU linker-script interpretation and Apple's
+missing-library behavior remain separate #1285 work.
 
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized
@@ -326,8 +464,12 @@ The object writer already carries that requirement into the section metadata
 Every hosted ELF link reads the shared libraries' own dynamic symbol tables.
 `compiler_driver_elf_library_exports` looks `libc.so.6` and each requested
 library up where the loader would — the `-L` paths, then the sysroot or host
-`lib`/`usr/lib` roots, multiarch first — and rejects a file whose ELF machine
+`lib`/`usr/lib` roots, multiarch first; without a sysroot also the Debian
+cross-libc root `/usr/<triple>/lib` — and rejects a file whose ELF machine
 disagrees with the target, so a cross link never reads the host's own libc.
+A cross link that finds no target libc cannot tell a missing symbol from a
+libc import and keeps every strong undefined reference as an import (GitHub
+#1729).
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
 
@@ -384,6 +526,131 @@ things in the x86-64 dynamic writer, and the AArch64 one through it:
   Clang-differential fixture** — a harness that reads "Clang refuses, Buster
   accepts" as a Buster success measures nothing (issue #660).
 
+A hosted executable also exports each of its own definitions that a requested
+library leaves undefined, as GNU ld does: `compiler_driver_elf_dynamic_symbols`
+records every library's undefined names as `referenced_symbols`, and the
+index marks them, so a library that calls back into the program or reads its
+data binds without `-rdynamic`. Only the requested libraries are consulted, not
+`libc.so.6`, whose undefined names are loader internals.
+
+## Shared objects and position-independent executables
+
+On x86-64 Linux, `-shared` links a shared object and `-pie` a
+position-independent executable (`NativeImageKind`, carried to the linker in
+`NativeExecutableLinkOptions.image_kind`). `-shared` outranks `-pie` in either
+order and `-no-pie` undoes only `-pie`. Linking either kind compiles the C
+inputs of that invocation with the position-independent code model, and
+`-fPIE`/`-fpie` select that same model on every target (the last of the four
+positive spellings wins; `-fno-pie` cancels only a PIE spelling). On any other
+target a link that asks for either image is refused as an unsupported option,
+while a compile-only invocation ignores the link option, as GCC does.
+
+`link_native_image_elf64_x86_64_position_independent` writes both kinds as an
+ET_DYN at base zero. Its orientation comment is the contract; in short:
+
+- Every absolute address becomes a dynamic relocation: `R_X86_64_RELATIVE` for
+  a definition bound in the image, `R_X86_64_64`/`GLOB_DAT` for an import and,
+  in a shared object, for an exported definition, because an executable may
+  copy-relocate the library's data and the library must then follow the copy.
+  Direct calls bind to the library's own definitions (ld's
+  `-Bsymbolic-functions` answer). A rel32 to preemptible data, 32-bit absolute
+  addresses, and address relocations in code are refused with a hint to
+  compile with `-fPIC`. A rel32 to imported data is refused in a shared object;
+  a PIE instead reserves a copy slot after `.bss` and emits `R_X86_64_COPY`,
+  as ld and lld do for GCC's `-fPIE` code, and every other reference to that
+  symbol binds to the slot. The slot planning (`link_elf_copy_plan_build`,
+  including the library's alias names such as `environ`/`__environ`) is shared
+  with the fixed-address writer.
+- A shared object exports every defined default-visibility symbol, leaves
+  undefined ones for the loader (`-Wl,--no-undefined`/`-z,defs` restore the
+  executable's rule), keeps `.init_array`/`.fini_array` for the loader, takes
+  `DT_SONAME` from `-Wl,-soname,NAME`, and records symbol versions like the
+  fixed-address writer. `.rodata`, the initializer arrays, `.dynamic` and
+  `.got` sit under `PT_GNU_RELRO`; `PT_GNU_STACK` is not executable.
+- Thread-local storage in a PIE is relaxed to local-exec as in a fixed-address
+  executable. In a shared object general-dynamic keeps its `__tls_get_addr`
+  call with a `DTPMOD64`/`DTPOFF64` pair, initial-exec gets `TPOFF64` and
+  `DF_STATIC_TLS`, and local-exec is refused.
+- Local-dynamic TLS, which this compiler never emits but GCC and Clang do for a
+  file-local `__thread` under `-fPIC -O1` and above (`R_X86_64_TLSLD` then
+  `DTPOFF32` per variable, issue 1711), is read from foreign objects. An
+  executable -- fixed-address or PIE -- relaxes the `lea`/`call
+  __tls_get_addr` pair (direct, or through the GOT under `-fno-plt`) to
+  `mov rax, fs:0` behind data16 padding and resolves `DTPOFF32` in code to the
+  thread-pointer offset, as ld does. A shared object keeps the call and gives
+  the image one `DTPMOD64` pair with a zero offset, and `DTPOFF32` is the
+  variable's offset in the module's block. `DTPOFF32`/`DTPOFF64` in DWARF
+  sections resolve to that block offset in every image.
+
+`compiler_driver_test_position_independent_images` exercises the whole path:
+a Buster library loaded by `dlopen` and linked by Buster (fixed-address and
+PIE) and by the host toolchain (PIE and `-no-pie`, whose copy relocations the
+library must follow), calls and data in both directions, the lifecycle order
+of initializers and handlers, a randomized PIE base, copy relocations in a
+Buster PIE for an object that reads library data and `environ` with rel32s
+(the shape GCC's `-fPIE` emits), a CPython extension when `python3` and its
+headers exist, and the `-fPIC` refusal.
+`compiler_driver_test_local_dynamic_tls` links GCC and Clang `-O2 -fPIC`
+local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
+runs them, the shared object under both a Buster PIE and the host toolchain.
+AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
+
+## Pass-through options
+
+`-Wl,a,b,c` produces three individual linker arguments, in order. Each
+`-Xlinker value` contributes exactly one argument; commas in that value are
+not split. Empty comma fields and missing operands fail with a diagnostic.
+The driver and native linker share `link_validate_linker_arguments`, and the
+linker checks the actual static/dynamic image before publishing output.
+
+The supported subset is:
+
+- Linux and Android dynamic ELF executables: `-E`, `-export-dynamic`, and
+  `--export-dynamic` export definitions. A static image refuses these options.
+- Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
+  two arguments `-z defs` require strong references to resolve. Executables
+  already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux shared objects: `-soname NAME`, `--soname NAME`, `-h NAME`,
+  `-soname=NAME`, and `--soname=NAME` set `DT_SONAME`.
+
+Other linker values and unsupported targets/output modes fail rather than
+silently losing link semantics. This includes PE, Mach-O, UEFI, compile-only,
+preprocessing, assembly-text and bitcode output. `-rdynamic` uses the same
+export validation. Unknown options, entry overrides, wrapping, archive-mode
+switches, runtime paths, version scripts, and other `-z` modes are refused.
+
+`-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
+preprocessor macro/include operations and dependency requests. Direct `-D`,
+`-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
+`-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
+preserves any existing artifact instead of reporting a successful stale build.
+
+## Object output (`-c`)
+
+`-c` writes the object through `object_write_borrowing`. The ELF64 writer
+plans the whole file with checked arithmetic, then stores each byte once,
+except that each section payload of at least 4 KiB is named in place and the
+file is published from the image's ranges and those payloads in order
+(`object_artifact_slices`, `file_publish_slices`), byte-identical to
+`object_write`'s image. It refuses an
+object whose section count reaches `SHN_LORESERVE`, whose string tables need
+offsets past 32 bits, or whose size overflows or exceeds the arena, with the
+diagnostic `native elf64 object exceeds the object writer's limits (...)`,
+and leaves an existing output file untouched. `-v` prints the writer's exact
+work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
+`-c`. See [object emission](../object-emission.md).
+
+## ELF TLS companion lookup
+
+The x86-64 executable writers index TLSGD/TLSLD section/offset sites in link
+scratch after initializer stripping. Import classification and relocation
+planning reuse those exact identities; input relocation order and duplicate
+sites do not determine membership. Shared images retain helper calls. Empty
+cases allocate no table, scratch exhaustion fails before publication, and the
+existing encoding and relocation bounds checks remain mandatory. See the
+[link comparison package](../linker-tls-comparison.md) for work counters,
+object/archive loader controls, latency boundaries and evidence limitations.
+
 ## External ELF debug information
 
 The ELF object reader carries the DWARF 5 `.debug_addr`, `.debug_str_offsets`,
@@ -437,3 +704,44 @@ leave the pointer null and `input_language_count` zero retain the legacy
 invocation-wide `language` behavior. Any code that slices `input_paths`
 for a single translation unit must slice the language array in lockstep.
 The GPU handoff follows the same null-means-global compatibility rule.
+
+## Response files
+
+`compiler_driver_parse_arguments` expands `@path` arguments before it reads
+any option, so `ide cc` and embedding callers share one behavior. An argument
+whose first byte is `@` is replaced, in place, by the arguments held in the
+file `path` names; a relative path resolves against the current directory.
+Expansion applies after `--` as well, as in GCC and Clang. An argument that
+contains `@` elsewhere (`a@b.c`, `-Wl,@x`) is not a response file. With no
+argument beginning with `@`, the argument slice is used unchanged and neither
+bound below applies.
+
+The file's text follows GCC's `expandargv` and Clang's GNU tokenizer:
+
+- space, tab, newline, carriage return, vertical tab and form feed separate
+  arguments; there is no comment syntax;
+- single and double quotes group bytes, including whitespace, and are
+  removed, so `a"b c"d` is one argument and `""` or `''` is an empty one;
+- a backslash takes the next byte literally inside or outside either quote,
+  so `\"`, `\'`, `\\`, `\ ` and a backslash-newline pair each yield that
+  byte. Write Windows paths with `/` or doubled backslashes.
+
+Where those compilers accept malformed text in different ways, this driver
+refuses it with a `driver.argument` error naming the file: a quote still open
+at the end of the file, a trailing backslash, a NUL byte, and a bare `@`.
+Nesting is not supported: an expanded argument that itself begins with `@`,
+quoted or escaped, is refused rather than expanded, so one file never
+includes another. Name an input that begins with `@` as `./@name`.
+
+`COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT` (4 MiB) bounds the bytes read from
+all response files of one invocation together, and
+`COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT` (65536) bounds the fully
+expanded command line; exceeding either is a `driver.argument` error. The
+reader requests one byte past the remaining budget, so a pipe or device is
+bounded too. A file that cannot be opened or read (missing, a directory) is a
+`driver.file-read` error, `could not read response file <path>`, which
+`ide cc` prints after `cc: error:` before exiting nonzero. Expanded arguments
+are NUL-terminated copies in the invocation arena.
+`compiler_driver_test_response_file_arguments` covers the grammar and bounds;
+`compiler_driver_test_response_file_batch` checks that a 400-input `-c` batch
+writes the same objects through `@file` as on the command line.

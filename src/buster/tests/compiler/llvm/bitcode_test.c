@@ -1,8 +1,82 @@
 #include <buster/tests/compiler/llvm/bitcode_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/llvm/bitcode_internal.h>
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/os.h>
 #include <buster/lib/file.h>
+
+// Integer wire coverage: llvm_bitcode_test_integer_encoding exhausts the
+// scalar operand boundary; llvm_bitcode_test_integer reads complete serialized
+// modules and llvm_bitcode_test_consumers keeps independent Clang execution.
+// llvm_bitcode_test_lifecycle checks canonical registrations and independently
+// observes constructor/main/destructor output across callback-only C units.
+BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_integer_operand_matches(u64 encoded, u64 bits, u32 width)
+{
+    // Inverse of LLVM's Signed VBRs, not a second implementation of the writer:
+    // https://llvm.org/docs/BitCodeFormat.html#signed-vbrs
+    // The reserved operand 1 denotes INT64_MIN before declared-width truncation.
+    u64 decoded = encoded >> 1;
+    if (encoded == 1)
+    {
+        decoded = UINT64_C(1) << 63;
+    }
+    else if (encoded & 1)
+    {
+        decoded = 0 - decoded;
+    }
+    u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+    return (decoded & mask) == (bits & mask);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_encoding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Exact wire values prevent a matching round-trip mistake at signed minima.
+    u32 widths[] = {1, 8, 16, 32, 64};
+    u64 expected[] = {3, 257, 65537, UINT64_C(4294967297), 1};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(widths); index += 1)
+    {
+        u64 sign = UINT64_C(1) << (widths[index] - 1);
+        BUSTER_TEST(arguments, llvm_bitcode_test_integer_operand(sign, widths[index]) == expected[index]);
+    }
+
+    u32 exhaustive_count = 0;
+    for (u32 width = 1; width <= 64; width += 1)
+    {
+        u64 sign = UINT64_C(1) << (width - 1);
+        u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        if (width <= 16)
+        {
+            // All 131,070 patterns across widths 1..16, through the actual
+            // operand encoder. Constant stack storage; no full-module emission.
+            for (u64 bits = 0; bits <= mask; bits += 1)
+            {
+                u64 encoded = llvm_bitcode_test_integer_operand(bits, width);
+                BUSTER_TEST(arguments, llvm_bitcode_test_integer_operand_matches(encoded, bits, width));
+                exhaustive_count += 1;
+            }
+        }
+
+        // Also exercise discarded high bits at the narrow widths, and every
+        // sign boundary through i64. UINT64_MAX must truncate before encoding.
+        u64 boundaries[] = {0, 1, sign - 1, sign, sign + 1, mask, UINT64_MAX};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(boundaries); index += 1)
+        {
+            u64 encoded = llvm_bitcode_test_integer_operand(boundaries[index], width);
+            BUSTER_TEST(arguments, llvm_bitcode_test_integer_operand_matches(encoded, boundaries[index], width));
+        }
+
+        if (width < 64)
+        {
+            // Historical #222 mutation: operand 1 for a narrow sign bit must
+            // be rejected by this same oracle. At i64 it is the positive control.
+            BUSTER_TEST(arguments, !llvm_bitcode_test_integer_operand_matches(1, sign, width));
+        }
+    }
+    BUSTER_TEST(arguments, exhaustive_count == 131070);
+    BUSTER_TEST(arguments, llvm_bitcode_test_integer_operand_matches(1, UINT64_C(1) << 63, 64));
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_uefi_boundary(UnitTestArguments* arguments)
 {
@@ -124,6 +198,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_addend_caller.c")},
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_table.c"),
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_table_caller.c")},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_unprototyped_definition.c"), .both_optimizations = true},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_block_function_declaration.c"), .both_optimizations = true},
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_unaligned_pointer.c"),
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_unaligned_pointer_caller.c")},
@@ -136,7 +212,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         {.source = S8("tests/basic_c_llvm_vector_abi.c"), .caller = S8("tests/basic_c_llvm_vector_abi_main.c")},
 #if BUSTER_LINUX || BUSTER_WINDOWS
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs.c"),
-         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs_check.c"), .both_optimizations = true},
+         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs_check.c"),
+         .both_optimizations = true},
 #endif
 #endif
         {.source = S8("tests/basic_c_llvm_integer_boundary_values.c"), .caller = S8("tests/basic_c_llvm_integer_boundary_check.c")},
@@ -297,6 +374,444 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
     {
         arguments->show(arguments, S8("LLVM consumer execution skipped: clang is unavailable on PATH\n"));
     }
+    return result;
+}
+
+
+// Lifecycle registrations belong to canonical modules even when every
+// definition is a static callback. Independent consumers observe fixed bytes
+// before main, in main, and during ordinary process exit (#1336).
+typedef struct LlvmBitcodeLifecycleRegistration LlvmBitcodeLifecycleRegistration;
+struct LlvmBitcodeLifecycleRegistration
+{
+    String8 name;
+    u32 priority;
+    bool destructor;
+};
+
+typedef struct LlvmBitcodeLifecycleFixture LlvmBitcodeLifecycleFixture;
+struct LlvmBitcodeLifecycleFixture
+{
+    String8 name;
+    String8 sources[2];
+    String8 expected_output;
+    LlvmBitcodeLifecycleRegistration registrations[2][6];
+    u32 registration_counts[2];
+};
+
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle_consumer(UnitTestArguments* arguments, Arena* arena, String8 compiler,
+    String8 optimization, String8 first, String8 second, String8 observer, String8 expected, String8 fixture, String8 producer,
+    bool* admission)
+{
+    UnitTestResult result = {0};
+    String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-lifecycle-consumer"), S8(""));
+    String8 command[8];
+    u64 command_count = 0;
+    command[command_count++] = compiler;
+    command[command_count++] = optimization;
+    command[command_count++] = first;
+    if (second.length)
+    {
+        command[command_count++] = second;
+    }
+    command[command_count++] = observer;
+    command[command_count++] = S8("-o");
+    command[command_count++] = executable;
+    ProcessSpawnOptions options = {.use_process_environment = true, .search_path = true, .new_process_group = true,
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+        .capture_limits = {.per_stream = {BUSTER_KB(64), BUSTER_KB(64), BUSTER_KB(64)}, .total = BUSTER_KB(128)},
+        .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL};
+    ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = command_count},
+        (SliceString8){0}, (SliceString8){0}, options);
+    if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
+    {
+        ProcessWaitResult compiled = os_process_wait_deadline(arena, spawned, 30000000);
+        *admission = *admission && !compiled.process_tree_cleanup_failed && !compiled.process_group_reservation_retained &&
+            !compiled.process_group_ownership_lost;
+        bool compile_success = compiled.result == PROCESS_RESULT_SUCCESS && !compiled.timed_out &&
+            !compiled.capture_failed && !compiled.output_truncated && *admission;
+        if (!compile_success)
+        {
+            ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+            arguments->show(arguments, S8("LLVM lifecycle compile {S8} {S8} {S8}: {S8}\n"), fixture, producer, optimization,
+                (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+        }
+        if (BUSTER_REQUIRE(arguments, compile_success))
+        {
+            String8 run[] = {executable};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
+                (SliceString8){0}, (SliceString8){0}, options);
+            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+            {
+                ProcessWaitResult observed = os_process_wait_deadline(arena, child, 30000000);
+                *admission = *admission && !observed.process_tree_cleanup_failed && !observed.process_group_reservation_retained &&
+                    !observed.process_group_ownership_lost;
+                ByteSlice bytes = observed.streams[STANDARD_STREAM_OUTPUT];
+                String8 output = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+                bool correct = observed.result == PROCESS_RESULT_SUCCESS && !observed.timed_out &&
+                    !observed.capture_failed && !observed.output_truncated && *admission &&
+                    !observed.streams[STANDARD_STREAM_ERROR].length && string_equal(output, expected);
+                if (!correct)
+                {
+                    ByteSlice errors = observed.streams[STANDARD_STREAM_ERROR];
+                    arguments->show(arguments, S8("LLVM lifecycle answer {S8} {S8} {S8}: status={u32} expected={S8} output={S8} stderr={S8}\n"),
+                        fixture, producer, optimization, observed.platform_status, expected, output,
+                        (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                }
+                BUSTER_TEST(arguments, observed.result == PROCESS_RESULT_SUCCESS && !observed.timed_out &&
+                    !observed.capture_failed && !observed.output_truncated && *admission);
+                BUSTER_TEST(arguments, observed.streams[STANDARD_STREAM_ERROR].length == 0);
+                BUSTER_STRING_TEST(arguments, output, expected);
+                if (correct)
+                {
+                    arguments->show(arguments, S8("LLVM_LIFECYCLE_CONSUMER_V1 fixture={S8} producer={S8} compiler={S8} optimization={S8} output={S8} status=pass\n"),
+                        fixture, producer, compiler, optimization, output);
+                }
+            }
+        }
+    }
+    os_file_delete(executable);
+    return result;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    LlvmBitcodeLifecycleFixture fixtures[] = {
+        {
+            .name = S8("callback-only-two-tu"),
+            .sources = {
+                S8("extern void record_event(int);\n"
+                   "static void init_default(void) __attribute__((constructor));\n"
+                   "static void init_default(void) { record_event(68); }\n"
+                   "__attribute__((constructor(301))) static void init_third(void) { record_event(67); }\n"
+                   "__attribute__((constructor(101))) static void init_first(void) { record_event(65); }\n"
+                   "__attribute__((destructor(101))) static void fini_first(void) { record_event(122); }\n"
+                   "__attribute__((destructor)) static void fini_default(void) { record_event(119); }\n"
+                   "__attribute__((destructor(301))) static void fini_third(void) { record_event(120); }\n"),
+                S8("extern void record_event(int);\n"
+                   "__attribute__((constructor(201))) static void init_second(void) { record_event(66); }\n"
+                   "__attribute__((destructor(201))) static void fini_second(void) { record_event(121); }\n"),
+            },
+            .expected_output = S8("ABCDMwxyz"),
+            .registrations = {
+                {{S8("init_default"), IR_INITIALIZER_PRIORITY_NONE, false}, {S8("init_third"), 301, false},
+                 {S8("init_first"), 101, false}, {S8("fini_first"), 101, true},
+                 {S8("fini_default"), IR_INITIALIZER_PRIORITY_NONE, true}, {S8("fini_third"), 301, true}},
+                {{S8("init_second"), 201, false}, {S8("fini_second"), 201, true}},
+            },
+            .registration_counts = {6, 2},
+        },
+        {
+            .name = S8("constructor-only"),
+            .sources = {S8("extern void record_event(int);\n"
+                "__attribute__((constructor)) static void init_default(void) { record_event(68); }\n"
+                "__attribute__((constructor(101))) static void init_first(void) { record_event(65); }\n")},
+            .expected_output = S8("ADM"),
+            .registrations = {{{S8("init_default"), IR_INITIALIZER_PRIORITY_NONE, false}, {S8("init_first"), 101, false}}},
+            .registration_counts = {2, 0},
+        },
+        {
+            .name = S8("destructor-only"),
+            .sources = {S8("extern void record_event(int);\n"
+                "__attribute__((destructor(101))) static void fini_first(void) { record_event(122); }\n"
+                "__attribute__((destructor)) static void fini_default(void) { record_event(119); }\n")},
+            .expected_output = S8("Mwz"),
+            .registrations = {{{S8("fini_first"), 101, true}, {S8("fini_default"), IR_INITIALIZER_PRIORITY_NONE, true}}},
+            .registration_counts = {2, 0},
+        },
+        {
+            .name = S8("default-only"),
+            .sources = {S8("extern void record_event(int);\n"
+                "__attribute__((constructor)) static void init_default(void) { record_event(68); }\n"
+                "__attribute__((destructor)) static void fini_default(void) { record_event(119); }\n")},
+            .expected_output = S8("DMw"),
+            .registrations = {{{S8("init_default"), IR_INITIALIZER_PRIORITY_NONE, false},
+                {S8("fini_default"), IR_INITIALIZER_PRIORITY_NONE, true}}},
+            .registration_counts = {2, 0},
+        },
+        {
+            .name = S8("explicit-last-priority"),
+            .sources = {S8("extern void record_event(int);\n"
+                "__attribute__((constructor(65535))) static void init_last(void) { record_event(69); }\n"
+                "__attribute__((destructor(65535))) static void fini_last(void) { record_event(101); }\n")},
+            .expected_output = S8("EMe"),
+            .registrations = {{{S8("init_last"), 65535, false}, {S8("fini_last"), 65535, true}}},
+            .registration_counts = {2, 0},
+        },
+        {
+            .name = S8("no-registration"),
+            .sources = {S8("extern void record_event(int);\n"
+                "void ordinary_function(void) { record_event(88); }\n")},
+            .expected_output = S8("M"),
+        },
+    };
+    String8 triples[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"),
+        S8("x86_64-pc-windows-msvc"), S8("aarch64-pc-windows-msvc"),
+        S8("x86_64-apple-macosx"), S8("aarch64-apple-macosx")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(triples); target_index += 1)
+    {
+        TargetParseResult target = target_parse_triple(triples[target_index]);
+        if (BUSTER_REQUIRE(arguments, target.error == TARGET_PARSE_ERROR_NONE))
+        {
+            for (u32 frontend = 0; frontend < 2; frontend += 1)
+            {
+                for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(fixtures); fixture_index += 1)
+                {
+                    LlvmBitcodeLifecycleFixture* fixture = fixtures + fixture_index;
+                    for (u32 unit = 0; unit < 2; unit += 1)
+                    {
+                        if (!fixture->sources[unit].length)
+                        {
+                            continue;
+                        }
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        Arena* arena = temporary.arena;
+                        CPreprocessResult tokens = c_preprocess(arena, fixture->sources[unit], (CPreprocessOptions){
+                            .target = target.target, .data_layout = target_data_layout(target.target),
+                            .dialect = C_PREPROCESS_DIALECT_GNU17});
+                        CParseResult parse = c_parse(arena, tokens);
+                        if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+                        {
+                            CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("llvm-lifecycle.c"), tokens, parse,
+                                target.target, (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+                            if (lowered.diagnostic_count)
+                            {
+                                arguments->show(arguments, S8("LLVM lifecycle lowering {S8} {S8}: {S8}\n"),
+                                    fixture->name, triples[target_index], lowered.diagnostics[0].message);
+                            }
+                            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program &&
+                                lowered.program->module_count == 1 && lowered.canonical_ir_certified))
+                            {
+                                IrProgram* program = lowered.program;
+                                IrModule* module = program->modules;
+                                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                                u32 count = fixture->registration_counts[unit];
+                                if (BUSTER_REQUIRE(arguments, module->initializer_count == count && (!count || module->initializers)))
+                                {
+                                    bool constructor = false;
+                                    bool destructor = false;
+                                    for (u32 index = 0; index < count; index += 1)
+                                    {
+                                        IrModuleInitializer initializer = module->initializers[index];
+                                        LlvmBitcodeLifecycleRegistration expected = fixture->registrations[unit][index];
+                                        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, initializer.symbol);
+                                        if (BUSTER_REQUIRE(arguments, symbol != 0))
+                                        {
+                                            BUSTER_STRING_TEST(arguments, symbol->name, expected.name);
+                                            BUSTER_TEST(arguments, symbol->kind == IR_SYMBOL_FUNCTION && symbol->is_definition &&
+                                                symbol->linkage == IR_LINKAGE_INTERNAL);
+                                            BUSTER_TEST(arguments, initializer.priority == expected.priority);
+                                            BUSTER_TEST(arguments, initializer.is_destructor == expected.destructor);
+                                        }
+                                        constructor = constructor || !initializer.is_destructor;
+                                        destructor = destructor || initializer.is_destructor;
+                                    }
+                                    LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
+                                    options.target_triple = triples[target_index];
+                                    LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, program, program->modules, program->module_count, options);
+                                    LlvmBitcodeArtifact repeated = llvm_bitcode_emit_with_options(arena, program, program->modules, program->module_count, options);
+                                    if (BUSTER_REQUIRE(arguments, llvm_bitcode_artifact_is_valid(first) &&
+                                        llvm_bitcode_artifact_is_valid(repeated)))
+                                    {
+                                        BUSTER_TEST(arguments, first.stats.global_count == (u32)constructor + (u32)destructor);
+                                        BUSTER_TEST(arguments, first.stats.deterministic && repeated.stats.deterministic);
+                                        BUSTER_TEST(arguments, first.bytes.length == repeated.bytes.length &&
+                                            !memcmp(first.bytes.pointer, repeated.bytes.pointer, first.bytes.length));
+                                        module->initializer_count = 0;
+                                        LlvmBitcodeArtifact omitted = llvm_bitcode_emit_with_options(arena, program, program->modules, program->module_count, options);
+                                        module->initializer_count = count;
+                                        if (BUSTER_REQUIRE(arguments, llvm_bitcode_artifact_is_valid(omitted)))
+                                        {
+                                            BUSTER_TEST(arguments, omitted.stats.global_count == 0);
+                                            bool same = first.bytes.length == omitted.bytes.length &&
+                                                !memcmp(first.bytes.pointer, omitted.bytes.pointer, first.bytes.length);
+                                            BUSTER_TEST(arguments, same == (count == 0));
+                                        }
+                                        if (count)
+                                        {
+                                            IrModuleInitializer original = module->initializers[0];
+                                            module->initializers[0].priority = IR_INITIALIZER_PRIORITY_NONE + 1;
+                                            LlvmBitcodeArtifact invalid_priority = llvm_bitcode_emit_with_options(arena, program,
+                                                program->modules, program->module_count, options);
+                                            module->initializers[0] = original;
+                                            BUSTER_TEST(arguments, invalid_priority.error.code == LLVM_BITCODE_ERROR_IR_VALIDATION &&
+                                                !invalid_priority.success && !invalid_priority.bytes.length);
+                                            module->initializers[0].symbol = IR_SYMBOL_ID_INVALID;
+                                            LlvmBitcodeArtifact invalid_symbol = llvm_bitcode_emit_with_options(arena, program,
+                                                program->modules, program->module_count, options);
+                                            module->initializers[0] = original;
+                                            BUSTER_TEST(arguments, invalid_symbol.error.code == LLVM_BITCODE_ERROR_IR_VALIDATION &&
+                                                !invalid_symbol.success && !invalid_symbol.bytes.length);
+                                            u32 priority = module->initializers[0].priority;
+                                            if (priority == IR_INITIALIZER_PRIORITY_NONE)
+                                            {
+                                                // LLVM spells the default as 65535, not the
+                                                // native object writer's sorting sentinel.
+                                                module->initializers[0].priority = 65535;
+                                                LlvmBitcodeArtifact explicit_default = llvm_bitcode_emit_with_options(arena, program,
+                                                    program->modules, program->module_count, options);
+                                                module->initializers[0].priority = priority;
+                                                if (BUSTER_REQUIRE(arguments, llvm_bitcode_artifact_is_valid(explicit_default)))
+                                                {
+                                                    BUSTER_TEST(arguments, first.bytes.length == explicit_default.bytes.length &&
+                                                        !memcmp(first.bytes.pointer, explicit_default.bytes.pointer, first.bytes.length));
+                                                }
+                                            }
+                                            module->initializers[0].priority = 401;
+                                            LlvmBitcodeArtifact reprioritized = llvm_bitcode_emit_with_options(arena, program, program->modules, program->module_count, options);
+                                            module->initializers[0].priority = priority;
+                                            if (BUSTER_REQUIRE(arguments, llvm_bitcode_artifact_is_valid(reprioritized)))
+                                            {
+                                                BUSTER_TEST(arguments, first.bytes.length != reprioritized.bytes.length ||
+                                                    memcmp(first.bytes.pointer, reprioritized.bytes.pointer, first.bytes.length));
+                                            }
+                                            module->initializers[0].is_destructor = !module->initializers[0].is_destructor;
+                                            LlvmBitcodeArtifact changed_kind = llvm_bitcode_emit_with_options(arena, program, program->modules, program->module_count, options);
+                                            module->initializers[0].is_destructor = !module->initializers[0].is_destructor;
+                                            if (BUSTER_REQUIRE(arguments, llvm_bitcode_artifact_is_valid(changed_kind)))
+                                            {
+                                                BUSTER_TEST(arguments, first.bytes.length != changed_kind.bytes.length ||
+                                                    memcmp(first.bytes.pointer, changed_kind.bytes.pointer, first.bytes.length));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 compilers[] = {executable_resolve_in_path(arguments->arena, S8("clang")),
+        executable_resolve_in_path(arguments->arena, S8("gcc"))};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 observer = S8("extern int putchar(int);\n"
+        "void record_event(int event) { (void)putchar(event); }\n"
+        "int main(void) { record_event(77); return 0; }\n");
+    bool consumers_available = BUSTER_REQUIRE(arguments, compilers[0].length != 0);
+    bool references_available = BUSTER_REQUIRE(arguments, compilers[1].length != 0);
+    bool admission = true;
+    if (consumers_available && references_available)
+    {
+        for (u32 fixture_index = 0; admission && fixture_index < BUSTER_ARRAY_LENGTH(fixtures); fixture_index += 1)
+        {
+            LlvmBitcodeLifecycleFixture* fixture = fixtures + fixture_index;
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 source_paths[2] = {0};
+            bool source_written = true;
+            for (u32 unit = 0; unit < 2; unit += 1)
+            {
+                if (fixture->sources[unit].length)
+                {
+                    source_paths[unit] = buster_test_temporary_path(arena, unit == 0 ? S8("buster-llvm-lifecycle-subject-0") : S8("buster-llvm-lifecycle-subject-1"), S8(".c"));
+                    bool written = file_write(source_paths[unit], BUSTER_SLICE_TO_BYTE_SLICE(fixture->sources[unit]));
+                    source_written = source_written && written;
+                }
+            }
+            String8 observer_path = buster_test_temporary_path(arena, S8("buster-llvm-lifecycle-observer"), S8(".c"));
+            bool observer_written = file_write(observer_path, BUSTER_SLICE_TO_BYTE_SLICE(observer));
+            source_written = source_written && observer_written;
+            if (BUSTER_REQUIRE(arguments, source_written))
+            {
+                for (u32 compiler = 0; admission && compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+                {
+                    for (u32 optimization = 0; admission && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                    {
+                        UnitTestResult reference = llvm_bitcode_test_lifecycle_consumer(arguments, arena, compilers[compiler],
+                            optimizations[optimization], source_paths[0], source_paths[1], observer_path, fixture->expected_output,
+                            fixture->name, compiler == 0 ? S8("clang-source") : S8("gcc-source"), &admission);
+                        result.test_count += reference.test_count;
+                        result.succeeded_test_count += reference.succeeded_test_count;
+                    }
+                }
+                for (u32 frontend = 0; admission && frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    String8 outputs[2] = {0};
+                    LlvmBitcodeArtifact artifacts[2] = {0};
+                    bool emitted_all = true;
+                    for (u32 unit = 0; unit < 2; unit += 1)
+                    {
+                        if (source_paths[unit].length)
+                        {
+                            outputs[unit] = buster_test_temporary_path(arena, unit == 0 ? S8("buster-llvm-lifecycle-subject-0") : S8("buster-llvm-lifecycle-subject-1"), S8(".bc"));
+                            String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), outputs[unit], source_paths[unit]};
+                            CompilerDriverResult emitted = compiler_driver_execute_invocation(arena,
+                                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                            if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                arguments->show(arguments, S8("LLVM lifecycle driver {S8} {S8}: {S8}\n"),
+                                    fixture->name, frontends[frontend], emitted.diagnostic);
+                            }
+                            bool success = BUSTER_REQUIRE(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE &&
+                                emitted.has_llvm_bitcode && llvm_bitcode_artifact_is_valid(emitted.llvm_bitcode));
+                            emitted_all = emitted_all && success;
+                            if (success)
+                            {
+                                artifacts[unit] = emitted.llvm_bitcode;
+                                ByteSlice written = file_read(arena, outputs[unit], (FileReadOptions){0});
+                                bool exact = BUSTER_REQUIRE(arguments, written.length == artifacts[unit].bytes.length && written.pointer &&
+                                    !memcmp(written.pointer, artifacts[unit].bytes.pointer, written.length));
+                                emitted_all = emitted_all && exact;
+                            }
+                        }
+                    }
+                    if (emitted_all)
+                    {
+                        for (u32 optimization = 0; admission && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                        {
+                            UnitTestResult consumed = llvm_bitcode_test_lifecycle_consumer(arguments, arena, compilers[0],
+                                optimizations[optimization], outputs[0], outputs[1], observer_path, fixture->expected_output,
+                                fixture->name, frontends[frontend], &admission);
+                            result.test_count += consumed.test_count;
+                            result.succeeded_test_count += consumed.succeeded_test_count;
+                        }
+                        for (u32 unit = 0; unit < 2; unit += 1)
+                        {
+                            if (outputs[unit].length)
+                            {
+                                ByteSlice after = file_read(arena, outputs[unit], (FileReadOptions){0});
+                                BUSTER_TEST(arguments, after.length == artifacts[unit].bytes.length && after.pointer &&
+                                    !memcmp(after.pointer, artifacts[unit].bytes.pointer, after.length));
+                            }
+                        }
+                    }
+                    for (u32 unit = 0; unit < 2; unit += 1)
+                    {
+                        if (outputs[unit].length)
+                        {
+                            os_file_delete(outputs[unit]);
+                        }
+                    }
+                }
+            }
+            for (u32 unit = 0; unit < 2; unit += 1)
+            {
+                if (source_paths[unit].length)
+                {
+                    ByteSlice source_after = file_read(arena, source_paths[unit], (FileReadOptions){0});
+                    BUSTER_TEST(arguments, source_after.length == fixture->sources[unit].length && source_after.pointer &&
+                        !memcmp(source_after.pointer, fixture->sources[unit].pointer, source_after.length));
+                    os_file_delete(source_paths[unit]);
+                }
+            }
+            ByteSlice observer_after = file_read(arena, observer_path, (FileReadOptions){0});
+            BUSTER_TEST(arguments, observer_after.length == observer.length && observer_after.pointer &&
+                !memcmp(observer_after.pointer, observer.pointer, observer_after.length));
+            os_file_delete(observer_path);
+            scratch_end(temporary);
+        }
+    }
+#else
+    arguments->show(arguments, S8("LLVM lifecycle native consumer unsupported on this host; canonical target checks remain active\n"));
+#endif
     return result;
 }
 
@@ -584,11 +1099,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_abi_diagnostics(UnitTestArg
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
             if (mode != 3)
             {
-                BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_LLVM_BITCODE);
-                BUSTER_TEST(arguments, !emitted.llvm_bitcode.success && emitted.llvm_bitcode.bytes.length == 0);
-                String8 diagnostic = mode == 4 ? S8("aggregate variadic arguments") :
-                                     target == 3 && mode == 6 ? S8("SysV aggregate register layout") : S8("aggregate function ABI");
-                BUSTER_TEST(arguments, string_first_sequence(emitted.diagnostic, diagnostic) != BUSTER_STRING_NO_MATCH);
+                // A SysV record containing only ignored padding has no
+                // transport parts. The frontend's unsupported zero-part
+                // signature gate now refuses it before LLVM emission.
+                bool ignored_padding = target == 3 && mode == 6;
+                CompilerDriverError expected = ignored_padding ? COMPILER_DRIVER_ERROR_ANALYSIS : COMPILER_DRIVER_ERROR_LLVM_BITCODE;
+                BUSTER_TEST_RAW(arguments, emitted.error == expected, emitted.diagnostic);
+                BUSTER_TEST(arguments, !emitted.has_llvm_bitcode && !emitted.llvm_bitcode.success && emitted.llvm_bitcode.bytes.length == 0);
+                String8 diagnostic = ignored_padding
+                    ? S8("C IR lowering does not yet support the parameter or return value types of function 'take_padding'")
+                    : mode == 4 ? S8("aggregate variadic arguments") : S8("aggregate function ABI");
+                BUSTER_TEST_RAW(arguments, string_first_sequence(emitted.diagnostic, diagnostic) != BUSTER_STRING_NO_MATCH, emitted.diagnostic);
             }
             else
             {
@@ -626,6 +1147,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_diagnostics(UnitTe
         BUSTER_TEST(arguments, !emitted.llvm_bitcode.success && !emitted.llvm_bitcode.bytes.length);
         String8 diagnostic = index == 2 ? S8("va_arg requires a promoted") : S8("va_list operations require x86-64 Linux SysV or Windows Win64");
         BUSTER_TEST(arguments, string_first_sequence(emitted.diagnostic, diagnostic) != BUSTER_STRING_NO_MATCH);
+        // The refusal names the function it stopped in and points at it.
+        String8 function = index == 2 ? S8(" (in function 'llvm_wide_arg')") : S8(" (in function 'llvm_sum_ints')");
+        BUSTER_TEST_RAW(arguments,
+                        string_starts_with_sequence(emitted.diagnostic, S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs.c:")) &&
+                            string_ends_with_sequence(emitted.diagnostic, function),
+                        emitted.diagnostic);
         FileMapRead absent = file_map_read(arena, output, (FileReadOptions){0});
         BUSTER_TEST(arguments, !absent.bytes.pointer);
         file_map_unmap(absent);
@@ -1272,6 +1799,389 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
     return result;
 }
 
+// Enough globals and initializer constants to grow the writer's hashed name
+// and constant indexes several times, with repeated initializers that must
+// share one pool entry and a late link name that must collide with an early
+// one (#1499).
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_indexed_lookups(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    enum
+    {
+        GLOBAL_COUNT = 300,
+        DISTINCT_INITIALIZERS = 200,
+        NAME_LENGTH = 4,
+    };
+    IrType types[2] = {0};
+    types[0] = (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}};
+    types[1] = (IrType){.id = {.value = 1}, .kind = IR_TYPE_INTEGER, .bit_width = 32,
+                        .layout = {.size = 4, .alignment = 4, .resolved = true}};
+    IrSymbol* symbols = arena_allocate(arena, IrSymbol, GLOBAL_COUNT);
+    IrGlobal* globals = arena_allocate(arena, IrGlobal, GLOBAL_COUNT);
+    char8* names = arena_allocate(arena, char8, GLOBAL_COUNT * NAME_LENGTH);
+    for (u32 index = 0; index < GLOBAL_COUNT; index += 1)
+    {
+        char8* name = names + index * NAME_LENGTH;
+        name[0] = 'g';
+        name[1] = (char8)('0' + index / 100);
+        name[2] = (char8)('0' + index / 10 % 10);
+        name[3] = (char8)('0' + index % 10);
+        symbols[index] = (IrSymbol){.id = {.value = index}, .name = {.pointer = name, .length = NAME_LENGTH}, .type = {.value = 1},
+                                    .kind = IR_SYMBOL_DATA, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true};
+        globals[index] = (IrGlobal){.symbol = {.value = index}, .type = {.value = 1}, .initializer_kind = IR_GLOBAL_INITIALIZER_INTEGER,
+                                    .initializer_bits = index % DISTINCT_INITIALIZERS, .alignment = 4};
+    }
+    IrModule modules[1] = {{.name = S8("indexed_lookups"), .globals = globals, .global_count = GLOBAL_COUNT}};
+    IrProgram program = {.arena = arena, .modules = modules, .module_count = 1,
+                         .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}, .symbols = {.symbols = symbols, .count = GLOBAL_COUNT}};
+    program.data_layout.pointer.size = 8;
+    LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
+    options.target_triple = S8("x86_64-unknown-linux-gnu");
+    options.data_layout = S8("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    options.validate_ir = false;
+    LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(first));
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(second));
+    BUSTER_TEST(arguments, first.stats.global_count == GLOBAL_COUNT && first.stats.constant_count == DISTINCT_INITIALIZERS);
+    BUSTER_TEST(arguments, first.bytes.pointer && second.bytes.pointer && first.bytes.length == second.bytes.length &&
+                           !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+
+    symbols[GLOBAL_COUNT - 1].link_name = symbols[1].name;
+    LlvmBitcodeArtifact collision = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(collision) && !collision.bytes.length);
+    BUSTER_TEST(arguments, collision.error.code == LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL &&
+                           collision.error.symbol.value == GLOBAL_COUNT - 1);
+    return result;
+}
+
+typedef struct LlvmBitcodeTestAllocaCounts LlvmBitcodeTestAllocaCounts;
+struct LlvmBitcodeTestAllocaCounts
+{
+    u32 functions;
+    u32 entry;
+    u32 nonentry;
+    bool valid;
+};
+
+// Read original serialized records independently of the emitter's slot plan.
+// Function block boundaries follow terminating records, not source block IDs.
+BUSTER_GLOBAL_LOCAL LlvmBitcodeTestAllocaCounts llvm_bitcode_test_alloca_blocks(ByteSlice bytes)
+{
+    LlvmBitcodeTestAllocaCounts result = {0};
+    LlvmBitcodeTestReader reader = {.bytes = bytes, .bit = 32};
+    u32 code_widths[3] = {2};
+    u64 blocks[3] = {0};
+    u32 depth = 0;
+    u32 block_index = 0;
+    u32 declared_blocks = 0;
+    while (!reader.failed && reader.bit < bytes.length * 8)
+    {
+        u64 code = llvm_bitcode_test_bits(&reader, code_widths[depth]);
+        if (code == 1)
+        {
+            u64 block = llvm_bitcode_test_vbr(&reader, 8);
+            u64 width = llvm_bitcode_test_vbr(&reader, 4);
+            reader.bit = (reader.bit + 31) & ~UINT64_C(31);
+            u64 words = llvm_bitcode_test_bits(&reader, 32);
+            if ((block == 8 || block == 12) && depth < 2 && width > 0 && width <= 32)
+            {
+                depth += 1;
+                blocks[depth] = block;
+                code_widths[depth] = (u32)width;
+                if (block == 12)
+                {
+                    result.functions += 1;
+                    block_index = 0;
+                    declared_blocks = 0;
+                }
+            }
+            else if (reader.bit <= bytes.length * 8 && words <= (bytes.length * 8 - reader.bit) / 32)
+            {
+                reader.bit += words * 32;
+            }
+            else
+            {
+                reader.failed = true;
+            }
+        }
+        else if (code == 0 && depth)
+        {
+            if (blocks[depth] == 12 && (!declared_blocks || block_index != declared_blocks))
+            {
+                reader.failed = true;
+            }
+            reader.bit = (reader.bit + 31) & ~UINT64_C(31);
+            depth -= 1;
+        }
+        else if (code == 3)
+        {
+            u64 record = llvm_bitcode_test_vbr(&reader, 6);
+            u64 count = llvm_bitcode_test_vbr(&reader, 6);
+            u64 first_operand = 0;
+            for (u64 index = 0; index < count && !reader.failed; index += 1)
+            {
+                u64 operand = llvm_bitcode_test_vbr(&reader, 6);
+                if (!index)
+                {
+                    first_operand = operand;
+                }
+            }
+            if (blocks[depth] == 12)
+            {
+                if (record == 1)
+                {
+                    reader.failed |= count != 1 || first_operand == 0 || first_operand > UINT32_MAX || declared_blocks != 0;
+                    declared_blocks = (u32)first_operand;
+                }
+                else if (!declared_blocks || block_index >= declared_blocks)
+                {
+                    reader.failed = true;
+                }
+                else if (record == 19)
+                {
+                    reader.failed |= count != 4;
+                    if (block_index)
+                    {
+                        result.nonentry += 1;
+                    }
+                    else
+                    {
+                        result.entry += 1;
+                    }
+                }
+                else if (record == 10 || record == 11 || record == 12 || record == 15)
+                {
+                    block_index += 1;
+                }
+            }
+        }
+        else
+        {
+            reader.failed = true;
+        }
+    }
+    result.valid = !reader.failed && !depth && result.functions > 0;
+    return result;
+}
+
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_fixed_process(UnitTestArguments* arguments, Arena* arena, SliceString8 command,
+                                                        String8 stage, bool* admit, UnitTestResult* totals)
+{
+    UnitTestResult result = {0};
+    bool success = false;
+    if (*admit)
+    {
+        ProcessSpawnResult spawned = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true, .new_process_group = true,
+                .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = 65536, [STANDARD_STREAM_ERROR] = 65536}, .total = 131072},
+                .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+        BUSTER_TEST(arguments, spawned.handle != 0);
+        if (spawned.handle)
+        {
+            ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, UINT64_C(30000000));
+            *admit &= !waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained && !waited.process_group_ownership_lost;
+            success = waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
+                      !waited.capture_limit_exceeded && !waited.output_truncated && *admit;
+            BUSTER_TEST(arguments, success);
+            arguments->show(arguments, S8("LLVM_FIXED_ALLOCA_V1 stage={S8} success={u32} exit={u32} timeout={u32}\n"),
+                            stage, (u32)success, waited.platform_status, (u32)waited.timed_out);
+            if (!success)
+            {
+                ByteSlice errors = waited.streams[STANDARD_STREAM_ERROR];
+                arguments->show(arguments, S8("fixed allocation consumer: {S8}\n"),
+                                (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+            }
+        }
+    }
+    totals->test_count += result.test_count;
+    totals->succeeded_test_count += result.succeeded_test_count;
+    return success;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_fixed_allocas(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Escaping fixed locals and changing bit-field values must be initialized
+    // on every iteration; only their storage may move to entry.
+    String8 local_source = S8(
+        "struct Bulk { unsigned v[64]; };\n"
+        "struct Bits { unsigned a:3; unsigned b:5; unsigned tail[63]; };\n"
+        "extern unsigned observe_bulk(struct Bulk *, unsigned);\n"
+        "extern unsigned observe_bits(struct Bits *, unsigned);\n"
+        "unsigned fixed_loop(unsigned n) { unsigned total = 0;\n"
+        " for (unsigned i=0; i<n; i++) { struct Bulk value; value.v[0]=i; value.v[63]=i^0x12345678u;\n"
+        " total+=observe_bulk(&value,i); struct Bits bits={i&7u,(i>>1)&31u,{0}};\n"
+        " total+=observe_bits(&bits,i); } return total; }\n");
+    String8 abi_source = S8(
+        "#include <stdarg.h>\n"
+        "struct Small { unsigned a,b; }; struct Large { unsigned v[64]; };\n"
+        "struct BitResult { unsigned a:3; unsigned b:5; unsigned extra; };\n"
+        "extern struct Small other_small(struct Small); extern struct Large other_large(struct Large);\n"
+        "extern unsigned inspect_bits(struct BitResult,unsigned);\n"
+        "struct Small producer_small(struct Small x) { return (struct Small){x.a+1,x.b^0x87654321u}; }\n"
+        "unsigned abi_loop(unsigned n) { unsigned total=0; for(unsigned i=0;i<n;i++) {\n"
+        " struct Small s=other_small((struct Small){i,i^0x12345678u});\n"
+        " total+=s.a==i+1 && s.b==((i^0x12345678u)^0x87654321u);\n"
+        " struct Large x={0}; x.v[0]=i; x.v[63]=i+9; struct Large y=other_large(x);\n"
+        " total+=y.v[0]==i+3 && y.v[63]==i+14;\n"
+        " total+=inspect_bits((struct BitResult){i&7u,(i>>1)&31u,i^0x13579bdfu},i);\n"
+        " } return total; }\n"
+        "unsigned copied_lists(unsigned n,...) { unsigned total=0; for(unsigned i=0;i<n;i++){\n"
+        " va_list ap,copy; va_start(ap,n); va_copy(copy,ap); total+=va_arg(copy,int)==37;\n"
+        " va_end(copy); va_end(ap); } return total; }\n");
+    String8 mixed_source = S8(
+        "unsigned mixed_allocas(int n) { unsigned total=0; for(int i=0;i<3;i++){\n"
+        " volatile unsigned fixed[16]; volatile unsigned dynamic[n]; fixed[0]=(unsigned)i+1;\n"
+        " dynamic[0]=(unsigned)i+2; total+=fixed[0]+dynamic[0]; } return total; }\n");
+    String8 observer = S8(
+        "struct Bulk { unsigned v[64]; }; struct Bits { unsigned a:3; unsigned b:5; unsigned tail[63]; };\n"
+        "unsigned fixed_loop(unsigned); unsigned mixed_allocas(int);\n"
+        "unsigned observe_bulk(struct Bulk *x,unsigned i) { return x->v[0]==i && x->v[63]==(i^0x12345678u)?101:0; }\n"
+        "unsigned observe_bits(struct Bits *x,unsigned i) { return x->a==(i&7u) && x->b==((i>>1)&31u) && x->tail[0]==0 && x->tail[62]==0?103:0; }\n"
+        "int main(void) { return fixed_loop(65536)!=13369344u || mixed_allocas(7)!=15u; }\n");
+    String8 abi_observer = S8(
+        "struct Small { unsigned a,b; }; struct Large { unsigned v[64]; };\n"
+        "struct BitResult { unsigned a:3; unsigned b:5; unsigned extra; };\n"
+        "unsigned abi_loop(unsigned); unsigned copied_lists(unsigned,...); struct Small producer_small(struct Small);\n"
+        "struct Small other_small(struct Small x) { return (struct Small){x.a+1,x.b^0x87654321u}; }\n"
+        "struct Large other_large(struct Large x) { x.v[0]+=3; x.v[63]+=5; return x; }\n"
+        "unsigned inspect_bits(struct BitResult x,unsigned i) { return x.a==(i&7u) && x.b==((i>>1)&31u) && x.extra==(i^0x13579bdfu); }\n"
+        "int main(void) { struct Small x=producer_small((struct Small){7,9});\n"
+        " return abi_loop(65536)!=196608u || copied_lists(1024,37)!=1024u || x.a!=8 || x.b!=(9u^0x87654321u); }\n");
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 sources[] = {local_source, abi_source, mixed_source};
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("x86_64-macos"),
+                         S8("aarch64-linux"), S8("aarch64-windows"), S8("aarch64-macos")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            for (u32 subject = 0; subject < BUSTER_ARRAY_LENGTH(sources); subject += 1)
+            {
+                // Aggregate public signatures are currently x86-64-only;
+                // list operations admit only Linux/Windows x86-64.
+                if (subject == 1 && target != 0 && target != 1)
+                {
+                    continue;
+                }
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 stem = string_format(arena, S8("buster-llvm-fixed-{u32}-{u32}-{u32}"), target, frontend, subject);
+                String8 input = buster_test_temporary_path(arena, stem, S8(".c"));
+                String8 output = buster_test_temporary_path(arena, stem, S8(".bc"));
+                BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[subject])));
+                String8 command[] = {S8("-emit-llvm"), string_format(arena, S8("--target={S8}"), targets[target]),
+                                     frontends[frontend], S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                CompilerDriverResult first = compiler_driver_execute_invocation(arena, invocation);
+                CompilerDriverResult second = compiler_driver_execute_invocation(arena, invocation);
+                if (first.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    arguments->show(arguments, S8("fixed allocation fixture {S8}/{S8}/{u32}: {S8}\n"),
+                                    targets[target], frontends[frontend], subject, first.diagnostic);
+                }
+                BUSTER_TEST(arguments, first.error == COMPILER_DRIVER_ERROR_NONE && first.has_llvm_bitcode && first.llvm_bitcode.success);
+                BUSTER_TEST(arguments, second.error == COMPILER_DRIVER_ERROR_NONE && second.has_llvm_bitcode && second.llvm_bitcode.success);
+                if (first.llvm_bitcode.success && second.llvm_bitcode.success)
+                {
+                    ByteSlice bytes = first.llvm_bitcode.bytes;
+                    BUSTER_TEST(arguments, bytes.length == second.llvm_bitcode.bytes.length &&
+                                          !memcmp(bytes.pointer, second.llvm_bitcode.bytes.pointer, bytes.length));
+                    LlvmBitcodeTestAllocaCounts counts = llvm_bitcode_test_alloca_blocks(bytes);
+                    BUSTER_TEST(arguments, counts.valid && counts.functions >= 1 && counts.entry >= 1);
+                    BUSTER_TEST(arguments, counts.nonentry == (subject == 2 ? 1u : 0u));
+                    FileMapRead retained = file_map_read(arena, output, (FileReadOptions){0});
+                    BUSTER_TEST(arguments, retained.bytes.pointer && retained.bytes.length == bytes.length &&
+                                          !memcmp(retained.bytes.pointer, bytes.pointer, bytes.length));
+                    file_map_unmap(retained);
+                    arguments->show(arguments, S8("LLVM_FIXED_ALLOCA_BLOCKS_V1 target={S8} frontend={S8} subject={u32} entry={u32} nonentry={u32}\n"),
+                                    targets[target], frontends[frontend], subject, counts.entry, counts.nonentry);
+                }
+                FileMapRead original = file_map_read(arena, input, (FileReadOptions){0});
+                BUSTER_TEST(arguments, original.bytes.pointer && original.bytes.length == sources[subject].length &&
+                                      !memcmp(original.bytes.pointer, sources[subject].pointer, sources[subject].length));
+                file_map_unmap(original);
+                BUSTER_TEST(arguments, os_file_delete(input));
+                BUSTER_TEST(arguments, os_file_delete(output));
+                scratch_end(temporary);
+            }
+        }
+    }
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    bool admit = true;
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    u32 family_count = BUSTER_CPU_ARCH_X86_64 ? 2 : 1;
+    for (u32 family = 0; compiler.length && admit && family < family_count; family += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 stem = string_format(arena, S8("buster-llvm-fixed-consumer-{u32}"), family);
+        String8 input = buster_test_temporary_path(arena, stem, S8(".c"));
+        String8 mixed_input = buster_test_temporary_path(arena, stem, S8("-mixed.c"));
+        String8 caller_input = buster_test_temporary_path(arena, stem, S8("-caller.c"));
+        String8 output = buster_test_temporary_path(arena, stem, S8(".bc"));
+        String8 mixed_output = buster_test_temporary_path(arena, stem, S8("-mixed.bc"));
+        String8 executable = buster_test_temporary_path(arena, stem, S8(""));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(family ? abi_source : local_source)));
+        BUSTER_TEST(arguments, file_write(mixed_input, BUSTER_SLICE_TO_BYTE_SLICE(mixed_source)));
+        BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(family ? abi_observer : observer)));
+        for (u32 optimization = 0; admit && optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+        {
+            String8 controls[] = {compiler, optimizations[optimization], input, mixed_input, caller_input, S8("-o"), executable};
+            bool reference = llvm_bitcode_test_fixed_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(controls), S8("original-compile"), &admit, &result);
+            if (reference)
+            {
+                String8 run[] = {executable};
+                llvm_bitcode_test_fixed_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), S8("original-run"), &admit, &result);
+            }
+        }
+        for (u32 frontend = 0; admit && frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), output, input};
+            String8 mixed_command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), mixed_output, mixed_input};
+            CompilerDriverResult emitted = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            CompilerDriverResult mixed = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_command)));
+            BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+            BUSTER_TEST(arguments, mixed.error == COMPILER_DRIVER_ERROR_NONE && mixed.has_llvm_bitcode && mixed.llvm_bitcode.success);
+            for (u32 optimization = 0; admit && emitted.llvm_bitcode.success && mixed.llvm_bitcode.success &&
+                 optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                String8 consume[] = {compiler, optimizations[optimization], output, mixed_output, caller_input, S8("-o"), executable};
+                bool compiled = llvm_bitcode_test_fixed_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(consume), S8("bitcode-compile"), &admit, &result);
+                if (compiled)
+                {
+                    String8 run[] = {executable};
+                    llvm_bitcode_test_fixed_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), S8("bitcode-run"), &admit, &result);
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(input));
+        BUSTER_TEST(arguments, os_file_delete(mixed_input));
+        BUSTER_TEST(arguments, os_file_delete(caller_input));
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, os_file_delete(mixed_output));
+        BUSTER_TEST(arguments, os_file_delete(executable));
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM fixed allocation execution skipped: clang is unavailable on PATH\n"));
+    }
+#else
+    BUSTER_UNUSED(observer);
+    BUSTER_UNUSED(abi_observer);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1474,10 +2384,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
     return result;
 }
 
+// Collection records each constant instruction's pool value id and value
+// numbering reads it, so searches of the locked pool come from the module's
+// auxiliary constants alone, not from its constant rows. Two modules that
+// differ only in 60 more constant rows must search the locked pool equally
+// often, while their pools differ by exactly those 60 constants.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_constant_handoff(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 constant_counts[] = {4, 64};
+    LlvmBitcodeStats stats[BUSTER_ARRAY_LENGTH(constant_counts)] = {0};
+    bool emitted_all = true;
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(constant_counts); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 source = S8("typedef unsigned long long u64;\nu64 chain(u64 a)\n{\n    u64 r = a;\n");
+        for (u32 index = 0; index < constant_counts[variant]; index += 1)
+        {
+            source = string_format(arena, S8("{S8}    r = r * a + {u32}u;\n"), source, 1001 + index);
+        }
+        source = string_format(arena, S8("{S8}    return r;\n}}\n"), source);
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-constant-handoff"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-constant-handoff"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 command[] = {S8("-emit-llvm"), S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        bool success = emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success;
+        BUSTER_TEST_RAW(arguments, success, emitted.diagnostic);
+        emitted_all &= success;
+        stats[variant] = emitted.llvm_bitcode.stats;
+        scratch_end(temporary);
+    }
+    if (emitted_all)
+    {
+        BUSTER_TEST(arguments, stats[1].constant_count - stats[0].constant_count == constant_counts[1] - constant_counts[0]);
+        BUSTER_TEST(arguments, stats[1].locked_constant_searches == stats[0].locked_constant_searches);
+        BUSTER_TEST(arguments, stats[0].constant_searches > stats[0].locked_constant_searches);
+    }
+    return result;
+}
+
 UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
+
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_integer_encoding);
 
     IrType types[3] = {0};
     types[0] = (IrType){
@@ -1647,6 +2601,10 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult consumers = llvm_bitcode_test_consumers(arguments);
     result.test_count += consumers.test_count;
     result.succeeded_test_count += consumers.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_lifecycle);
+    UnitTestResult fixed_allocas = llvm_bitcode_test_fixed_allocas(arguments);
+    result.test_count += fixed_allocas.test_count;
+    result.succeeded_test_count += fixed_allocas.succeeded_test_count;
     UnitTestResult stack_records = llvm_bitcode_test_stack_records(arguments);
     result.test_count += stack_records.test_count;
     result.succeeded_test_count += stack_records.succeeded_test_count;
@@ -1674,6 +2632,12 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult integer_counts = llvm_bitcode_test_integer_counts(arguments);
     result.test_count += integer_counts.test_count;
     result.succeeded_test_count += integer_counts.succeeded_test_count;
+    UnitTestResult constant_handoff = llvm_bitcode_test_constant_handoff(arguments);
+    result.test_count += constant_handoff.test_count;
+    result.succeeded_test_count += constant_handoff.succeeded_test_count;
+    UnitTestResult indexed_lookups = llvm_bitcode_test_indexed_lookups(arguments);
+    result.test_count += indexed_lookups.test_count;
+    result.succeeded_test_count += indexed_lookups.succeeded_test_count;
     return result;
 }
 #endif

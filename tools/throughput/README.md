@@ -26,7 +26,36 @@ On GitHub-hosted machines, bootstrap `build/build` with the image's Clang as
 place of `./build.sh`. Canonical local bootstrapping still uses TCC. On Windows
 use `build.ps1` from a configured native developer shell.
 The tool itself supports Linux, macOS and Windows; native harness tests run on
-all three. Hardware counters currently have a Linux implementation only.
+all three. The macOS leg is `.github/workflows/throughput-harness-macos.yml`:
+it runs weekly, on demand, and for ready pull requests that change a harness
+input, so the Linux comparison never waits for a macOS runner. Hardware
+counters currently have a Linux implementation only.
+
+### Hosted workflow requests
+
+`Compiler throughput` runs on pull requests and cancels older in-progress or
+pending runs for the same PR when a newer run arrives. It also defines the
+reusable jobs for `Compiler throughput requests`. Start a manual comparison
+from the latter workflow; its weekly schedule uses the same entry. Manual and
+scheduled requests share one concurrency group across branches, so a schedule
+cannot replace an already-pending manual request (or vice versa).
+
+The request workflow runs one comparison at a time and retains at most 100
+pending runs through GitHub's `queue: max` policy. A new run when the queue is
+full is cancelled, with the existing pending requests retained. The wait order
+is based on when each run entered the concurrency group, which can differ from
+dispatch order. Neither another dispatch nor a schedule cancels an accepted
+request; cancel obsolete pending requests explicitly in Actions. The reusable
+workflow uses the unique run ID for non-PR concurrency, so it cannot replace a
+waiting caller through a second single-pending group. PR runs have a separate
+per-PR group and do not wait behind manual measurements. For reproducible
+manual comparisons, select an exact baseline commit rather than a moving ref;
+scheduled runs use the default `main` baseline.
+
+`python3 tools/compiler_throughput_workflow_test.py` checks the PR and request
+policies, including three overlapping non-PR requests, a manual/schedule
+collision, and capacity exhaustion. The ordinary hosted workflow lint checks
+the syntax separately; no live benchmark is part of the offline policy test.
 
 `bench_throughput self-test --sanitize` builds and runs the same native suite
 with AddressSanitizer and UndefinedBehaviorSanitizer. Sanitizer construction
@@ -36,6 +65,35 @@ is also owned by `build.c`, including the Linux CI invocation.
 integration tests, including fixed-seed corpus hashes, rejected sample paths,
 deliberately invalid result bundles and timed-out children. Their expected error
 diagnostics are not compiler failures.
+
+The fixtures write fixed paths that the tool refuses to reuse, so `build.c`
+deletes `build/throughput-tool-tests` (or `build/throughput-tool-tests-sanitized`)
+before every self-test run. When you run `throughput-tests OUTPUT_DIRECTORY`
+directly, pass an absent or empty directory. If a child exit-code check fails,
+it prints the exit code, signal, timeout, launch error, POSIX launch stage and wall time, followed by
+the end of the child's log. It also keeps the whole log as `LOG.line-N` under the
+test root, which the harness artifacts upload. The desktop matrix also retains
+these parent diagnostics and the child-log tail in `combinations.log`.
+
+POSIX launch failures preserve the failing setup/exec stage and errno through
+a small close-on-exec error pipe. Child reporting uses no allocation or buffered
+stdio, and parent reads are nonblocking after the waited child exits. A missing
+executable, denied executable, invalid format or missing working directory now
+reports a launch error; a program that successfully starts and exits 125 remains
+a normal child result. The native self-test checks all four refusals, the valid
+exit 125 control and repeated descriptor cleanup. This diagnoses a refusal; it
+does not explain an unreproduced transient OS error or retry the invocation.
+
+The POSIX summary-write fixture keeps its real one-byte `RLIMIT_FSIZE` failure
+and three-second child deadline. It restores the saved limit only after
+comparison has closed the reports, then emits `SUMMARY_WRITE_FAILURE` with the
+setup stage/errno, comparison result and restoration status. Otherwise the
+injected limit truncates the child log itself to one byte. The parent requires
+the complete diagnostic, absence of partial reports, unchanged sealed evidence,
+and successful normal report regeneration. A separate invalid-resource control
+must report setup failure without entering comparison or deleting good reports.
+This diagnostic coverage does not classify an unreproduced child crash, launch
+failure or timeout as a file-size-limit defect, and it never retries the child.
 
 A direct standalone build is useful when diagnosing the harness:
 
@@ -414,8 +472,16 @@ nothing. No extra arena storage or whole-function row stream is retained.
   visits, incoming nodes examined including matches, and emitted copy
   sources. Direct/non-native consumers do not call this builder: zero
   means no work at this hook, not absence of all CFG work.
+- `debug_value_blocks` counts blocks walked for `-g` locals without a single
+  place, and `debug_value_local_visits` the per-block entries loaded, filled,
+  reset or emitted for them: every unresolved local twice per block only when
+  blocks carry `local_values`, otherwise three per parameter-filled entry.
 - `operand_slots_appended` sums appended rows' operand counts. It does
   not count unique operands or repeated downstream decoding passes.
+- `debug_function_index_rows` counts IR functions entered into the
+  per-model symbol index that matches `-g` debug seeds to their canonical
+  locals; `debug_function_seed_scan_rows` counts rows examined by the
+  search kept for a seed without a program symbol, which codegen never emits.
 
 The additive direct-SSA census for #447 separates work inside `c_ir_ssa_*`:
 
@@ -429,7 +495,7 @@ The additive direct-SSA census for #447 separates work inside `c_ir_ssa_*`:
 | `simplify_passes`, `simplify_block_visits`, `simplify_empty_block_visits`, `simplify_parameter_visits`, `simplify_incoming_visits` | Fixed-point sweeps and visited blocks/parameters/incoming rows, including revisits and the initial active-block census. Empty-block visits are a subset of block visits. |
 | `value_scratch_bytes`, `value_clear_bytes`, `replacement_rows` | Value-count-sized table allocation requests, explicit memset bytes for those tables, and identity-map initialization rows. These exclude block-sized scratch, restoration tails, and sparse slots. |
 | `initialization_work_visits`, `live_work_visits` | Values popped from the definite-initialization and live-parameter queues. |
-| `remap_value_rows`, `remap_instruction_rows`, `remap_operand_slots`, `remap_incoming_visits` | Rows visited by the three value compaction passes and final instruction/operand/incoming remapping. |
+| `remap_value_rows`, `remap_instruction_rows`, `remap_operand_slots`, `remap_incoming_visits` | Rows visited by the fused dense numbering/root copy and alias resolution passes, and final instruction/operand/incoming remapping. |
 
 These share the existing saturation, calling-thread and failed-attempt rules.
 They do not add timers, histograms, per-function storage or a reporting switch.
@@ -438,8 +504,13 @@ Explicit clear bytes exclude ordinary map writes and allocator-internal clears.
 The `validation_*` and `preparation_*` fields attribute the canonical boundary.
 `validation_calls` counts complete module-verifier entries. The ownership fields
 count the preliminary function scan, published-CFG checks, lowered functions,
-blocks, instruction-chain steps and owner-map clear bytes. The remaining fields
-count globals/relocations and their overlap pairs, aliases, initializers, value
+blocks, instruction-chain steps and owner-map clear bytes.
+`validation_global_relocation_pairs` counts relocation overlap comparisons:
+one per relocation against its predecessor while a global's offsets ascend,
+then one per neighbour of a sorted copy for a global whose offsets do not.
+`validation_global_relocation_sorts` counts those unordered globals and
+`validation_global_relocation_sort_rows` the rows their radix passes moved.
+The remaining fields count globals, relocations, aliases, initializers, value
 and provenance visits, block parameters and incoming values, instruction,
 operand, target and result checks, opcode-operation checks, conversions,
 calls/fixed arguments, provenance-bearing opcodes and terminator checks.
@@ -459,6 +530,73 @@ Reuse per-site allocation diagnostics and uninstrumented paired experiments.
 A smaller count is not a speedup. Normal builds preprocess recording calls
 away and retain neither counter storage nor reporting API. Row layout,
 IDs, source/label provenance, and arena lifetimes are unchanged.
+
+### Frontend source-fact census in allocation probes
+
+The same `BUSTER_BENCH_ALLOCATIONS` build also emits `c_census.*` fields in
+`-fsource-metrics`, defined in
+`src/buster/lib/compiler/frontend/c/c_census.h`. `version=1` identifies the
+vocabulary and `overflowed=1` invalidates the census. The instrumented
+compiler must produce the same artifact hash as its uninstrumented
+counterpart; it is never a timing baseline or candidate.
+
+Global fields count stage work over source bytes: `translate_*` (bytes
+examined and copied into the spelling space, checkpoints written and the
+checkpoint capacity reserved), `lex_*` (calls, translated bytes, token rows
+and reserved row bytes, including every paste and builtin-definition relex),
+`intern_pass_tokens`, `class_mask_tokens`, `output_token_rows` and the
+spelling-space copies (`space_synthesized_*`, `space_foreign_*` for macro
+output whose location is a stamp, `space_total_bytes`).
+
+Phase fields are `c_census.<phase>.<name>` for `other`, `preprocess`,
+`parse`, `semantic` and `lower`, attributed by brackets around the public
+stage entry points: spelling reads (`c_token_spelling`) with bytes and
+per-phase distinct offsets, spelling and `string_equal` comparisons with the
+bytes compared, `buster_hash_64` and name-hash calls and bytes, symbol-intern
+calls/probes/middle compares/inserts, integer/float/character/string
+conversions with bytes and distinct offsets, string range decodes and counts,
+temporary evaluation spaces and tokens, source-location recoveries, and the
+arena traffic of the phase. A conversion's `distinct` count keys the
+spelling-space offset of its token; a later conversion at the same offset is
+a repeat, and spellings outside the preprocessor's space are `untracked`.
+These are calling-thread populations, not timings, live memory or all-lane
+totals.
+
+`tools/source_fact_census.py` generates the deterministic adversarial
+corpora (short, repeated and long identifiers, literal- and comment-heavy
+files, malformed strings, dense punctuation, long lines, tiny declarations,
+one large function and token pasting) at scales 1, 2 and 4, compiles each
+with one or two census compilers, requires byte-identical objects and
+identical diagnostics between them, and writes the per-corpus fields and
+deltas to `census.json` and `census.md`.
+
+### Diagnostic-work census in allocation probes
+
+The same build also emits `diagnostic_census.*` (`version=1`, owned by
+`ir/ir_diagnostic_census.h`): work a compilation spends on information that
+only diagnostics, debug consumers or failure paths read. Counts are
+cumulative calling-thread events since process start, with the same
+saturation (`overflowed=1`) and failed-attempt rules as `ir_construction.*`.
+
+| Fields | Counted work |
+| --- | --- |
+| `position_queries`, `position_memo_hits`, `position_checkpoint_searches` | `ir_source_map_position` calls (line/column conversions), cursor memo answers, and checkpoint binary searches actually run. |
+| `source_queries` | `ir_source_map_source` calls: a region lookup without the per-line search. |
+| `original_queries`, `original_steps` | `ir_source_map_original_position` calls and the stamp-origin steps they walk. |
+| `text_position_queries`, `text_bytes_scanned` | `ir_source_text_position` calls and bytes rescanned for newlines. |
+| `c_record_sites`, `c_site_resolutions` | Record sites taken (offset plus source, no line/column; see `CSourceSite`), and sites later resolved to a full location. Before records kept sites, the parser resolved the full location eagerly (`c_eager_locations` in the first census revision). |
+| `c_visibility_locations` | Reference locations resolved by the declared-before fallback, a semantic read. |
+| `c_directive_locations`, `c_stamp_locations` | Lexer-local location recoveries for directive lines and macro-invocation stamps. |
+| `c_metrics_token_visits` | Tokens visited by the spelled-byte pass that feeds only `-v` and `-fsource-metrics`. |
+| `c_diagnostics_recorded` | C diagnostics recorded by the lexer, preprocessor, syntax and semantic funnels (lowering writes its rows directly and is not counted). |
+| `c_diagnostic_reservations`, `c_diagnostic_rows_reserved`, `c_diagnostic_bytes_reserved`, `c_diagnostic_{lex,preprocess,semantic,evaluation,lowering}_rows` | `CDiagnostic` storage reserved before any diagnostic exists, by reserving stage. Bytes are logical arena requests, not committed or touched pages. |
+| `debug_locals` | `IrDebugLocal` records lowering attaches to functions; zero under `-g0`. |
+| `c_lex_diagnostic_arenas`, `c_lex_diagnostic_arena_bytes` | Dedicated arenas the lexer creates for possible diagnostics when a file's worst case does not fit its scratch arena, and their reservations. |
+
+Measure successful and failing compilations separately:
+`tools/diagnostic_equivalence.py` sums these fields per mode and outcome when
+given census compilers. Like the construction census, these are populations,
+not timings or resident memory, and normal builds retain no counters.
 
 ## Frozen-source self-host stages
 
@@ -725,6 +863,7 @@ clang -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic \
   -fwrapv -fno-strict-aliasing -funsigned-char \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
   tools/throughput/tests.c -lm -o build/throughput-tests-sanitized
+rm -rf build/throughput-tool-tests-sanitized
 ASAN_OPTIONS=halt_on_error=1:detect_leaks=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   build/throughput-tests-sanitized build/throughput-tool-tests-sanitized

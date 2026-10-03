@@ -8,6 +8,11 @@
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
 // process spawn/wait with deadlines, executable lookup, dynamic libraries, and
 // the crash/failure printers. Replacement publication follows os_file_close.
+// Opt-in child resource witnesses in os_process_wait_deadline retain native
+// accounting scope; they do not alter process ownership or cleanup.
+// os_process_capture_step separates ordinary POSIX pipe drain transitions
+// from native observations in os_process_wait_deadline; its private replay
+// contract lives in os_internal.h, without process-group identity changes.
 // The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
@@ -72,6 +77,11 @@ BUSTER_GLOBAL_LOCAL void thread_context_tls_key_ensure_initialized(void)
 }
 #else
 BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
+#endif
+
+BUSTER_GLOBAL_LOCAL OsError os_file_invalid_error(void);
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool os_windows_ascii_equal_ignore_case(String8 a, String8 b);
 #endif
 
 #if !BUSTER_SINGLE_THREADED
@@ -742,7 +752,8 @@ OsFileDescriptor* os_get_stdout(void)
 // is only sound to build while this is zero, which is what
 // os_is_only_live_thread() reports and BUSTER_CHECK_SERIAL_INITIALIZATION
 // states. Counted rather than derived from the lane context because a raw
-// os_thread_create thread is a lane of one and would look serial.
+// os_thread_create thread is a lane of one and would look serial. Untracked
+// threads promise never to touch such a global and are not counted.
 BUSTER_GLOBAL_LOCAL AtomicU64 os_live_thread_count;
 
 bool os_is_only_live_thread(void)
@@ -751,7 +762,7 @@ bool os_is_only_live_thread(void)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, void* user_argument)
+BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, void* user_argument, bool untracked)
 {
     ThreadContext* thread_context = thread_context_allocate();
     thread_context_select(thread_context);
@@ -766,24 +777,30 @@ BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, vo
 #endif
     // Last, so the count covers every instant this thread could still have
     // touched a shared global. os_thread_join returns after this store.
-    atomic_u64_decrement(&os_live_thread_count);
+    if (!untracked)
+    {
+        atomic_u64_decrement(&os_live_thread_count);
+    }
 }
 
 #if defined(__linux__) || defined(__APPLE__)
 BUSTER_GLOBAL_LOCAL void* pthread_entry_point(void* argument)
 {
     OsEntity* entity = (OsEntity*)argument;
-    thread_entry_point(entity->thread.callback, entity->thread.argument);
+    thread_entry_point(entity->thread.callback, entity->thread.argument, entity->thread.untracked);
     return (void*)0;
 }
 #elif defined(_WIN32)
 BUSTER_GLOBAL_LOCAL DWORD WINAPI windows_thread_entry_point(LPVOID argument)
 {
     OsEntity* entity = (OsEntity*)argument;
-    thread_entry_point(entity->thread.callback, entity->thread.argument);
+    thread_entry_point(entity->thread.callback, entity->thread.argument, entity->thread.untracked);
     return 0;
 }
 #endif
+
+// Every created thread's stack reservation; see os_thread_create.
+#define OS_THREAD_STACK_SIZE BUSTER_MB(8)
 
 OsThreadHandle* os_thread_create(ThreadCreateOptions options)
 {
@@ -797,15 +814,28 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
         result = os_entity_allocate(OS_ENTITY_KIND_THREAD);
         result->thread.callback = options.callback;
         result->thread.argument = options.argument;
+        result->thread.untracked = options.untracked;
         // Counted before the thread exists rather than from inside it, so no
         // window has the new thread running while the process still looks serial.
-        atomic_u64_increment(&os_live_thread_count);
+        // The addend is zero for an untracked thread; the failure paths add its
+        // two's complement to undo exactly what was counted.
+        u64 counted = options.untracked ? 0 : 1;
+        atomic_u64_add(&os_live_thread_count, counted);
 #if defined(__linux__) || defined(__APPLE__)
-        int create_result = pthread_create(&result->thread.handle, 0, &pthread_entry_point, result);
+        // Apple gives secondary threads 512 KiB; the main thread, Linux threads
+        // (RLIMIT_STACK) and Windows threads (the PE reservation set in
+        // CMakeLists.txt) get 8 MiB. Lane workers compile like the main thread,
+        // and sanitized x86-64 selection overflowed 512 KiB, so every thread
+        // reserves OS_THREAD_STACK_SIZE. The default stays when attributes fail.
+        pthread_attr_t attributes;
+        bool attributes_initialized = pthread_attr_init(&attributes) == 0;
+        bool attributes_sized = attributes_initialized && pthread_attr_setstacksize(&attributes, OS_THREAD_STACK_SIZE) == 0;
+        int create_result = pthread_create(&result->thread.handle, attributes_sized ? &attributes : 0, &pthread_entry_point, result);
+        if (attributes_initialized) { pthread_attr_destroy(&attributes); }
         bool os_result = create_result == 0;
         if (!os_result)
         {
-            atomic_u64_decrement(&os_live_thread_count);
+            atomic_u64_add(&os_live_thread_count, 0 - counted);
             os_entity_release(result);
             result = 0;
         }
@@ -817,7 +847,7 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
         }
         else
         {
-            atomic_u64_decrement(&os_live_thread_count);
+            atomic_u64_add(&os_live_thread_count, 0 - counted);
             os_entity_release(result);
             result = 0;
         }
@@ -1079,33 +1109,35 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
 {
     String8 result = {0};
 #if defined(__linux__) || defined(__APPLE__)
-    bool valid = relative_file_path.pointer || !relative_file_path.length;
-    for (u64 i = 0; i < relative_file_path.length && valid; i += 1)
-    {
-        valid = relative_file_path.pointer[i] != 0;
-    }
-    if (valid && relative_file_path.length)
+    if (relative_file_path.length)
     {
         TemporalArena temp = scratch_begin(&arena, 1);
-        String8 terminated = string_duplicate_arena(temp.arena, relative_file_path, true);
-        u64 position = arena->position;
-        u64 length = PATH_MAX;
-        char8* buffer = arena_allocate(arena, char8, length + null_terminate);
-        char* syscall_result = realpath((char*)terminated.pointer, buffer);
-
-        if (syscall_result)
+        String8Z terminated = {0};
+        if (string8z_copy_arena(temp.arena, relative_file_path, &terminated))
         {
-            result = string_from_pointer(syscall_result);
-            BUSTER_VALIDATE(result.length <= length);
-        }
+            u64 position = arena->position;
+            u64 length = PATH_MAX;
+            char8* buffer = arena_allocate(arena, char8, length + null_terminate);
+            char* syscall_result = realpath((char*)terminated.pointer, buffer);
 
-        arena_set_position(arena, position + result.length + null_terminate);
+            if (syscall_result)
+            {
+                result = string_from_pointer(syscall_result);
+                BUSTER_VALIDATE(result.length <= length);
+            }
+
+            arena_set_position(arena, position + result.length + null_terminate);
+        }
         scratch_end(temp);
     }
 #elif defined(_WIN32)
     TemporalArena temp = scratch_begin(&arena, 1);
-    String16 relative_file_path_w = string16_from_string8(temp.arena, relative_file_path, true);
-    DWORD length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, 0, 0, 0);
+    String16Z relative_file_path_w = {0};
+    DWORD length_plus_null_termination = 0;
+    if (string16z_from_string8_arena(temp.arena, relative_file_path, &relative_file_path_w))
+    {
+        length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, 0, 0, 0);
+    }
 
     if (length_plus_null_termination != 0)
     {
@@ -1167,97 +1199,201 @@ String8 os_path_absolute_lexical(Arena* arena, String8 path, bool null_terminate
 bool os_make_directory_attempt(String8 path)
 {
     bool result = path.pointer != 0 && path.length != 0;
-    for (u64 i = 0; i < path.length && result; i += 1)
-    {
-        result = path.pointer[i] != 0;
-    }
     if (result)
     {
         TemporalArena temp = scratch_begin(0, 0);
 #if defined(_WIN32)
-        String16 wide = string16_from_string8(temp.arena, path, true);
-        result = CreateDirectoryW(wide.pointer, 0) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
+        String16Z wide = {0};
+        bool valid = string16z_from_string8_arena(temp.arena, path, &wide);
+        if (valid)
+        {
+            result = CreateDirectoryW(wide.pointer, 0) != 0;
+            DWORD error = result ? ERROR_SUCCESS : GetLastError();
+            if (!result && (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS))
+            {
+                DWORD attributes = GetFileAttributesW(wide.pointer);
+                result = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            }
+        }
 #else
-        String8 terminated = string_duplicate_arena(temp.arena, path, true);
-        result = mkdir(terminated.pointer, 0700) == 0 || errno == EEXIST;
+        String8Z terminated = {0};
+        if (string8z_copy_arena(temp.arena, path, &terminated))
+        {
+            result = mkdir(terminated.pointer, 0700) == 0;
+            if (!result && errno == EEXIST)
+            {
+                struct stat attributes;
+                result = stat(terminated.pointer, &attributes) == 0 && S_ISDIR(attributes.st_mode);
+            }
+        }
+        else
+        {
+            result = false;
+        }
 #endif
         scratch_end(temp);
     }
     return result;
 }
 
-void os_make_directory(String8 path)
+OsDirectoryCreateResult os_make_directory(String8 path)
 {
-#if defined(__linux__) || defined(__APPLE__)
-    bool valid = path.pointer != 0 && path.length != 0;
-    for (u64 i = 0; i < path.length && valid; i += 1)
+    OsDirectoryCreateResult result = {0};
+    if (!path.pointer || !path.length)
     {
-        valid = path.pointer[i] != 0;
+        result.error = os_file_invalid_error();
     }
-    if (valid)
+    else
     {
         TemporalArena temp = scratch_begin(0, 0);
-        String8 terminated = string_duplicate_arena(temp.arena, path, true);
-        mkdir((const char*)terminated.pointer, 0755);
+#if defined(_WIN32)
+        String16Z wide = {0};
+        if (!string16z_from_string8_arena(temp.arena, path, &wide))
+        {
+            result.error = os_file_invalid_error();
+        }
+        else if (CreateDirectoryW(wide.pointer, 0))
+        {
+            result.created = true;
+        }
+        else
+        {
+            OsError create_error = os_get_last_error();
+            if (create_error.v == (u32)ERROR_ALREADY_EXISTS || create_error.v == (u32)ERROR_FILE_EXISTS)
+            {
+                result.already_exists = true;
+                DWORD attributes = GetFileAttributesW(wide.pointer);
+                if (attributes == INVALID_FILE_ATTRIBUTES)
+                {
+                    result.error = os_get_last_error();
+                }
+                else
+                {
+                    result.existing_directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                    if (!result.existing_directory)
+                    {
+                        result.error = create_error;
+                    }
+                }
+            }
+            else
+            {
+                result.error = create_error;
+            }
+        }
+#elif defined(__linux__) || defined(__APPLE__)
+        String8Z terminated = {0};
+        if (!string8z_copy_arena(temp.arena, path, &terminated))
+        {
+            result.error = os_file_invalid_error();
+        }
+        else
+        {
+            int status;
+            do
+            {
+                status = mkdir(terminated.pointer, 0755);
+            } while (status < 0 && errno == EINTR);
+            if (status == 0)
+            {
+                result.created = true;
+            }
+            else
+            {
+                OsError create_error = os_get_last_error();
+                if (create_error.v == (u32)EEXIST)
+                {
+                    result.already_exists = true;
+                    struct stat attributes;
+                    if (stat(terminated.pointer, &attributes) != 0)
+                    {
+                        result.error = os_get_last_error();
+                    }
+                    else
+                    {
+                        result.existing_directory = S_ISDIR(attributes.st_mode);
+                        if (!result.existing_directory)
+                        {
+                            result.error = create_error;
+                        }
+                    }
+                }
+                else
+                {
+                    result.error = create_error;
+                }
+            }
+        }
+#else
+        result.error = os_file_invalid_error();
+#endif
         scratch_end(temp);
     }
-#elif defined(_WIN32)
-    TemporalArena temp = scratch_begin(0, 0);
-    String16 path_w = string16_from_string8(temp.arena, path, true);
-    CreateDirectoryW(path_w.pointer, 0);
-    scratch_end(temp);
-#endif
+    return result;
 }
 
 OsDirectoryCreateResult os_make_directory_exclusive(String8 path)
 {
     OsDirectoryCreateResult result = {0};
-    bool valid = path.pointer != 0 && path.length != 0;
-    for (u64 index = 0; index < path.length && valid; index += 1)
+    if (!path.pointer || !path.length)
     {
-        valid = path.pointer[index] != 0;
-    }
-
-    if (!valid)
-    {
-#if defined(_WIN32)
-        result.error.v = (u32)ERROR_INVALID_PARAMETER;
-#else
-        result.error.v = (u32)EINVAL;
-#endif
+        result.error = os_file_invalid_error();
     }
     else
     {
         TemporalArena scratch = scratch_begin(0, 0);
 #if defined(_WIN32)
-        String16 wide = string16_from_string8(scratch.arena, path, true);
-        if (!CreateDirectoryW(wide.pointer, 0))
+        String16Z wide = {0};
+        if (!string16z_from_string8_arena(scratch.arena, path, &wide))
+        {
+            result.error = os_file_invalid_error();
+        }
+        else if (!CreateDirectoryW(wide.pointer, 0))
         {
             result.error = os_get_last_error();
             result.already_exists = result.error.v == (u32)ERROR_ALREADY_EXISTS || result.error.v == (u32)ERROR_FILE_EXISTS;
             if (result.already_exists)
             {
                 result.error = (OsError){0};
+                DWORD attributes = GetFileAttributesW(wide.pointer);
+                result.existing_directory = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             }
         }
+        else
+        {
+            result.created = true;
+        }
 #elif defined(__linux__) || defined(__APPLE__)
-        String8 terminated = string_duplicate_arena(scratch.arena, path, true);
-        int status;
-        do
+        String8Z terminated = {0};
+        if (!string8z_copy_arena(scratch.arena, path, &terminated))
         {
-            status = mkdir((const char*)terminated.pointer, 0700);
-        } while (status < 0 && errno == EINTR);
-        if (status < 0)
+            result.error = os_file_invalid_error();
+        }
+        else
         {
-            result.error = os_get_last_error();
-            result.already_exists = result.error.v == (u32)EEXIST;
-            if (result.already_exists)
+            int status;
+            do
             {
-                result.error = (OsError){0};
+                status = mkdir(terminated.pointer, 0700);
+            } while (status < 0 && errno == EINTR);
+            if (status < 0)
+            {
+                result.error = os_get_last_error();
+                result.already_exists = result.error.v == (u32)EEXIST;
+                if (result.already_exists)
+                {
+                    result.error = (OsError){0};
+                    struct stat attributes;
+                    result.existing_directory = stat(terminated.pointer, &attributes) == 0 && S_ISDIR(attributes.st_mode);
+                }
+            }
+            else
+            {
+                result.created = true;
             }
         }
 #else
-        result.error.v = 1;
+        result.error = os_file_invalid_error();
 #endif
         scratch_end(scratch);
     }
@@ -1283,22 +1419,22 @@ BUSTER_GLOBAL_LOCAL String16 os_string16_from_wide(char16* pointer)
 
 BUSTER_GLOBAL_LOCAL bool os_windows_entry_delete(Arena* arena, String8 path, DWORD attributes)
 {
-    // Keep conversion storage in the walker's arena. A nested scratch scope
-    // can select that same arena and rewind away the pending worklist tasks.
-    String16 path_w = string16_from_string8(arena, path, true);
-    // Read-only files refuse DeleteFileW until the attribute is cleared.
-    if (attributes & FILE_ATTRIBUTE_READONLY)
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    String16Z path_w = {0};
+    bool valid = string16z_from_string8_arena(scratch.arena, path, &path_w);
+    if (valid && (attributes & FILE_ATTRIBUTE_READONLY))
     {
         SetFileAttributesW(path_w.pointer, attributes & ~(DWORD)FILE_ATTRIBUTE_READONLY);
     }
     // A directory reparse point is unlinked with RemoveDirectoryW, which
     // removes the link itself rather than its target.
-    bool result = attributes & FILE_ATTRIBUTE_DIRECTORY ? RemoveDirectoryW(path_w.pointer) != 0 : DeleteFileW(path_w.pointer) != 0;
-    if (!result)
+    bool result = valid && (attributes & FILE_ATTRIBUTE_DIRECTORY ? RemoveDirectoryW(path_w.pointer) != 0 : DeleteFileW(path_w.pointer) != 0);
+    if (valid && !result)
     {
         DWORD error = GetLastError();
         result = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
     }
+    scratch_end(scratch);
     return result;
 }
 #endif
@@ -1309,12 +1445,12 @@ struct OsDirectoryDeleteFrame
 {
     OsDirectoryDeleteFrame* parent;
     DIR* directory;
-    String8 name;
+    String8Z name;
     dev_t device;
     ino_t inode;
 };
 
-BUSTER_GLOBAL_LOCAL int os_directory_delete_open_path(String8 path)
+BUSTER_GLOBAL_LOCAL int os_directory_delete_open_path(String8Z path)
 {
     int result;
     do
@@ -1324,7 +1460,7 @@ BUSTER_GLOBAL_LOCAL int os_directory_delete_open_path(String8 path)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL int os_directory_delete_open_at(int parent, String8 name)
+BUSTER_GLOBAL_LOCAL int os_directory_delete_open_at(int parent, String8Z name)
 {
     int result;
     do
@@ -1344,7 +1480,7 @@ BUSTER_GLOBAL_LOCAL int os_directory_delete_stat(int descriptor, struct stat* st
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL int os_directory_delete_stat_at(int parent, String8 name, struct stat* stats)
+BUSTER_GLOBAL_LOCAL int os_directory_delete_stat_at(int parent, String8Z name, struct stat* stats)
 {
     int result;
     do
@@ -1354,7 +1490,7 @@ BUSTER_GLOBAL_LOCAL int os_directory_delete_stat_at(int parent, String8 name, st
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL int os_directory_delete_unlink_at(int parent, String8 name, int flags)
+BUSTER_GLOBAL_LOCAL int os_directory_delete_unlink_at(int parent, String8Z name, int flags)
 {
     int result;
     do
@@ -1383,31 +1519,33 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
         separator -= 1;
     }
 
-    String8 parent_path;
-    String8 root_name;
+    String8 parent_path_slice;
+    String8 root_name_slice;
     if (separator)
     {
         u64 parent_length = separator == 1 ? 1 : separator - 1;
-        parent_path = (String8){.pointer = root.pointer, .length = parent_length};
-        root_name = (String8){.pointer = root.pointer + separator, .length = root_end - separator};
+        parent_path_slice = (String8){.pointer = root.pointer, .length = parent_length};
+        root_name_slice = (String8){.pointer = root.pointer + separator, .length = root_end - separator};
     }
     else
     {
-        parent_path = S8(".");
-        root_name = (String8){.pointer = root.pointer, .length = root_end};
+        parent_path_slice = S8(".");
+        root_name_slice = (String8){.pointer = root.pointer, .length = root_end};
     }
-    if (!root_name.length)
+    if (!root_name_slice.length)
     {
-        root_name = S8(".");
+        root_name_slice = S8(".");
     }
-    parent_path = string_duplicate_arena(arena, parent_path, true);
-    root_name = string_duplicate_arena(arena, root_name, true);
+    String8Z parent_path = {0};
+    String8Z root_name = {0};
+    bool paths_valid = string8z_copy_arena(arena, parent_path_slice, &parent_path) &&
+                       string8z_copy_arena(arena, root_name_slice, &root_name);
 
-    int root_parent = os_directory_delete_open_path(parent_path);
+    int root_parent = paths_valid ? os_directory_delete_open_path(parent_path) : -1;
     OsDirectoryDeleteFrame* frame = 0;
-    if (root_parent < 0)
+    if (!paths_valid || root_parent < 0)
     {
-        result = errno == ENOENT;
+        result = paths_valid && errno == ENOENT;
     }
     else
     {
@@ -1458,8 +1596,9 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
             struct dirent* entry = readdir(frame->directory);
             if (entry)
             {
-                String8 name = string_from_pointer((const char8*)entry->d_name);
-                if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+                String8 name_slice = string_from_pointer((const char8*)entry->d_name);
+                String8Z name = {.pointer = name_slice.pointer, .length = name_slice.length};
+                if (!string_equal(name_slice, S8(".")) && !string_equal(name_slice, S8("..")))
                 {
                     int directory = dirfd(frame->directory);
                     struct stat entry_stats;
@@ -1492,13 +1631,19 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
                         else
                         {
                             OsDirectoryDeleteFrame* child_frame = arena_allocate(arena, OsDirectoryDeleteFrame, 1);
+                            String8Z child_name = {0};
+                            bool child_name_valid = string8z_copy_arena(arena, name_slice, &child_name);
                             *child_frame = (OsDirectoryDeleteFrame){
                                 .parent = frame,
                                 .directory = child_directory,
-                                .name = string_duplicate_arena(arena, name, true),
+                                .name = child_name,
                                 .device = opened.st_dev,
                                 .inode = opened.st_ino,
                             };
+                            if (!child_name_valid)
+                            {
+                                result = false;
+                            }
                             if (closedir(frame->directory) != 0)
                             {
                                 result = false;
@@ -1521,7 +1666,8 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
                 int parent_descriptor = root_parent;
                 if (parent)
                 {
-                    parent_descriptor = os_directory_delete_open_at(dirfd(finished->directory), S8(".."));
+                    String8Z parent_name = {.pointer = (char8*)"..", .length = 2};
+                    parent_descriptor = os_directory_delete_open_at(dirfd(finished->directory), parent_name);
                     struct stat reopened;
                     bool same_parent = parent_descriptor >= 0 && os_directory_delete_stat(parent_descriptor, &reopened) == 0 &&
                                        reopened.st_dev == parent->device && reopened.st_ino == parent->inode;
@@ -1627,14 +1773,18 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
             continue;
         }
 
-        String16 task_path_w = string16_from_string8(arena, task->path, true);
-        DWORD task_attributes = GetFileAttributesW(task_path_w.pointer);
+        TemporalArena scratch = scratch_begin(&arena, 1);
+        String16Z task_path_w = {0};
+        bool task_path_valid = string16z_from_string8_arena(scratch.arena, task->path, &task_path_w);
+        DWORD task_attributes = task_path_valid ? GetFileAttributesW(task_path_w.pointer) : INVALID_FILE_ATTRIBUTES;
         if (task_attributes == INVALID_FILE_ATTRIBUTES)
         {
-            DWORD error = GetLastError();
+            DWORD error = task_path_valid ? GetLastError() : ERROR_INVALID_PARAMETER;
             result = (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) && result;
+            scratch_end(scratch);
             continue;
         }
+        scratch_end(scratch);
         if (task_attributes & FILE_ATTRIBUTE_REPARSE_POINT)
         {
             result = os_windows_entry_delete(arena, task->path, task_attributes) && result;
@@ -1646,13 +1796,23 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
             continue;
         }
         os_directory_delete_task_push(arena, &tasks, task->path, OS_DIRECTORY_DELETE_POST, task_attributes);
-        String16 pattern = string16_from_string8(arena, string_format_z(arena, S8("{S8}\\*"), task->path), true);
+        String8 pattern_string = string_format_z(arena, S8("{S8}\\*"), task->path);
+        TemporalArena pattern_scratch = scratch_begin(&arena, 1);
+        String16Z pattern = {0};
+        bool pattern_valid = string16z_from_string8_arena(pattern_scratch.arena, pattern_string, &pattern);
+        if (!pattern_valid)
+        {
+            scratch_end(pattern_scratch);
+            result = false;
+            continue;
+        }
         WIN32_FIND_DATAW find_data;
         HANDLE find = FindFirstFileW(pattern.pointer, &find_data);
         if (find == INVALID_HANDLE_VALUE)
         {
             DWORD error = GetLastError();
             result = error == ERROR_FILE_NOT_FOUND && result;
+            scratch_end(pattern_scratch);
             continue;
         }
         bool more = true;
@@ -1671,6 +1831,7 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
         }
         result = GetLastError() == ERROR_NO_MORE_FILES && result;
         FindClose(find);
+        scratch_end(pattern_scratch);
     }
     return result;
 }
@@ -1680,15 +1841,21 @@ bool os_directory_delete(String8 path)
 {
     bool result = false;
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
-    if (path.length)
+    if (path.pointer && path.length)
     {
-        BUSTER_VALIDATE(!path.pointer[path.length]);
         // The walk retains its descriptor frames or pending Windows tasks
         // for the whole traversal. Own their arena so nested scratch scopes can
         // never rewind live frame names or tasks.
         Arena* arena = arena_create((ArenaCreation){0});
-        result = os_directory_delete_walk(arena, path);
-        arena_destroy(arena, 1);
+        if (arena)
+        {
+            String8Z root = {0};
+            if (string8z_copy_arena(arena, path, &root))
+            {
+                result = os_directory_delete_walk(arena, (String8){.pointer = root.pointer, .length = root.length});
+            }
+            arena_destroy(arena, 1);
+        }
     }
 #else
     BUSTER_UNUSED(path);
@@ -1703,6 +1870,67 @@ BUSTER_GLOBAL_LOCAL OsError os_file_invalid_error(void)
     return (OsError){ERROR_INVALID_PARAMETER};
 #else
     return (OsError){EINVAL};
+#endif
+}
+
+typedef struct OsTemporaryArenaScope OsTemporaryArenaScope;
+struct OsTemporaryArenaScope
+{
+    TemporalArena scratch;
+    Arena* arena;
+    bool owns_arena;
+};
+
+// POSIX path calls historically did not need a thread scratch arena. Keep
+// them usable during teardown, when the selected ThreadContext has already
+// been released, by using a short lived private arena for their terminated
+// path copies. Windows callers already required scratch storage before these
+// conversions, so preserve that contract there.
+BUSTER_GLOBAL_LOCAL OsTemporaryArenaScope os_temporary_arena_begin(Arena** conflicts, u64 conflict_count)
+{
+    OsTemporaryArenaScope result = {0};
+    if (thread_context_selected())
+    {
+        result.scratch = scratch_begin(conflicts, conflict_count);
+        result.arena = result.scratch.arena;
+    }
+#if defined(__linux__) || defined(__APPLE__)
+    else
+    {
+        result.arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+        result.owns_arena = true;
+    }
+#else
+    else
+    {
+        result.scratch = scratch_begin(conflicts, conflict_count);
+        result.arena = result.scratch.arena;
+    }
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_temporary_arena_end(OsTemporaryArenaScope scope)
+{
+    if (scope.owns_arena)
+    {
+        if (scope.arena)
+        {
+            arena_destroy(scope.arena, 1);
+        }
+    }
+    else
+    {
+        scratch_end(scope.scratch);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL OsError os_temporary_arena_error(void)
+{
+#if defined(_WIN32)
+    return (OsError){ERROR_NOT_ENOUGH_MEMORY};
+#else
+    return (OsError){ENOMEM};
 #endif
 }
 
@@ -1779,55 +2007,64 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
 #endif
     if (path.pointer && !error.v)
     {
+        OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
+        if (!scratch.arena)
+        {
+            error = os_temporary_arena_error();
+        }
 #if defined(__linux__) || defined(__APPLE__)
-        BUSTER_VALIDATE(!path.pointer[path.length]);
-
-        int o = 0;
-        if (flags.read & flags.write)
+        String8Z path_z = {0};
+        if (!error.v && !string8z_copy_arena(scratch.arena, path, &path_z))
         {
-            o = O_RDWR;
+            error = os_file_invalid_error();
         }
-        else if (flags.read)
+        else if (!error.v)
         {
-            o = O_RDONLY;
-        }
-        else if (flags.write)
-        {
-            o = O_WRONLY;
-        }
-        else
-        {
-            BUSTER_UNREACHABLE();
-        }
-
-        o |= (flags.truncate) * O_TRUNC;
-        o |= (flags.create) * O_CREAT;
-        o |= (flags.directory) * O_DIRECTORY;
-
-        mode_t mode = permissions.execute ? 0755 : 0644;
-        int fd;
-        do
-        {
-            fd = open((char*)path.pointer, o, mode);
-        } while (fd < 0 && errno == EINTR);
-
-        if (fd >= 0)
-        {
-            result = posix_fd_to_generic_fd(fd);
-        }
-        else
-        {
-            error = os_get_last_error();
-            // Missing paths are expected while probing include and library
-            // candidates. Keep diagnostics for other failures visible.
-            if (program_flag_get(PROGRAM_FLAG_VERBOSE) && error.v != (u32)ENOENT && error.v != (u32)ENOTDIR)
+            int o = 0;
+            if (flags.read & flags.write)
             {
-                string_print(S8("Error opening {S8}: {EOs}\n"), path, error);
+                o = O_RDWR;
+            }
+            else if (flags.read)
+            {
+                o = O_RDONLY;
+            }
+            else if (flags.write)
+            {
+                o = O_WRONLY;
+            }
+            else
+            {
+                BUSTER_UNREACHABLE();
+            }
+
+            o |= (flags.truncate) * O_TRUNC;
+            o |= (flags.create) * O_CREAT;
+            o |= (flags.directory) * O_DIRECTORY;
+
+            mode_t mode = permissions.execute ? 0755 : 0644;
+            int fd;
+            do
+            {
+                fd = open((char*)path_z.pointer, o, mode);
+            } while (fd < 0 && errno == EINTR);
+
+            if (fd >= 0)
+            {
+                result = posix_fd_to_generic_fd(fd);
+            }
+            else
+            {
+                error = os_get_last_error();
+                // Missing paths are expected while probing include and library
+                // candidates. Keep diagnostics for other failures visible.
+                if (program_flag_get(PROGRAM_FLAG_VERBOSE) && error.v != (u32)ENOENT && error.v != (u32)ENOTDIR)
+                {
+                    string_print(S8("Error opening {S8}: {EOs}\n"), path, error);
+                }
             }
         }
 #elif defined(_WIN32)
-        TemporalArena scratch = scratch_begin(0, 0);
-
         DWORD desired_access = 0;
         DWORD shared_mode = 0;
         SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, 0};
@@ -1880,24 +2117,31 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
             creation_disposition = OPEN_EXISTING;
         }
 
-        String16 path_w = string16_from_string8(scratch.arena, path, true);
-        HANDLE fd = CreateFileW(path_w.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
-        if (fd != INVALID_HANDLE_VALUE)
+        String16Z path_w = {0};
+        if (!error.v && !string16z_from_string8_arena(scratch.arena, path, &path_w))
         {
-            result = (OsFileDescriptor*)fd;
+            error = os_file_invalid_error();
         }
-        else
+        else if (!error.v)
         {
-            error = os_get_last_error();
-            // Missing paths are expected while probing include and library
-            // candidates. Keep diagnostics for other failures visible.
-            if (program_flag_get(PROGRAM_FLAG_VERBOSE) && error.v != (u32)ERROR_FILE_NOT_FOUND && error.v != (u32)ERROR_PATH_NOT_FOUND)
+            HANDLE fd = CreateFileW(path_w.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
+            if (fd != INVALID_HANDLE_VALUE)
             {
-                string_print(S8("Error opening {S8}: {EOs}\n"), path, error);
+                result = (OsFileDescriptor*)fd;
+            }
+            else
+            {
+                error = os_get_last_error();
+                // Missing paths are expected while probing include and library
+                // candidates. Keep diagnostics for other failures visible.
+                if (program_flag_get(PROGRAM_FLAG_VERBOSE) && error.v != (u32)ERROR_FILE_NOT_FOUND && error.v != (u32)ERROR_PATH_NOT_FOUND)
+                {
+                    string_print(S8("Error opening {S8}: {EOs}\n"), path, error);
+                }
             }
         }
-        scratch_end(scratch);
 #endif
+        os_temporary_arena_end(scratch);
     }
     if (!result && !error.v) error = os_file_invalid_error();
 #if BUSTER_INCLUDE_TESTS
@@ -2093,6 +2337,10 @@ FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions 
                 {
                     result.kind = OS_FILE_KIND_LINK;
                 }
+                else if (S_ISCHR(stats.st_mode) || S_ISFIFO(stats.st_mode))
+                {
+                    result.kind = OS_FILE_KIND_STREAM;
+                }
                 else
                 {
                     result.kind = OS_FILE_KIND_OTHER;
@@ -2181,16 +2429,28 @@ OsError os_file_delete_checked(String8 path)
 #endif
     if (!result.v)
     {
+        OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
+        if (!scratch.arena)
+        {
+            result = os_temporary_arena_error();
+        }
 #if defined(__linux__) || defined(__APPLE__)
-        BUSTER_VALIDATE(!path.pointer[path.length]);
-        if (unlink((const char*)path.pointer) != 0 && errno != ENOENT)
+        String8Z path_z = {0};
+        if (!result.v && !string8z_copy_arena(scratch.arena, path, &path_z))
+        {
+            result = os_file_invalid_error();
+        }
+        else if (!result.v && unlink((const char*)path_z.pointer) != 0 && errno != ENOENT)
         {
             result = os_get_last_error();
         }
 #elif defined(_WIN32)
-        TemporalArena scratch = scratch_begin(0, 0);
-        String16 path_w = string16_from_string8(scratch.arena, path, true);
-        if (!DeleteFileW(path_w.pointer))
+        String16Z path_w = {0};
+        if (!result.v && !string16z_from_string8_arena(scratch.arena, path, &path_w))
+        {
+            result = os_file_invalid_error();
+        }
+        else if (!result.v && !DeleteFileW(path_w.pointer))
         {
             OsError error = os_get_last_error();
             if (error.v != (u32)ERROR_FILE_NOT_FOUND && error.v != (u32)ERROR_PATH_NOT_FOUND)
@@ -2198,11 +2458,11 @@ OsError os_file_delete_checked(String8 path)
                 result = error;
             }
         }
-        scratch_end(scratch);
 #else
         BUSTER_UNUSED(path);
         result = os_file_invalid_error();
 #endif
+        os_temporary_arena_end(scratch);
     }
     return result;
 }
@@ -2220,81 +2480,99 @@ FileStats os_file_replacement_target_stats(String8 path)
     }
     else if (!result.error.v)
     {
-#if defined(__linux__) || defined(__APPLE__)
-        BUSTER_VALIDATE(!path.pointer[path.length]);
-        // O_NONBLOCK keeps a FIFO without a reader from blocking, and O_NOCTTY
-        // keeps a terminal from becoming the controlling terminal.
-        int fd;
-        do
+        OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
+        if (!scratch.arena)
         {
-            fd = open((char*)path.pointer, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
-        } while (fd < 0 && errno == EINTR);
-        if (fd >= 0)
-        {
-            OsFileDescriptor* file = posix_fd_to_generic_fd(fd);
-            result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
-            OsError close_error = os_file_close_checked(file);
-            if (result.valid && close_error.v)
-            {
-                result = (FileStats){.error = close_error};
-            }
+            result.error = os_temporary_arena_error();
         }
-        else
+#if defined(__linux__) || defined(__APPLE__)
+        String8Z path_z = {0};
+        if (!result.error.v && !string8z_copy_arena(scratch.arena, path, &path_z))
         {
-            OsError error = os_get_last_error();
-            result.valid = true;
-            if (error.v == (u32)ENOENT)
+            result.error = os_file_invalid_error();
+        }
+        else if (!result.error.v)
+        {
+            // O_NONBLOCK keeps a FIFO without a reader from blocking, and O_NOCTTY
+            // keeps a terminal from becoming the controlling terminal.
+            int fd;
+            do
             {
-                result.kind = OS_FILE_KIND_MISSING;
-            }
-            else if (error.v == (u32)ELOOP)
+                fd = open((char*)path_z.pointer, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+            } while (fd < 0 && errno == EINTR);
+            if (fd >= 0)
             {
-                result.kind = OS_FILE_KIND_LINK;
-            }
-            else if (error.v == (u32)EISDIR)
-            {
-                result.kind = OS_FILE_KIND_DIRECTORY;
-            }
-            else if (error.v == (u32)ENXIO)
-            {
-                result.kind = OS_FILE_KIND_OTHER;
+                OsFileDescriptor* file = posix_fd_to_generic_fd(fd);
+                result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+                OsError close_error = os_file_close_checked(file);
+                if (result.valid && close_error.v)
+                {
+                    result = (FileStats){.error = close_error};
+                }
             }
             else
             {
-                result.valid = false;
-                result.error = error;
+                OsError error = os_get_last_error();
+                result.valid = true;
+                if (error.v == (u32)ENOENT)
+                {
+                    result.kind = OS_FILE_KIND_MISSING;
+                }
+                else if (error.v == (u32)ELOOP)
+                {
+                    result.kind = OS_FILE_KIND_LINK;
+                }
+                else if (error.v == (u32)EISDIR)
+                {
+                    result.kind = OS_FILE_KIND_DIRECTORY;
+                }
+                else if (error.v == (u32)ENXIO)
+                {
+                    result.kind = OS_FILE_KIND_OTHER;
+                }
+                else
+                {
+                    result.valid = false;
+                    result.error = error;
+                }
             }
         }
 #elif defined(_WIN32)
-        TemporalArena scratch = scratch_begin(0, 0);
-        String16 path_w = string16_from_string8(scratch.arena, path, true);
-        // Attribute-only access never conflicts with other handles' share
-        // modes; the reparse flag inspects a link rather than its target.
-        HANDLE handle = CreateFileW(path_w.pointer, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING,
-                                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, 0);
-        if (handle != INVALID_HANDLE_VALUE)
+        String16Z path_w = {0};
+        if (!result.error.v && !string16z_from_string8_arena(scratch.arena, path, &path_w))
         {
-            OsFileDescriptor* file = (OsFileDescriptor*)handle;
-            result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
-            OsError close_error = os_file_close_checked(file);
-            if (result.valid && close_error.v)
+            result.error = os_file_invalid_error();
+        }
+        else if (!result.error.v)
+        {
+            // Attribute-only access never conflicts with other handles' share
+            // modes; the reparse flag inspects a link rather than its target.
+            HANDLE handle = CreateFileW(path_w.pointer, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING,
+                                        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, 0);
+            if (handle != INVALID_HANDLE_VALUE)
             {
-                result = (FileStats){.error = close_error};
+                OsFileDescriptor* file = (OsFileDescriptor*)handle;
+                result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+                OsError close_error = os_file_close_checked(file);
+                if (result.valid && close_error.v)
+                {
+                    result = (FileStats){.error = close_error};
+                }
+            }
+            else
+            {
+                OsError error = os_get_last_error();
+                result.valid = error.v == (u32)ERROR_FILE_NOT_FOUND || error.v == (u32)ERROR_PATH_NOT_FOUND;
+                if (!result.valid)
+                {
+                    result.error = error;
+                }
             }
         }
-        else
-        {
-            OsError error = os_get_last_error();
-            result.valid = error.v == (u32)ERROR_FILE_NOT_FOUND || error.v == (u32)ERROR_PATH_NOT_FOUND;
-            if (!result.valid)
-            {
-                result.error = error;
-            }
-        }
-        scratch_end(scratch);
 #else
         result.error = os_file_invalid_error();
 #endif
+        os_temporary_arena_end(scratch);
     }
     return result;
 }
@@ -2307,9 +2585,13 @@ BUSTER_GLOBAL_LOCAL AtomicU64 os_file_staging_counter;
 OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions)
 {
     OsFileStagingResult result = {0};
+    u64 validation_position = arena->position;
+    String8Z validated_destination = {0};
+    bool destination_valid = string8z_copy_arena(arena, destination, &validated_destination) && validated_destination.pointer;
+    arena_set_position(arena, validation_position);
     // The staging name replaces only the final component, keeping the rename
     // within one directory without lengthening the destination's name.
-    u64 directory_length = destination.pointer ? destination.length : 0;
+    u64 directory_length = destination_valid ? destination.length : 0;
     bool separator = false;
     while (directory_length && !separator)
     {
@@ -2329,7 +2611,7 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
     const OsFileTestStep* step = selected ? os_file_test_take(OS_FILE_TEST_OPEN) : 0;
     if (step) result.error.v = (u32)step->value;
 #endif
-    if (!result.error.v && (!destination.pointer || destination.length == directory_length))
+    if (!result.error.v && (!destination_valid || !destination.length || destination.length == directory_length))
     {
         result.error = os_file_invalid_error();
     }
@@ -2342,22 +2624,34 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
         u64 serial = atomic_u64_increment(&os_file_staging_counter);
         String8 path = string_format_z(arena, S8("{S8}{S8}{u64}-{u64}{S8}"), directory, OS_FILE_STAGING_PREFIX, os_get_current_process_id(), serial,
                                        OS_FILE_STAGING_SUFFIX);
-        OsError error;
+        OsError error = {0};
 #if defined(__linux__) || defined(__APPLE__)
         mode_t mode = permissions.execute ? 0755 : 0644;
-        int fd;
-        do
+        String8Z path_z = {0};
+        int fd = -1;
+        if (!string8z_copy_arena(arena, path, &path_z))
         {
-            fd = open((char*)path.pointer, O_WRONLY | O_CREAT | O_EXCL, mode);
-        } while (fd < 0 && errno == EINTR);
-        error = fd >= 0 ? (OsError){0} : os_get_last_error();
+            error = os_file_invalid_error();
+        }
+        else
+        {
+            do
+            {
+                fd = open((char*)path_z.pointer, O_WRONLY | O_CREAT | O_EXCL, mode);
+            } while (fd < 0 && errno == EINTR);
+            error = fd >= 0 ? (OsError){0} : os_get_last_error();
+        }
         if (fd >= 0)
         {
             result.file = posix_fd_to_generic_fd(fd);
         }
         bool collision = error.v == (u32)EEXIST;
 #elif defined(_WIN32)
-        String16 path_w = string16_from_string8(arena, path, true);
+        String16Z path_w = {0};
+        if (!string16z_from_string8_arena(arena, path, &path_w))
+        {
+            error = os_file_invalid_error();
+        }
         DWORD shared_mode = 0;
         if (permissions.read)
         {
@@ -2368,8 +2662,12 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
             shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         }
         SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, 0};
-        HANDLE handle = CreateFileW(path_w.pointer, GENERIC_WRITE, shared_mode, &security_attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
-        error = handle != INVALID_HANDLE_VALUE ? (OsError){0} : os_get_last_error();
+        HANDLE handle = path_w.pointer ? CreateFileW(path_w.pointer, GENERIC_WRITE, shared_mode, &security_attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0)
+                                       : INVALID_HANDLE_VALUE;
+        if (!error.v)
+        {
+            error = handle != INVALID_HANDLE_VALUE ? (OsError){0} : os_get_last_error();
+        }
         if (handle != INVALID_HANDLE_VALUE)
         {
             result.file = (OsFileDescriptor*)handle;
@@ -2417,18 +2715,31 @@ OsError os_file_replace(String8 path, String8 destination)
     if (!result.v)
     {
 #if defined(__linux__) || defined(__APPLE__)
-        BUSTER_VALIDATE(!path.pointer[path.length] && !destination.pointer[destination.length]);
-        if (rename((const char*)path.pointer, (const char*)destination.pointer) != 0)
+        OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
+        if (!scratch.arena)
+        {
+            result = os_temporary_arena_error();
+        }
+        String8Z path_z = {0};
+        String8Z destination_z = {0};
+        if (!result.v && (!string8z_copy_arena(scratch.arena, path, &path_z) || !string8z_copy_arena(scratch.arena, destination, &destination_z)))
+        {
+            result = os_file_invalid_error();
+        }
+        else if (!result.v && rename((const char*)path_z.pointer, (const char*)destination_z.pointer) != 0)
         {
             result = os_get_last_error();
         }
+        os_temporary_arena_end(scratch);
 #elif defined(_WIN32)
         TemporalArena scratch = scratch_begin(0, 0);
-        String16 path_w = string16_from_string8(scratch.arena, path, true);
+        String16Z path_w = {0};
         String8 absolute_destination = os_path_absolute_lexical(scratch.arena, destination, true);
-        String16 destination_w = string16_from_string8(scratch.arena, absolute_destination, true);
+        String16Z destination_w = {0};
+        bool paths_valid = string16z_from_string8_arena(scratch.arena, path, &path_w) && absolute_destination.length &&
+                           string16z_from_string8_arena(scratch.arena, absolute_destination, &destination_w);
         u64 rename_bytes = sizeof(FILE_RENAME_INFO) + destination_w.length * sizeof(WindowsChar);
-        if (!absolute_destination.length || rename_bytes > UINT32_MAX)
+        if (!paths_valid || rename_bytes > UINT32_MAX)
         {
             result = os_file_invalid_error();
         }
@@ -2895,6 +3206,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 
     result.capture_limits = options.capture_limits;
     result.capture_overflow_policy = options.capture_overflow_policy;
+    result.observe_resources = options.observe_resources;
     memcpy(result.capture_overflow_files, options.capture_overflow_files, sizeof(result.capture_overflow_files));
     if (options.capture_overflow_policy >= PROCESS_CAPTURE_OVERFLOW_COUNT)
     {
@@ -3070,7 +3382,11 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 
     if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
     {
-        String16 application = string16_from_string8(temp.arena, executable, true);
+        String16Z application = {0};
+        if (!string16z_from_string8_arena(temp.arena, executable, &application))
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_EXECUTABLE_LOOKUP, os_process_spawn_invalid_error());
+        }
         WindowsStringList command_line = windows_string_list_from_slice_string(temp.arena, arguments);
         WindowsStringList environment = options.use_process_environment
                                             ? program_state->input.raw_environment
@@ -3085,11 +3401,11 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             creation_flags |= CREATE_SUSPENDED;
         }
         BOOL created = FALSE;
-        if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN))
+        if (result.failure == PROCESS_SPAWN_FAILURE_NONE && OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN))
         {
             os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_process_spawn_injected_error());
         }
-        else
+        else if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
         {
             created = CreateProcessW(application.pointer, command_line, 0, 0, inherited_handle_count != 0, creation_flags, environment, 0,
                                      &startup_info.StartupInfo, &process_information);
@@ -3318,13 +3634,22 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         PosixStringList envp = options.use_process_environment
                                   ? program_state->input.raw_environment
                                   : posix_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
-        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN)
-                         ? EIO
-                         : posix_spawn(&pid, executable.pointer, &file_actions, &attributes, argv, envp);
-        if (status)
+        String8Z executable_z = {0};
+        int status = 0;
+        if (!string8z_copy_arena(temp.arena, executable, &executable_z))
         {
-            pid = -1;
-            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, (OsError){(u32)status});
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_EXECUTABLE_LOOKUP, os_process_spawn_invalid_error());
+        }
+        else
+        {
+            status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN)
+                         ? EIO
+                         : posix_spawn(&pid, executable_z.pointer, &file_actions, &attributes, argv, envp);
+            if (status)
+            {
+                pid = -1;
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, (OsError){(u32)status});
+            }
         }
     }
 
@@ -3488,6 +3813,139 @@ BUSTER_GLOBAL_LOCAL void pipe_capture_append(Arena* arena, PipeCapture* capture,
         }
     }
 }
+
+bool os_process_capture_step(OsProcessCaptureState* state, OsProcessCaptureEvent event, u64 bytes)
+{
+    bool valid = event < OS_PROCESS_CAPTURE_EVENT_COUNT &&
+        (event == OS_PROCESS_CAPTURE_READ_BYTES ? bytes && bytes <= OS_PROCESS_CAPTURE_READ_LIMIT : !bytes);
+    OsProcessCaptureState next = *state;
+    if (valid)
+    {
+        switch (event)
+        {
+            case OS_PROCESS_CAPTURE_WAIT_READY:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING;
+                next.phase = OS_PROCESS_CAPTURE_READY;
+            } break;
+            case OS_PROCESS_CAPTURE_WAIT_IDLE:
+            case OS_PROCESS_CAPTURE_WAIT_INTERRUPTED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING;
+            } break;
+            case OS_PROCESS_CAPTURE_WAIT_FAILED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING;
+                next.failed = true;
+                next.phase = OS_PROCESS_CAPTURE_CLOSING;
+            } break;
+            case OS_PROCESS_CAPTURE_READ_BYTES:
+            case OS_PROCESS_CAPTURE_READ_INTERRUPTED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_READY && bytes <= (u64)-1 - next.observed_bytes;
+                next.observed_bytes += bytes;
+                next.phase = OS_PROCESS_CAPTURE_WAITING;
+            } break;
+            case OS_PROCESS_CAPTURE_READ_EOF:
+            case OS_PROCESS_CAPTURE_READ_FAILED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_READY;
+                next.eof = event == OS_PROCESS_CAPTURE_READ_EOF;
+                next.failed |= !next.eof;
+                next.phase = OS_PROCESS_CAPTURE_CLOSING;
+            } break;
+            case OS_PROCESS_CAPTURE_STOP:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING || next.phase == OS_PROCESS_CAPTURE_READY;
+                next.phase = OS_PROCESS_CAPTURE_CLOSING;
+            } break;
+            case OS_PROCESS_CAPTURE_CLOSE_OK:
+            case OS_PROCESS_CAPTURE_CLOSE_FAILED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_CLOSING && !next.close_attempts;
+                next.close_attempts += 1;
+                next.close_outcome_unknown = event == OS_PROCESS_CAPTURE_CLOSE_FAILED;
+                next.failed |= next.close_outcome_unknown;
+                next.phase = OS_PROCESS_CAPTURE_CLOSED;
+            } break;
+            default: { valid = false; } break;
+        }
+    }
+    if (valid) { *state = next; }
+    return valid;
+}
+
+ProcessResult os_process_capture_result(const OsProcessCaptureState* state, ProcessResult child_result)
+{
+    ProcessResult result = state->phase == OS_PROCESS_CAPTURE_CLOSED && state->eof && !state->failed
+        ? child_result : PROCESS_RESULT_FAILED;
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsProcessCaptureEvent os_process_capture_test_failure = OS_PROCESS_CAPTURE_EVENT_COUNT;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_process_capture_test_consumed;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 os_process_capture_test_calls_remaining;
+
+void os_process_capture_test_fail_on_call(OsProcessCaptureEvent event, u32 call_index)
+{
+    BUSTER_VALIDATE(os_process_capture_test_failure == OS_PROCESS_CAPTURE_EVENT_COUNT &&
+        call_index < 16 &&
+        (event == OS_PROCESS_CAPTURE_WAIT_FAILED || event == OS_PROCESS_CAPTURE_READ_FAILED || event == OS_PROCESS_CAPTURE_CLOSE_FAILED));
+    os_process_capture_test_failure = event;
+    os_process_capture_test_consumed = false;
+    os_process_capture_test_calls_remaining = call_index;
+}
+
+bool os_process_capture_test_end(void)
+{
+    bool result = os_process_capture_test_consumed;
+    os_process_capture_test_failure = OS_PROCESS_CAPTURE_EVENT_COUNT;
+    os_process_capture_test_consumed = false;
+    os_process_capture_test_calls_remaining = 0;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_process_capture_test_take(OsProcessCaptureEvent event)
+{
+    bool result = os_process_capture_test_failure == event;
+    if (result && os_process_capture_test_calls_remaining)
+    {
+        os_process_capture_test_calls_remaining -= 1;
+        result = false;
+    }
+    else if (result)
+    {
+        os_process_capture_test_failure = OS_PROCESS_CAPTURE_EVENT_COUNT;
+        os_process_capture_test_consumed = true;
+    }
+    return result;
+}
+#endif
+
+#if !BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool os_process_capture_close(int* descriptor, OsProcessCaptureState* state)
+{
+    int close_result = close(*descriptor);
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+    if (state && os_process_capture_test_take(OS_PROCESS_CAPTURE_CLOSE_FAILED))
+    {
+        close_result = -1;
+        errno = EIO;
+    }
+#endif
+    *descriptor = -1;
+    if (state)
+    {
+        if (state->phase != OS_PROCESS_CAPTURE_CLOSING)
+        {
+            BUSTER_CHECK(os_process_capture_step(state, OS_PROCESS_CAPTURE_STOP, 0));
+        }
+        BUSTER_CHECK(os_process_capture_step(state, close_result ? OS_PROCESS_CAPTURE_CLOSE_FAILED : OS_PROCESS_CAPTURE_CLOSE_OK, 0));
+    }
+    return close_result == 0;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* capture)
 {
@@ -4608,6 +5066,53 @@ bool os_process_group_ownership_loss_self_test(void)
 #endif
 #endif
 
+#if BUSTER_WINDOWS
+// TinyCC has neither psapi.h nor its import stubs. This is the fixed ABI of
+// PROCESS_MEMORY_COUNTERS; resolve the existing kernel32 export at runtime.
+typedef struct OsProcessMemoryCounters OsProcessMemoryCounters;
+struct OsProcessMemoryCounters
+{
+    DWORD cb;
+    DWORD page_fault_count;
+    SIZE_T peak_working_set_size;
+    SIZE_T working_set_size;
+    SIZE_T quota_peak_paged_pool_usage;
+    SIZE_T quota_paged_pool_usage;
+    SIZE_T quota_peak_non_paged_pool_usage;
+    SIZE_T quota_non_paged_pool_usage;
+    SIZE_T pagefile_usage;
+    SIZE_T peak_pagefile_usage;
+};
+
+BUSTER_GLOBAL_LOCAL ProcessResourceStatus os_windows_process_memory_counters(HANDLE handle, OsProcessMemoryCounters* counters, OsError* error)
+{
+    ProcessResourceStatus result = PROCESS_RESOURCE_UNSUPPORTED;
+    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, OsProcessMemoryCounters*, DWORD);
+    GetProcessMemoryInfoProc get_process_memory_info =
+        (GetProcessMemoryInfoProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
+    counters->cb = sizeof(*counters);
+    if (get_process_memory_info)
+    {
+        if (get_process_memory_info(handle, counters, sizeof(*counters))) { result = PROCESS_RESOURCE_OBSERVED; }
+        else
+        {
+            *error = os_get_last_error();
+            if (!error->v) { error->v = ERROR_GEN_FAILURE; }
+            result = PROCESS_RESOURCE_ERROR;
+        }
+    }
+    return result;
+}
+#else
+BUSTER_GLOBAL_LOCAL bool os_process_usage_microseconds(struct timeval value, u64* output)
+{
+    bool result = value.tv_sec >= 0 && value.tv_usec >= 0 && value.tv_usec < 1000000 &&
+        (u64)value.tv_sec <= ((u64)-1 - (u64)value.tv_usec) / 1000000;
+    if (result) { *output = (u64)value.tv_sec * 1000000 + (u64)value.tv_usec; }
+    return result;
+}
+#endif
+
 ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds)
 {
     ProcessWaitResult result = {0};
@@ -4794,6 +5299,25 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
             CloseHandle((HANDLE)spawn.process_tree);
         }
+        if (spawn.observe_resources && wait_result == WAIT_OBJECT_0)
+        {
+            FILETIME created, exited, kernel, user;
+            if (GetProcessTimes((HANDLE)spawn.handle, &created, &exited, &kernel, &user))
+            {
+                result.resources.user_cpu_us = (((u64)user.dwHighDateTime << 32) | (u64)user.dwLowDateTime) / 10;
+                result.resources.system_cpu_us = (((u64)kernel.dwHighDateTime << 32) | (u64)kernel.dwLowDateTime) / 10;
+                result.resources.cpu_status = PROCESS_RESOURCE_OBSERVED;
+            }
+            else
+            {
+                result.resources.cpu_status = PROCESS_RESOURCE_ERROR;
+                result.resources.cpu_error = os_get_last_error();
+                if (!result.resources.cpu_error.v) { result.resources.cpu_error.v = ERROR_GEN_FAILURE; }
+            }
+            OsProcessMemoryCounters counters = {0};
+            result.resources.memory_status = os_windows_process_memory_counters((HANDLE)spawn.handle, &counters, &result.resources.memory_error);
+            if (result.resources.memory_status == PROCESS_RESOURCE_OBSERVED) { result.resources.peak_memory_bytes = (u64)counters.peak_working_set_size; }
+        }
         CloseHandle(spawn.handle);
         if (result.process_tree_cleanup_failed)
         {
@@ -4816,6 +5340,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         }
 
         int read_pipes[(u64)STANDARD_STREAM_COUNT];
+        OsProcessCaptureState capture_states[(u64)STANDARD_STREAM_COUNT] = {0};
         u64 quiescent_capture_remaining[(u64)STANDARD_STREAM_COUNT] = {0};
         u64 open_pipe_count = 0;
         bool quiescent_capture_snapshot = false;
@@ -4916,7 +5441,18 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             {
                 poll_milliseconds = 10;
             }
-            int poll_result = poll(poll_fds, poll_count, (int)poll_milliseconds);
+            int poll_result;
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+            if (!spawn.process_group && os_process_capture_test_take(OS_PROCESS_CAPTURE_WAIT_FAILED))
+            {
+                poll_result = -1;
+                errno = ENOMEM;
+            }
+            else
+#endif
+            {
+                poll_result = poll(poll_fds, poll_count, (int)poll_milliseconds);
+            }
             int poll_error = errno;
 #if BUSTER_INCLUDE_TESTS
             if (!spawn.process_group && poll_result > 0 && test_expire_deadline_after_ready)
@@ -4942,7 +5478,22 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             {
                 if (poll_error == EINTR)
                 {
+                    if (!spawn.process_group)
+                    {
+                        for (nfds_t index = 0; index < poll_count; index += 1)
+                        {
+                            BUSTER_CHECK(os_process_capture_step(capture_states + poll_streams[index], OS_PROCESS_CAPTURE_WAIT_INTERRUPTED, 0));
+                        }
+                    }
                     continue;
+                }
+                capture_failed = true;
+                if (!spawn.process_group)
+                {
+                    for (nfds_t index = 0; index < poll_count; index += 1)
+                    {
+                        BUSTER_CHECK(os_process_capture_step(capture_states + poll_streams[index], OS_PROCESS_CAPTURE_WAIT_FAILED, 0));
+                    }
                 }
                 errno = poll_error;
                 string_print(S8("Failed to poll process pipes: {EOs}\n"), os_get_last_error());
@@ -4950,31 +5501,55 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
             for (nfds_t poll_index = 0; poll_index < poll_count; poll_index += 1)
             {
-                if (!(poll_fds[poll_index].revents & (POLLIN | POLLHUP | POLLERR)))
+                u64 stream = poll_streams[poll_index];
+                OsProcessCaptureState* capture_state = spawn.process_group ? 0 : capture_states + stream;
+                if (!(poll_fds[poll_index].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
                 {
+                    if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_WAIT_IDLE, 0)); }
                     continue;
                 }
 
-                u64 stream = poll_streams[poll_index];
-                u8 buffer[16 * 1024];
-                ssize_t read_result = read(read_pipes[stream], buffer, sizeof(buffer));
+                if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_WAIT_READY, 0)); }
+                u8 buffer[OS_PROCESS_CAPTURE_READ_LIMIT];
+                ssize_t read_result;
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+                if (capture_state && os_process_capture_test_take(OS_PROCESS_CAPTURE_READ_FAILED))
+                {
+                    read_result = -1;
+                    errno = EBADF;
+                }
+                else
+#endif
+                {
+                    read_result = read(read_pipes[stream], buffer, sizeof(buffer));
+                }
+                int read_error = errno;
 
                 if (read_result > 0)
                 {
+                    if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_READ_BYTES, (u64)read_result)); }
                     pipe_capture_append(scratch.arena, &captures[stream], spawn, &result, (StandardStream)stream, buffer, (u64)read_result);
                 }
                 else
                 {
-                    if (read_result < 0 && errno != EINTR)
+                    if (read_result < 0 && read_error != EINTR)
                     {
-                        string_print(S8("Failed to read from process pipe: {EOs}\n"), os_get_last_error());
+                        capture_failed = true;
+                        string_print(S8("Failed to read from process pipe: {EOs}\n"), (OsError){.v = (u32)read_error});
                     }
 
-                    if (read_result == 0 || (read_result < 0 && errno != EINTR))
+                    if (read_result == 0 || (read_result < 0 && read_error != EINTR))
                     {
-                        close(read_pipes[stream]);
-                        read_pipes[stream] = -1;
+                        if (capture_state)
+                        {
+                            BUSTER_CHECK(os_process_capture_step(capture_state, read_result ? OS_PROCESS_CAPTURE_READ_FAILED : OS_PROCESS_CAPTURE_READ_EOF, 0));
+                        }
+                        capture_failed = !os_process_capture_close(read_pipes + stream, capture_state) || capture_failed;
                         open_pipe_count -= 1;
+                    }
+                    else if (capture_state)
+                    {
+                        BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_READ_INTERRUPTED, 0));
                     }
                 }
             }
@@ -4993,8 +5568,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
             if (read_pipes[stream] >= 0)
             {
-                close(read_pipes[stream]);
-                read_pipes[stream] = -1;
+                capture_failed = !os_process_capture_close(read_pipes + stream, spawn.process_group ? 0 : capture_states + stream) || capture_failed;
             }
         }
 
@@ -5096,6 +5670,26 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
         }
 
+        if (spawn.observe_resources && wait_result == pid)
+        {
+            bool cpu_valid = os_process_usage_microseconds(usage.ru_utime, &result.resources.user_cpu_us) &&
+                os_process_usage_microseconds(usage.ru_stime, &result.resources.system_cpu_us);
+            result.resources.cpu_status = cpu_valid ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (!cpu_valid) { result.resources.cpu_error.v = (u32)EOVERFLOW; }
+#if BUSTER_LINUX
+            bool memory_valid = usage.ru_maxrss >= 0 && (u64)usage.ru_maxrss <= (u64)-1 / 1024;
+            result.resources.memory_status = memory_valid ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (memory_valid) { result.resources.peak_memory_bytes = (u64)usage.ru_maxrss * 1024; }
+            else { result.resources.memory_error.v = (u32)EOVERFLOW; }
+#elif BUSTER_MACOS
+            result.resources.memory_status = usage.ru_maxrss >= 0 ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (result.resources.memory_status == PROCESS_RESOURCE_OBSERVED) { result.resources.peak_memory_bytes = (u64)usage.ru_maxrss; }
+            else { result.resources.memory_error.v = (u32)EOVERFLOW; }
+#else
+            result.resources.memory_status = PROCESS_RESOURCE_UNSUPPORTED;
+#endif
+        }
+
         if (program_flag_get(PROGRAM_FLAG_VERBOSE))
         {
             string_print(S8("Process [{s32}]: Time (user): {s64}:{s64} s,us, (system): {s64}:{s64} s,us. Max RSS: {s64} KB. PF (soft): {s64}, (hard): {s64}. "
@@ -5123,6 +5717,18 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         {
             result.result = PROCESS_RESULT_FAILED;
         }
+        if (!spawn.process_group)
+        {
+            for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+            {
+                if (captured[stream])
+                {
+                    result.result = os_process_capture_result(capture_states + stream, result.result);
+                    capture_failed |= capture_states[stream].failed;
+                }
+            }
+        }
+        result.capture_failed |= capture_failed;
         if (capture_failed) { wait_failed = true; }
         if (wait_failed) { result.result = PROCESS_RESULT_FAILED; }
         result.process_group_reservation_retained = spawn.process_group && wait_result != pid;
@@ -5332,6 +5938,63 @@ String8 string8_from_os_error(Arena* arena, OsError error, bool null_terminate)
     return result;
 }
 
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool os_windows_environment_name_equal(String8 a, String8 b)
+{
+    bool result = os_windows_ascii_equal_ignore_case(a, b);
+    if (!result && a.length <= INT32_MAX && b.length <= INT32_MAX)
+    {
+        bool non_ascii = false;
+        for (u64 index = 0; index < a.length && !non_ascii; index += 1)
+        {
+            non_ascii = (u8)a.pointer[index] >= 0x80;
+        }
+        for (u64 index = 0; index < b.length && !non_ascii; index += 1)
+        {
+            non_ascii = (u8)b.pointer[index] >= 0x80;
+        }
+        // The shared conversion replaces malformed UTF-8. Refuse that path
+        // rather than aliasing an invalid query to a real U+FFFD name.
+        bool valid_utf8 = non_ascii &&
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, a.pointer, (int)a.length, 0, 0) > 0 &&
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, b.pointer, (int)b.length, 0, 0) > 0;
+        if (valid_utf8)
+        {
+            // Preserve allocation-free ASCII and byte-equal names. Unicode
+            // mismatches use Windows' ordinal case mapping, independent of the
+            // locale. Entry/teardown callers can have no selected context.
+            bool has_context = thread_context_selected() != 0;
+            TemporalArena temp = {0};
+            Arena* arena;
+            if (has_context)
+            {
+                temp = scratch_begin(0, 0);
+                arena = temp.arena;
+            }
+            else
+            {
+                arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+            }
+            if (arena)
+            {
+                String16 left = string16_from_string8(arena, a, false);
+                String16 right = string16_from_string8(arena, b, false);
+                result = CompareStringOrdinal(left.pointer, (int)left.length, right.pointer, (int)right.length, TRUE) == CSTR_EQUAL;
+            }
+            if (has_context)
+            {
+                scratch_end(temp);
+            }
+            else if (arena)
+            {
+                arena_destroy(arena, 1);
+            }
+        }
+    }
+    return result;
+}
+#endif
+
 String8 os_get_environment_variable(String8 variable)
 {
     String8 result = {0};
@@ -5342,7 +6005,12 @@ String8 os_get_environment_variable(String8 variable)
         for (u64 i = 0; i < env_count; i += 1)
         {
             String8 env = env_pointer[i];
-            if (string_equal(variable, env))
+#if BUSTER_WINDOWS
+            bool matches = os_windows_environment_name_equal(variable, env);
+#else
+            bool matches = string_equal(variable, env);
+#endif
+            if (matches)
             {
                 result = program_state->input.environment_values.pointer[i];
                 break;
@@ -5395,18 +6063,25 @@ bool os_unreserve(void* address, u64 size)
 
 OsModuleHandle* os_dynamic_library_load(String8 library)
 {
-    OsModuleHandle* result = {0};
-    BUSTER_VALIDATE(BUSTER_SLICE_IS_ZERO_TERMINATED(library));
-
+    OsModuleHandle* result = 0;
+    OsTemporaryArenaScope temp = os_temporary_arena_begin(0, 0);
+    if (temp.arena)
+    {
 #if defined(_WIN32)
-    TemporalArena temp = scratch_begin(0, 0);
-    String16 library_w = string16_from_string8(temp.arena, library, true);
-    result = (OsModuleHandle*)LoadLibraryW(library_w.pointer);
-    scratch_end(temp);
+        String16Z library_w = {0};
+        if (string16z_from_string8_arena(temp.arena, library, &library_w))
+        {
+            result = (OsModuleHandle*)LoadLibraryW(library_w.pointer);
+        }
 #else
-    result = (OsModuleHandle*)dlopen(library.pointer, RTLD_NOW | RTLD_LOCAL);
+        String8Z library_z = {0};
+        if (string8z_copy_arena(temp.arena, library, &library_z))
+        {
+            result = (OsModuleHandle*)dlopen(library_z.pointer, RTLD_NOW | RTLD_LOCAL);
+        }
 #endif
-
+    }
+    os_temporary_arena_end(temp);
     return result;
 }
 
@@ -5425,13 +6100,20 @@ void os_dynamic_library_unload(OsModuleHandle* module)
 OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbol)
 {
     TemporalArena scratch = scratch_begin(0, 0);
-    String8 terminated_symbol = string_duplicate_arena(scratch.arena, symbol, true);
-    OsSymbol* result = {0};
+    OsSymbol* result = 0;
 
 #if defined(_WIN32)
-    result = (OsSymbol*)GetProcAddress((HMODULE)module, terminated_symbol.pointer);
+    String8Z terminated_symbol = {0};
+    if (string8z_copy_arena(scratch.arena, symbol, &terminated_symbol))
+    {
+        result = (OsSymbol*)GetProcAddress((HMODULE)module, terminated_symbol.pointer);
+    }
 #else
-    result = (OsSymbol*)dlsym((void*)module, terminated_symbol.pointer);
+    String8Z terminated_symbol = {0};
+    if (string8z_copy_arena(scratch.arena, symbol, &terminated_symbol))
+    {
+        result = (OsSymbol*)dlsym((void*)module, terminated_symbol.pointer);
+    }
 #endif
 
     scratch_end(scratch);
@@ -5534,34 +6216,9 @@ u64 os_get_resident_memory_size(void)
         result = (u64)usage.ru_maxrss;
     }
 #else
-    // Resolved at runtime for the same reason GlobalMemoryStatusEx is below:
-    // tcc's bundled import stubs do not carry it. K32GetProcessMemoryInfo is
-    // the kernel32 export, so no psapi import library is needed either.
-    //
-    // The counters are declared here rather than taken from psapi.h, which
-    // tcc's bundled headers do not ship: build.c includes this file and is
-    // bootstrapped with tcc, so naming PROCESS_MEMORY_COUNTERS is an "invalid
-    // type" there long before any Windows compiler sees it. The layout is
-    // fixed by the ABI, and `cb` tells the callee which version it received.
-    typedef struct
-    {
-        DWORD cb;
-        DWORD page_fault_count;
-        SIZE_T peak_working_set_size;
-        SIZE_T working_set_size;
-        SIZE_T quota_peak_paged_pool_usage;
-        SIZE_T quota_paged_pool_usage;
-        SIZE_T quota_peak_non_paged_pool_usage;
-        SIZE_T quota_non_paged_pool_usage;
-        SIZE_T pagefile_usage;
-        SIZE_T peak_pagefile_usage;
-    } OsProcessMemoryCounters;
-    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, OsProcessMemoryCounters*, DWORD);
-    GetProcessMemoryInfoProc get_process_memory_info =
-        (GetProcessMemoryInfoProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
     OsProcessMemoryCounters counters = {0};
-    counters.cb = sizeof(counters);
-    if (get_process_memory_info && get_process_memory_info(GetCurrentProcess(), &counters, sizeof(counters)))
+    OsError error = {0};
+    if (os_windows_process_memory_counters(GetCurrentProcess(), &counters, &error) == PROCESS_RESOURCE_OBSERVED)
     {
         result = (u64)counters.working_set_size;
     }
@@ -5639,18 +6296,25 @@ void os_thread_set_name(String8 thread_name)
 {
 #if defined(__linux__) || defined(__APPLE__)
     TemporalArena scratch = scratch_begin(0, 0);
-    String8 terminated_name = string_duplicate_arena(scratch.arena, thread_name, true);
+    String8Z terminated_name = {0};
+    bool valid = string8z_copy_arena(scratch.arena, thread_name, &terminated_name);
+    if (valid)
+    {
 #if defined(__linux__)
-    pthread_setname_np(pthread_self(), terminated_name.pointer);
+        pthread_setname_np(pthread_self(), terminated_name.pointer);
 #else
-    pthread_setname_np(terminated_name.pointer);
+        pthread_setname_np(terminated_name.pointer);
 #endif
+    }
     scratch_end(scratch);
 #elif defined(_WIN32)
 #ifndef __TINYC__
     TemporalArena scratch = scratch_begin(0, 0);
-    String16 string = string16_from_string8(scratch.arena, thread_name, true);
-    SetThreadDescription(GetCurrentThread(), string.pointer);
+    String16Z string = {0};
+    if (string16z_from_string8_arena(scratch.arena, thread_name, &string))
+    {
+        SetThreadDescription(GetCurrentThread(), string.pointer);
+    }
     scratch_end(scratch);
 #else
     BUSTER_UNUSED(thread_name);
@@ -6489,20 +7153,24 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
             };
 
             String8 full_path = string_join_arena(temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
+            String8Z full_path_z = {0};
+            bool path_valid = string8z_copy_arena(temp.arena, full_path, &full_path_z);
 
             bool found;
 #if defined(_WIN32)
-            DWORD file_attributes = GetFileAttributesW(string16_from_string8(temp.arena, full_path, true).pointer);
-            found = file_attributes != INVALID_FILE_ATTRIBUTES && (file_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+            String16Z full_path_w = {0};
+            bool wide_path_valid = path_valid && string16z_from_string8_arena(temp.arena, full_path, &full_path_w);
+            DWORD file_attributes = wide_path_valid ? GetFileAttributesW(full_path_w.pointer) : INVALID_FILE_ATTRIBUTES;
+            found = wide_path_valid && file_attributes != INVALID_FILE_ATTRIBUTES && (file_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
 #else
             // access(X_OK) alone also matches directories (e.g. a "cmake/"
             // directory in a "." PATH component); require a regular file.
             struct stat file_stat;
-            found = access(full_path.pointer, X_OK) == 0 && stat(full_path.pointer, &file_stat) == 0 && S_ISREG(file_stat.st_mode);
+            found = path_valid && access(full_path_z.pointer, X_OK) == 0 && stat(full_path_z.pointer, &file_stat) == 0 && S_ISREG(file_stat.st_mode);
 #endif
             if (found)
             {
-                result = string_duplicate_arena(arena, full_path, true);
+                result = string_duplicate_arena(arena, (String8){.pointer = full_path_z.pointer, .length = full_path_z.length}, true);
                 break;
             }
 

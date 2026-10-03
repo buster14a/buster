@@ -6,14 +6,12 @@
 
 Use the repository and host named by the user; a GitHub URL names the GitHub
 repository, not a Forgejo task. Otherwise inspect the current git remote.
-Forgejo at `https://code.buster14a.com/buster/buster` retains the workflows
-under `.forgejo/`; `.github/workflows/ci.yml` runs the migration matrix described
-in `docs/ci-github-actions.md`. Check the live checks on the submitted commit.
-The separate private workflow-only GitHub broker may supply opt-in hosted
-desktop runners as documented in `docs/ci-github-hosted-runners.md`; that
-broker is never a source mirror. When working on Forgejo, use **`fj`**, the Forgejo CLI. It reads
-the repository from the git remote, so run it from inside a checkout (or pass
-`-C <path>` / `-r buster/buster`).
+Active CI and merge admission are defined under `.github/workflows/`; check
+the live checks on the submitted commit. The `.forgejo/` implementation and
+source-free GitHub runner broker were removed in commit
+`02c0400a34d04be9e984f29a59291750b3998d3f`. Their
+[retirement record](../ci-github-hosted-runners.md) links historical material,
+not current setup or validation commands.
 
 The issues open on 2026-08-31 were copied to `buster14a/buster` on GitHub as
 part of the migration. Numbers did not survive the copy, so historical
@@ -22,37 +20,21 @@ references in the topic guides, code comments, and commit messages may name a
 through `docs/forgejo-issue-archive.md` for issues already closed by then.
 Do not remap an issue identified by a current GitHub URL.
 
-`fj` needs a token once per machine. The password half of the
-`code.buster14a.com` line in `~/.git-credentials` is a valid API token, so
-authentication is a pipe, not a browser round trip:
-
-```sh
-grep code.buster14a.com ~/.git-credentials \
-  | sed 's|https://[^:]*:||; s|@code.buster14a.com.*||' \
-  | fj auth add-token -H code.buster14a.com
-fj whoami          # verify: <account>@code.buster14a.com
-```
-
-`fj issue create "<title>" --body-file <path> --no-template`,
-`fj issue search [-s open|closed|all]`, `fj issue view <n>`,
-`fj issue comment <n>`, and `fj pr create --base main --head <branch>
---body-file <path>` are the whole working set; `fj pr search`, `fj pr status`
-and `fj pr view` read the other side. Two things to know before scripting it:
-the subcommand for listing issues is `search`, not `list`, and **omitting both
-`--body` and `--body-file` opens `$EDITOR`**, which hangs a non-interactive
-session — always pass a body file. Write the body as a file rather than a
-shell string: backticks inside `$(cat <<EOF)` get command-substituted by zsh,
-which has mangled a commit message before.
-
-`fj` supersedes the older workarounds. `tea`'s login for this host has no
-token, and the raw-`curl` recipe that went with it needed a browser
-`User-Agent` to get past Cloudflare's `403 error code: 1010`; `fj` is not
-subject to either problem.
-
 **Issues are the task queue.** Work that is real but not being done right now
 becomes an issue, not a paragraph in an audit that nobody will find — a chip
 filed against a memory is invisible to the next agent, while an issue is
-something a fresh session can pick up cold. Write the body as a **prompt**: what
+something a fresh session can pick up cold. An agent that encounters a separate
+actionable problem reports it during the task, before session end or handoff:
+search open and closed issues/PRs for the root cause; comment with fresh evidence
+on the matching record, or file a new issue if none exists. A finding fixed in
+the active PR belongs in that PR's description and regression evidence; link an
+existing issue if one tracks it. Group symptoms with the same root cause in one
+record and separate independent problems. Report a blocker on its owning issue
+or PR as soon as it changes the next action. Do not open a new issue for every
+flaky retry or known duplicate. When access prevents publication, preserve a
+ready-to-post body and explicitly identify the unposted report in the handoff.
+
+Write the body as a **prompt**: what
 is wrong and how it was diagnosed, the file and symbol names to start from,
 the constraints and do-not-retries that earlier work already paid for, how to
 validate the fix (which oracle, which harness, which counters), and a
@@ -174,12 +156,20 @@ Ordinary feature branches do not own
 an admitted source changed. The read-only rebinding workflow reconstructs the
 exact candidate state in a disposable checkout. The repository ruleset's
 required `Native retirement merge admission` check is the merge-admission
-authority. `API migration policy` remains a separate compatibility check. For
-retirement-sensitive changes it accepts only a current-main, two-parent
-integration head with a successful exact-head
-`Native retirement trusted integration` status from `github-actions[bot]`.
-When `main` advances that status is invalidated; rerun the protected writer
-instead of hand-editing generated state or requiring a manual rebase.
+authority. `API migration policy` remains a separate compatibility check.
+
+An ordinary PR that changes admitted sources needs no writer step. It queues
+like any other PR, and queue admission requires the ephemeral reconstruction
+of its exact group tree. Afterwards an automatic catch-up PR
+(`native-retirement/catch-up`) publishes the regenerated pair for `main`.
+Leave that PR to the automation: do not edit it, push to it or merge it by hand.
+
+`bootstrap` and `policy` transitions still need the writer first. For them,
+admission accepts only a current-main, two-parent integration head with a
+successful exact-head `Native retirement trusted integration` status from
+`github-actions[bot]`. When `main` advances that status is invalidated; rerun
+the protected writer instead of hand-editing generated state or requiring a
+manual rebase.
 
 Changes to rebinder/materializer/validator/workflow implementation are a
 `bootstrap` transition. Changes to reviewed policy, generated schema, or
@@ -194,8 +184,9 @@ generated-file edits are rejected for every class. See
 
 The `merge-conflict-preflight` status is a cheap read-only answer for one exact
 triple: current `main`, candidate head and merge base. Its description embeds
-the full main and head SHAs; the retained JSON also records their trees, every
-merge-base SHA/tree and the exact combined tree when clean. A result for
+the full main and head SHAs, plus a trailing `q=queued` when the trusted job
+read that exact head as queued; the retained JSON also records their trees,
+every merge-base SHA/tree and the exact combined tree when clean. A result for
 `m=<old-main> h=<head>` is not authoritative after `main` moves, even when the
 same head still shows a green status. The default-branch refresh rewrites the
 status for open PRs, and the later merge-group admission path must validate its
@@ -221,8 +212,8 @@ Respond to its numbered classification exactly as follows:
    `docs/native-retirement-repository-sources-v1.json` and/or
    `tools/native_retirement_dependency_binding.generated.h` from the PR. Do not
    hand-resolve hashes or refresh generated state on the feature branch; rerun
-   ephemeral validation and let the serialized trusted writer publish the
-   integrated result.
+   ephemeral validation and let the automatic catch-up (or, for a trust
+   transition, the trusted writer) publish the integrated result.
 2. **Genuine source overlap.** Stop the expensive matrix and inspect the exact
    named paths. Choose an intentional order, rebase or explicit stack; preserve
    both changes where required, run the affected focused tests, then let the
@@ -240,6 +231,18 @@ Respond to its numbered classification exactly as follows:
    the applicable exact-head authorization before running expensive acceptance
    again: independent review by default, or the explicitly configured admin
    dispatch in the documented solo-maintainer policy.
+
+**Dequeue a conflicted queued PR before pushing its fix.** GitHub keeps a
+queued PR that starts conflicting with `main` in the queue, and it refuses
+every push to that PR's branch with `GH006` ("Branches that are queued for
+merging cannot be updated"). Any of these signals means the PR is in that
+state: a conflicted status that ends in `q=queued`, a preflight summary that
+names the PR as queued, or that push error. Dequeue the PR first, with
+**Remove from queue** or the GraphQL `dequeuePullRequest` mutation. Then push
+the resolution and re-enqueue the PR after its checks pass. Do not retry the
+push or use a queue bypass. If you cannot dequeue the PR, say so on the PR.
+Nothing dequeues it automatically; see
+[queued PRs that start conflicting](../merge-queue-admission.md#queued-prs-that-start-conflicting).
 
 For a local diagnosis with already-fetched immutable commits, run:
 
@@ -280,9 +283,11 @@ replacement head after its checks pass. No manual generated-file repair is neede
 
 The main merge queue was enabled and read back on 2026-09-22 after #945 landed.
 All eight documented checks are required from GitHub Actions. The repository
-contract permits up to 20 speculative combined-head builds while allowing only
-one validated candidate to merge at a time. `ALLGREEN` requires every queued
-group's checks, and `MERGE` retains merge commits. The initial activation had
+contract permits up to 6 speculative combined-head builds (raised from 4 by
+#2012 after #1805 lowered it from 20) while allowing only one validated candidate
+to merge at a time.
+`ALLGREEN` requires every queued group's checks, and `MERGE` retains merge
+commits. The initial activation had
 one build slot and no bypass; the administrator must read back the current live
 settings before relying on them. On 2026-09-24 the administrator added two
 standing `always` bypass actors to the live main ruleset: Repository admin

@@ -59,11 +59,14 @@ typedef enum AssemblyRelocationKind
     ASSEMBLY_RELOCATION_X86_PC16,
     ASSEMBLY_RELOCATION_X86_PC64,
     ASSEMBLY_RELOCATION_AARCH64_CALL26,
-    // Local control-flow relocations used by inline asm-goto lowering. Object
-    // writers intentionally reject these local-only architectural forms.
+    // Local control-flow relocations used by inline asm-goto and assembly-unit
+    // lowering. Units resolve binding-invariant same-section references before
+    // object construction; object writers reject retained short forms.
     ASSEMBLY_RELOCATION_AARCH64_CONDBR19,
     ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19,
     ASSEMBLY_RELOCATION_AARCH64_TESTBR14,
+    ASSEMBLY_RELOCATION_AARCH64_PREL32,
+    ASSEMBLY_RELOCATION_AARCH64_PREL64,
     ASSEMBLY_RELOCATION_COUNT,
 } AssemblyRelocationKind;
 
@@ -94,7 +97,11 @@ struct AssemblyEncodeOptions
     // label placeholders that must be made reachable before local layout.
     // Standalone/module assembly leaves identically spelled user labels alone.
     bool private_inline_labels;
-    u8 reserved[3];
+    // The assembly-unit owner resolves these short symbolic references after
+    // all labels and bindings are known. This does not enable object/link
+    // relocation support or change private inline branch expansion.
+    bool unit_control_relocations;
+    u8 reserved[2];
 };
 
 typedef struct AssemblyEncodeResult AssemblyEncodeResult;

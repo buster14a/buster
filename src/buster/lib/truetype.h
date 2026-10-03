@@ -80,6 +80,9 @@ BUSTER_F_DECL TTF_FontInitialization truetype_font_initialize(ByteSlice file, u3
 BUSTER_F_DECL f32 truetype_scale_for_pixel_height(const TTF_FontInformation* information, f32 height);
 BUSTER_F_DECL TTF_VerticalMetrics truetype_get_font_vertical_metrics(const TTF_FontInformation* information);
 BUSTER_F_DECL TTF_HorizontalMetrics truetype_get_codepoint_horizontal_metrics(const TTF_FontInformation* information, u32 codepoint);
+// Horizontal advance delta in font units from version-0, format-0 kern
+// subtables. Matching values add in table order; override replaces the sum.
+// Minimum, cross-stream, vertical and other-format subtables are ignored.
 BUSTER_F_DECL s32 truetype_get_codepoint_kern_advance(const TTF_FontInformation* information, u32 codepoint_left, u32 codepoint_right);
 // Scales must be finite and in [0, BUSTER_TTF_MAX_SCALE]. A zero scale on
 // either axis, an empty glyph, invalid bounds/scales, or an exceeded bitmap
@@ -88,6 +91,10 @@ BUSTER_F_DECL s32 truetype_get_codepoint_kern_advance(const TTF_FontInformation*
 // a 0.25px device-space tolerance and bounded subdivision; count-then-emit
 // extraction enforces the point and edge-search work budgets before allocating
 // the exact raster path, and checks the edge budget again before rasterization.
+// Compounds align original outline points with unsigned indices after matrix
+// transformation, with eight levels and bounded outline/attachment work. Hinting
+// and phantom-point anchors are unsupported; invalid/out-of-outline anchors
+// return the same all-zero bitmap and roll back extraction allocations.
 BUSTER_F_DECL TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation* information, f32 scale_x, f32 scale_y, u32 codepoint);
 
 #if BUSTER_INCLUDE_TESTS

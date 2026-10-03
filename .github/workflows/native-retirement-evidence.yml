@@ -19,6 +19,7 @@ on:
       - tools/native_retirement_sdks_test.py
       - tools/native_retirement_reference.py
       - tools/native-retirement-mingw/**
+      - tools/native-retirement-darwin/**
       - docs/native-retirement-sdks-v1.json
       - tools/native_retirement_external_test.py
       - tools/native_retirement_census.c
@@ -121,6 +122,18 @@ jobs:
           python3 tools/native_retirement_external.py prepare \
             --manifest docs/native-retirement-dependencies-v1.json \
             --source-root "$(pwd)"
+          # Evidence binds the committed generated pair at this exact revision.
+          # Between an ordinary-bound merge and its catch-up (#1893) that pair
+          # is behind; fail with the reason instead of a census binding mismatch.
+          freshness=0
+          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)" > "$RUNNER_TEMP/rebind-check.json" || freshness=$?
+          if [[ "$freshness" -eq 2 ]]; then
+            echo '::error::Committed native-retirement generated state is behind this revision; a catch-up is pending. Run evidence on a revision after the catch-up lands.'
+          fi
+          if [[ "$freshness" -ne 0 ]]; then
+            cat "$RUNNER_TEMP/rebind-check.json"
+            exit "$freshness"
+          fi
           python3 tools/native_retirement_materializer.py self-test
           python3 tools/native_retirement_materializer.py materialize \
             --manifest docs/native-retirement-dependencies-v1.json \
@@ -271,13 +284,6 @@ jobs:
           - name: Linux AArch64 native
             runner: ubuntu-26.04-arm
             slug: linux-aarch64
-            platform: unix
-            python: python3
-            sanitizer: required
-            sanitizer_reason: available
-          - name: macOS x86-64 native
-            runner: macos-26-intel
-            slug: macos-x86_64
             platform: unix
             python: python3
             sanitizer: required

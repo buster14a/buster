@@ -4,6 +4,24 @@
 
 [Compatibility harness index](../compatibility.md). Read only the harness you are working on; pins, measurements, and past failure counts describe the revision recorded below and must be rechecked before reuse.
 
+## Current cloud qualification
+
+At baseline `133e11167a0e6818a6e226aedab68560add0673c`, the unchanged
+harness rejects `sqlite3.c:137217:3` in `sqlite3RegisterBuiltinFunctions`:
+`could not lower initializer expression for local 'aBuiltinFunc'`.
+The math-function table stores function addresses in `void *pUserData`.
+
+The bounded [GNU callback-storage policy](../frontend/calls.md#gnu-callback-storage-through-void-pointers)
+restores that conversion in this harness's native Linux/default GNU17
+configuration. On hosted Ubuntu26.04 x86-64, the candidate passes the full
+unchanged harness. No math functions, tests or source constructs are removed.
+See the [pinned portfolio](../../capability-portfolios/callback-storage.md)
+for exact baseline/candidate identities, complete allocator/configuration
+results, source transports, license exceptions and artifacts.
+Other target families and build configurations remain outside this runtime
+qualification; the historical measurements below are not new performance
+acceptance.
+
 The opt-in SQLite compatibility harness takes the official SQLite 3.53.4
 downloads -- the amalgamation and the source distribution -- and neither is
 copied into or patched in this repository:

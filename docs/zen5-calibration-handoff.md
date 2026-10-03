@@ -42,6 +42,18 @@ job/attempt, plan bytes and approved host/lease/profile identity. Merely writing
 `plan.json` beside later results does not prove predeclaration. Any source,
 binary, root, host/profile or output-oracle change requires a new plan and job.
 
+## Service producer
+
+The served `zen5-calibration-v1` recipe (`tools/bench_service/zen5_recipe.c`,
+described in `tools/bench_service/README.md`) is the producer; it has not yet
+run on the physical 9700X. It
+builds the five trusted subjects serially, writes this plan in the canonical
+`freeze` form before any timed child, publishes a durable plan manifest, and
+emits `immutable.json`, `same-root-rebuild.json` and `cross-root.json` under
+`zen5/captures/`. Its final manifest lists the plan and capture digests, but
+those are bundle contents: the trusted digests for `replay` must still come
+from the authenticated service channel. The recipe never authorizes A/B.
+
 ## Exclusive collection and independent replay
 
 The operator explicitly authorizes the host interval and verifies the approved
@@ -89,6 +101,217 @@ eligibility calculation remain necessary before #1022 can authorize A/B. An
 accepted A/B result from this same job is never an input to its preceding A/A
 decision. The existing #619/#511 consumer then assesses complete candidate
 samples only after the independent post-A/A decision and service phase receipt.
+
+## A/A policy evaluator (#426 plan step 4)
+
+`tools/zen5_aa_evaluator.py` turns retained `zen5-calibration-v1` attempt
+bundles into the canonical A/A policy document that a later
+`aa-policy-sha256=` recipe-profile pin binds. It implements the family
+proposed by #1188 with the inputs decided on
+[#36](https://github.com/buster14a/buster/issues/36#issuecomment-5919407135):
+q = 0.90, a 42-member family with 0.05 Bonferroni allocation (so a finite bound
+needs at least 64 confirmatory attempts), and #881 current-job P = 60 with
+runtime rows (U = R). It changes no threshold. It carries no approved limit,
+and no policy digest is pinned anywhere.
+
+There are two inputs and two digests:
+
+- **Protocol** (`buster-zen5-aa-protocol-v1`). The reviewer writes it from
+  exploratory pilots, then freezes it and merges it on main before the
+  window-2 dispatch (decided on
+  [#36](https://github.com/buster14a/buster/issues/36#issuecomment-5921955897)).
+  `template` writes the unapproved skeleton. The decided inputs are fixed:
+  q, K, the family alpha, the count of at least 64 (at most 256) confirmatory
+  attempts, and the independence checks (alpha 0.05, Bonferroni over 84, at
+  least 100,000 permutations; decided on
+  [#36](https://github.com/buster14a/buster/issues/36#issuecomment-5921978144)).
+  Each reviewer choice starts as `null`: the 42 practical limits, the
+  permutation seed, the confirmatory job range, the applicability identities,
+  the pilot list, the current-job A/A equivalence band and the approval. The
+  evaluator records the protocol's SHA-256. Nothing offline can prove that the
+  protocol was published before window 2.
+- **Ledger** (`buster-zen5-aa-attempt-ledger-v1`). It must be the complete
+  attempt list the service reports, never a selection of kept bundles. It
+  lists every retained attempt in execution order, so job/attempt tokens must
+  strictly increase, and pilots come first. `window_jobs` lists every job id
+  the service reports inside the protocol's `confirmatory_jobs` range. Each
+  entry has its role, its bundle directory and a `trusted` block of digests
+  taken from the authenticated service channel, never from the bundle (see
+  below).
+- **Policy document** (`buster-zen5-aa-policy-v1`). The canonical JSON bytes
+  are hashed, and that SHA-256 is the future `aa-policy-sha256=` value. The
+  document embeds the protocol, the method, every attempt with its validity
+  reasons, the family result, and the evaluator source digests. It does not
+  record the interpreter version: the analyzers use `math.fsum` since #2110,
+  and the evaluator's own statistics are exact integers or fractions, so the
+  bytes replay under any supported Python 3 (checked with 3.11, 3.12 and 3.13).
+  The report shows the interpreter for information.
+
+Each ledger `trusted` block has four parts:
+
+- `manifest_sha256`: the SHA-256 of the final `zen5-calibration-v1.manifest`
+  bytes. The service binds it with `BQ_RESULT_BIND` (`bq_result_bind`) and
+  reports it as `manifest-sha256=` in the `gateway result JOB` receipt. The
+  `BQEXP001` export receipt carries it at offset 112. The evaluator requires the
+  bundle's manifest bytes to hash to it. Profile, status, stage, oracle, PMU,
+  budget and job/attempt lines therefore come from the service, not from the
+  bundle.
+- `profile_sha256`: the SHA-256 of the compiled recipe profile, at offset 608
+  of the `BQEXP001` export receipt. This is the same byte string that
+  `zen5_recipe.c` hashes into `profile-sha256=`, and the manifest line must
+  equal it.
+- `plan_sha256` and `captures`: these must equal the authenticated manifest's
+  `plan-sha256=` and `*-capture-sha256=` lines, and the bundle bytes must
+  match them.
+
+Since #2106 the recipe is served, and a successful zen5 job produces both
+receipts. The worker's terminal hook (`bq_worker_before_terminal`) validates
+the zen5 manifest (`bq_worker_result_validate`) and journals `BQ_RESULT_BIND`.
+The RESULT reply then reports the manifest digest, and `bq_export_snapshot`
+writes it at offset 112 and the SHA-256 of `bq_recipe_profile` at offset 608.
+`bq_test_zen5_served_binding` (`tools/bench_service/tests.c`) checks this end to
+end on the recipe self-test's result tree. An attempt without these receipts,
+or with digests that differ from them, is `invalid`.
+
+The confirmatory set is fixed in advance by the protocol's
+`confirmatory_jobs` range (`first_job_id`..`last_job_id`). The service assigns
+job ids from its journal sequence, so ids are increasing but not consecutive.
+The reviewer sets the range when the protocol is merged, and window 2
+dispatches only its confirmatory attempts. `window_jobs` must be the
+service's complete list of jobs in that range: for example, every id in the
+range for which `gateway status JOB` returns a job (unassigned ids are
+refused). The confirmatory entries must be exactly those jobs, one attempt
+each. The set is `invalid` if a job in the range is missing from the ledger,
+if a job has a replaced (second) attempt, if a confirmatory attempt or listed
+job lies outside the range, or if a pilot lies inside it. The evaluator cannot
+query the service itself. Omitting an attempt therefore requires
+misreporting the service's list explicitly; it cannot happen by quietly
+dropping a bundle.
+
+```sh
+python3 -B tools/zen5_aa_evaluator.py template --output protocol.json
+python3 -B tools/zen5_aa_evaluator.py evaluate --protocol protocol.json \
+  --ledger ledger.json --policy-output aa-policy.json --report-output aa-policy.md
+python3 -B tools/zen5_aa_evaluator.py verify --protocol protocol.json \
+  --ledger ledger.json --policy aa-policy.json
+```
+
+### Frozen window-2 protocol
+
+`docs/zen5-aa-protocol-v1.json` is the protocol frozen for window 2, decided
+on [#36](https://github.com/buster14a/buster/issues/36#issuecomment-5928278832).
+The evaluator self-test requires it to be valid with no unset choice.
+
+- **Pilots.** The window-1 qualification attempt and four pilots (jobs 82, 91,
+  100, 109, 118) were all valid with 5 values per member
+  ([summaries](https://github.com/buster14a/buster/issues/36#issuecomment-5928197212)).
+- **Limits.** Each of the 42 limits is twice the pilot maximum, rounded up to two
+  significant digits. Serial-effect correlation limits have a floor of 0.3 and
+  a cap of 0.5. The wall-time `pair_resolution` limits (1.2–1.4) therefore
+  barely bind.
+- **Band, seed and applicability.** The current-job band is `[0.98, 1.02]` and
+  the seed is `4260881`. Applicability is the window-1 install: revision
+  `d7c9d5f8`, tree `a3a04f9f`, and its source-identity and profile digests.
+- **Confirmatory jobs.** The range is `120..9999`. No other job may be
+  submitted to the service from this protocol's merge until window 2 closes,
+  or the confirmatory set is `invalid`.
+
+Window 2 evaluated `inconclusive` (`aa-policy-sha256=8366b4d9…`). The cause was
+CPU 2 power management: after each 2 s inter-block gap, the first children ran
+slow and the following pairs ramped up, which shifted block medians. Host packet
+H1 pinned CPU 2's frequency policy, disabled its idle states deeper than C1,
+moved IRQs away and offlined its SMT sibling
+([#36](https://github.com/buster14a/buster/issues/36#issuecomment-5947820015)).
+
+### Frozen window-3 protocol
+
+`docs/zen5-aa-protocol-window3.json` is the protocol for window 3 on the H1
+host, approved on
+[#36](https://github.com/buster14a/buster/issues/36#issuecomment-5949598169).
+The self-test checks it as it checks the window-2 protocol.
+
+- **Pilots.** The H1 verification attempt (job 703) and four pilots (jobs 712,
+  721, 730, 739). No window-2 confirmatory value was used.
+- **Limits.** The limits use the window-2 rule unchanged.
+- **Seed and range.** The seed is `4260883` and the confirmatory range is
+  `740..9999`. The band and applicability are unchanged.
+- **Known host property.** A constant cold first child follows each 2 s gap.
+  A pilot also showed an unexplained periodic slowdown of about 8 s, which
+  sets the cross-root wall-time `block_shift` limit at 0.17.
+
+Each attempt is replayed from its exported result root:
+
+- the final manifest bytes must hash to the authenticated digest. The manifest
+  must show a succeeded, complete, `pmu-qualified`, oracle-consistent attempt
+  with `ab-authorized=false`, the authenticated profile digest, and
+  `elapsed-ns` no greater than `budget-seconds`;
+- the `BQ-BUNDLE-V1` index must list every file, with matching sizes and
+  digests. No file may be unlisted, and no directory may be unreadable
+  or change while it is inventoried;
+- `zen5_calibration_handoff.replay` runs against the authenticated digests;
+- every capture must have `ab_authorized` false and match the ledger's
+  job/attempt;
+- the PMU record must replay, and its digest must match the plan and the
+  manifest.
+
+A failed, incomplete or tampered attempt is kept as `invalid` with its reasons,
+and it contributes no values. Each valid attempt contributes the 42 members:
+7 checks for each metric and control, computed by the existing analyzers.
+
+Constant series follow the rule decided on
+[#36](https://github.com/buster14a/buster/issues/36#issuecomment-5921955897).
+A zero-variance pair-center series, such as page-quantized peak RSS with equal
+centers, is listed in the attempt's `constant_series`. Its serial effect is
+exactly 0, because a constant series cannot be serially dependent. Its linear
+drift is already a defined 0. Every other undefined value stays unavailable
+and is never zero, for example a lag-one correlation where only one window is
+constant.
+
+The status follows #1188's precedence:
+
+- **`invalid`**: an invalid confirmatory attempt, more attempts than the fixed
+  count, a confirmatory set that differs from the service's job list for the
+  declared range, or ledger pilots that differ from the protocol's list.
+- **`unavailable`**: an unset reviewer choice, or a confirmatory attempt outside
+  the declared applicability. Applicability is checked on confirmatory
+  attempts only, because pilots are exploratory.
+- **`inconclusive`**: insufficient evidence (fewer attempts than the
+  predeclared count), an unavailable or unbounded member, a bound above its
+  limit, or across-attempt dependence.
+- **`eligible`**: none of the above.
+
+Confirmatory statistics are withheld unless a complete, valid, fixed-count set
+is evaluated under a complete protocol, so they cannot be used to choose
+limits. Pilot attempts get descriptive summaries only and never count toward
+the confirmatory set.
+
+For a complete set, each member's bound is the exact order statistic `T_(k)`,
+where k is the smallest value with `Pr[Binomial(n, 0.9) <= k-1] >= 1 - 0.05/42`.
+Rational arithmetic is used, and ties are kept. At n = 64 the bound is the
+sample maximum. A limit is compared exactly as a decimal, against the
+shortest round-trip form of the bound. Independence across attempts uses the
+decided mechanism. Two seeded two-sided rank permutation tests run on every
+member in execution order: a Spearman trend test and a lag-one serial test.
+Both use splitmix64 Fisher-Yates orders, at least 100,000 permutations, and
+family alpha 0.05 with Bonferroni over all 84 checks, so each test rejects at
+p <= 1/1680. If either test rejects, the family is inconclusive. Nothing is
+deleted or rerun. The statistics are packed into exact integer fields, and a
+100,000-permutation run takes about 8 s for 64 attempts.
+
+The exit status is 0 for `eligible`, 1 for `unavailable` or `inconclusive`,
+and 2 for `invalid` or a refused input. Every output says
+`ab_authorized=false`. The result is not the #881 current-job A/A itself: that
+check applies the band recorded here with #619's intervals.
+
+The synthetic suite, `python3 -B tools/zen5_aa_evaluator.py --self-test`, runs
+in the benchmark-service policy workflow. It covers invalid, tampered,
+incomplete and relabeled bundles, as well as forged manifests, forged profiles
+and budget overruns. It covers omitted, replaced and out-of-range attempts,
+unreadable or changing bundle directories, too few and too many attempts,
+drift within a capture and across attempts, and serial dependence. It also
+covers constant and non-constant undefined series through the real analyzers,
+pilot and applicability mismatches, refused protocols, and byte replay through
+the CLI. None of its bundles is host evidence.
 
 The real producer is an explicitly authorized, separately admitted #880 service
 qualification phase. Its A/A work must be allowed before any A/B result exists;

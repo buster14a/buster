@@ -65,6 +65,29 @@ if mode == "success":
         valid(package)
     print("fake sdkmanager success")
     raise SystemExit(0)
+if mode == "unavailable-emulator-update":
+    if "emulator" in packages:
+        print("Warning: Android Emulator archive is unavailable.")
+        raise SystemExit(1)
+    for package in packages:
+        valid(package)
+    raise SystemExit(0)
+if mode == "partial-progress":
+    if count == 1:
+        valid("emulator")
+        valid("platforms;android-35")
+        partial_image()
+        raise SystemExit(1)
+    if "emulator" in packages or "platforms;android-35" in packages:
+        print("valid packages were unnecessarily requested again")
+        raise SystemExit(9)
+    for package in packages:
+        valid(package)
+    raise SystemExit(0)
+if mode == "complete-but-failed":
+    for package in packages:
+        valid(package)
+    raise SystemExit(1)
 if mode == "retry":
     if count == 1:
         partial_image()
@@ -94,7 +117,7 @@ class AndroidWorkflowContractTests(unittest.TestCase):
         lanes = mobile_coverage._workflow_mobile_lanes(ROOT / ".github/workflows/ci.yml")
         self.assertEqual(
             {(lane["os"], lane["arch"]) for lane in lanes},
-            {("android", "x86_64"), ("ios", "x86_64"), ("ios", "aarch64")},
+            {("android", "x86_64"), ("ios", "aarch64")},
         )
 
 
@@ -140,6 +163,20 @@ class AndroidSdkInstallerTests(unittest.TestCase):
     def attempts(self):
         return int(self.state.read_text(encoding="utf-8"))
 
+    def preinstall(self, package):
+        names = {
+            "emulator": ("emulator", "emulator.exe"),
+            "platforms;android-35": ("android.jar", "source.properties"),
+            "system-images;android-35;google_apis;x86_64": ("source.properties", "system.img", "ramdisk.img", "kernel-ranchu"),
+        }
+        directory = self.sdk.joinpath(*package.split(";"))
+        directory.mkdir(parents=True)
+        for name in names[package]:
+            path = directory / name
+            path.write_text("preinstalled", encoding="utf-8")
+            if package == "emulator":
+                path.chmod(0o755)
+
     def assert_unrelated_state_preserved(self):
         self.assertEqual(self.unrelated.read_text(encoding="utf-8"), "keep")
         self.assertEqual(self.preexisting_temp.read_text(encoding="utf-8"), "keep")
@@ -162,6 +199,52 @@ class AndroidSdkInstallerTests(unittest.TestCase):
         self.assertIn("ANDROID_SDK_RETRY next_attempt=2", transcript)
         self.assertIn("ANDROID_SDK_INSTALL_RESULT status=success attempts=2", transcript)
         self.assertFalse((self.sdk / ".temp" / "current-download").exists())
+        self.assert_unrelated_state_preserved()
+
+    def test_valid_emulator_is_preserved_when_only_image_is_missing(self):
+        self.preinstall("emulator")
+        self.preinstall("platforms;android-35")
+        self.assertEqual(self.run_installer("unavailable-emulator-update"), 0)
+        self.assertEqual(self.attempts(), 1)
+        self.assertEqual((self.sdk / "emulator" / "emulator").read_text(encoding="utf-8"), "preinstalled")
+        self.assertEqual((self.sdk / "platforms" / "android-35" / "android.jar").read_text(encoding="utf-8"), "preinstalled")
+        transcript = (self.logs / "android-sdk-install.attempt-1.log").read_text(encoding="utf-8")
+        command = next(line for line in transcript.splitlines() if line.startswith("ANDROID_SDK_COMMAND "))
+        self.assertIn("--verbose", command)
+        self.assertNotIn("--install emulator", command)
+        self.assertNotIn("platforms;android-35", command)
+        self.assertIn(PACKAGES[-1], command)
+        self.assertFalse(ci_android_sdk.validate_packages(self.sdk.resolve(), PACKAGES))
+        self.assert_unrelated_state_preserved()
+
+    def test_retry_keeps_packages_completed_by_failed_attempt(self):
+        self.assertEqual(self.run_installer("partial-progress"), 0)
+        self.assertEqual(self.attempts(), 2)
+        transcript = (self.logs / "android-sdk-install.attempt-2.log").read_text(encoding="utf-8")
+        command = next(line for line in transcript.splitlines() if line.startswith("ANDROID_SDK_COMMAND "))
+        self.assertNotIn("--install emulator", command)
+        self.assertNotIn("platforms;android-35", command)
+        self.assertIn(PACKAGES[-1], command)
+        self.assertFalse(ci_android_sdk.validate_packages(self.sdk.resolve(), PACKAGES))
+        self.assert_unrelated_state_preserved()
+
+    def test_complete_preinstalled_sdk_never_invokes_sdkmanager(self):
+        for package in PACKAGES:
+            self.preinstall(package)
+        self.assertEqual(self.run_installer("permanent"), 0)
+        self.assertFalse(self.state.exists())
+        transcript = (self.logs / "android-sdk-install.log").read_text(encoding="utf-8")
+        self.assertIn("status=success attempts=0 source=preinstalled", transcript)
+        self.assert_unrelated_state_preserved()
+
+    def test_nonzero_installer_status_cannot_accept_valid_packages(self):
+        self.assertEqual(self.run_installer("complete-but-failed"), 1)
+        self.assertEqual(self.attempts(), 1)
+        transcript = (self.logs / "android-sdk-install.log").read_text(encoding="utf-8")
+        self.assertIn("status=1 timed_out=no validation=success", transcript)
+        self.assertIn("ANDROID_SDK_INSTALL_RESULT status=failure attempts=1", transcript)
+        self.assertNotIn("ANDROID_SDK_RETRY", transcript)
+        self.assertNotIn("ANDROID_SDK_INSTALL_RESULT status=success", transcript)
         self.assert_unrelated_state_preserved()
 
     def test_permanent_failure_stops_at_fixed_bound(self):

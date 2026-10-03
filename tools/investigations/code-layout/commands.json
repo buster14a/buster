@@ -1,0 +1,135 @@
+[
+  {
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-target",
+      "x86_64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-fverify-codegen",
+      "-g",
+      "-c",
+      "tests/basic_c_switch_case_blocks.c",
+      "-o",
+      "/home/runner/work/buster/buster/evidence/basic_c_switch_case_blocks.o"
+    ],
+    "cwd": "/home/runner/work/buster/buster/production",
+    "exit": 0,
+    "log": "fixture-0.log"
+  },
+  {
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-target",
+      "x86_64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-fverify-codegen",
+      "-g",
+      "-c",
+      "tests/basic_c_nested_control_substatement.c",
+      "-o",
+      "/home/runner/work/buster/buster/evidence/basic_c_nested_control_substatement.o"
+    ],
+    "cwd": "/home/runner/work/buster/buster/production",
+    "exit": 0,
+    "log": "fixture-1.log"
+  },
+  {
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-target",
+      "x86_64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-fverify-codegen",
+      "-g",
+      "-c",
+      "tests/basic_c_goto_into_loop.c",
+      "-o",
+      "/home/runner/work/buster/buster/evidence/basic_c_goto_into_loop.o"
+    ],
+    "cwd": "/home/runner/work/buster/buster/production",
+    "exit": 0,
+    "log": "fixture-2.log"
+  },
+  {
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-target",
+      "x86_64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-fverify-codegen",
+      "-g",
+      "-c",
+      "tests/basic_c_conditional_array_branch.c",
+      "-o",
+      "/home/runner/work/buster/buster/evidence/basic_c_conditional_array_branch.o"
+    ],
+    "cwd": "/home/runner/work/buster/buster/production",
+    "exit": 0,
+    "log": "fixture-3.log"
+  },
+  {
+    "command": [
+      "/usr/bin/python3",
+      "/home/runner/work/buster/buster/diagnostic/tools/investigations/code-layout/layout_census.py",
+      "--revision",
+      "8f67df736f13d4edc055110a7a6d619a00a22eaf",
+      "--output",
+      "/home/runner/work/buster/buster/evidence/fixtures.json",
+      "--proven-no-inline-asm",
+      "/home/runner/work/buster/buster/evidence/basic_c_switch_case_blocks.o",
+      "/home/runner/work/buster/buster/evidence/basic_c_nested_control_substatement.o",
+      "/home/runner/work/buster/buster/evidence/basic_c_goto_into_loop.o",
+      "/home/runner/work/buster/buster/evidence/basic_c_conditional_array_branch.o"
+    ],
+    "cwd": "/home/runner/work/buster/buster/production",
+    "exit": 0,
+    "log": "fixture-census.log"
+  },
+  {
+    "command": [
+      "build/Release/ide",
+      "cc",
+      "-target",
+      "x86_64-unknown-linux-gnu",
+      "-march=native",
+      "-Isrc",
+      "-Ibuild/generated",
+      "-DBUSTER_UNITY_BUILD=1",
+      "-DBUSTER_INCLUDE_TESTS=0",
+      "-g0",
+      "-v",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-fverify-codegen",
+      "-c",
+      "src/buster/apps/ide/ide.c",
+      "-o",
+      "/home/runner/work/buster/buster/evidence/unity.o"
+    ],
+    "cwd": "/home/runner/work/buster/buster/production",
+    "exit": 0,
+    "log": "unity-compile.log"
+  },
+  {
+    "command": [
+      "/usr/bin/python3",
+      "/home/runner/work/buster/buster/diagnostic/tools/investigations/code-layout/layout_census.py",
+      "--revision",
+      "8f67df736f13d4edc055110a7a6d619a00a22eaf",
+      "--output",
+      "/home/runner/work/buster/buster/evidence/unity.json",
+      "/home/runner/work/buster/buster/evidence/unity.o"
+    ],
+    "cwd": "/home/runner/work/buster/buster/production",
+    "exit": 0,
+    "log": "unity-census.log"
+  }
+]
