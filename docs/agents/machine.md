@@ -844,6 +844,15 @@ fixture as well as compiling both architectures.
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
   sequence too (`link_elf_relax_local_dynamic`).
 
+The x86 inline-assembly vocabulary admits zero-operand `rdtsc` and `rdtscp`
+through the shared assembler. GNU fixed outputs or explicit clobbers name
+RAX/RDX and, for RDTSCP, RCX; ordinary transaction staging preserves live
+values and captures the declared 32-bit outputs. Memory and flags effects
+remain source-declared. `machine_test_x64_inline_timestamps` checks exact
+instruction bytes, output registers, clobbers and rejected operand forms
+across native targets, frontend forms and allocator modes. Runtime availability
+and ordering of timestamp reads remain the caller's responsibility.
+
 ## Wide integer conversion rounding
 
 - AArch64 i128-to-f32/f64 casts normalize the magnitude as two scalar MIR

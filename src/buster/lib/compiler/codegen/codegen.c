@@ -190,6 +190,9 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // are exactly what a C-level constraint and clobber list already state.
     // It is what a libc's system-call layer is written against.
     S8_INITIALIZER("syscall"),
+    // Timestamp outputs and architectural clobbers are explicit GNU asm
+    // operands/clobbers; the shared assembler owns these zero-operand bytes.
+    S8_INITIALIZER("rdtsc"), S8_INITIALIZER("rdtscp"),
     // The read-modify-write instructions a libc's atomics are written in, the
     // LOCK prefix that makes them atomic, the bit scans its ctz/clz reduce to,
     // and the HLT its abort path ends on. Each writes only its named operands.
