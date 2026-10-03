@@ -4242,93 +4242,100 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_shift_breakpoint(Unit
         BUSTER_TEST_RAW(arguments, invalid.diagnostic_count != 0, rejected[index]);
     }
 
+
     String8 operations[] = {S8("sar"), S8("shl"), S8("shr"), S8("sal")};
     String8 suffixes[] = {S8("b"), S8("w"), S8("l"), S8("q"), S8("")};
     String8 types[] = {S8("unsigned char"), S8("unsigned short"), S8("unsigned int"), S8("unsigned long long"), S8("unsigned long long")};
     u32 widths[] = {8, 16, 32, 64, 64};
-    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
-    for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(operations); operation += 1)
+    enum { SHAPE_COUNT = 40 };
+    String8 parts[SHAPE_COUNT + 1];
+    String8 names[SHAPE_COUNT];
+    for (u32 shape = 0; shape < SHAPE_COUNT; shape += 1)
     {
-        for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
+        u32 operation = shape / 10;
+        u32 width_index = (shape % 10) / 2;
+        bool variable_count = (shape & 1u) != 0;
+        String8 count_text = variable_count ? S8("%%cl") : S8("$3");
+        String8 input_text = variable_count ? S8("\"c\"(count)") : S8("");
+        names[shape] = string_format(arguments->arena, S8("shift_{u32}"), shape);
+        parts[shape] = string_format(arguments->arena,
+            S8("unsigned long long {S8}(unsigned long long input, unsigned count) {{ "
+               "{S8} value = ({S8})input; __asm__ volatile(\"{S8}{S8} {S8}, %0\" : \"+r\"(value) : {S8} : \"cc\"); "
+               "return value; }}\n"),
+            names[shape], types[width_index], types[width_index], operations[operation], suffixes[width_index], count_text, input_text);
+    }
+    parts[SHAPE_COUNT] = S8("void breakpoint(void) { __asm__ volatile(\"int $3; int3\"); return; }\n");
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        target.os = systems[system];
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
         {
-            for (u32 count_form = 0; count_form < 2; count_form += 1)
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("inline-shift-breakpoint.c"), source, target,
+                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
             {
-                String8 count_text = count_form ? S8("%%cl") : S8("$3");
-                String8 input_text = count_form ? S8("\"c\"(count)") : S8("");
-                String8 source = string_format(arguments->arena,
-                    S8("unsigned long long shift(unsigned long long input, unsigned count) { "
-                       "{S8} value = ({S8})input; __asm__ volatile(\"{S8}{S8} {S8}, %0\" : \"+r\"(value) : {S8} : \"cc\"); "
-                       "return value; } "
-                       "void breakpoint(void) { __asm__ volatile(\"int $3; int3\"); return; }"),
-                    types[width_index], types[width_index], operations[operation], suffixes[width_index], count_text, input_text);
-                for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+                IrModule* module = program->modules;
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
                 {
-                    target.os = systems[system];
-                    for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
-                    {
-                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                        IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("inline-shift-breakpoint.c"), source, target,
-                            (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
-                        if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
-                        {
-                            IrModule* module = program->modules;
-                            for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
-                            {
-                                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
-                                    (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
-                                BUSTER_TEST_RAW(arguments, generated.error == CODEGEN_ERROR_NONE, source);
-                                BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
-                                // Only the shift function executes. Breakpoints are byte-generation controls.
-                                if (system == 0 && generated.error == CODEGEN_ERROR_NONE)
+                    // Only shift functions execute. Breakpoints are byte-generation controls.
+                    if (system == 0 && generated.error == CODEGEN_ERROR_NONE)
+                    {
+                        CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                        if (BUSTER_REQUIRE(arguments, executable.error == CODEGEN_ERROR_NONE && executable.address))
+                        {
+                            for (u32 shape = 0; shape < SHAPE_COUNT; shape += 1)
+                            {
+                                u32 offset = machine_test_module_offset(&generated, module, names[shape]);
+                                if (BUSTER_REQUIRE(arguments, offset != UINT32_MAX))
                                 {
-                                    CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
-                                    if (BUSTER_REQUIRE(arguments, executable.error == CODEGEN_ERROR_NONE && executable.address))
+                                    typedef u64 Shift(u64, u32);
+                                    Shift* call = 0;
+                                    void* address = (u8*)executable.address + offset;
+                                    memcpy(&call, &address, sizeof(call));
+                                    u64 values[] = {0, 1, UINT64_C(0x8181818181818180), UINT64_MAX};
+                                    u32 counts[] = {0, 1, 3, 31, 32, 63, 64, 65, 255};
+                                    u32 operation = shape / 10;
+                                    u32 width = widths[(shape % 10) / 2];
+                                    u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+                                    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1)
                                     {
-                                        u32 offset = machine_test_module_offset(&generated, module, S8("shift"));
-                                        if (BUSTER_REQUIRE(arguments, offset != UINT32_MAX))
+                                        for (u32 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(counts); count_index += 1)
                                         {
-                                            typedef u64 Shift(u64, u32);
-                                            Shift* call = 0;
-                                            void* address = (u8*)executable.address + offset;
-                                            memcpy(&call, &address, sizeof(call));
-                                            u64 values[] = {0, 1, UINT64_C(0x8181818181818180), UINT64_MAX};
-                                            u32 counts[] = {0, 1, 3, 31, 32, 63, 64, 65, 255};
-                                            u32 width = widths[width_index];
-                                            u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
-                                            for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1)
+                                            u32 count = shape & 1u ? counts[count_index] & (width == 64 ? 63u : 31u) : 3u;
+                                            u64 value = values[value_index] & mask;
+                                            u64 expected;
+                                            if (operation == 1 || operation == 3)
                                             {
-                                                for (u32 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(counts); count_index += 1)
+                                                expected = count >= width ? 0 : (value << count) & mask;
+                                            }
+                                            else
+                                            {
+                                                expected = count >= width ? 0 : value >> count;
+                                                if (operation == 0 && (value & (UINT64_C(1) << (width - 1))))
                                                 {
-                                                    u32 count = count_form ? counts[count_index] & (width == 64 ? 63u : 31u) : 3u;
-                                                    u64 value = values[value_index] & mask;
-                                                    u64 expected;
-                                                    if (operation == 1 || operation == 3)
-                                                    {
-                                                        expected = count >= width ? 0 : (value << count) & mask;
-                                                    }
-                                                    else
-                                                    {
-                                                        expected = count >= width ? 0 : value >> count;
-                                                        if (operation == 0 && (value & (UINT64_C(1) << (width - 1))))
-                                                        {
-                                                            expected |= count >= width ? mask : mask ^ (mask >> count);
-                                                        }
-                                                    }
-                                                    BUSTER_TEST_RAW(arguments, call(values[value_index], counts[count_index]) == expected, source);
+                                                    expected |= count >= width ? mask : mask ^ (mask >> count);
                                                 }
                                             }
+                                            BUSTER_TEST_RAW(arguments, call(values[value_index], counts[count_index]) == expected, names[shape]);
                                         }
                                     }
-                                    codegen_release_executable(executable);
                                 }
-#endif
                             }
                         }
-                        scratch_end(temporary);
+                        codegen_release_executable(executable);
                     }
+#endif
                 }
             }
+            scratch_end(temporary);
         }
     }
     return result;
