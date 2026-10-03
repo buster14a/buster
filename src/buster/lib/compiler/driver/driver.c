@@ -35,6 +35,8 @@
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
 // compiler_driver_elf_library_roots shares target/sysroot search roots between
 // export discovery and static-library lookup; explicit -L roots come first.
+// compiler_driver_elf_linker_script classifies located requested scripts for
+// explicit refusal; no script contents are evaluated or skipped as absent.
 // compiler_driver_elf_compiler_runtime adds existing libgcc_s on demand for
 // unresolved half/quad helper calls after explicit library exports are known.
 
@@ -2239,6 +2241,7 @@ struct CompilerDriverDynamicLibraries
     // loader, and a configure script reads the successful link as the
     // library existing.  Empty when every requested library was found.
     String8 missing_request;
+    String8 unsupported_script_path;
     String8 missing_runtime_symbol;
     String8 runtime_failure_library;
 };
@@ -2717,16 +2720,73 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, Compiler
     return root_count;
 }
 
+// GNU ld scripts use C comments as whitespace. Only the initial command is
+// recognized here: the driver diagnoses unsupported input, never evaluates it.
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_linker_script_skip_trivia(ByteSlice bytes, u64 cursor)
+{
+    bool scanning = true;
+    while (scanning && cursor < bytes.length)
+    {
+        u8 byte = bytes.pointer[cursor];
+        if (byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n' || byte == '\v' || byte == '\f')
+        {
+            cursor += 1;
+        }
+        else if (byte == '/' && bytes.length - cursor >= 2 && bytes.pointer[cursor + 1] == '*')
+        {
+            cursor += 2;
+            while (bytes.length - cursor >= 2 && !(bytes.pointer[cursor] == '*' && bytes.pointer[cursor + 1] == '/'))
+            {
+                cursor += 1;
+            }
+            cursor = bytes.length - cursor >= 2 ? cursor + 2 : bytes.length;
+        }
+        else
+        {
+            scanning = false;
+        }
+    }
+    return cursor;
+}
+
+bool compiler_driver_elf_linker_script(ByteSlice bytes)
+{
+    static String8 const commands[] = {
+        S8_INITIALIZER("INPUT"), S8_INITIALIZER("GROUP"), S8_INITIALIZER("AS_NEEDED"),
+        S8_INITIALIZER("OUTPUT_FORMAT"), S8_INITIALIZER("OUTPUT_ARCH"), S8_INITIALIZER("SEARCH_DIR"),
+    };
+    bool result = false;
+    if (bytes.pointer)
+    {
+        u64 cursor = compiler_driver_linker_script_skip_trivia(bytes, 0);
+        u64 start = cursor;
+        while (cursor < bytes.length && ((bytes.pointer[cursor] >= 'A' && bytes.pointer[cursor] <= 'Z') || bytes.pointer[cursor] == '_'))
+        {
+            cursor += 1;
+        }
+        String8 command = {.pointer = bytes.pointer + start, .length = cursor - start};
+        bool recognized = false;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(commands); index += 1)
+        {
+            recognized |= string_equal(command, commands[index]);
+        }
+        cursor = compiler_driver_linker_script_skip_trivia(bytes, cursor);
+        result = recognized && cursor < bytes.length && bytes.pointer[cursor] == '(';
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
-                                                             NativeDynamicLibrary* library, FileMapRead* export_map)
+                                                             NativeDynamicLibrary* library, FileMapRead* export_map, String8* script_path)
 {
     u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
     String8 roots[7];
     u32 root_count = compiler_driver_elf_library_roots(arena, invocation, roots);
     *export_map = (FileMapRead){0};
     bool found = false;
+    bool script_found = false;
     u32 candidate_count = invocation.library_path_count + root_count + 1;
-    for (u32 path_index = 0; !found && path_index < candidate_count; path_index += 1)
+    for (u32 path_index = 0; !found && !script_found && path_index < candidate_count; path_index += 1)
     {
         // Every candidate is zero-terminated: os_file_open takes the path as a
         // C string, and the bare library name is one this driver built with a
@@ -2738,6 +2798,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
                            : string_duplicate_arena(arena, library->name, true);
         FileMapRead file = file_map_read(arena, path, (FileReadOptions){0});
         found = file.bytes.pointer && compiler_driver_elf_dynamic_symbols(arena, file.bytes, machine, collect_data, library);
+        script_found = script_path && !found && compiler_driver_elf_linker_script(file.bytes);
+        if (script_found && script_path)
+        {
+            *script_path = path;
+        }
         if (found)
         {
             *export_map = file;
@@ -2858,7 +2923,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_compiler_runtime(Arena* arena, Comp
                 NativeDynamicLibrary* runtime = libraries->pointer + runtime_index;
                 *runtime = (NativeDynamicLibrary){.name = S8("libgcc_s.so.1")};
                 FileMapRead* export_map = libraries->export_maps + libraries->export_map_count;
-                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map);
+                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map, 0);
                 libraries->export_map_count += export_map->bytes.pointer != 0;
                 provider = runtime;
                 provided = compiler_driver_elf_library_helper_provider(runtime, symbol->name);
@@ -3027,12 +3092,13 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         result.export_maps = arena_allocate(arena, FileMapRead, count + 2);
         result.runtime.name = S8("libc.so.6");
         FileMapRead* export_map = result.export_maps + result.export_map_count;
-        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map);
+        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map, 0);
         result.export_map_count += export_map->bytes.pointer != 0;
         for (u32 index = 0; index < count; index += 1)
         {
             export_map = result.export_maps + result.export_map_count;
-            compiler_driver_elf_library_exports(arena, invocation, imports_data, &libraries[index], export_map);
+            String8 script_path = {0};
+            compiler_driver_elf_library_exports(arena, invocation, imports_data, &libraries[index], export_map, &script_path);
             result.export_map_count += export_map->bytes.pointer != 0;
             // The scan walked every search directory the loader would, so a
             // library it did not find is one the produced executable could
@@ -3042,6 +3108,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             if (!libraries[index].exports_known && requests[index].length && !result.missing_request.length)
             {
                 result.missing_request = requests[index];
+                result.unsupported_script_path = script_path;
             }
         }
     }
@@ -3721,7 +3788,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     if (dynamic_libraries.missing_request.length)
     {
         result->error = COMPILER_DRIVER_ERROR_LINK;
-        result->diagnostic = string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        result->diagnostic = dynamic_libraries.unsupported_script_path.length
+                                 ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
+                                                 dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
+                                 : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
         compiler_driver_dynamic_libraries_release(&dynamic_libraries);
         return;
     }
@@ -5440,7 +5510,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (dynamic_libraries.missing_request.length)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        result.diagnostic = dynamic_libraries.unsupported_script_path.length
+                                ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
+                                                dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
+                                : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
         compiler_driver_dynamic_libraries_release(&dynamic_libraries);
         goto finish;
     }

@@ -7670,6 +7670,133 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_elf_helper_version(Arena* are
     return (ByteSlice){.pointer = bytes, .length = length};
 }
 
+// These literal GNU script spellings come from the documented command grammar,
+// not a Buster-produced object roundtrip. Located scripts are refused explicitly.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_linker_scripts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    static String8 const scripts[] = {
+        S8_INITIALIZER("INPUT(libactual.so)"),
+        S8_INITIALIZER("GROUP ( libactual.so AS_NEEDED(libextra.so) )"),
+        S8_INITIALIZER("/* GNU ld script */\nOUTPUT_FORMAT /* format */ (elf64-x86-64)\nGROUP(libactual.so)"),
+        S8_INITIALIZER(" \t\r\n\v\f/**/ AS_NEEDED /* dependency */ (libactual.so)"),
+        S8_INITIALIZER("OUTPUT_ARCH(i386:x86-64)"),
+        S8_INITIALIZER("SEARCH_DIR(\"/usr/lib\")"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(scripts); index += 1)
+    {
+        BUSTER_TEST(arguments, compiler_driver_elf_linker_script(BUSTER_SLICE_TO_BYTE_SLICE(scripts[index])));
+    }
+    static String8 const non_scripts[] = {
+        S8_INITIALIZER(""), S8_INITIALIZER("INPUT"), S8_INITIALIZER("INPUTX(libactual.so)"),
+        S8_INITIALIZER("INPUT1(libactual.so)"), S8_INITIALIZER("input(libactual.so)"),
+        S8_INITIALIZER("text INPUT(libactual.so)"), S8_INITIALIZER("/* INPUT(libactual.so) */"),
+        S8_INITIALIZER("/* unterminated"), S8_INITIALIZER("INPUT /* unterminated"),
+        S8_INITIALIZER("INPUT /"), S8_INITIALIZER("\0INPUT(libactual.so)"),
+        S8_INITIALIZER("!<arch>\n"), S8_INITIALIZER("\x7f" "ELF\x02\x01\x01"),
+    };
+    BUSTER_TEST(arguments, !compiler_driver_elf_linker_script((ByteSlice){0}));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(non_scripts); index += 1)
+    {
+        BUSTER_TEST(arguments, !compiler_driver_elf_linker_script(BUSTER_SLICE_TO_BYTE_SLICE(non_scripts[index])));
+    }
+    static String8 const targets[] = {S8_INITIALIZER("x86_64-linux"), S8_INITIALIZER("aarch64-linux")};
+    static u16 const machines[] = {62, 183};
+    String8 exported_name = S8("script_provider");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 scenario = 0; scenario < 9; scenario += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 directory = buster_test_temporary_path(arena,
+                string_format(arena, S8("buster-linker-script-{u32}-{u32}"), target, scenario), S8(""));
+            String8 later = buster_test_temporary_path(arena,
+                string_format(arena, S8("buster-linker-script-later-{u32}-{u32}"), target, scenario), S8(""));
+            if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(directory) && os_make_directory_attempt(later)))
+            {
+                String8 path = string_format_z(arena, S8("{S8}/libscriptcheck.so"), directory);
+                String8 later_path = string_format_z(arena, S8("{S8}/libscriptcheck.so"), later);
+                ByteSlice elf = compiler_driver_test_elf_shared_library(arena, machines[target], &exported_name, 1);
+                BUSTER_TEST(arguments, !compiler_driver_elf_linker_script(elf));
+                bool inputs_written = true;
+                if (scenario < 4 || scenario == 7)
+                {
+                    String8 script = scripts[scenario == 7 ? 0 : scenario];
+                    inputs_written &= file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(script));
+                    // A later genuine target DSO must never hide an earlier script.
+                    inputs_written &= file_write(later_path, elf);
+                }
+                else if (scenario == 4)
+                {
+                    inputs_written &= file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(S8("not an ELF library")));
+                }
+                else if (scenario == 6 || scenario == 8)
+                {
+                    inputs_written &= file_write(path, elf);
+                    if (scenario == 8) { inputs_written &= file_write(later_path, BUSTER_SLICE_TO_BYTE_SLICE(scripts[0])); }
+                }
+                String8 source_path = string_format_z(arena, S8("{S8}/main.c"), directory);
+                String8 anchor_path = string_format_z(arena, S8("{S8}/anchor.c"), directory);
+                inputs_written &= file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n")));
+                inputs_written &= file_write(anchor_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("int script_anchor;\n")));
+                if (BUSTER_REQUIRE(arguments, inputs_written))
+                {
+                    for (u32 multi = 0; multi < 2; multi += 1)
+                    {
+                        String8 output = string_format_z(arena, S8("{S8}/output-{u32}.elf"), directory, multi);
+                        String8 sentinel = S8("preserve script output");
+                        if (BUSTER_REQUIRE(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+                        {
+                            String8 command[16];
+                            u32 count = 0;
+                            command[count++] = S8("-target"); command[count++] = targets[target];
+                            command[count++] = S8("--sysroot"); command[count++] = directory;
+                            command[count++] = S8("-L"); command[count++] = directory;
+                            command[count++] = S8("-L"); command[count++] = later;
+                            command[count++] = S8("-o"); command[count++] = output;
+                            command[count++] = S8("-g0"); command[count++] = source_path;
+                            if (multi) { command[count++] = anchor_path; }
+                            if (scenario == 7) { command[count++] = S8("-lmissing_script_control"); }
+                            command[count++] = multi ? S8("-l:libscriptcheck.so") : S8("-lscriptcheck");
+                            CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                                (SliceString8){.pointer = command, .length = count}));
+                            String8 description = string_format(arena, S8("GNU script target={S8} scenario={u32} multi={u32}: {S8}"),
+                                targets[target], scenario, multi, linked.diagnostic);
+                            bool success = scenario == 6 || scenario == 8;
+                            BUSTER_TEST_RAW(arguments, linked.error == (success ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_LINK), description);
+                            if (!success)
+                            {
+                                String8 expected;
+                                if (scenario < 4)
+                                {
+                                    expected = string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
+                                        path, multi ? S8(":libscriptcheck.so") : S8("scriptcheck"));
+                                }
+                                else
+                                {
+                                    expected = scenario == 7 ? S8("cannot find -lmissing_script_control")
+                                        : multi ? S8("cannot find -l:libscriptcheck.so") : S8("cannot find -lscriptcheck");
+                                }
+                                BUSTER_STRING_TEST(arguments, linked.diagnostic, expected);
+                                BUSTER_TEST(arguments, linked.native_link.executable.length == 0);
+                                ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+                                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved), sentinel);
+                            }
+                            else
+                            {
+                                BUSTER_TEST(arguments, linked.native_link.executable.length != 0);
+                            }
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // A literal independent ABI-name corpus drives the native Linux library
 // selection boundary. Synthetic DSOs are export-scan witnesses, never run.
 // Actual half/quad ABI execution remains in the native fixtures below.
@@ -17384,6 +17511,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_linker_scripts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocessed_c_input);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
