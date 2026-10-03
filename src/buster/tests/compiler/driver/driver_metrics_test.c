@@ -436,7 +436,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics(UnitTestAr
         BUSTER_TEST_RAW(arguments, plain.error == COMPILER_DRIVER_ERROR_FILE_WRITE, plain.diagnostic);
         BUSTER_TEST(arguments, measured.error == plain.error && string_equal(measured.diagnostic, plain.diagnostic));
         BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(measured.diagnostic, refused_output) &&
-                                   compiler_driver_metrics_test_contains(measured.diagnostic, S8("unsupported output destination")));
+                                   compiler_driver_metrics_test_contains(measured.diagnostic, S8("directories and non-stream special destinations are refused")));
         if (BUSTER_REQUIRE(arguments, measured.input_result_count == 1 && measured.failed_input_count == 1))
         {
             CompilerDriverInputResult* input = &measured.inputs[0];
