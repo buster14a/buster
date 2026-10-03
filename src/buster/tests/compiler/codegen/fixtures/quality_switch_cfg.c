@@ -1,5 +1,6 @@
-// Switch-case targets precede their dispatch. The twelve values stay live
-// across those table backedges, including shared destinations and fallthrough.
+// C labels precede their dispatch, but the selector may reorder MIR blocks.
+// Twelve values stay live across loops, shared destinations and fallthrough;
+// the companion synthetic MIR fixture fixes actual table-backedge layout.
 unsigned long long quality_switch_cfg(unsigned seed, unsigned rounds)
 {
     unsigned long long a = seed;

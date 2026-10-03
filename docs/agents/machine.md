@@ -209,8 +209,10 @@ fixture as well as compiling both architectures.
   and asm-goto. Split entry/exit analysis consumes that adjacency, with entry
   installs restricted to forward unconditional branches; ambiguous entries and
   landing pads with predecessors outside the region remain ineligible. The
-  switch CFG fixture covers table backedges, shared destinations, fallthrough,
-  default-only switches, all allocators and both frontend memory forms.
+  verified synthetic MIR fixture fixes table backedges and duplicate/default
+  predecessor counts independently of selector layout. The C switch fixture
+  covers loops, shared destinations, fallthrough, default-only switches, all
+  allocators and both frontend memory forms.
   Its private input lives at
   `src/buster/tests/compiler/codegen/fixtures/quality_switch_cfg.c`; the
   registered machine module reads it as compiler input, preserving the

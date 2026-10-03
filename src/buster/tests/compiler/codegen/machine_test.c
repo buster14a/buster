@@ -3954,6 +3954,133 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_dynamic_stack(UnitTestArgume
     return result;
 }
 
+// Fixed MIR layout owns the backward-edge oracle; C selection is free to
+// place source labels in a different order. Duplicate cases/defaults retain
+// their predecessor multiplicity, while loop closure merges their spans.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_backward_switch_cfg(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineTargetDescription const* descriptions[] = {machine_target_x86_64(), machine_target_aarch64()};
+    enum { VALUE_COUNT = 8 };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(descriptions); target_index += 1)
+    {
+        for (u32 variant = 0; variant < 2; variant += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            MachineTargetDescription const* description = descriptions[target_index];
+            MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+            MachineRef values[VALUE_COUNT];
+            MachineRef argument = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, target_index == 0 ? MACHINE_X64_RDI : MACHINE_A64_X0);
+            u16 store_opcode = target_index == 0 ? MACHINE_X64_STORE_FRAME64 : MACHINE_A64_STORE_FRAME64;
+            u16 return_opcode = target_index == 0 ? MACHINE_X64_RET : MACHINE_A64_RET;
+            machine_builder_block_begin(&builder);
+            for (u32 value = 0; value < VALUE_COUNT; value += 1)
+            {
+                u32 index = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+                    .definition_point = machine_point_make(value, MACHINE_POINT_AFTER),
+                    .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID});
+                values[value] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, index);
+                machine_builder_instruction(&builder, (MachineInstruction){.opcode = description->copy_opcode,
+                    .operands = {values[value], argument}});
+            }
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = description->unconditional_branch_opcode,
+                .operands = {machine_ref_make(MACHINE_REF_BLOCK, 3)}});
+            machine_builder_block_end(&builder, (MachineBlock){0});
+            machine_builder_edge(&builder, (MachineEdge){.source_block = 0, .destination_block = 3});
+            for (u32 block = 1; block < 3; block += 1)
+            {
+                machine_builder_block_begin(&builder);
+                for (u32 value = 0; value < VALUE_COUNT; value += 1)
+                {
+                    machine_builder_instruction(&builder, (MachineInstruction){.opcode = store_opcode,
+                        .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, value), values[value]}});
+                }
+                machine_builder_instruction(&builder, (MachineInstruction){.opcode = description->unconditional_branch_opcode,
+                    .operands = {machine_ref_make(MACHINE_REF_BLOCK, 3)}});
+                machine_builder_block_end(&builder, (MachineBlock){0});
+                machine_builder_edge(&builder, (MachineEdge){.source_block = block, .destination_block = 3});
+            }
+            machine_builder_block_begin(&builder);
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = description->switch_opcode,
+                .operands = {argument, machine_ref_make(MACHINE_REF_BLOCK, variant ? 1 : 4)}, .flags = 4});
+            machine_builder_block_end(&builder, (MachineBlock){0});
+            for (u32 destination = 1; destination < 5; destination += 1)
+            {
+                if (destination != 3)
+                {
+                    machine_builder_edge(&builder, (MachineEdge){.source_block = 3, .destination_block = destination});
+                }
+            }
+            machine_builder_block_begin(&builder);
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = return_opcode});
+            machine_builder_block_end(&builder, (MachineBlock){0});
+            MachineFunction function = machine_function_builder_finish(arena, &builder);
+            function.target = description;
+            function.switch_case_count = 4;
+            function.switch_cases = arena_allocate(arena, MachineSwitchCase, function.switch_case_count);
+            u32 destinations[] = {1, 1, 2, 4};
+            for (u32 index = 0; index < function.switch_case_count; index += 1)
+            {
+                function.switch_cases[index] = (MachineSwitchCase){.value = index, .target_block = destinations[index], .compare_width = 64};
+            }
+            function.stack_slot_count = VALUE_COUNT;
+            function.stack_slot_sizes = arena_allocate(arena, u32, VALUE_COUNT);
+            function.stack_slot_alignments = arena_allocate(arena, u32, VALUE_COUNT);
+            for (u32 slot = 0; slot < VALUE_COUNT; slot += 1)
+            {
+                function.stack_slot_sizes[slot] = 8;
+                function.stack_slot_alignments[slot] = 8;
+            }
+            if (BUSTER_REQUIRE(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE))
+            {
+                MachineFastPrepass prepass = machine_fast_prepass_build(arena, &function, true);
+                if (BUSTER_REQUIRE(arguments, prepass.valid && prepass.loop_span_count == 1))
+                {
+                    // Only the switch contributes backward edges: the three
+                    // JMPs go forward to dispatch block 3.
+                    BUSTER_TEST(arguments, (u32)(prepass.loop_spans[0] >> 32) == function.blocks[1].first_instruction);
+                    BUSTER_TEST(arguments, (u32)prepass.loop_spans[0] == function.blocks[3].first_instruction);
+                    BUSTER_TEST(arguments, prepass.predecessor_offsets[2] - prepass.predecessor_offsets[1] == (variant ? 3u : 2u));
+                    BUSTER_TEST(arguments, prepass.predecessor_offsets[5] - prepass.predecessor_offsets[4] == (variant ? 1u : 2u));
+                }
+                for (u32 mode = 0; mode < 3; mode += 1)
+                {
+#if BUSTER_BENCH_ALLOCATIONS
+                    MachineQualityCensus before = machine_quality_census_snapshot();
+#endif
+                    MachineStackPlacement placement = mode == 0 ? machine_stack_placement_build(arena, &function) :
+                        mode == 1 ? machine_fast_placement_build(arena, &function) : machine_quality_placement_build(arena, &function);
+                    if (BUSTER_REQUIRE(arguments, placement.valid))
+                    {
+                        BUSTER_TEST(arguments, placement.split_register_count == 0);
+                        MachineEncodeResult encoded = target_index == 0 ? machine_encode_x86_64(arena, &function, &placement) :
+                            machine_encode_aarch64(arena, &function, &placement);
+                        BUSTER_TEST(arguments, encoded.valid);
+                    }
+                    if (mode == 2)
+                    {
+                        BUSTER_TEST(arguments, function.blocks[0].frequency_class == 0 && function.blocks[1].frequency_class == 1 &&
+                            function.blocks[2].frequency_class == 2 && function.blocks[3].frequency_class == 2 &&
+                            function.blocks[4].frequency_class == 0);
+#if BUSTER_BENCH_ALLOCATIONS
+                        MachineQualityCensus after = machine_quality_census_snapshot();
+                        BUSTER_TEST(arguments, after.prepassed_functions - before.prepassed_functions == 1);
+                        BUSTER_TEST(arguments, after.switch_fallback_functions == before.switch_fallback_functions);
+                        // Escaping copies spill at definition and reload at
+                        // both case blocks, so actual global-region planning
+                        // runs; this is not merely an empty-candidate switch.
+                        BUSTER_TEST(arguments, after.candidates > before.candidates && after.candidate_region_cells > before.candidate_region_cells);
+#endif
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_switch_cfg(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3988,24 +4115,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_switch_cfg(UnitTestArgum
                         machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE))
                     {
                         MachineFunction* machine = &selected.function;
-                        u32 backward_cases = 0;
                         for (u32 block_index = 0; block_index < machine->block_count; block_index += 1)
                         {
                             MachineBlock* block = machine->blocks + block_index;
                             block->frequency_class = 0;
-                            for (u32 offset = 0; offset < block->instruction_count; offset += 1)
-                            {
-                                MachineInstruction* row = machine->instructions + block->first_instruction + offset;
-                                if (row->opcode == machine->target->switch_opcode)
-                                {
-                                    for (u32 case_index = 0; case_index < row->flags; case_index += 1)
-                                    {
-                                        backward_cases += machine->switch_cases[row->payload + case_index].target_block <= block_index;
-                                    }
-                                }
-                            }
                         }
-                        BUSTER_TEST(arguments, backward_cases > 0);
+                        // C labels do not constrain selected block layout. The
+                        // separate synthetic fixture owns table-backedge goldens.
+                        BUSTER_TEST(arguments, machine->switch_case_count > 0);
 #if BUSTER_BENCH_ALLOCATIONS
                         MachineQualityCensus before = machine_quality_census_snapshot();
 #endif
@@ -8157,6 +8274,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_clear_instruction_cache);
     BUSTER_TEST_FIXTURE(arguments, machine_test_unsigned_switch);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_switch_cfg);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_backward_switch_cfg);
     BUSTER_TEST_FIXTURE(arguments, machine_test_disconnected_dominance);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_storage_reuse);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_address_rematerialization);
