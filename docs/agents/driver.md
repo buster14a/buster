@@ -201,7 +201,9 @@ or permission to retire the canonical oracle.
 Quoted symbol spellings in x86 Intel and AT&T instruction operands retain
 the same symbol identity as labels and data directives. RIP-relative and
 absolute memory operands and direct branch targets accept the quoted spelling
-and a numeric addend; Intel also accepts a displacement before the brackets
+and a numeric addend. A direct branch's `@PLT` modifier remains outside its
+quoted name; `@PLT` and numeric-label-looking bytes inside the quote stay name
+bytes. Intel also accepts a displacement before the brackets
 (`"g"+8[rip]`). Delimiters and comment punctuation within a quoted name remain
 name bytes. Malformed or empty quoted symbols fail with an operand diagnostic.
 The registered `-g0` listing round trip covers a string reference and an

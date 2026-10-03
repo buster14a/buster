@@ -3298,6 +3298,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_quoted_instruction_symbols(Unit
             unit.relocations[1].symbol < unit.symbol_count &&
             string_equal(unit.symbols[unit.relocations[1].symbol].name, S8("observe")));
     }
+    String8 plt_sources[] = {
+        S8(".intel_syntax noprefix\n.text\ncall \"quote_observer\"@PLT+8\n"),
+        S8(".att_syntax prefix\n.text\ncall \"quote_observer\"@plt+8\n"),
+        S8(".intel_syntax noprefix\n.text\ncall \"1f\"@PLT\n"),
+        S8(".att_syntax prefix\n.text\ncall \"1f\"@PLT\n"),
+        S8(".intel_syntax noprefix\n.text\ncall \"literal@PLT\"\n"),
+        S8(".att_syntax prefix\n.text\ncall \"literal@PLT\"\n"),
+    };
+    String8 plt_names[] = {S8("quote_observer"), S8("quote_observer"), S8("1f"), S8("1f"), S8("literal@PLT"), S8("literal@PLT")};
+    u8 const call_bytes[] = {0xe8, 0, 0, 0, 0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(plt_sources); index += 1)
+    {
+        AssemblyUnitResult plt = assembly_unit_encode(arguments->arena, plt_sources[index], (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST_RAW(arguments, !plt.diagnostic_count && plt.section_count == 1 && plt.relocation_count == 1 &&
+            assembly_test_bytes_equal(plt.sections[0].data, call_bytes, sizeof(call_bytes)), plt_sources[index]);
+        if (!plt.diagnostic_count && plt.relocation_count == 1)
+        {
+            BUSTER_TEST(arguments, plt.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                plt.relocations[0].offset == 1 && plt.relocations[0].addend == (index < 2 ? 4 : -4) &&
+                plt.relocations[0].plt == (index < 4) && plt.relocations[0].x86_branch &&
+                plt.relocations[0].symbol < plt.symbol_count &&
+                string_equal(plt.symbols[plt.relocations[0].symbol].name, plt_names[index]));
+        }
+    }
+    String8 const bad_modifiers[] = {S8("call \"\"@PLT"), S8("call \"g\"@GOTPCREL"), S8("call \"g\"@PLT@PLT")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bad_modifiers); index += 1)
+    {
+        String8 source = string_format(arguments->arena, S8(".intel_syntax noprefix\n.text\n{S8}\n"), bad_modifiers[index]);
+        AssemblyUnitResult rejected = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST_RAW(arguments, rejected.diagnostic_count != 0 && rejected.section_count == 1 &&
+            !rejected.sections[0].data.length && !rejected.relocation_count, source);
+    }
     u8 const local_bytes[] = {0xe9, 0, 0, 0, 0, 0xc3};
     AssemblyEncodeResult local = assembly_encode(arguments->arena, S8("jmp \".Lquoted\"\n\".Lquoted\": ret\n"),
         (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
