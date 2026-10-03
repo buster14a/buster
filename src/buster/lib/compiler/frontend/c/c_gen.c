@@ -2815,8 +2815,8 @@ struct CIntegerIrBuilder
     // the per-body scan's exact verdicts.
     u32 const* stream_matching_delimiters_plus_one;
     // Borrowed from the parse position index when it is built: ascending
-    // positions of every identifier-then-colon token pair, the necessary
-    // condition of c_ir_named_label_at. label_candidates_valid distinguishes
+    // positions of identifier-then-colon pairs outside aggregate member
+    // bodies. label_candidates_valid distinguishes
     // "no labels anywhere" from "no index"; only the latter falls back to
     // scanning every body token.
     u32 const* label_candidate_positions;
@@ -38675,7 +38675,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
     {
         for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
         {
-            label_capacity += c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end);
+            label_capacity += c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end) &&
+                              c_parse_label_candidate_at(&builder->parse, &builder->preprocess, declaration.body_start, index);
         }
     }
     bool initialized = c_ir_lower_scratch_reservation(builder, sizeof(CIrLabel), label_capacity ? label_capacity : 1, BUSTER_ALIGN_OF(CIrLabel));
@@ -38714,7 +38715,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
             }
         }
         CToken token = builder->preprocess.tokens[index];
-        bool named_label = c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end);
+        bool named_label = c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end) &&
+                           (builder->label_candidates_valid ||
+                            c_parse_label_candidate_at(&builder->parse, &builder->preprocess, declaration.body_start, index));
         if (!named_label)
         {
             continue;
@@ -39348,7 +39351,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     for (u32 position = index; position + 1 < task.end; position += 1)
                     {
-                        if (c_ir_named_label_at(&builder->preprocess, task.start, position, task.end))
+                        if (c_ir_named_label_at(&builder->preprocess, task.start, position, task.end) &&
+                            c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, position))
                         {
                             found = position;
                             break;
@@ -39445,7 +39449,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             bool first_is_unbound_typedef_name =
                 first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID &&
                 c_parse_type_start_token(&builder->parse, builder->preprocess, c_ir_current_scope(builder), first);
-            if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end))
+            if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end) &&
+                c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, index))
             {
                 CIrLabel* label = c_ir_label_find(labels, label_count, c_token_spelling(builder->preprocess.spelling_base, first));
                 IrBlock* current = &builder->function->blocks[builder->current_block.value];
@@ -53665,9 +53670,28 @@ bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclarat
     {
         u64 remaining = kind == C_TEST_IR_SCRATCH_BODY_TASKS ? sizeof(CIrLabel) : 0;
         arena_allocate_bytes(scratch, scratch->reserved_size - scratch->position - remaining, 1);
-        CIrSsaLocal local = {.last_event = UINT32_MAX};
-        CIrDirectSsa ssa = {.locals = &local, .local_count = 1};
-        CIntegerIrBuilder builder = {.scratch_arena = scratch, .direct_ssa = &ssa, .preprocess = preprocess};
+        // Retain a valid cached read context for the analyzer's success path.
+        IrType type = {.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true,
+                       .layout = {.resolved = true, .size = 4, .alignment = 4}};
+        IrProgram program = {.types = {.types = &type, .count = 1, .capacity = 1}};
+        IrModule module = {0};
+        IrBlock block = {.id = {.value = 0}, .sealed = true};
+        IrValue values[4] = {
+            {.canonical_type = {.value = 0}, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_PLACE},
+            {.canonical_type = {.value = 0}, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE},
+        };
+        IrFunction function = {.blocks = &block, .block_count = 1, .block_capacity = 1,
+                               .values = values, .value_count = 2, .value_capacity = BUSTER_ARRAY_LENGTH(values), .entry = block.id};
+        CIrSsaLocal local = {.place = {.value = 0}, .type = {.value = 0}, .first_event = UINT32_MAX, .last_event = UINT32_MAX};
+        CIrSsaSlot slots[8] = {0};
+        u32 slot_index = c_ir_ssa_hash(1, 0, BUSTER_ARRAY_LENGTH(slots) - 1);
+        slots[slot_index] = (CIrSsaSlot){.block_plus_one = 1, .value = {.value = 1}};
+        u32 slot_indices[4] = {slot_index};
+        CIrDirectSsa ssa = {.locals = &local, .local_count = 1, .local_capacity = 1,
+                           .slots = slots, .slot_indices = slot_indices, .slot_count = 1, .slot_capacity = BUSTER_ARRAY_LENGTH(slots)};
+        CIntegerIrBuilder builder = {.arena = scratch, .scratch_arena = scratch, .temporary_arena = scratch,
+                                     .program = &program, .module = &module, .function = &function, .current_block = block.id,
+                                     .direct_ssa = &ssa, .preprocess = preprocess};
         bool refused;
         switch (kind)
         {

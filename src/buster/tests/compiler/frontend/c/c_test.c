@@ -13057,6 +13057,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
     u64 source_capacity = BUSTER_MB(1);
     char8* source_bytes = arena_allocate(arguments->arena, char8, source_capacity);
     u64 source_length = 0;
+    c_test_append_source(source_bytes, source_capacity, &source_length, S8("typedef int Word;\n"));
     for (u32 item = 0; item < 400; item += 1)
     {
         if (item % 5 == 0)
@@ -13084,7 +13085,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
             }
             c_test_append_source(source_bytes, source_capacity, &source_length,
                                  string_format(arguments->arena,
-                                               S8(" struct pair_{u32} {{ int a; }} pair = {{ 0 }}; void* target = &&done_{u32};"
+                                               S8(" struct pair_{u32} {{ Word : 0; int a; Word : 0; }} pair = {{ 0 }}; void* target = &&done_{u32};"
                                                   " int total = ({{ int inner = x; inner; }});"
                                                   " for (int i = 0; i < x; i += 1) {{ if (i == 3) continue; total += sizeof(int) + _Alignof(long) + __alignof__(short); }}"
                                                   " while (x) {{ x -= 1; break; }} do {{ x += 1; }} while (x < 2);"
@@ -13112,6 +13113,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
     u32* expected_attributes = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
     u32* expected_stack_positions = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
     CPunctuator* expected_stack_openings = arena_allocate(arguments->arena, CPunctuator, token_count ? token_count : 1);
+    bool* expected_stack_aggregate = arena_allocate(arguments->arena, bool, token_count ? token_count : 1);
     u32 vector_size_count = 0;
     u32 alignas_count = 0;
     u32 label_count = 0;
@@ -13136,7 +13138,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
             {
                 expected_attributes[attribute_count++] = token_index;
             }
-            if (token_index + 1 < token_count &&
+            if ((!stack_count || !expected_stack_aggregate[stack_count - 1]) && token_index + 1 < token_count &&
                 c_token_shape_punctuator(c_preprocess_token_shape(&preprocess, token_index + 1)) == C_PUNCTUATOR_COLON)
             {
                 expected_labels[label_count++] = token_index;
@@ -13148,6 +13150,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
         {
             expected_stack_positions[stack_count] = token_index;
             expected_stack_openings[stack_count] = punctuator;
+            bool aggregate = stack_count && expected_stack_aggregate[stack_count - 1];
+            if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
+            {
+                aggregate = false;
+                for (u32 distance = 1; distance <= 2 && distance <= token_index; distance += 1)
+                {
+                    CToken preceding = preprocess.tokens[token_index - distance];
+                    String8 word = c_token_spelling(preprocess.spelling_base, preceding);
+                    aggregate |= preceding.kind == C_TOKEN_IDENTIFIER &&
+                        (string_equal(word, S8("struct")) || string_equal(word, S8("union")) || string_equal(word, S8("enum")));
+                }
+            }
+            expected_stack_aggregate[stack_count] = aggregate;
             stack_count += 1;
             continue;
         }
@@ -17550,6 +17565,12 @@ BUSTER_GLOBAL_LOCAL String8 c_test_expression_aggregate_bit_field_source(void)
         "int named_expression(void) { return 1 + (int)sizeof(struct { unsigned int expression_bit : 1; }); }\n"
         "int named_initializer(void) { int n = (int)sizeof(struct { unsigned int initializer_bit : 1; }); return n; }\n"
         "int zero_initializer(void) { int n = (int)sizeof(struct { int : 0; int x; }); return n; }\n"
+        "typedef int Word;\n"
+        "int typedef_initializer(void) { int n = (int)sizeof(struct { Word : 0; int x; }); return n; }\n"
+        "int typedef_after_member(void) { int n = (int)sizeof(struct { int x; Word : 0; int y; }); return n; }\n"
+        "int repeated_widths(void) { int n = (int)sizeof(struct { Word : 0; Word : 0; int x; }); return n; }\n"
+        "int typedef_label(void) { int n = (int)sizeof(struct { Word : 0; int x; }); goto Word; Word: return n; }\n"
+        "int typedef_statement_label(void) { int n = ({ goto inside; inside: (int)sizeof(struct { Word : 0; int x; }); }); return n; }\n"
         "int unnamed_initializer(void) { int n = (int)sizeof(struct { int : 3; int x; }); return n; }\n"
         "int unnamed_return(void) { return (int)sizeof(struct { int : 0; int x; }); }\n"
         "int arithmetic_initializer(void) { int n = (int)sizeof(struct { int arithmetic_bit : 0 * 1 + 1; }); return n; }\n"
@@ -17578,6 +17599,8 @@ BUSTER_GLOBAL_LOCAL String8 c_test_expression_aggregate_bit_field_source(void)
         " failure += named_return() != 4; failure += named_argument() != 4;"
         " failure += named_expression() != 5; failure += named_initializer() != 4;"
         " failure += zero_initializer() != 4; failure += unnamed_initializer() != 8;"
+        " failure += typedef_initializer() != 4; failure += typedef_after_member() != 8;"
+        " failure += repeated_widths() != 4; failure += typedef_label() != 4; failure += typedef_statement_label() != 4;"
         " failure += unnamed_return() != 4; failure += arithmetic_initializer() != 4;"
         " failure += arithmetic_return() != 4; failure += nested_return() != 8;"
         " failure += member_shadow() != 11; failure += tag_visibility() != 1;"
@@ -17607,6 +17630,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_aggregate_bit_fields(UnitTe
     } expected[] = {
         {S8("named_return"), 4}, {S8("named_argument"), 4}, {S8("named_initializer"), 4},
         {S8("zero_initializer"), 4}, {S8("unnamed_initializer"), 8}, {S8("unnamed_return"), 4},
+        {S8("typedef_initializer"), 4}, {S8("typedef_after_member"), 8}, {S8("repeated_widths"), 4},
+        {S8("typedef_label"), 4}, {S8("typedef_statement_label"), 4},
         {S8("arithmetic_initializer"), 4}, {S8("arithmetic_return"), 4}, {S8("nested_return"), 8},
         {S8("unevaluated_width"), 4}, {S8("visible_bound"), 16}, {S8("nested_bound"), 20},
     };
@@ -17658,6 +17683,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_aggregate_bit_fields(UnitTe
                         }
                     }
                     BUSTER_TEST_RAW(arguments, function && folded, expected[row].name);
+                }
+            }
+            if (semantic.diagnostic_count == 0)
+            {
+                semantic.position_index = 0;
+                CIRLowerResult unindexed = c_test_lower_to_ir_with_scratch_limits(temporary.arena,
+                    S8("expression-aggregate-bit-fields.c"), tokens, semantic, target,
+                    (CIRLowerOptions){.disable_direct_ssa = frontend != 0}, 0, 0);
+                bool valid = unindexed.diagnostic_count == 0 && unindexed.program && unindexed.program->module_count &&
+                             unindexed.canonical_ir_certified;
+                BUSTER_TEST_RAW(arguments, valid, unindexed.diagnostic_count ? unindexed.diagnostics[0].message : source);
+                if (valid)
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(unindexed.program, unindexed.program->modules).error == IR_VALIDATION_NONE);
                 }
             }
             scratch_end(temporary);

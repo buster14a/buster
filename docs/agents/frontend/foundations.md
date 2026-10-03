@@ -97,6 +97,20 @@ the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The
 strict `basic_c_statement_expression_value.c` corpus checks both goto arms.
 
+Label candidates exclude aggregate member bodies: `int : 0` and a typedef
+spelling such as `Word : 0` are bit-fields, not function labels. The existing
+position-index delimiter stack retains the nearest brace's context, and its
+window walk merges label and delimiter events in source order. Parenthesis and
+bracket groups inherit that context; a nested GNU statement-expression brace
+opens a statement context. Both label-table sizing and filling use the filtered
+positions, while a caller without an index uses the same brace classification
+through `c_parse_label_candidate_at`. No block is predeclared for a field colon.
+`c_test_expression_aggregate_bit_fields` checks typedef-named and repeated
+anonymous members, genuine typedef-named and statement-expression labels,
+indexed and unindexed lowering, both frontend forms and all native allocators.
+The tiled position-index regression compares the window and scalar populations
+with anonymous member colons shifted across window boundaries.
+
 A named label can re-enter a token range after control skipped an ordinary
 automatic declaration. Fixed-size objects in a labeled function therefore
 receive their canonical local/place rows before the entry block terminates;

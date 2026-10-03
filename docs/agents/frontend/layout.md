@@ -18,7 +18,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   published in the containing scope. This includes
   `sizeof` operands in returns, arguments and controlling expressions.
   `c_test_expression_aggregate_bit_fields` checks these contexts, unnamed and
-  zero-width members, arithmetic widths, tag visibility and local/member name
+  zero-width members, typedef-named anonymous members, arithmetic widths, tag visibility and local/member name
   separation across six target layouts and both frontend forms. Its embedded
   runtime source checks fixed sizes and unevaluated width operands in all four
   native allocators; invalid member declarations retain structured diagnostics.

@@ -403,8 +403,93 @@ typedef struct CParseDelimiterStackEntry CParseDelimiterStackEntry;
 struct CParseDelimiterStackEntry
 {
     u32 position;
-    CPunctuator opening;
+    u8 opening;
+    bool aggregate_body;
+    u8 reserved[2];
 };
+
+// Aggregate braces include attributes before and after their tag.
+BUSTER_C_INTERNAL bool c_parse_aggregate_brace_at(CPreprocessResult const* preprocess, u32 open)
+{
+    bool aggregate = false;
+    bool tag_skipped = false;
+    bool scanning = true;
+    u32 prefix = open;
+    while (prefix && scanning)
+    {
+        CToken token = preprocess->tokens[prefix - 1];
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            aggregate = c_token_in_well_known_set(preprocess->spelling_base, token,
+                C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM));
+            scanning = !aggregate && !tag_skipped;
+            tag_skipped = true;
+            prefix -= 1;
+        }
+        else if (token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET)
+        {
+            u8 closing = token.punctuator;
+            u8 opening = (u8)(closing - 1);
+            u32 depth = 1;
+            u32 group = prefix - 1;
+            while (group && depth)
+            {
+                group -= 1;
+                u8 punctuator = preprocess->tokens[group].punctuator;
+                if (punctuator == closing) depth += 1;
+                else if (punctuator == opening) depth -= 1;
+            }
+            bool gnu_attribute = !depth && closing == C_PUNCTUATOR_RIGHT_PARENTHESIS && group &&
+                c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[group - 1],
+                    C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT) | C_SYMBOL_WELL_KNOWN_BIT(DECLSPEC));
+            bool standard_attribute = !depth && closing == C_PUNCTUATOR_RIGHT_BRACKET && group + 1 < prefix &&
+                preprocess->tokens[group + 1].punctuator == C_PUNCTUATOR_LEFT_BRACKET &&
+                preprocess->tokens[prefix - 2].punctuator == C_PUNCTUATOR_RIGHT_BRACKET;
+            scanning = gnu_attribute || standard_attribute;
+            prefix = gnu_attribute ? group - 1 : group;
+        }
+        else
+        {
+            scanning = false;
+        }
+    }
+    return aggregate;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_position_lower_bound(u32 const* positions, u32 count, u32 start);
+
+// Only unindexed consumers scan backwards for brace context.
+BUSTER_C_SHARED bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index)
+{
+    bool label = true;
+    if (parse->position_index && parse->position_index->built)
+    {
+        CTokenPositionIndex const* positions = parse->position_index;
+        u32 low = c_parse_position_lower_bound(positions->label_candidate_positions, positions->label_candidate_count, index);
+        label = low < positions->label_candidate_count && positions->label_candidate_positions[low] == index;
+    }
+    else
+    {
+        u32 braces = 0;
+        u32 scan = index;
+        while (scan > body_start)
+        {
+            scan -= 1;
+            u8 punctuator = preprocess->tokens[scan].punctuator;
+            if (punctuator == C_PUNCTUATOR_RIGHT_BRACE) braces += 1;
+            else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
+            {
+                if (!braces)
+                {
+                    label = !c_parse_aggregate_brace_at(preprocess, scan);
+                    break;
+                }
+                braces -= 1;
+            }
+        }
+    }
+    return label;
+}
 
 // The three bracket pairs the index matches, as one closer-to-opener rule
 // rather than a ladder: each closing spelling sits immediately above its own
@@ -413,6 +498,8 @@ struct CParseDelimiterStackEntry
 BUSTER_CT_CHECK(C_PUNCTUATOR_RIGHT_PARENTHESIS == C_PUNCTUATOR_LEFT_PARENTHESIS + 1);
 BUSTER_CT_CHECK(C_PUNCTUATOR_RIGHT_BRACKET == C_PUNCTUATOR_LEFT_BRACKET + 1);
 BUSTER_CT_CHECK(C_PUNCTUATOR_RIGHT_BRACE == C_PUNCTUATOR_LEFT_BRACE + 1);
+BUSTER_CT_CHECK(C_PUNCTUATOR_RIGHT_BRACE <= UINT8_MAX);
+BUSTER_CT_CHECK(sizeof(CParseDelimiterStackEntry) == 8);
 
 // The identifier populations of the index, for a token the caller has already
 // proved is an identifier. The label rule is not here: the window pass answers
@@ -488,15 +575,18 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_keyword(CParse
 // bracket spellings and has already separated into opener and closer. Neither
 // the punctuator ladder nor the shape test survives that: the opener's id is
 // the shape's low bits and the closer's expectation is one below its own.
-BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_delimiter(CTokenPositionIndex* index, CParseDelimiterStackEntry* stack,
+BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_delimiter(CPreprocessResult const* preprocess, CTokenPositionIndex* index, CParseDelimiterStackEntry* stack,
                                                                            u32* stack_count, u32 token_index, CTokenShape shape, bool opening)
 {
     CPunctuator punctuator = (CPunctuator)(shape & C_TOKEN_SHAPE_PUNCTUATOR_MASK);
     if (opening)
     {
+        bool aggregate_body = punctuator == C_PUNCTUATOR_LEFT_BRACE ? c_parse_aggregate_brace_at(preprocess, token_index)
+            : *stack_count && stack[*stack_count - 1].aggregate_body;
         stack[(*stack_count)++] = (CParseDelimiterStackEntry){
             .position = token_index,
-            .opening = punctuator,
+            .opening = (u8)punctuator,
+            .aggregate_body = aggregate_body,
         };
     }
     else if (!*stack_count || stack[*stack_count - 1].opening != (CPunctuator)(punctuator - 1))
@@ -536,7 +626,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit(CParseResult* 
         // The next token is one line of this cache at most, and reading
         // its punctuator here spares the body-lowering loops a re-scan of
         // every token for the same identifier-then-colon shape.
-        if ((u64)token_index + 1 < preprocess.token_count &&
+        if ((!*stack_count || !stack[*stack_count - 1].aggregate_body) && (u64)token_index + 1 < preprocess.token_count &&
             c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, token_index + 1)) == C_PUNCTUATOR_COLON)
         {
             c_parse_position_index_append(result->arena, &index->label_candidate_positions, &index->label_candidate_count, label_candidate_capacity,
@@ -562,7 +652,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit(CParseResult* 
         bool closing = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || punctuator == C_PUNCTUATOR_RIGHT_BRACKET || punctuator == C_PUNCTUATOR_RIGHT_BRACE;
         if (opening || closing)
         {
-            c_parse_position_index_visit_delimiter(index, stack, stack_count, token_index, shape, opening);
+            c_parse_position_index_visit_delimiter(&preprocess, index, stack, stack_count, token_index, shape, opening);
         }
     }
 }
@@ -648,21 +738,25 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
                     c_parse_position_index_append(result->arena, &index->statement_expression_positions, &index->statement_expression_count,
                                                   &validation_capacities.statement_expression, (u32)(window_base + mask64_first_set(remaining)));
                 }
-                for (Mask64 remaining = labels; remaining; remaining &= remaining - 1)
-                {
-                    u32 token_index = (u32)(window_base + mask64_first_set(remaining));
-                    c_parse_position_index_append(result->arena, &index->label_candidate_positions, &index->label_candidate_count,
-                                                  &label_candidate_capacity, token_index);
-                }
-                // Openers and closers stay in one walk: the stack discipline is
-                // what makes the pass a matching, so their order relative to
-                // each other is the answer and cannot be split apart.
-                for (Mask64 remaining = mask64_or(opens, closes); remaining; remaining &= remaining - 1)
+                // Merge labels and delimiters so member colons are excluded
+                // while nested statement expressions keep function labels.
+                for (Mask64 remaining = mask64_or(mask64_or(opens, closes), labels); remaining; remaining &= remaining - 1)
                 {
                     u32 lane = mask64_first_set(remaining);
                     u32 token_index = (u32)(window_base + lane);
-                    c_parse_position_index_visit_delimiter(index, stack, &stack_count, token_index, token_shapes[token_index],
-                                                           ((opens >> lane) & 1) != 0);
+                    if ((labels >> lane) & 1)
+                    {
+                        if (!stack_count || !stack[stack_count - 1].aggregate_body)
+                        {
+                            c_parse_position_index_append(result->arena, &index->label_candidate_positions, &index->label_candidate_count,
+                                                          &label_candidate_capacity, token_index);
+                        }
+                    }
+                    else
+                    {
+                        c_parse_position_index_visit_delimiter(&preprocess, index, stack, &stack_count, token_index, token_shapes[token_index],
+                                                               ((opens >> lane) & 1) != 0);
+                    }
                 }
             }
         }
@@ -20255,7 +20349,8 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         bool label = false;
         if (shape == C_TOKEN_IDENTIFIER)
         {
-            label = c_ir_named_label_at(&preprocess, body_start, index, body_end);
+            label = c_ir_named_label_at(&preprocess, body_start, index, body_end) &&
+                    c_parse_label_candidate_at(result, &preprocess, body_start, index);
             bool member = index > body_start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
                                                  c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
             // A name after `struct`, `union` or `enum` is a tag and one after
@@ -24229,7 +24324,8 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
     for (u32 index = c_parse_candidates_next(&label_candidates, start, end); index + 1 < end;
          index = c_parse_candidates_next(&label_candidates, index + 1, end))
     {
-        count += c_ir_named_label_at(&preprocess, start, index, end);
+        count += c_ir_named_label_at(&preprocess, start, index, end) &&
+                 (label_candidates.source == C_PARSE_CANDIDATES_POSITIONS || c_parse_label_candidate_at(result, &preprocess, start, index));
     }
     u64 capacity = 1;
     while (capacity < (u64)count * 2)
@@ -24243,7 +24339,8 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
     for (u32 index = c_parse_candidates_next(&label_candidates, start, end); index + 1 < end;
          index = c_parse_candidates_next(&label_candidates, index + 1, end))
     {
-        if (c_ir_named_label_at(&preprocess, start, index, end))
+        if (c_ir_named_label_at(&preprocess, start, index, end) &&
+            (label_candidates.source == C_PARSE_CANDIDATES_POSITIONS || c_parse_label_candidate_at(result, &preprocess, start, index)))
         {
             String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
             u64 slot = c_macro_name_hash(name) & (capacity - 1);
@@ -26355,7 +26452,7 @@ BUSTER_C_INTERNAL bool c_parse_label_values_needed(CParseResult* result, CPrepro
     {
         if (!skipped || !skipped[index - start])
         {
-            named_label |= c_ir_named_label_at(&preprocess, start, index, end);
+            named_label |= c_ir_named_label_at(&preprocess, start, index, end) && c_parse_label_candidate_at(result, &preprocess, start, index);
             conjunction |= c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND);
             needed |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index], C_SYMBOL_WELL_KNOWN_GOTO) &&
                       c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR);
@@ -26818,6 +26915,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                     for (u32 definition = start; !found && definition + 1 < end; definition += 1)
                     {
                         found = c_ir_named_label_at(&preprocess, start, definition, end) &&
+                                c_parse_label_candidate_at(result, &preprocess, start, definition) &&
                                 string_equal(label, c_token_spelling(preprocess.spelling_base, preprocess.tokens[definition]));
                     }
                     if (!found) message = string_format(result->arena, S8("asm goto label '{S8}' is not defined in this function"), label);
