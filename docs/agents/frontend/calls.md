@@ -255,6 +255,17 @@ allocator modes and both frontend forms.
 
 ## Declarator constraints
 
+Semantic expression queries type a string literal through its target and dialect
+element type before applying subscripts. Both `literal[index]` and
+`index[literal]` retain that element identity for `typeof`; `_Generic` applies
+the ordinary lvalue conversion, and arithmetic applies integer promotions.
+The expression task stack queries both operands without evaluating either one.
+`c_test_generic_string_subscripts` checks all five prefixes, parentheses,
+concatenation, commuted subscripts, computed indices, promotions and rejected
+operand pairs on six native layouts in GNU17/GNU23 and both frontend forms.
+Its embedded native fixture checks every allocator and preserves unevaluated
+index effects.
+
 Function types reject array and function return types when their declarators
 are formed, including unused prototypes, typedef return types and nested
 function-pointer declarators. Pointer return types keep their array/function
