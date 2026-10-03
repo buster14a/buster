@@ -266,6 +266,18 @@ operand pairs on six native layouts in GNU17/GNU23 and both frontend forms.
 Its embedded native fixture checks every allocator and preserves unevaluated
 index effects.
 
+Character literal expression queries retain the prefix's scalar identity:
+ordinary constants are `int`, `L` follows the target's `wchar_t`, `u` is
+`unsigned short`, `U` is `unsigned int`, and C23 `u8` is `unsigned char`.
+The allocation-free literal query and the type machine share this leaf policy;
+`typeof`, `_Generic` and inferred declarations agree with lowering, while
+arithmetic still applies the ordinary integer promotions. Prefix and dialect
+admission remain owned by existing lexing and semantic validation.
+`c_test_character_literal_query_types` checks fixed type, promotion and size
+expectations on six native layouts in GNU17/GNU23 through both query routes and
+both frontend forms. Its embedded native fixture checks signedness after `-1`
+assignment for `typeof`, GNU `__auto_type` and C23 `auto` in every allocator.
+
 Function types reject array and function return types when their declarators
 are formed, including unused prototypes, typedef return types and nested
 function-pointer declarators. Pointer return types keep their array/function

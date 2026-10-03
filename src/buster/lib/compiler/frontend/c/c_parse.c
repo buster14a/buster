@@ -5063,6 +5063,14 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
         }
+        else if (spelling.length && spelling.pointer[0] == 'u')
+        {
+            kind = spelling.length > 1 && spelling.pointer[1] == '8' ? C_TYPE_UNSIGNED_CHAR : C_TYPE_UNSIGNED_SHORT;
+        }
+        else if (spelling.length && spelling.pointer[0] == 'U')
+        {
+            kind = C_TYPE_UNSIGNED_INT;
+        }
         return c_parse_expression_scalar_type(result, kind);
     }
     if (first.kind == C_TOKEN_STRING_LITERAL)
