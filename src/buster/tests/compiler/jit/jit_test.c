@@ -607,6 +607,17 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, tls_relocation_program.error == JIT_ERROR_TLS_UNSUPPORTED);
     BUSTER_STRING_TEST(arguments, tls_relocation_program.failing_symbol, local_symbol.name);
 
+    ObjectRelocationKind mach_tls_kinds[] = {OBJECT_RELOCATION_X86_64_MACH_TLV_PC32,
+        OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21, OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12};
+    for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(mach_tls_kinds); kind += 1)
+    {
+        tls_relocation.kind = mach_tls_kinds[kind];
+        JitProgram refused = jit_link_object(&tls_relocation_object, (JitOptions){0});
+        BUSTER_TEST(arguments, refused.error == JIT_ERROR_TLS_UNSUPPORTED && !refused.allocation_base && !refused.allocation_size);
+        BUSTER_STRING_TEST(arguments, refused.failing_symbol, local_symbol.name);
+        jit_program_release(&refused);
+    }
+
     ObjectRelocation unsupported_relocation = tls_relocation;
     unsupported_relocation.kind = OBJECT_RELOCATION_ABSOLUTE32;
     ObjectFile unsupported_object = tls_relocation_object;
