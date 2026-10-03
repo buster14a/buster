@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise real caller clocks and descriptor custody without a simulator.
 
-BridgeTests runs GNU monitors, the actual Bash collector, and the real owner.
+BridgeTests runs the selected monitors, the actual Bash collector, and the real owner.
 All fixture processes are finite. Cleanup uses live owned Popen handles and
 release markers; protocol PID/PGID/SID numbers are never signal targets.
 """
@@ -351,7 +351,7 @@ class BridgeTests(unittest.TestCase):
         native_marker = self.root / "must-not-admit-native"
         command = [sys.executable, "-c", "import pathlib,sys;pathlib.Path(sys.argv[1]).touch()", str(native_marker)]
         status, fields, prefix, private, elapsed, errors = self.finish_cap(self.start_cap(command, environment))
-        self.assertEqual(status, 137, errors)
+        self.assertIn(status, (124, 137), errors)
         self.assertEqual(fields["admission"], "0")
         self.assertTrue((state / "startup-entered").exists())
         self.assertFalse((state / "startup-exec-admitted").exists())
@@ -359,6 +359,15 @@ class BridgeTests(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 11.8)
         self.assertLess(elapsed, 13)
         self.assertFalse(Path(str(prefix) + ".supervisor-status.log").exists())
+        # A timer result alone cannot prove that delayed startup was killed.
+        # Its finite delay starts at entry, not at the outer timer's launch.
+        entered_ns = int((state / "startup-entered").read_text())
+        now_ns = time.monotonic_ns()
+        self.assertGreater(entered_ns, 0)
+        self.assertLessEqual(entered_ns, now_ns)
+        time.sleep(max(0, (entered_ns + 13_300_000_000 - now_ns) / 1_000_000_000))
+        self.assertFalse((state / "startup-exec-admitted").exists())
+        self.assertFalse(native_marker.exists())
 
     def test_finite_startup13_is_bounded_by_caller_cap12_default_signals(self):
         self.startup_case("default")
@@ -396,7 +405,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(status, 0, errors)
         self.assertEqual(fields["admission"], "1")
         self.assertEqual(fields["helper_status"], "124")
-        self.assertEqual(fields["command_monitor_status"], "137")
+        self.assertIn(fields["command_monitor_status"], ("124", "137"))
         owner = self.supervisor(prefix)
         self.assertEqual(owner["native_status"], "0")
         self.assertEqual(owner["command_status"], "124")
@@ -461,7 +470,7 @@ class BridgeTests(unittest.TestCase):
         prefix = self.root / "repeated-stable-prefix"
         status, old, prefix, old_private, elapsed, errors = self.finish_cap(
             self.start_cap([sys.executable, "-c", "print('old')"], environment, prefix=prefix))
-        self.assertEqual(status, 137, errors)
+        self.assertIn(status, (124, 137), errors)
         self.assertEqual(old["admission"], "0")
         self.assertTrue((state / "publication-delay-entered").exists())
         self.assertFalse((state / "publication-delay-ended").exists())
@@ -484,7 +493,7 @@ class BridgeTests(unittest.TestCase):
         environment = self.python_overlay(state, "shim", "preserve", "13", "1")
         status, fields, prefix, private, elapsed, errors = self.finish_cap(
             self.start_cap([sys.executable, "-c", "pass"], environment))
-        self.assertEqual(status, 137, errors)
+        self.assertIn(status, (124, 137), errors)
         self.assertEqual(fields["admission"], "0")
         self.assertTrue((state / "actual-helper-wait-0").exists())
         self.assertTrue((state / "shim-completion-closed").exists())

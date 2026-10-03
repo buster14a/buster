@@ -62,52 +62,135 @@ class LifecycleCaptureTests(unittest.TestCase):
         self.finite_writers = []
         self.case_number = 0
 
-    def imported_fault_case(self, keeper_exit=None, premature=False, cancel=False, native_source=None):
+    def imported_fault_case(self, keeper_exit=None, premature=False, cancel=False,
+                            native_source=None, early_refusal=False):
         specification = importlib.util.spec_from_file_location("capture_fault_control", HELPER)
         module = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(module)
         original_popen = module.subprocess.Popen
         owned = []
-        prefix = self.root / "fault-phase"
+        self.case_number += 1
+        prefix = self.root / ("fault-phase-%d" % self.case_number)
+        entry_marker = Path(str(prefix) + ".native-entered")
+        death_marker = Path(str(prefix) + ".keeper-eof-observed")
+        descriptors = {}
+        if early_refusal:
+            self.assertIsNotNone(keeper_exit)
+            self.assertFalse(premature)
+        if premature:
+            self.assertIsNotNone(keeper_exit)
+            self.assertFalse(early_refusal)
+            descriptors["entry_read"], descriptors["entry_write"] = os.pipe()
+            descriptors["death_read"], descriptors["death_write"] = os.pipe()
+
+        def close_descriptor(name):
+            descriptor = descriptors.pop(name, None)
+            if descriptor is not None:
+                os.close(descriptor)
+
         keeper_code = (
-            "import os,signal,sys\n"
-            "ready,control=map(int,sys.argv[1:])\n"
+            "import os,select,signal,sys\n"
+            "ready,control=map(int,sys.argv[1:3])\n"
             "signal.signal(signal.SIGTERM,lambda *_:None)\n"
             "signal.signal(signal.SIGINT,lambda *_:None)\n"
             "os.setpgid(0,0)\n"
             "signal.pthread_sigmask(signal.SIG_UNBLOCK,{signal.SIGINT,signal.SIGTERM})\n"
-            "os.write(ready,('%d %d\\n'%(os.getpid(),os.getpgrp())).encode())\n"
-            + ("" if premature else "while os.read(control,1): pass\n")
+            + ("os._exit(%s)\n" % keeper_exit if early_refusal else "")
+            + "os.write(ready,('%d %d\\n'%(os.getpid(),os.getpgrp())).encode())\n"
+            + ("entry,death=map(int,sys.argv[3:])\n"
+               "if not select.select([entry],[],[],2)[0] or os.read(entry,1)!=b'1': os._exit(98)\n"
+               if premature else "while os.read(control,1): pass\n")
             + "os._exit(%s)\n" % keeper_exit
         )
+        native = native_source or "import os;os.write(1,b'payload\\n')"
+        if premature:
+            # Exec entry proves the real supervisor's private-group admission
+            # already happened. Only this keeper owns the death pipe's writer;
+            # EOF observes its exit without polling or reaping its Popen handle.
+            native = ("import os,select\nfrom pathlib import Path\n"
+                      + "Path(%r).touch()\n" % str(entry_marker)
+                      + "os.write(%d,b'1');os.close(%d)\n" %
+                        (descriptors["entry_write"], descriptors["entry_write"])
+                      + "if not select.select([%d],[],[],2)[0] or os.read(%d,1)!=b'': raise RuntimeError('fault keeper EOF missing')\n" %
+                        (descriptors["death_read"], descriptors["death_read"])
+                      + "os.close(%d)\n" % descriptors["death_read"]
+                      + "Path(%r).touch()\n" % str(death_marker)
+                      + native)
 
         def popen_control(arguments, **options):
             is_keeper = len(arguments) > 2 and arguments[2] == "--keeper"
             if is_keeper and keeper_exit is not None:
                 arguments = [sys.executable, "-c", keeper_code, *arguments[3:]]
+                if premature:
+                    arguments.extend(str(descriptors[name]) for name in ("entry_read", "death_write"))
+                    options["pass_fds"] = (*options.get("pass_fds", ()),
+                                           descriptors["entry_read"], descriptors["death_write"])
+            elif not is_keeper and premature:
+                options["pass_fds"] = (*options.get("pass_fds", ()),
+                                       descriptors["entry_write"], descriptors["death_read"])
             process = original_popen(arguments, **options)
             owned.append(process)
+            if premature:
+                for name in (("entry_read", "death_write") if is_keeper else
+                             ("entry_write", "death_read")):
+                    close_descriptor(name)
             if is_keeper and cancel:
                 # The supervisor's creation/register window has these signals
                 # blocked. Delivery happens only after it registers ownership.
                 os.kill(os.getpid(), signal.SIGTERM)
             return process
 
+        supervisor = module.Supervisor(prefix, 1, 12, [sys.executable, "-c", native])
         try:
             with mock.patch.object(module.subprocess, "Popen", side_effect=popen_control):
-                result = module.Supervisor(prefix, 1, 12,
-                    [sys.executable, "-c", native_source or "import os;os.write(1,b'payload\\n')"]).run()
+                result = supervisor.run()
         finally:
+            for name in tuple(descriptors):
+                close_descriptor(name)
+            # An unexpected test error must release the supervisor's existing
+            # group authority before any fixture poll can reap its keeper.
+            if supervisor.group_authority:
+                supervisor.final_cleanup(time.monotonic_ns())
             for process in owned:
                 if process.poll() is None:
                     process.kill()
                     process.wait(timeout=2)
         fields = dict(token.split("=", 1) for token in
                       Path(str(prefix) + ".supervisor-status.log").read_text().split()[1:])
-        self.assertEqual(fields["keeper_reaped"], "1")
-        self.assertEqual(fields["group_authority_released"], "1")
-        self.assertTrue(all(process.returncode is not None for process in owned))
+        diagnostic = "result=%r supervisor=%r" % (result, fields)
+        self.assertEqual(fields["keeper_reaped"], "1", diagnostic)
+        self.assertEqual(fields["group_authority_released"], "1", diagnostic)
+        self.assertTrue(all(process.returncode is not None for process in owned), diagnostic)
+        if premature:
+            self.assertTrue(entry_marker.exists(), diagnostic)
+            self.assertTrue(death_marker.exists(), diagnostic)
+            self.assertEqual(fields["native_launch"], "1", diagnostic)
+            self.assertEqual(fields["native_reaped"], "1", diagnostic)
+            self.assertEqual(fields["native_status"], "0", diagnostic)
+            self.assertEqual(fields["helper_error"], "none", diagnostic)
         return result, fields, prefix
+
+    def test_keeper_exit_before_ready_is_startup_refusal_not_native_cleanup(self):
+        for keeper_exit in (0, 99):
+            with self.subTest(keeper_exit=keeper_exit):
+                result, fields, prefix = self.imported_fault_case(
+                    keeper_exit=keeper_exit, early_refusal=True)
+                diagnostic = "result=%r supervisor=%r" % (result, fields)
+                self.assertEqual(result, 125, diagnostic)
+                self.assertEqual(fields["command_status"], "125", diagnostic)
+                self.assertEqual(fields["native_launch"], "0", diagnostic)
+                self.assertEqual(fields["native_status"], "unavailable", diagnostic)
+                self.assertEqual(fields["native_reaped"], "0", diagnostic)
+                self.assertEqual(fields["capture_status"], "0", diagnostic)
+                self.assertEqual(fields["capture_eof"], "1", diagnostic)
+                self.assertEqual(fields["cleanup_status"], "0", diagnostic)
+                self.assertEqual(fields["helper_error"], "RuntimeError", diagnostic)
+                self.assertEqual(fields["keeper_status"], str(keeper_exit), diagnostic)
+                self.assertEqual(fields["keeper_control_eof_ack"], "0", diagnostic)
+                self.assertEqual(fields["keeper_release"], "startup-owned-only", diagnostic)
+                self.assertEqual(fields["term_group_attempted"], "0", diagnostic)
+                self.assertEqual(fields["kill_group_attempted"], "0", diagnostic)
+                self.assertEqual(Path(str(prefix) + ".log").read_bytes(), b"", diagnostic)
 
     def test_pending_startup_cancellation_registers_and_reaps_only_owned_keeper(self):
         result, fields, prefix = self.imported_fault_case(cancel=True)
@@ -134,8 +217,11 @@ class LifecycleCaptureTests(unittest.TestCase):
 
     def test_premature_zero_keeper_exit_requires_control_release_ack(self):
         result, fields, prefix = self.imported_fault_case(keeper_exit=0, premature=True)
-        self.assertEqual(result, 1)
+        diagnostic = "result=%r supervisor=%r" % (result, fields)
+        self.assertEqual(result, 1, diagnostic)
         self.assertEqual(fields["command_status"], "0")
+        self.assertEqual(fields["native_status"], "0")
+        self.assertEqual(fields["capture_status"], "0")
         self.assertEqual(fields["capture_eof"], "1")
         self.assertEqual(fields["cleanup_status"], "1")
         self.assertEqual(fields["keeper_status"], "0")
@@ -149,8 +235,10 @@ class LifecycleCaptureTests(unittest.TestCase):
             with self.subTest(keeper_exit=keeper_exit):
                 result, fields, prefix = self.imported_fault_case(
                     keeper_exit=keeper_exit, premature=True, native_source=native)
-                self.assertEqual(result, 1)
+                diagnostic = "result=%r supervisor=%r" % (result, fields)
+                self.assertEqual(result, 1, diagnostic)
                 self.assertEqual(fields["command_status"], "0")
+                self.assertEqual(fields["native_status"], "0")
                 self.assertEqual(fields["capture_eof"], "1")
                 self.assertEqual(fields["capture_status"], "0")
                 self.assertEqual(fields["cleanup_status"], "1")
