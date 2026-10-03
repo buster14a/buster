@@ -80,8 +80,6 @@ BUSTER_F_DECL bool codegen_global_assembly_apply_symbol_directive(IrProgram* pro
 #define CODEGEN_X64_STACK_PROBE_PAGE 4096u
 
 BUSTER_F_DECL bool codegen_canonical_x64_type_is_f80(IrType* type);
-BUSTER_F_DECL bool codegen_canonical_x64_type_is_f80_x87_shape(IrProgram* program, IrTypeId type_id);
-BUSTER_F_DECL bool codegen_canonical_x64_type_contains_f80(IrProgram* program, IrTypeId type_id);
 BUSTER_F_DECL bool codegen_canonical_x64_abi_is_f80_result(IrType* type, CodegenCanonicalAbiValue const* abi);
 BUSTER_F_DECL void codegen_canonical_x64_x87_memory(CodegenBuffer* buffer, bool store, X64Register base, s32 displacement);
 BUSTER_F_DECL void codegen_canonical_x64_zero_f80_padding(CodegenBuffer* buffer, X64Register base, s32 displacement);

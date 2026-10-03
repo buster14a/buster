@@ -4,19 +4,19 @@
 
 The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
 
-`machine_x64_select_switch`, `machine_a64_select_switch` and the direct
-canonical emitters compare matching selector-width bit images. Mask raw keys
+`machine_x64_select_switch` and `machine_a64_select_switch` compare matching
+selector-width bit images. Mask raw keys
 and any excess register bits at that boundary, while leaving the caller's
 immediates and targets unchanged. Signedness does not change SWITCH equality.
 The registered raw-ARGUMENT controls and the exact contract are described in
 [IR validation boundaries](../ir-validation-boundaries.md#switch-case-images).
 
-Canonical fallback identity casts of structs and unions copy the complete
+MIR identity casts of structs and unions copy the complete
 resolved layout between value frame homes on x86-64 and AArch64. The frontend
 keeps these casts on aggregate comma results to preserve their non-lvalue
 semantics. `compiler_driver_test_aggregate_comma` covers calls, initializers,
-returns, partial eightbytes and tail fields with canonical FAST disabled,
-both frontend forms and all four allocators; desktop lanes execute the native
+returns, partial eightbytes and tail fields with both frontend forms and all
+four allocators; desktop lanes execute the native
 fixture as well as compiling both architectures.
 
 ## Machine instruction selection and scheduling
@@ -35,9 +35,9 @@ fixture as well as compiling both architectures.
   side effects across every native allocator spelling and frontend form.
 
 - System V indirect variadic calls keep the vector-register count in AL
-  through the call instruction. The canonical emitter reloads the callee from
-  its frame home into caller-saved R10 after argument staging; the MIR allocators
-  reserve the same indirect-call register. `compiler_driver_test_sysv_indirect_variadic`
+  through the call instruction. MIR call staging retains the callee in
+  caller-saved R10 after argument preparation; every allocator reserves that
+  indirect-call register. `compiler_driver_test_sysv_indirect_variadic`
   checks counts 0/1/8 and floating arguments crossing the register/stack boundary
   against aligned foreign assembly and host-compiled `va_arg` callees. It covers
   both frontend forms and every allocator on all four System V x86-64 targets;
@@ -358,7 +358,7 @@ fixture as well as compiling both architectures.
   limbs, CFG joins use the canonical pair mapping, and ordinary loads/stores
   copy all sixteen bytes. Variadic prologues save all sixteen XMM bytes, and
   each VECTOR read consumes one FP cursor slot.
-  The shared direct oracle also copies both register-save/overflow halves
+  The archived direct oracle also copies both register-save/overflow halves
   and aligns the overflow cursor after an eight-byte stack argument.
   `basic_c_sysv_sseup.c` requires strict MIR across four SysV targets, all
   allocators, both frontend forms and PIC settings; matching native hosts
@@ -479,7 +479,7 @@ fixture as well as compiling both architectures.
   RMW reloads its unchanged operand on each retry and propagates carry/borrow
   across both limbs. CAS compares both halves, selects the observed pair on
   mismatch, and still completes STXP/STLXP before returning: an unvalidated
-  LDXP may be a torn read. The direct oracle follows the same corrected rule.
+  LDXP may be a torn read. The archived direct oracle follows the same corrected rule.
   Every frame load precedes LDXP on each retry; only register operations
   occur before STXP, preserving the exclusive-loop progress guarantee.
   Both rows declare X9/X11-X14 clobbers and flag definitions; CAS additionally
@@ -539,7 +539,8 @@ fixture as well as compiling both architectures.
   `win64_aligned.c` regression exercises 32/64/128-byte argument alignments
   across host/MIR boundaries, including raw variadic argument pointers and
   every sixteen-byte dynamic-stack residue modulo 128. Fixed calls also execute
-  through the direct backend; wide variadic reads use all three MIR allocators.
+  through every retained allocator spelling, including the MIR_STACK `none`
+  alias; wide variadic reads use the same MIR path.
 - Windows/UEFI x86-64 128-bit integer arguments use the same one-pointer
   placement and sixteen-aligned private copies as indirect aggregates. A
   128-bit integer result travels whole in XMM0, without a hidden result
@@ -650,12 +651,12 @@ fixture as well as compiling both architectures.
   The registered finite-input fixture decodes IEEE images with integer
   operations and requires strict compilation across all desktop AArch64
   targets, all MIR allocators, and both frontend forms; native hosts execute
-  the same cases, retaining NONE as the direct reference.
+  the same cases, with NONE retained as a MIR_STACK compatibility spelling.
 - AArch64 leading/trailing-zero counts use importer-generated CLZ and RBIT
   forms for ordinary 32/64-bit scalar rows. A 128-bit count operates on both
   slot-backed limbs, selecting the primary limb's count or 64 plus the other
   count with ordinary scalar MIR. Publish a zero high result limb, including
-  the direct oracle's all-zero-pair result of 128. Never truncate the operand
+  the archived direct oracle's all-zero-pair result of 128. Never truncate the operand
   to a single limb or leave stale high result bytes. Preserve existing replay
   opcode numbers by appending new rows. The registered zero-count fixture
   covers every one-bit position and both frontend forms, with strict MIR
@@ -735,7 +736,7 @@ fixture as well as compiling both architectures.
   following arguments. `va_copy` copies all 32 bytes; `va_end` emits no write.
   Lists passed by value use the existing AAPCS64 indirect aggregate argument
   plan and a private callee copy, not the original producer's cursor.
-  The direct oracle and MIR also reconstruct three/four-double HFAs,
+  The archived direct oracle and MIR also reconstruct three/four-double HFAs,
   64/128-bit short vectors and up to four-vector HVAs from independent V
   slots. An ordinary composite above sixteen bytes consumes one GP pointer
   and copies exactly the object size, including a short tail. Its pointed-to

@@ -31,7 +31,7 @@ typedef enum CodegenError
 } CodegenError;
 
 // The active owner of a failed native generation attempt. Success reports
-// NONE; a canonical fallback that succeeds does not become a phase failure.
+// NONE; a machine failure records its phase and fails the module.
 typedef enum CodegenPhase
 {
     CODEGEN_PHASE_NONE,

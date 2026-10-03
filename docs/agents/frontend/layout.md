@@ -110,8 +110,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   zero meaning the declared type's size, and `ir_field_access_size` is what
   every reader asks: the load and the read-modify-write in `c_gen.c`, the four
   constant-initializer folds there, the `IR_OPCODE_AGGREGATE` selectors in
-  `machine_x86_64.c` and `machine_aarch64.c`, and the two canonical emitters in
-  `codegen.c`. It is also the one place a `LOAD` or `STORE` may disagree with
+  `machine_x86_64.c` and `machine_aarch64.c`. It is also the one place a `LOAD` or `STORE` may disagree with
   its place's type, which `ir_place_narrow_bit_field_access` is what validation
   admits it through. **A field whose bits cross every unit that fits has no
   single-unit access even then**, which is every width whose byte count is not
@@ -212,8 +211,8 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   writer of a bit-field is a read-modify-write, including the one inside an
   aggregate initializer, where the members are materialized into a zero-filled
   slot and it is tempting to treat the accumulated word as the whole unit: the
-  canonical emitters spell it `OR mem, reg` and the two `IR_OPCODE_AGGREGATE`
-  selectors seed the accumulator with a load of the unit rather than with zero.
+  two `IR_OPCODE_AGGREGATE` selectors seed the accumulator with a load of the
+  unit rather than with zero.
   Ordering the members differently does not substitute for it -- a whole-unit
   store loses whichever neighbour ran first, and two overlapping units lose one
   of themselves whatever the order (issue #705).
