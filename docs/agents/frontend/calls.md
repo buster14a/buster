@@ -266,6 +266,23 @@ operand pairs on six native layouts in GNU17/GNU23 and both frontend forms.
 Its embedded native fixture checks every allocator and preserves unevaluated
 index effects.
 
+Parameter declarations give a visible typedef name priority over a parameter
+name in an ambiguous parenthesized group (C11 6.7.6.3p11). `T (T)` and
+`int (T)` derive an unnamed function parameter and then adjust it to a pointer;
+`T (T (T))` retains the inner function-parameter adjustment. Redundant abstract
+groups such as `int ((T))` carry that classification down the explicit type
+machine. Pointer-led named groups, `int T`, `const T T`, member names and
+ordinary block-scope shadowing keep their existing rules.
+
+`c_test_parenthesized_typedef_parameters` checks the original prototype/body
+pairs, a char typedef, nested and deeply grouped abstract forms, retained
+typedef visibility, and rejected typedef-name expressions. Semantic-only and
+both canonical frontend forms check structured diagnostics on six native
+layouts in C11/GNU17/GNU23, with carried and zeroed symbol IDs. Embedded native
+sources exercise all four allocators at O0/O2 in both forms; hosted Linux x86-64
+GCC/Clang compile and execute the same original expected-value sources and
+independently reject the invalid typedef-name expression.
+
 Function types reject array and function return types when their declarators
 are formed, including unused prototypes, typedef return types and nested
 function-pointer declarators. Pointer return types keep their array/function
