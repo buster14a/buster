@@ -117,9 +117,363 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_test_bytes(Arena* arena, O
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_refusal_elf(Arena* arena, String8 definition, u32 type, u32 instruction, bool relocation)
+{
+    // Independently specified ELF64 little-endian ET_REL: fixed raw offsets,
+    // six section headers and two global symbols. Never call object_write.
+    BUSTER_CHECK(definition.length <= 14);
+    ByteSlice result = {.pointer = arena_allocate_zeroed(arena, u8, 632), .length = 632};
+    u8* bytes = result.pointer;
+    memcpy(bytes, "\x7f" "ELF", 4);
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    compiler_driver_archive_test_integer(bytes + 16, 1, 2, false);
+    compiler_driver_archive_test_integer(bytes + 18, 183, 2, false);
+    compiler_driver_archive_test_integer(bytes + 20, 1, 4, false);
+    compiler_driver_archive_test_integer(bytes + 40, 248, 8, false);
+    compiler_driver_archive_test_integer(bytes + 52, 64, 2, false);
+    compiler_driver_archive_test_integer(bytes + 58, 64, 2, false);
+    compiler_driver_archive_test_integer(bytes + 60, 6, 2, false);
+    compiler_driver_archive_test_integer(bytes + 62, 5, 2, false);
+    compiler_driver_archive_test_integer(bytes + 64, instruction, 4, false);
+    compiler_driver_archive_test_integer(bytes + 68, UINT32_C(0xd65f03c0), 4, false);
+    compiler_driver_archive_test_integer(bytes + 88, ((u64)2 << 32) | type, 8, false);
+    compiler_driver_archive_test_integer(bytes + 128, 1, 4, false);
+    bytes[132] = 0x12;
+    compiler_driver_archive_test_integer(bytes + 134, 1, 2, false);
+    compiler_driver_archive_test_integer(bytes + 144, 16, 8, false);
+    compiler_driver_archive_test_integer(bytes + 152, definition.length + 2, 4, false);
+    bytes[156] = 0x10;
+    memcpy(bytes + 177, definition.pointer, definition.length);
+    memcpy(bytes + 178 + definition.length, "target", 6);
+    String8 names = S8("\0.text\0.rela.text\0.symtab\0.strtab\0.shstrtab\0");
+    memcpy(bytes + 200, names.pointer, names.length);
+    struct
+    {
+        u32 name;
+        u32 type;
+        u64 flags;
+        u64 offset;
+        u64 size;
+        u32 link;
+        u32 info;
+        u64 alignment;
+        u64 entry_size;
+    } sections[] = {
+        {1, 1, 6, 64, 16, 0, 0, 4, 0},
+        {7, 4, 0, 80, relocation ? 24 : 0, 3, 1, 8, 24},
+        {18, 2, 0, 104, 72, 4, 1, 8, 24},
+        {26, 3, 0, 176, definition.length + 9, 0, 0, 1, 0},
+        {34, 3, 0, 200, names.length, 0, 0, 1, 0},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sections); index += 1)
+    {
+        u8* header = bytes + 248 + (u64)(index + 1) * 64;
+        compiler_driver_archive_test_integer(header, sections[index].name, 4, false);
+        compiler_driver_archive_test_integer(header + 4, sections[index].type, 4, false);
+        compiler_driver_archive_test_integer(header + 8, sections[index].flags, 8, false);
+        compiler_driver_archive_test_integer(header + 24, sections[index].offset, 8, false);
+        compiler_driver_archive_test_integer(header + 32, sections[index].size, 8, false);
+        compiler_driver_archive_test_integer(header + 40, sections[index].link, 4, false);
+        compiler_driver_archive_test_integer(header + 44, sections[index].info, 4, false);
+        compiler_driver_archive_test_integer(header + 48, sections[index].alignment, 8, false);
+        compiler_driver_archive_test_integer(header + 56, sections[index].entry_size, 8, false);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_refusal_bytes(Arena* arena, u32 type, u32 instruction, u32 count, bool gnu_index)
+{
+    BUSTER_CHECK(count >= 2 && count <= 9);
+    ByteSlice members[9] = {0};
+    String8 definitions[9] = {S8("safe"), S8("entry")};
+    u64 names_size = 0;
+    u64 size = 8;
+    for (u32 member = 0; member < count; member += 1)
+    {
+        if (member >= 2) definitions[member] = string_format(arena, S8("unused{u32}"), member);
+        members[member] = compiler_driver_archive_refusal_elf(arena, definitions[member], type, instruction, member == 1);
+        names_size += definitions[member].length + 1;
+        size += 60 + members[member].length;
+    }
+    u64 index_size = 4 + (u64)count * 4 + names_size;
+    if (gnu_index) size += 60 + index_size + (index_size & 1);
+    ByteSlice result = {.pointer = arena_allocate_zeroed(arena, u8, size), .length = size};
+    memcpy(result.pointer, "!<arch>\n", 8);
+    u64 cursor = 8;
+    u8* index = 0;
+    if (gnu_index)
+    {
+        compiler_driver_archive_test_header(result.pointer + cursor, S8("/"), index_size);
+        index = result.pointer + cursor + 60;
+        compiler_driver_archive_test_integer(index, count, 4, true);
+        cursor += 60 + index_size;
+        if (cursor & 1) result.pointer[cursor++] = '\n';
+    }
+    u64 name_cursor = 4 + (u64)count * 4;
+    for (u32 member = 0; member < count; member += 1)
+    {
+        if (index)
+        {
+            compiler_driver_archive_test_integer(index + 4 + (u64)member * 4, cursor, 4, true);
+            memcpy(index + name_cursor, definitions[member].pointer, definitions[member].length);
+            name_cursor += definitions[member].length + 1;
+        }
+        compiler_driver_archive_test_header(result.pointer + cursor, string_format(arena, S8("member{u32}.o/"), member), members[member].length);
+        memcpy(result.pointer + cursor + 60, members[member].pointer, members[member].length);
+        cursor += 60 + members[member].length;
+    }
+    BUSTER_CHECK(cursor == result.length);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_refusal_exists(String8 path)
+{
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = true}, (OpenPermissions){0});
+    bool result = file != 0;
+    if (file) os_file_close(file);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_refusal_record(CompilerDriverResult* result)
+{
+    bool valid = result->diagnostic_count == 1 && result->diagnostics;
+    if (valid)
+    {
+        CompilerDiagnostic* record = result->diagnostics;
+        valid = string_equal(record->code, S8("driver.object")) && string_equal(record->message, result->diagnostic) &&
+                record->severity == COMPILER_DIAGNOSTIC_ERROR && !record->primary.has_range &&
+                record->primary.range.source.value == IR_ID_UNDERLYING_INVALID && !record->primary.position.line &&
+                !record->primary.original_position.line;
+    }
+    return valid;
+}
+
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_AARCH64
+BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_refusal_host(Arena* arena, String8 source, String8 output)
+{
+    String8 command[8] = {S8(BUSTER_HOST_C_COMPILER)};
+    u32 count = 1;
+    String8 first_argument = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    if (first_argument.length) command[count++] = first_argument;
+    command[count++] = S8("-c");
+    command[count++] = source;
+    command[count++] = S8("-o");
+    command[count++] = output;
+    ProcessSpawnResult spawned = os_process_spawn((SliceString8){command, count}, (SliceString8){0}, (SliceString8){0},
+        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
+                              .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+    bool result = spawned.handle != 0;
+    if (result)
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
+        result = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS;
+    }
+    return result;
+}
+#endif
+
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_aarch64_refusal_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX};
+    // Literal ABI names and words are independent of the reader's lookup.
+    struct
+    {
+        u32 type;
+        u32 instruction;
+        String8 name;
+    } rows[] = {
+        {279, UINT32_C(0x36000000), S8("R_AARCH64_TSTBR14")},
+        {280, UINT32_C(0x34000000), S8("R_AARCH64_CONDBR19")},
+        {560, UINT32_C(0x58000000), S8("R_AARCH64_TLSDESC_LD_PREL19")},
+        {561, UINT32_C(0x10000000), S8("R_AARCH64_TLSDESC_ADR_PREL21")},
+        {562, UINT32_C(0x90000000), S8("R_AARCH64_TLSDESC_ADR_PAGE21")},
+        {563, UINT32_C(0xf9400000), S8("R_AARCH64_TLSDESC_LD64_LO12")},
+        {564, UINT32_C(0x91000000), S8("R_AARCH64_TLSDESC_ADD_LO12")},
+        {565, UINT32_C(0xd2a00000), S8("R_AARCH64_TLSDESC_OFF_G1")},
+        {566, UINT32_C(0xf2800000), S8("R_AARCH64_TLSDESC_OFF_G0_NC")},
+        {567, UINT32_C(0xf9400000), S8("R_AARCH64_TLSDESC_LDR")},
+        {568, UINT32_C(0x91000000), S8("R_AARCH64_TLSDESC_ADD")},
+        {569, UINT32_C(0xd63f0000), S8("R_AARCH64_TLSDESC_CALL")},
+        {1031, 0, S8("R_AARCH64_TLSDESC")},
+        {UINT32_C(0xf0000001), UINT32_C(0xd503201f), {0}},
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arena);
+        ByteSlice bytes = compiler_driver_archive_refusal_elf(arena, S8("entry"), rows[row].type, rows[row].instruction, true);
+        ObjectFile object = object_read(arena, bytes, target);
+        String8 expected = rows[row].name.length
+            ? string_format(arena, S8("unsupported ELF AArch64 relocation {S8} (type {u32})"), rows[row].name, rows[row].type)
+            : S8("unsupported ELF AArch64 relocation type 4026531841");
+        BUSTER_TEST(arguments, object.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        BUSTER_STRING_TEST(arguments, object.diagnostic, expected);
+        // Exercise GNU-indexed and unindexed archives through both extraction
+        // algorithms. Member zero is valid; member one is the rejected entry.
+        for (u32 gnu_index = 0; gnu_index < 2; gnu_index += 1)
+        {
+            for (u32 indexed = 0; indexed < 2; indexed += 1)
+            {
+                u32 count = indexed ? 9 : 2;
+                ByteSlice archive_bytes = compiler_driver_archive_refusal_bytes(arena, rows[row].type, rows[row].instruction, count, gnu_index != 0);
+                ObjectArchive eager = object_archive_read(arena, archive_bytes, target);
+                BUSTER_TEST(arguments, eager.error == OBJECT_ERROR_UNSUPPORTED_TARGET && eager.object_count == 1);
+                // Eager diagnostic propagation is owned by #2326; this
+                // branch preserves its independent reader-core repair.
+                for (u32 selected_bad = 0; selected_bad < 2; selected_bad += 1)
+                {
+                    ObjectArchive archive = object_archive_read_link(arena, archive_bytes, target);
+                    if (BUSTER_REQUIRE(arguments, archive.error == OBJECT_ERROR_NONE && archive.object_count == count))
+                    {
+                        ObjectSymbol request = {.name = selected_bad ? S8("entry") : S8("safe"),
+                            .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+                        ObjectFile selected[10] = {compiler_driver_archive_test_object(arena, target, &request, 1, 0)};
+                        u32 selected_count = 1;
+                        CompilerDriverArchiveState state = {0};
+                        if (indexed) state.arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+                        compiler_driver_archive_extract(arena, &state, &archive, selected, &selected_count);
+                        BUSTER_TEST(arguments, (state.arena != 0) == (indexed != 0));
+                        if (selected_bad)
+                        {
+                            BUSTER_TEST(arguments, archive.error == OBJECT_ERROR_UNSUPPORTED_TARGET && archive.failed_member == 1 &&
+                                                   selected_count == 1 && archive.member_bytes[1].pointer != 0);
+                            BUSTER_TEST(arguments, string_first_sequence(archive.diagnostic, expected) != BUSTER_STRING_NO_MATCH &&
+                                                   string_first_sequence(archive.diagnostic, S8("selected member member1.o")) != BUSTER_STRING_NO_MATCH);
+                        }
+                        else
+                        {
+                            BUSTER_TEST(arguments, archive.error == OBJECT_ERROR_NONE && selected_count == 2 &&
+                                                   !archive.member_bytes[0].pointer && archive.member_bytes[1].pointer != 0);
+                            BUSTER_STRING_TEST(arguments, selected[1].symbols[0].name, S8("safe"));
+                        }
+                        if (state.arena) arena_destroy(state.arena, 1);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    struct
+    {
+        u32 type;
+        u32 instruction;
+        ObjectRelocationKind kind;
+    } supported[] = {
+        {311, UINT32_C(0x90000000), OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21},
+        {312, UINT32_C(0xf9400000), OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12},
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(supported); row += 1)
+    {
+        ByteSlice bytes = compiler_driver_archive_refusal_elf(arena, S8("entry"), supported[row].type, supported[row].instruction, true);
+        ObjectFile object = object_read(arena, bytes, target);
+        if (BUSTER_REQUIRE(arguments, object.error == OBJECT_ERROR_NONE && object.relocation_count == 1))
+        {
+            BUSTER_TEST(arguments, !object.diagnostic.length && object.relocations[0].kind == supported[row].kind &&
+                                   object.relocations[0].addend == 0 && object.relocations[0].offset == 0);
+        }
+    }
+    // Preserve the existing x86-64 fallback's exact wording.
+    ByteSlice x86 = compiler_driver_archive_refusal_elf(arena, S8("entry"), 25, UINT32_C(0x90909090), true);
+    compiler_driver_archive_test_integer(x86.pointer + 18, 62, 2, false);
+    ObjectFile x86_object = object_read(arena, x86, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX});
+    BUSTER_TEST(arguments, x86_object.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    BUSTER_STRING_TEST(arguments, x86_object.diagnostic, S8("unsupported ELF x86-64 relocation type 25"));
+
+    String8 root = buster_test_temporary_path(arena, S8("buster-reloc-refusal"), S8(""));
+    OsDirectoryCreateResult created = os_make_directory(root);
+    if (BUSTER_REQUIRE(arguments, created.error.v == 0))
+    {
+        String8 root_objects[2] = {0};
+        String8 programs[] = {S8("int main(void) { return 0; }\n"),
+                             S8("int entry(void); int main(void) { return entry(); }\n")};
+        bool prepared = true;
+        for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(programs); program += 1)
+        {
+            String8 source = string_format_z(arena, S8("{S8}/root{u32}.c"), root, program);
+            root_objects[program] = string_format_z(arena, S8("{S8}/root{u32}.o"), root, program);
+            prepared &= file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(programs[program]));
+            String8 command[] = {S8("-target"), S8("aarch64-unknown-linux"), S8("-g0"), S8("-nostdinc"),
+                                 S8("-c"), source, S8("-o"), root_objects[program]};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            prepared &= compiled.error == COMPILER_DRIVER_ERROR_NONE;
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        }
+        if (BUSTER_REQUIRE(arguments, prepared))
+        {
+            for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+            {
+                TemporalArena temporary = arena_begin_temporal(arena);
+                String8 expected = rows[row].name.length
+                    ? string_format(arena, S8("unsupported ELF AArch64 relocation {S8} (type {u32})"), rows[row].name, rows[row].type)
+                    : S8("unsupported ELF AArch64 relocation type 4026531841");
+                for (u32 archive = 0; archive < 2; archive += 1)
+                {
+                    String8 input = string_format_z(arena, S8("{S8}/input-{u32}-{u32}.{S8}"), root, row, archive, archive ? S8("a") : S8("o"));
+                    String8 output = string_format_z(arena, S8("{S8}/refused-{u32}-{u32}"), root, row, archive);
+                    ByteSlice bytes = archive ? compiler_driver_archive_refusal_bytes(arena, rows[row].type, rows[row].instruction, 9, true)
+                                              : compiler_driver_archive_refusal_elf(arena, S8("entry"), rows[row].type, rows[row].instruction, true);
+                    BUSTER_TEST(arguments, file_write(input, bytes));
+                    u8 sentinel[] = {0xca, 0xfe, 0xba, 0xbe};
+                    if (archive) BUSTER_TEST(arguments, file_write(output, (ByteSlice)BUSTER_ARRAY_TO_SLICE(sentinel)));
+                    String8 command[8] = {S8("-target"), S8("aarch64-unknown-linux"), S8("-g0"), S8("-o"), output};
+                    u32 count = 5;
+                    if (archive) command[count++] = root_objects[1];
+                    command[count++] = input;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+                        compiler_driver_parse_arguments(arena, (SliceString8){command, count}));
+                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_OBJECT && compiled.object_error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
+                                           !compiled.native_link.executable.length && compiler_driver_archive_refusal_record(&compiled));
+                    BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, input) != BUSTER_STRING_NO_MATCH &&
+                                           string_first_sequence(compiled.diagnostic, expected) != BUSTER_STRING_NO_MATCH);
+                    if (archive)
+                    {
+                        BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, S8("member1.o")) != BUSTER_STRING_NO_MATCH);
+                        ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+                        BUSTER_TEST(arguments, preserved.length == sizeof(sentinel) && !memcmp(preserved.pointer, sentinel, sizeof(sentinel)));
+                        String8 allowed_output = string_format_z(arena, S8("{S8}/unused-{u32}"), root, row);
+                        String8 allowed_command[] = {S8("-target"), S8("aarch64-unknown-linux"), S8("-g0"), S8("-o"),
+                                                    allowed_output, root_objects[0], input};
+                        CompilerDriverResult allowed = compiler_driver_execute_invocation(arena,
+                            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(allowed_command)));
+                        BUSTER_TEST_RAW(arguments, allowed.error == COMPILER_DRIVER_ERROR_NONE, allowed.diagnostic);
+                        BUSTER_TEST(arguments, allowed.native_link.executable.length && !allowed.diagnostic_count &&
+                                               compiler_driver_archive_refusal_exists(allowed_output));
+                    }
+                    else BUSTER_TEST(arguments, !compiler_driver_archive_refusal_exists(output));
+                }
+                scratch_end(temporary);
+            }
+        }
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_AARCH64
+        // A real native assembler independently produces CONDBR19. No Buster
+        // assembler or object writer participates in this producer control.
+        String8 source = string_format_z(arena, S8("{S8}/host-branch.s"), root);
+        String8 output = string_format_z(arena, S8("{S8}/host-branch.o"), root);
+        String8 assembly = S8(".text\n.globl entry\n.type entry,%function\nentry:\ncbz x0,target\nret\n");
+        bool produced = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(assembly)) &&
+                        compiler_driver_archive_refusal_host(arena, source, output);
+        if (BUSTER_REQUIRE(arguments, produced))
+        {
+            ObjectFile object = object_read(arena, file_read(arena, output, (FileReadOptions){0}), target);
+            BUSTER_TEST(arguments, object.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+            BUSTER_STRING_TEST(arguments, object.diagnostic, S8("unsupported ELF AArch64 relocation R_AARCH64_CONDBR19 (type 280)"));
+        }
+#endif
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_test_aarch64_refusal_diagnostics);
     OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
     for (u32 format = 0; format < BUSTER_ARRAY_LENGTH(systems); format += 1)
     {

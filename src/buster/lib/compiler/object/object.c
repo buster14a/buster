@@ -47,6 +47,8 @@
 //   object_assembly_append_*                       the disassembly printer
 //                                                  (x86 and AArch64 operand
 //                                                  and relocation rendering)
+//   object_elf_*_relocation_name                   unsupported ELF type names
+//   object_elf_unsupported_relocation              architecture/type diagnostics
 //   object_read_u16 .. object_read_string_checked  checked reading primitives
 //   object_coff_comdat_is_replaceable              COFF COMDAT selection
 //   object_read_elf64, object_read_coff,           the three format readers;
@@ -4644,14 +4646,42 @@ BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
     }
 }
 
+// ABI names for the unsupported AArch64 branch and descriptor forms this
+// reader can identify. Naming a type here does not admit it into the object
+// model; the existing relocation-kind mapping remains the support authority.
+BUSTER_GLOBAL_LOCAL String8 object_elf_aarch64_relocation_name(u32 type)
+{
+    String8 result = {0};
+    switch (type)
+    {
+    case 279: result = S8("R_AARCH64_TSTBR14"); break;
+    case 280: result = S8("R_AARCH64_CONDBR19"); break;
+    case 560: result = S8("R_AARCH64_TLSDESC_LD_PREL19"); break;
+    case 561: result = S8("R_AARCH64_TLSDESC_ADR_PREL21"); break;
+    case 562: result = S8("R_AARCH64_TLSDESC_ADR_PAGE21"); break;
+    case 563: result = S8("R_AARCH64_TLSDESC_LD64_LO12"); break;
+    case 564: result = S8("R_AARCH64_TLSDESC_ADD_LO12"); break;
+    case 565: result = S8("R_AARCH64_TLSDESC_OFF_G1"); break;
+    case 566: result = S8("R_AARCH64_TLSDESC_OFF_G0_NC"); break;
+    case 567: result = S8("R_AARCH64_TLSDESC_LDR"); break;
+    case 568: result = S8("R_AARCH64_TLSDESC_ADD"); break;
+    case 569: result = S8("R_AARCH64_TLSDESC_CALL"); break;
+    case 1031: result = S8("R_AARCH64_TLSDESC"); break;
+    default: break;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void object_elf_unsupported_relocation(ObjectFile* object, Arena* arena, u32 type)
 {
     if (object)
     {
         object->error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-        String8 name = object_elf_x86_64_relocation_name(type);
-        object->diagnostic = name.length ? string_format(arena, S8("unsupported ELF x86-64 relocation {S8} (type {u32})"), name, type)
-                                         : string_format(arena, S8("unsupported ELF x86-64 relocation type {u32}"), type);
+        bool aarch64 = object->target.cpu_arch == CPU_ARCH_AARCH64;
+        String8 architecture = aarch64 ? S8("AArch64") : S8("x86-64");
+        String8 name = aarch64 ? object_elf_aarch64_relocation_name(type) : object_elf_x86_64_relocation_name(type);
+        object->diagnostic = name.length ? string_format(arena, S8("unsupported ELF {S8} relocation {S8} (type {u32})"), architecture, name, type)
+                                         : string_format(arena, S8("unsupported ELF {S8} relocation type {u32}"), architecture, type);
     }
 }
 
@@ -5732,7 +5762,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             source_offset > target_section_data->virtual_size - section_bases[target_section] ||
                             relocation_width > target_section_data->virtual_size - section_bases[target_section] - source_offset)
                         {
-                            if (kind == OBJECT_RELOCATION_COUNT && target.cpu_arch == CPU_ARCH_X86_64)
+                            if (kind == OBJECT_RELOCATION_COUNT)
                             {
                                 object_elf_unsupported_relocation(&result, arena, relocation_type);
                             }
