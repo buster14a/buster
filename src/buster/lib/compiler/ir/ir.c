@@ -6085,6 +6085,18 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
             error = IR_VALIDATION_BRANCH_TARGET;
         }
     }
+    else if (instruction->opcode == IR_OPCODE_UNREACHABLE)
+    {
+        // Consumers emit a terminal operation with no result or edges.
+        // A target here would publish topology no backend implements.
+        IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!type || type->kind != IR_TYPE_VOID || instruction->operand_count != 0 ||
+            instruction->target_count != 0 || instruction->immediate_count != 0 ||
+            instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
     else if (instruction->opcode == IR_OPCODE_RETURN)
     {
         IrType* return_type = ir_type_from_id(&program->types, signature->return_type);
