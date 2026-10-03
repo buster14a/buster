@@ -123,6 +123,10 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   parsing, so the report states how much of the run lies outside it.
 - Native-backend retirement has a separate maintainer-approved
   [performance contract](../native-retirement-performance-contract.md). Its
+  [October 3 decision](https://github.com/buster14a/buster/issues/36#issuecomment-5969534074)
+  moves #512 acceptance to the [direct lab gate below](#native-retirement-gate-512),
+  with four allocator-mode cells and one generated-runtime cell. The following
+  service binding/replay instructions retain the historical service contract.
   tighter budgets, immutable #508 binding, dedicated-host admission and
   simultaneous uncertainty rules apply only to the #36/#512 acceptance run;
   they do not silently replace the native harness's ordinary CI guard. Before
@@ -660,7 +664,8 @@ meaning or a removal bumps the schema id):
   `bootstrap_resamples`, `complete_pairs`), `method`, `verdict` (`metric`,
   `outcome`, `ratio`, `ci_low`, `ci_high`, `ci_coverage`, `change_percent`,
   `bound_percent`, `min_effect_percent`, `n`, `explanation`, `text`),
-  `metrics` and `phases` (per name: `unit`, `direction`, `n`, `a_median`,
+  `code_bytes` (exact executable-section totals, formats, sections, diagnostic
+  file sizes and B/A ratio), `metrics` and `phases` (per name: `unit`, `direction`, `n`, `a_median`,
   `b_median`, `a_min`, `b_min`, `a_mad`, `b_mad`, `delta`, `ratio`, `ci_low`,
   `ci_high`, `ci_coverage`, `geomean_ratio`, `bootstrap_ci_low`,
   `bootstrap_ci_high`, `ratio_of_medians`, `min_ratio`, `change_percent`,
@@ -676,7 +681,7 @@ meaning or a removal bumps the schema id):
   `exceeds_bound`; `report DIR` renders an older directory as v2, with
   `fresh_copy` false and the default floor. Metric names: `wall`, `task_clock`, `compiler_wall`,
   `instructions`, `cycles`, `ipc`, `branch_misses`, `branch_mpki`,
-  `page_faults`, `minor_faults`, `major_faults`; phases are the
+  `page_faults`, `minor_faults`, `major_faults`, `peak_rss`; phases are the
   `-fmetrics-out` phases plus `total` (ms), or null.
 - `buster-uarch-lab-run-v1`: `schema`, `directory`, `command`, `cpu`, `ide`
   (`path`, `sha256`), `host`, `capabilities`, `steps` (`status`, `problems`),
@@ -686,6 +691,68 @@ meaning or a removal bumps the schema id):
   (`group`, `metric`, `value`, `unit`, `source`),
   `dominant_topdown_category`, `hot_symbols` (per capture: `symbol`,
   `share`), `findings`.
+
+## Native-retirement gate (#512)
+
+The [maintainer decision](https://github.com/buster14a/buster/issues/36#issuecomment-5969534074)
+defines five required cells: a stage-1 self-host compile in each of `none`,
+`mir-stack`, `fast` and `quality`, then the generated-runtime cell. The latter
+executes the two stage-1 compilers produced by the `fast` cell, compiling the
+same frozen source with `fast`. This measures a real generated program's
+runtime while checking that its two outputs agree byte for byte.
+
+Build and freeze matched Clang Release baseline (`main`) and candidate
+(#522, then the final #514 tree) compilers using the provenance rules above.
+Run on `benchpress` CPU 2 with the recorded H1 state, dispatch disabled,
+no competing work and the exclusive host lock. Keep the source checkout and
+`build/generated` unchanged for the entire campaign. Record their identities,
+the build commands, both compiler hashes and the host facts with the result.
+
+```sh
+flock -n ~/bench/host.lock python3 tools/uarch_lab.py retirement \
+    --baseline /tmp/ide-base --candidate /tmp/ide-cand --repo-root . \
+    --cpu 2 --output /tmp/retirement-attempt-1 \
+    --baseline-rev BASE_COMMIT --candidate-rev CANDIDATE_COMMIT
+python3 tools/uarch_lab.py report /tmp/retirement-attempt-1
+```
+
+Each cell uses fresh binary copies and ABBA paired runs. The default is about
+12 minutes per cell, with the pair count fixed after its timing-only pilot.
+`--pairs N` selects a fixed-count smoke/test plan. `--modes fast` exercises a
+partial run, including generated runtime; missing required modes keep the
+overall result INCONCLUSIVE. Every attempt needs a new or empty output
+directory so earlier observations remain intact.
+
+| Metric | Per-cell B/A limit |
+| --- | --- |
+| Compiler wall time | Upper 95% sign-test bound at most 1.05 |
+| Compiler peak RSS | Upper 95% sign-test bound at most 1.05 |
+| Generated code-section bytes | Exact ratio at most 1.01 |
+| Generated-program runtime | Upper 95% sign-test bound at most 1.03 |
+
+`retirement.json` (`buster-uarch-lab-retirement-v1`) and `retirement.md`
+contain PASS, FAIL or INCONCLUSIVE plus every cell's checks. A passing numeric
+result requires the full planned sample population, successful fresh output
+production, deterministic outputs, no flagged order/drift problem and all
+upper bounds within their limits. A missing sample, unavailable metric or
+interval crossing a limit is inconclusive. The ordinary `compare` practical
+effect floor does not change these acceptance limits. The historical 1.02
+aggregate figures are diagnostic under the decision's per-cell contract.
+
+Peak RSS uses Linux `wait4` high-water bytes for the waited process tree.
+The recorded current harness footprint and a `perf stat -- true` probe bound
+wrapper overhead; values within 1.5 times that floor are unavailable rather
+than reported as compiler memory. Historical harness peaks are not used as
+the inherited footprint. Code bytes sum file-backed ELF sections with
+`SHF_EXECINSTR`; ELF32/ELF64 and either byte order are covered. Unsupported
+formats and malformed sections remain unavailable; whole-file bytes are
+diagnostic. Both metrics also appear in ordinary `compare` reports.
+
+The lab's PASS describes its measured cells. Independently run the candidate's
+repository self-host fixed point and retain its byte-identical evidence.
+After #514 lands, repeat the whole gate on the final integrated source,
+retain all attempts and record the accepted result with `tools/new_audit.py`.
+Those source, host and fixed-point checks are part of #512/#36 acceptance.
 
 ## Performance audit notes
 

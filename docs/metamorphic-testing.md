@@ -76,7 +76,8 @@ uninitialized values, shifts or division.
 | 1024 | Outline products into a helper | A nonrecursive, pure, same-translation-unit call computes the same unsigned product. Argument evaluation order is unobservable. |
 
 Each enabled transformation runs separately and, when more than one is enabled,
-as one combined mask. The default is twelve pairs per seed and target/mode (eleven for eBPF). This is not an
+as one combined mask. The default is twelve pairs per seed and target/mode
+(eleven for eBPF when the kernel oracle is unavailable). This is not an
 arbitrary-source C transformer and makes no equivalence claim for unsafe
 floating-point reassociation, side-effecting operand swaps or scope-changing
 rewrites.
@@ -132,17 +133,22 @@ The eBPF interpreter supports the generated subset and has bounded instruction
 execution and checked stack accesses. It applies the verifier's structural
 rules (every instruction reachable, in-range jumps) and width-aligned stack
 accesses, and it refuses relocations, objects with more than one function and
-encodings it does not model. It does not implement local calls: only
-mask 1024 is excluded for that row, with an explicit
-`METAMORPHIC_TRANSFORMS_UNAVAILABLE` record. When `BPF_PROG_LOAD` of a probe
-program succeeds (root or `CAP_BPF` on Linux 5.14 or later), every eBPF input
-is also loaded into the kernel verifier and executed through its JIT, and the
-result must match. `METAMORPHIC_EBPF_KERNEL available=0|1` records which case
-applied; VM execution alone does not certify kernel acceptance. All previously
-supported relations and aggregate materialization still run. This is a coverage
-exclusion, not an execution pass for the call relation. This change adds multiplication to that
-existing interpreter, with separate 32- and 64-bit multiplication cases in its
-existing compiler tests. An interpreter refusal is reported as a runner failure,
+encodings it does not model. It does not implement local calls. When the kernel
+oracle is unavailable, only mask 1024 is excluded for that row, with an explicit
+`METAMORPHIC_TRANSFORMS_UNAVAILABLE` record. When a `BPF_PROG_LOAD`/test-run
+probe succeeds, every eBPF input is also loaded into the Linux verifier and
+executed through its JIT, and mask 1024 and its compositions run through that
+kernel oracle. Local-call objects use the whole `.text` section and the named
+`metamorphic` entry, so a helper preceding that entry cannot be mistaken for it.
+The loader resolves only `R_BPF_64_32` calls to defined `STT_FUNC` symbols in
+the same section, with zero addends and valid call encodings. Missing or undefined
+targets, malformed ELF ranges, unrelocated calls and every other code relocation
+fail the runner. Globals and maps remain unsupported by this test-only loader.
+`METAMORPHIC_EBPF_KERNEL available=0|1` records actual kernel availability; VM
+execution alone does not certify kernel acceptance. All previously supported
+relations and aggregate materialization still run. An unavailable kernel is a
+coverage exclusion, never an execution pass for the call relation. An interpreter
+refusal is reported as a runner failure,
 not incorrectly classified as a successful guest result or a proven compiler bug.
 
 The local aggregate-copy relation is lowered by both nonnative backends.
