@@ -540,3 +540,59 @@ The opt-in production-throughput workflow, profile provenance contract,
 validation matrix, and evidence layout are documented in
 [`docs/production-profile.md`](../production-profile.md). Ordinary developer
 and CI defaults remain unchanged.
+
+## Exact-artifact binary coverage pilot
+
+The native command `binary_coverage_inventory` is the bounded inventory/reporting
+slice for [#2216](https://github.com/buster14a/buster/issues/2216). It accepts one
+ELF64 little-endian x86-64 executable/shared-object file; the maintained pilot
+target is the Linux x86-64 native build driver. It hashes the actual file and
+reads its program headers independently of any received coverage data:
+
+```sh
+./build.sh binary_coverage_inventory --self-test
+# Use the exact bootstrap-driver path recorded by the wrapper/CI, not ide.
+build/build binary_coverage_inventory build/build > build/driver-inventory.json
+build/build binary_coverage_inventory build/build --verify-inventory build/driver-inventory.json
+```
+
+A zero exit status means inventory creation or exact inventory verification
+succeeded. The report's coverage status remains `incomplete`; it does not mean
+100% coverage. Verification regenerates the report from the artifact and rejects
+different content, identity, omitted ranges, or unsupported completeness claims.
+No evidence collector is approved by this pilot.
+
+Executable `PT_LOAD` ranges are a conservative **byte inventory**, including
+zero-filled memory tails. Every byte remains unclassified: data/padding cannot
+be mistaken for instructions or removed because it was not hit. Instruction-site
+execution, machine edges, MC/DC obligations, and functional assertions are four
+separate unmeasured metrics with null totals/hits/percentages. This command
+neither decodes nor executes the artifact. Source/tree revision, compiler/linker
+versions, flags/defines, optimization/LTO, ABI details, linked-module identities,
+live executable mappings and generated code are not recovered from the file and
+remain explicit gaps. ELF virtual addresses are recorded; no ASLR attribution
+is claimed. Inputs must stay unchanged while mapped and hashed; this pilot does
+not certify mutable-file snapshot atomicity or runtime module continuity.
+
+The existing Release/combinations preflight runs the native self-tests on every
+desktop platform and prints an inventory of `/proc/self/exe` on Linux x86-64.
+That is the running native driver's artifact, including the documented hosted
+Clang-bootstrap configuration when used; it does not substitute a special
+coverage build for the delivery artifact. Other platforms run the format/report
+controls but have no measured pilot artifact. The complete JSON is retained in
+the ordinary combination log; no new workflow, collector, dependency or physical
+runner is introduced.
+
+Format contracts are consulted from ELF gABI 4.3 DRAFT, inspected at
+xinuos/gabi `81337e4611a7789761bdb4a46be12cac5a08dab1`:
+[header](https://github.com/xinuos/gabi/blob/81337e4611a7789761bdb4a46be12cac5a08dab1/docsrc/elf/02-eheader.rst)
+and [program loading](https://github.com/xinuos/gabi/blob/81337e4611a7789761bdb4a46be12cac5a08dab1/docsrc/elf/07-pheader.rst).
+Specification licensing is unverified (no root license in the inspected tree);
+no specification text or implementation is copied. Companion source MC/DC remains unimplemented. The inspected
+[Clang source-coverage documentation](https://github.com/llvm/llvm-project/blob/2078da43e25a4623cab2d0d60decddf709aaea28/clang/docs/SourceBasedCodeCoverage.rst)
+at LLVM `llvmorg-21.1.8` / `2078da43e25a4623cab2d0d60decddf709aaea28`
+describes source instrumentation and omissions; it does not provide actual-binary
+instruction tracing. Its [license](https://github.com/llvm/llvm-project/blob/2078da43e25a4623cab2d0d60decddf709aaea28/LICENSE.TXT)
+is Apache-2.0 WITH LLVM-exception with separately listed third-party/legacy terms.
+No LLVM material is imported. Buster first-party licensing remains unselected
+per [LICENSES/README.md](../../LICENSES/README.md) and #621.
