@@ -344,7 +344,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_default_native(U
                 ProcessWaitResult controlled = compiler_driver_test_response_file_run(arena, (SliceString8){.pointer = command, .length = count});
                 bool host_ok = !controlled.timed_out && controlled.result == PROCESS_RESULT_SUCCESS;
                 BUSTER_TEST(arguments, host_ok);
-                if (host_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, host_output)); }
+                if (host_ok)
+                {
+                    host_ok = compiler_driver_test_process_success(arena, host_output);
+                    BUSTER_TEST(arguments, host_ok);
+                }
                 String8 target = BUSTER_CPU_ARCH_AARCH64 ? S8("aarch64-linux") : S8("x86_64-linux");
                 CompilerDriverResult direct = compiler_driver_archive_test_default_link(arena, target, sysroot, source, archive, (String8){0}, direct_output);
                 UnitTestResult checked = compiler_driver_archive_test_default_result(arguments, direct, 91, (ByteSlice){0});
