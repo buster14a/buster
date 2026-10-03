@@ -5525,7 +5525,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                         : c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[task->start]);
                     if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF)
                     {
-                        machine->expression_constraint = string_format(arena, S8("typedef name '{S8}' is not an expression"),
+                        machine->expression_constraint = string_format(result->arena, S8("typedef name '{S8}' is not an expression"),
                             c_token_spelling(preprocess.spelling_base, first));
                         machine->expression_constraint_token = task->start;
                     }
