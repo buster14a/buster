@@ -30639,6 +30639,310 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArgumen
     return result;
 }
 
+// #1261: updates retain the place and return the correct old or new value.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CPlaceUpdateCase CPlaceUpdateCase;
+    struct CPlaceUpdateCase
+    {
+        String8 name;
+        String8 source;
+        u32 call_count;
+    };
+    CPlaceUpdateCase cases[] = {
+        {S8("check_literal_prefix"), S8("int check_literal_prefix(void) { int a = ++(int){5}; int b = --(int){5}; return a != 6 || b != 4; }\n"), 0},
+        {S8("check_literal_postfix"), S8("int check_literal_postfix(void) { int a = (int){5}++; int b = (int){5}--; return a != 5 || b != 5; }\n"), 0},
+        {S8("check_member_prefix"), S8("int check_member_prefix(void) { struct M { int m, n; }; int a = ++((struct M){1, 2}).m; int b = --((struct M){4, 8}).n; return a != 2 || b != 7; }\n"), 0},
+        {S8("check_member_postfix"), S8("int check_member_postfix(void) { struct M { int m, n; }; int a = (struct M){1, 2}.m++; int b = (struct M){4, 8}.n--; return a != 1 || b != 8; }\n"), 0},
+        {S8("check_literal_index"), S8("static int literal_calls; static int literal_next(void) { literal_calls++; return 1; }\nint check_literal_index(void) { literal_calls = 0; int old = (int[2]){3, 7}[literal_next()]++; return old != 7 || literal_calls != 1; }\n"), 1},
+        {S8("check_literal_address"), S8("int check_literal_address(void) { int *p = &(int){5}; int old = (*p)++; int now = ++*p; return old != 5 || now != 7 || *p != 7; }\n"), 0},
+        {S8("check_complex_compound"), S8("int check_complex_compound(void) { double _Complex z = 0; __real__ z = 1; __imag__ z = 2; __real__ z += 1.5; double r = (__real__ z += 1.5); double i = ++__imag__ z; double old = (__real__ z)++; return r != 4 || i != 3 || old != 4 || __real__ z != 5 || __imag__ z != 3; }\n"), 0},
+        {S8("check_complex_prefix"), S8("int check_complex_prefix(void) { double _Complex z = 0; __real__ z = 1; __imag__ z = 2; double r = ++__real__ z; double i = --__imag__ z; return r != 2 || i != 1 || __real__ z != 2 || __imag__ z != 1; }\n"), 0},
+        {S8("check_complex_postfix"), S8("int check_complex_postfix(void) { double _Complex z = 0; __real__ z = 1; __imag__ z = 2; double r = (__real__ z)++; double i = (__imag__ z)--; return r != 1 || i != 2 || __real__ z != 2 || __imag__ z != 1; }\n"), 0},
+        {S8("check_projection_precedence"), S8("int check_projection_precedence(void) { double _Complex z = 0; __real__ z = 1; __imag__ z = 2; double r = __real__ z++; double i = __imag__ z++; return r != 1 || i != 2 || __real__ z != 3 || __imag__ z != 2; }\n"), 0},
+        {S8("check_real_index"), S8("static int real_calls; static int real_next(void) { real_calls++; return 1; }\nint check_real_index(void) { double _Complex slots[2] = {0, 0}; __real__ slots[1] = 3; __imag__ slots[1] = 7; real_calls = 0; double old = (__real__ slots[real_next()])++; return old != 3 || real_calls != 1 || __real__ slots[1] != 4 || __imag__ slots[1] != 7 || slots[0] != 0; }\n"), 1},
+        {S8("check_imag_index"), S8("static int imag_calls; static int imag_next(void) { imag_calls++; return 1; }\nint check_imag_index(void) { double _Complex slots[2] = {0, 0}; __real__ slots[1] = 3; __imag__ slots[1] = 7; imag_calls = 0; double old = (__imag__ slots[imag_next()])--; return old != 7 || imag_calls != 1 || __real__ slots[1] != 3 || __imag__ slots[1] != 6 || slots[0] != 0; }\n"), 1},
+        {S8("check_compound_index"), S8("static int compound_calls; static int compound_next(void) { compound_calls++; return 1; }\nint check_compound_index(void) { double _Complex slots[2] = {0, 0}; __real__ slots[1] = 3; __imag__ slots[1] = 7; compound_calls = 0; double r = (__real__ slots[compound_next()] += 1.5); return r != 4.5 || compound_calls != 1 || __real__ slots[1] != 4.5 || __imag__ slots[1] != 7 || slots[0] != 0; }\n"), 1},
+        {S8("check_volatile_part"), S8("int check_volatile_part(void) { volatile double _Complex z = 0; __real__ z = 1; __imag__ z = 2; double old = (__imag__ z)++; double now = (__real__ z += 2); return old != 2 || now != 3 || __real__ z != 3 || __imag__ z != 3; }\n"), 0},
+        {S8("check_projection_value"), S8("int check_projection_value(void) { double _Complex z = 0; __real__ z = 1; __imag__ z = 2; double r = __real__ (z + 3); double i = __imag__ (z + 3); return r != 4 || i != 2 || __real__ z != 1 || __imag__ z != 2; }\n"), 0},
+        {S8("check_nested_projection"), S8("int check_nested_projection(void) { double _Complex z = 0; __real__ z = 1; __imag__ z = 2; double old = (__real__(__imag__ z))++; double now = ++(__real__(__real__ z)); int n = 4; int r = ++__real__ n; int zero = __imag__ n; return old != 2 || now != 2 || r != 5 || n != 5 || zero != 0 || __real__ z != 2 || __imag__ z != 3; }\n"), 0},
+    };
+    String8 rejected[] = {
+        S8("int bad(void) { return ++(const int){5}; }\n"),
+        S8("int bad(void) { const double _Complex z = 0; return ++__real__ z; }\n"),
+        S8("int bad(void) { const double _Complex z = 0; return (__imag__ z)++; }\n"),
+        S8("int bad(void) { double _Complex z = 0; return ++__real__ (z + 1); }\n"),
+        S8("enum { n = 3 }; int bad(void) { return ++__real__ n; }\n"),
+        S8("enum { n = 3 }; int bad(void) { return (__real__ n)++; }\n"),
+        S8("enum { n = 3 }; int bad(void) { return ++(__real__((__real__(n)))); }\n"),
+        S8("enum { n = 3 }; int bad(void) { return ((__real__((__real__(n)))))--; }\n"),
+        S8("int bad(void) { int n = 3; return ++__imag__ n; }\n"),
+        S8("int bad(void) { double n = 3; return (__imag__ n)++; }\n"),
+        S8("int bad(void) { double _Complex z = 0; return ++(__imag__(__real__ z)); }\n"),
+        S8("int bad(void) { int n = 3; return (__real__(__imag__ n))++; }\n"),
+        S8("int bad(void) { int n = 3; __imag__ n = 4; return n; }\n"),
+        S8("int bad(void) { int n = 3; return *&(__imag__ n); }\n"),
+        S8("void bad(void) { int n = 3; __asm__(\"\" : \"=r\" (__imag__ n)); }\n"),
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 context = string_format(temporary.arena, S8("place update {S8} target={u32} dialect={u32} form={u32}"),
+                                                   cases[row].name, target_index, dialect, form);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, cases[row].source, (CPreprocessOptions){
+                        .target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect],
+                    });
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count, context);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("runtime-place-update.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified,
+                        string_format(temporary.arena, S8("{S8}: {S8}"), context,
+                                      lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("canonical lowering")));
+                    if (!lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
+                        BUSTER_REQUIRE(arguments, lowered.program->module_count == 1))
+                    {
+                        IrModule* module = lowered.program->modules;
+                        BUSTER_TEST_RAW(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE, context);
+                        IrFunction* function = c_test_find_ir_function(module, cases[row].name);
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            BUSTER_TEST_RAW(arguments, function->state == IR_FUNCTION_LOWERED && function->instruction_count != 0, context);
+                            u32 calls = 0;
+                            for (u32 index = 0; index < function->instruction_count; index += 1)
+                            {
+                                calls += function->instructions[index].opcode == IR_OPCODE_CALL;
+                            }
+                            BUSTER_TEST_RAW(arguments, calls == cases[row].call_count,
+                                string_format(temporary.arena, S8("{S8}: calls={u32}/{u32}"), context, calls, cases[row].call_count));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 source = S8("int volatile_literal_update(void) { return ++(volatile int){5}; }\n");
+                    String8 context = string_format(temporary.arena, S8("volatile literal update target={u32} dialect={u32} form={u32}"),
+                                                   target_index, dialect, form);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                        .target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect],
+                    });
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("volatile-literal-update.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified, context);
+                    if (!lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
+                        BUSTER_REQUIRE(arguments, lowered.program->module_count == 1))
+                    {
+                        IrFunction* function = c_test_find_ir_function(lowered.program->modules, S8("volatile_literal_update"));
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            u32 loads = 0;
+                            u32 volatile_loads = 0;
+                            u32 volatile_stores = 0;
+                            for (u32 index = 0; index < function->instruction_count; index += 1)
+                            {
+                                IrInstruction instruction = function->instructions[index];
+                                loads += instruction.opcode == IR_OPCODE_LOAD;
+                                volatile_loads += instruction.opcode == IR_OPCODE_LOAD && instruction.volatile_access;
+                                volatile_stores += instruction.opcode == IR_OPCODE_STORE && instruction.volatile_access;
+                            }
+                            BUSTER_TEST_RAW(arguments, loads == 1 && volatile_loads == 1 && volatile_stores == 2,
+                                string_format(temporary.arena, S8("{S8}: loads={u32} volatile-loads={u32} volatile-stores={u32}"),
+                                              context, loads, volatile_loads, volatile_stores));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[row], (CPreprocessOptions){
+                        .target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect],
+                    });
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    BUSTER_TEST_RAW(arguments, semantic.diagnostic_count != 0,
+                        string_format(temporary.arena, S8("semantic-only rejected place update row={u32} target={u32} dialect={u32} form={u32}"),
+                                      row, target_index, dialect, form));
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("invalid-place-update.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified,
+                        string_format(temporary.arena, S8("rejected place update row={u32} target={u32} dialect={u32} form={u32}: {S8}"),
+                                      row, target_index, dialect, form, rejected[row]));
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8* parts = arena_allocate(arguments->arena, String8, BUSTER_ARRAY_LENGTH(cases) * 2 + 2);
+    u32 part_count = 0;
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        parts[part_count++] = cases[row].source;
+    }
+    parts[part_count++] = S8("int main(void) {\n");
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        parts[part_count++] = string_format(arguments->arena, S8("if ({S8}()) return {u32};\n"), cases[row].name, row + 1);
+    }
+    parts[part_count++] = S8("return 0; }\n");
+    String8 runtime_source = string_join_arena(arguments->arena, (SliceString8){.pointer = parts, .length = part_count}, false);
+    String8 input = buster_test_temporary_path(arguments->arena, S8("runtime-place-updates"), S8(".c"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(runtime_source));
+    BUSTER_TEST(arguments, written);
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 allocator = 0; written && allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("runtime-place-updates"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fverify-codegen"), allocators[allocator], forms[form],
+                                     optimizations[optimization], S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = allocator != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("place updates {S8} {S8} {S8}: {S8}"),
+                                  allocators[allocator], forms[form], optimizations[optimization], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("place update runtime {S8} {S8} {S8}: status={u32} timeout={u32}"),
+                                          allocators[allocator], forms[form], optimizations[optimization],
+                                          execution.platform_status, (u32)execution.timed_out));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    // Control 1 returns an independent fixed mask: result, call count,
+    // stored real, stored imaginary and untouched neighbor are bits 0..4.
+    String8 diagnostic_source = S8("static int compound_calls; static int compound_next(void) { compound_calls++; return 1; }\nint check_compound_index(void) { double _Complex slots[2] = {0, 0}; __real__ slots[1] = 3; __imag__ slots[1] = 7; compound_calls = 0; double r = (__real__ slots[compound_next()] += 1.5); return (r != 4.5) | ((compound_calls != 1) << 1) | ((__real__ slots[1] != 4.5) << 2) | ((__imag__ slots[1] != 7) << 3) | ((slots[0] != 0) << 4); }\nint main(void) { return check_compound_index(); }\n");
+    String8 diagnostic_input = buster_test_temporary_path(arguments->arena, S8("place-update-mask"), S8(".c"));
+    bool diagnostic_written = written && file_write(diagnostic_input, BUSTER_SLICE_TO_BYTE_SLICE(diagnostic_source));
+    BUSTER_TEST(arguments, diagnostic_written);
+    // GCC 15.2 diverges from the indexed compound-assignment call-count oracle.
+    // Keep all original case bodies, but call the other fourteen cases and a
+    // separately sequenced address neighbor in its mandatory reference main.
+    String8 gcc_neighbor = S8("int check_compound_index_sequenced(void) { double _Complex slots[2] = {0, 0}; __real__ slots[1] = 3; __imag__ slots[1] = 7; compound_calls = 0; double _Complex *selected = &slots[compound_next()]; double r = (__real__ *selected += 1.5); return r != 4.5 || compound_calls != 1 || __real__ slots[1] != 4.5 || __imag__ slots[1] != 7 || slots[0] != 0; }\n");
+    String8* gcc_parts = arena_allocate(arguments->arena, String8, BUSTER_ARRAY_LENGTH(cases) * 2 + 4);
+    u32 gcc_part_count = 0;
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        gcc_parts[gcc_part_count++] = cases[row].source;
+    }
+    gcc_parts[gcc_part_count++] = gcc_neighbor;
+    gcc_parts[gcc_part_count++] = S8("int main(void) {\n");
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        if (!string_equal(cases[row].name, S8("check_compound_index")))
+        {
+            gcc_parts[gcc_part_count++] = string_format(arguments->arena, S8("if ({S8}()) return {u32};\n"), cases[row].name, row + 1);
+        }
+    }
+    gcc_parts[gcc_part_count++] = S8("if (check_compound_index_sequenced()) return 16;\nreturn 0; }\n");
+    String8 gcc_source = string_join_arena(arguments->arena, (SliceString8){.pointer = gcc_parts, .length = gcc_part_count}, false);
+    String8 gcc_input = buster_test_temporary_path(arguments->arena, S8("place-update-gcc-reference"), S8(".c"));
+    bool gcc_written = written && file_write(gcc_input, BUSTER_SLICE_TO_BYTE_SLICE(gcc_source));
+    BUSTER_TEST(arguments, gcc_written);
+    String8 reference_inputs[] = {input, diagnostic_input};
+    String8 references[] = {S8("gcc"), S8("clang")};
+    String8 reference_dialects[] = {S8("-std=gnu17"), S8("-std=gnu2x")};
+    for (u32 reference = 0; diagnostic_written && gcc_written && reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(reference_dialects); dialect += 1)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                for (u32 control = 0; control < (reference == 0 ? 1 : BUSTER_ARRAY_LENGTH(reference_inputs)); control += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("place-update-reference"), S8(".exe"));
+                    if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                    {
+                        String8 reference_input = reference == 0 ? gcc_input : reference_inputs[control];
+                        String8 command[] = {compiler, reference_dialects[dialect], optimizations[optimization], S8("-nostdinc"), reference_input, S8("-o"), output};
+                        ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                  .use_process_environment = true, .search_path = true});
+                        if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                        {
+                            ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, 30000000);
+                            bool compiled = !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS;
+                            BUSTER_TEST_RAW(arguments, compiled,
+                                string_format(temporary.arena, S8("place update reference control={u32} {S8} {S8} {S8}: status={u32} timeout={u32}\n{S8}{S8}"),
+                                              control, compiler, reference_dialects[dialect], optimizations[optimization],
+                                              compilation.platform_status, (u32)compilation.timed_out,
+                                              BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_OUTPUT]),
+                                              BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR])));
+                            if (compiled)
+                            {
+                                String8 run[] = {output};
+                                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                                {
+                                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                        string_format(temporary.arena, S8("place update reference runtime control={u32} {S8} {S8} {S8}: status={u32} timeout={u32}"),
+                                                      control, compiler, reference_dialects[dialect], optimizations[optimization],
+                                                      execution.platform_status, (u32)execution.timed_out));
+                                }
+                                BUSTER_TEST(arguments, os_file_delete(output));
+                            }
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    if (diagnostic_written)
+    {
+        BUSTER_TEST(arguments, os_file_delete(diagnostic_input));
+    }
+    if (gcc_written)
+    {
+        BUSTER_TEST(arguments, os_file_delete(gcc_input));
+    }
+#endif
+    if (written)
+    {
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+#endif
+    return result;
+}
+
 // C 6.3.1.2 converts every scalar -- a complex value too -- to _Bool by
 // comparing the whole value with zero; 6.3.1.7p2's discarded imaginary half
 // is the rule for the other real targets. The truths and projections below are
@@ -32454,6 +32758,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
     BUSTER_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
     BUSTER_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
+    BUSTER_TEST_FIXTURE(arguments, c_test_runtime_place_updates);
     BUSTER_TEST_FIXTURE(arguments, c_test_complex_bool_conversion);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
