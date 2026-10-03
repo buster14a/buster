@@ -28,6 +28,9 @@ Each test also binds the native buster-desktop-unit-observation-v1 receipt at
 <phase_directory>.parent/unit-observations/<taskID>/observation.json. Its adjacent
 inventory.log/test.log bytes, binary hash, source/run identity and command must
 match the same phase and sample; the independent inventory query is replayed.
+Its CI_UNIT_HOST_V1 record must match identity.native_host_profile and is part
+of the exact per-row census; CPU model names or assertion counts cannot supply
+a missing effective native feature/build-SIMD profile.
 The manifest log must be that exact retained test.log. Its elapsed_us must equal
 the native test phase, and its toolchain identity is
 {compiler,path_hash,identity,target,version} from that row's detected capability.
@@ -254,6 +257,11 @@ def observation(root, item, test, unit, manifest_path, event, identity):
     manifest = phases.read(manifest_path)
     require((manifest_path.parent / manifest["log"]).resolve() == log_path.resolve() and test["log_sha256"] == value["log_sha256"], "manifest did not consume the native test log")
     require(unit["inventory"] == unit_campaign.inventory(inventory_path), "native independent inventory differs from test manifest")
+    profile = unit_campaign.host_profile(inventory_path, required=True)
+    declared_profile = unit["identity"].get("native_host_profile")
+    require(profile["architecture"] == identity["architecture"] and
+            declared_profile == profile and json.dumps(declared_profile, sort_keys=True) == json.dumps(profile, sort_keys=True),
+            "native host profile differs from same-binary inventory query")
     return value
 
 
@@ -308,6 +316,7 @@ def desktop(root, item, run, condition, variant):
         require(unit["wall_us"] == event["end_us"] - event["child_start_us"] and unit["test_workers"] == int(event["test_jobs"]), "test census is not the native invocation interval/quota")
         observation(root, item, test, unit, manifest_path, event, identity)
         census[test["row_id"]] = {"inventory": unit["inventory"], "skipped_table_audits": unit["skipped_table_audits"],
+            "native_host_profile": provenance["native_host_profile"],
             "external": unit["external"], "modules": {name: {k: module[k] for k in ("index", "assertions", "passed", "failed", "status")} for name, module in unit["modules"].items()}}
     caps = [{k: cap.get(k) for k in ("id", *CAP_KEYS, "state", "reason")} for cap in capabilities.values()]
     normalized_rows = [{k: v for k, v in row.items() if k != "owner_shard"} for row in expected]

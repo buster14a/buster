@@ -15,6 +15,10 @@ import ci_matrix_phases as phases
 import ci_matrix_phases_test as phase_tests
 import github_ci_time as github
 
+HOST_RECORD = "CI_UNIT_HOST_V1 architecture=x86_64 feature_source=cpuid-xcr0 feature_word_count=4 word0=1 word1=2 word2=3 word3=4 simd_512_base=0 simd_512=0"
+HOST_PROFILE = {"schema": "buster-native-host-profile-v1", "architecture": "x86_64", "feature_source": "cpuid-xcr0",
+                "feature_words": [1, 2, 3, 4], "simd_512_base": False, "simd_512": False}
+
 
 def reference(root, name, value):
     path = root / name
@@ -339,7 +343,7 @@ class QualificationTests(unittest.TestCase):
             sidecar = self.root / "unit-observations" / event["id"]
             sidecar.mkdir(parents=True)
             inventory = [dict(index=0, name="compiler_driver_tests", table_audit=False), dict(index=1, name="fixture", table_audit=False), dict(index=2, name="table_audit_fixture", table_audit=True)]
-            lines = [f"CI_UNIT_MODULE_V1 index={r['index']} module={r['name']} table_audit={int(r['table_audit'])} enabled={int(not r['table_audit'])} selected=0 group={'driver' if r['index'] == 0 else 'rest'}" for r in inventory]
+            lines = [HOST_RECORD] + [f"CI_UNIT_MODULE_V1 index={r['index']} module={r['name']} table_audit={int(r['table_audit'])} enabled={int(not r['table_audit'])} selected=0 group={'driver' if r['index'] == 0 else 'rest'}" for r in inventory]
             lines += ["CI_UNIT_BATCH_V1 group=inventory modules=0 modules_passed=0 assertions=0 passed=0 failed=0 external=0 external_passed=0 status=inventory", "[0/0] Unit tests (0 of 3 modules selected)", "[0/0] Module tests", "[0/0] External tests"]
             inventory_path = sidecar / "inventory.log"
             inventory_path.write_text("\n".join(lines) + "\n")
@@ -352,7 +356,7 @@ class QualificationTests(unittest.TestCase):
                         inventory=inventory, log=str(log.relative_to(self.root)),
                         identity=dict(source_revision="a" * 40, binary_sha256="e" * 64, runner_image={k: condition[k] for k in ("image_os", "image_version", "runner")},
                                       platform="macos" if direct else "windows", architecture="x86_64", configuration=row["configuration"], sanitize=row["sanitize"], fuzz=row["fuzz"], table_audits=release or direct,
-                                      toolchain={k: cap[k] for k in qualification.CAP_KEYS}, cpu_budget=4))
+                                      toolchain={k: cap[k] for k in qualification.CAP_KEYS}, cpu_budget=4, native_host_profile=copy.deepcopy(HOST_PROFILE)))
             receipt = {k: event[k] for k in ("id", "epoch_us", "pid", "argv")}
             receipt.update(schema="buster-desktop-unit-observation-v1", source_revision="a" * 40, run_id="123", run_attempt="1", binary_path=event["argv"][0], binary_sha256="e" * 64,
                            inventory_file="inventory.log", log_file="test.log", inventory_sha256=hashlib.sha256(inventory_path.read_bytes()).hexdigest(),
@@ -388,6 +392,61 @@ class QualificationTests(unittest.TestCase):
         item["tests"].pop()
         with self.assertRaisesRegex(ValueError, "runtime assertion census"):
             qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_host_profile_is_required_and_bound_to_same_binary_query(self):
+        item, _, condition = self.complete_desktop()
+        test = item["tests"][0]
+        manifest_path = self.root / test["manifest"]["path"]
+        original = phases.read(manifest_path)
+        for profile in (None, dict(HOST_PROFILE, feature_words=[9, 2, 3, 4]),
+                        dict(HOST_PROFILE, simd_512_base=True), dict(HOST_PROFILE, architecture="aarch64"),
+                        dict(HOST_PROFILE, feature_words=[True, 2, 3, 4]), dict(HOST_PROFILE, simd_512_base=0),
+                        dict(HOST_PROFILE, feature_words=[1.0, 2, 3, 4])):
+            manifest = copy.deepcopy(original)
+            if profile is None:
+                del manifest["identity"]["native_host_profile"]
+            else:
+                manifest["identity"]["native_host_profile"] = profile
+            test["manifest"] = reference(self.root, test["manifest"]["path"], manifest)
+            with self.subTest(profile=profile), self.assertRaisesRegex(ValueError, "same-binary inventory query"):
+                qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_missing_duplicate_and_malformed_host_query_cannot_qualify(self):
+        item, _, condition = self.complete_desktop()
+        test = item["tests"][0]
+        receipt_path = self.root / test["observation"]["path"]
+        original_receipt = phases.read(receipt_path)
+        inventory_path = receipt_path.parent / "inventory.log"
+        original = inventory_path.read_text()
+        mutations = (original.replace(HOST_RECORD + "\n", ""), HOST_RECORD + "\n" + original,
+                     original.replace("word0=1", "word0=18446744073709551616"))
+        for mutation in mutations:
+            inventory_path.write_text(mutation)
+            receipt = dict(original_receipt, inventory_sha256=hashlib.sha256(inventory_path.read_bytes()).hexdigest())
+            test["observation"] = reference(self.root, test["observation"]["path"], receipt)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+
+    def test_host_profile_and_assertion_differences_both_keep_campaign_pending(self):
+        item, _, condition = self.complete_desktop()
+        desktop = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        self.assertTrue(all(row["native_host_profile"] == HOST_PROFILE for row in desktop["census"].values()))
+        for changed in ("native_host_profile", "modules"):
+            def collect(root, sample):
+                result = self.observation(sample["variant"], sample["synthetic_id"])
+                result["platforms"] = copy.deepcopy(desktop)
+                if sample["synthetic_id"] == 9:
+                    census = next(iter(result["platforms"]["census"].values()))
+                    if changed == "native_host_profile":
+                        census[changed]["feature_words"][0] = 9
+                    else:
+                        census[changed]["compiler_driver_tests"]["assertions"] += 1
+                        census[changed]["compiler_driver_tests"]["passed"] += 1
+                return result
+            with self.subTest(changed=changed), mock.patch.object(qualification, "sample", side_effect=collect):
+                result = qualification.qualify(self.campaign())
+            self.assertEqual(result["status"], "pending")
+            self.assertFalse(result["performance_accepted"])
 
     def test_unknown_metadata_keeps_retained_native_runner_observations(self):
         item, _, condition = self.complete_desktop()
