@@ -3229,9 +3229,96 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_control_labels(UnitTestArg
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_quoted_instruction_symbols(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    struct QuotedInstructionCase
+    {
+        String8 intel;
+        String8 att;
+        String8 symbol;
+        u8 bytes[8];
+        u8 count;
+        u8 offset;
+        s64 addend;
+        AssemblyRelocationKind kind;
+    };
+    // Literal opcode/field positions are independent of metadata selection.
+    struct QuotedInstructionCase const cases[] = {
+        {S8("lea rdi, [rip + \".L.cstr.1\"]\n"), S8("leaq \".L.cstr.1\"(%rip), %rdi\n"),
+         S8(".L.cstr.1"), {0x48, 0x8d, 0x3d, 0, 0, 0, 0}, 7, 3, -4, ASSEMBLY_RELOCATION_X86_PC32},
+        {S8("lea rdi, \".L.cstr.1\"[rip]\n"), S8("leaq \".L.cstr.1\"(%rip), %rdi\n"),
+         S8(".L.cstr.1"), {0x48, 0x8d, 0x3d, 0, 0, 0, 0}, 7, 3, -4, ASSEMBLY_RELOCATION_X86_PC32},
+        {S8("mov rdi, QWORD PTR [rip + \".L.cstr.1\"]\n"), S8("movq \".L.cstr.1\"(%rip), %rdi\n"),
+         S8(".L.cstr.1"), {0x48, 0x8b, 0x3d, 0, 0, 0, 0}, 7, 3, -4, ASSEMBLY_RELOCATION_X86_PC32},
+        {S8("mov eax, DWORD PTR \"g\"[rip]\n"), S8("movl \"g\"(%rip), %eax\n"),
+         S8("g"), {0x8b, 0x05, 0, 0, 0, 0}, 6, 2, -4, ASSEMBLY_RELOCATION_X86_PC32},
+        {S8("call \"puts\"\n"), S8("call \"puts\"\n"),
+         S8("puts"), {0xe8, 0, 0, 0, 0}, 5, 1, -4, ASSEMBLY_RELOCATION_X86_PC32},
+        {S8("jmp \".Lx\"\n"), S8("jmp \".Lx\"\n"),
+         S8(".Lx"), {0xe9, 0, 0, 0, 0}, 5, 1, -4, ASSEMBLY_RELOCATION_X86_PC32},
+        {S8("lea rdi, \"g\"+8[rip]\n"), S8("leaq \"g\"+8(%rip), %rdi\n"),
+         S8("g"), {0x48, 0x8d, 0x3d, 0, 0, 0, 0}, 7, 3, 4, ASSEMBLY_RELOCATION_X86_PC32},
+        {S8("lea rdi, [rip + \"g\" - 8]\n"), S8("leaq \"g\"-8(%rip), %rdi\n"),
+         S8("g"), {0x48, 0x8d, 0x3d, 0, 0, 0, 0}, 7, 3, -12, ASSEMBLY_RELOCATION_X86_PC32},
+        {S8("mov rdi, QWORD PTR [\"g\"]\n"), S8("movq \"g\", %rdi\n"),
+         S8("g"), {0x48, 0x8b, 0x3c, 0x25, 0, 0, 0, 0}, 8, 4, 0, ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED},
+        {S8("lea rdi, [rip + \"g+-*[,]{};#:\"]\n"), S8("leaq \"g+-*[,]{};#:\"(%rip), %rdi\n"),
+         S8("g+-*[,]{};#:"), {0x48, 0x8d, 0x3d, 0, 0, 0, 0}, 7, 3, -4, ASSEMBLY_RELOCATION_X86_PC32},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 syntax = 0; syntax < 2; syntax += 1)
+        {
+            String8 source = syntax ? cases[index].att : cases[index].intel;
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
+                (AssemblyEncodeOptions){.target = target, .syntax = syntax ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST_RAW(arguments, !encoded.diagnostic_count &&
+                assembly_test_bytes_equal(encoded.bytes, cases[index].bytes, cases[index].count) &&
+                encoded.symbol_count == 1 && string_equal(encoded.symbols[0].name, cases[index].symbol) &&
+                encoded.relocation_count == 1 && encoded.relocations[0].symbol == 0 &&
+                encoded.relocations[0].offset == cases[index].offset && encoded.relocations[0].addend == cases[index].addend &&
+                encoded.relocations[0].kind == cases[index].kind, source);
+        }
+    }
+    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena,
+        S8(".intel_syntax noprefix\n.text\nlea rdi, [rip + \".Lliteral\"]\ncall \"observe\"\n"
+           ".section .rodata\n\".Lliteral\": .byte 65\n"), (AssemblyEncodeOptions){.target = target});
+    u8 const unit_bytes[] = {0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0};
+    BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count == 2 && unit.relocation_count == 2 &&
+        assembly_test_bytes_equal(unit.sections[0].data, unit_bytes, sizeof(unit_bytes)));
+    if (!unit.diagnostic_count && unit.relocation_count == 2)
+    {
+        BUSTER_TEST(arguments, unit.relocations[0].offset == 3 && unit.relocations[0].addend == -4 &&
+            unit.relocations[0].symbol < unit.symbol_count &&
+            string_equal(unit.symbols[unit.relocations[0].symbol].name, S8(".Lliteral")) &&
+            unit.relocations[1].offset == 8 && unit.relocations[1].addend == -4 &&
+            unit.relocations[1].symbol < unit.symbol_count &&
+            string_equal(unit.symbols[unit.relocations[1].symbol].name, S8("observe")));
+    }
+    u8 const local_bytes[] = {0xe9, 0, 0, 0, 0, 0xc3};
+    AssemblyEncodeResult local = assembly_encode(arguments->arena, S8("jmp \".Lquoted\"\n\".Lquoted\": ret\n"),
+        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, !local.diagnostic_count && !local.relocation_count && local.symbol_count == 1 &&
+        local.symbols[0].defined && string_equal(local.symbols[0].name, S8(".Lquoted")) &&
+        assembly_test_bytes_equal(local.bytes, local_bytes, sizeof(local_bytes)));
+    String8 const invalid[] = {S8("call \"unterminated\n"), S8("call \"\"\n"), S8("call \"g\"tail\n"),
+                               S8("lea rdi, [rip + \"g]\n"), S8("lea rdi, \"g\"+bad[rip]\n")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid[index],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST_RAW(arguments, rejected.diagnostic_count != 0 && !rejected.bytes.length && !rejected.relocation_count, invalid[index]);
+    }
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_quoted_instruction_symbols);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);

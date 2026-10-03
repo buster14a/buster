@@ -198,6 +198,16 @@ semantic reference, with failed wide CAS requiring a validated pair read.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
 or permission to retire the canonical oracle.
 
+Quoted symbol spellings in x86 Intel and AT&T instruction operands retain
+the same symbol identity as labels and data directives. RIP-relative and
+absolute memory operands and direct branch targets accept the quoted spelling
+and a numeric addend; Intel also accepts a displacement before the brackets
+(`"g"+8[rip]`). Delimiters and comment punctuation within a quoted name remain
+name bytes. Malformed or empty quoted symbols fail with an operand diagnostic.
+The registered `-g0` listing round trip covers a string reference and an
+external call under all four allocators; matching Linux x86-64 hosts execute
+the linked result.
+
 ## Plain-char signedness
 
 `-fsigned-char` and `-funsigned-char` override the target's implementation-
