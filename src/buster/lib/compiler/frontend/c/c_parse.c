@@ -25504,12 +25504,12 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
         ? c_parse_statement_end(preprocess, header_close + 1, function_end, suffix, function_end - header_close) : UINT32_MAX;
     bool braced_body = header_close < function_end && header_close + 1 < function_end &&
                        c_token_is_punctuator(&preprocess.tokens[header_close + 1], C_PUNCTUATOR_LEFT_BRACE);
-    if (!braced_body)
+    if (switch_end == UINT32_MAX)
     {
         c_parse_lowering_constraint_consider(diagnostic, S8("unsupported C function-body statement or expression near 'switch'"),
                                              switch_index, switch_index);
     }
-    else if (switch_end != UINT32_MAX)
+    else
     {
         CScopeId scope = c_parse_scope_for_token(result, declaration->scope, switch_index);
         u64 controlling_mark = machine->scratch_arena->position;
@@ -25560,7 +25560,7 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
                 CToken token = preprocess.tokens[index];
                 brace_depth += c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE);
                 brace_depth -= brace_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
-                if (brace_depth > 1 && !value_count && !has_default && c_token_in_well_known_set(preprocess.spelling_base, token,
+                if (brace_depth > (braced_body ? 1u : 0u) && !value_count && !has_default && c_token_in_well_known_set(preprocess.spelling_base, token,
                         C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(DEFAULT)))
                 {
                     c_parse_lowering_constraint_consider(diagnostic, S8("case label inside a block precedes every case of its switch"), index, index);

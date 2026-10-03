@@ -1259,3 +1259,29 @@ constants, not inferred from Buster. The fixed-range fixture additionally checks
 the aligned-base case against Clang. `c_test_enum_runtime` runs these two sources
 and the bit-field source in all four native allocator modes with strict codegen
 verification, rejecting machine fallback outside NONE.
+
+## Unbraced switch bodies (#1617)
+
+A switch controls one C statement. Semantic validation measures that statement's
+extent instead of requiring a compound body. Lowering uses the existing
+controlled-body range helper and resumes at its separate after-statement token;
+label-prefixed blocks retain their braces and all labels in the statement.
+Nested switches keep ownership of their own labels. Break cleanup resolves the
+scope surrounding the switch keyword, including when the body introduces no
+scope. Integer promotion, supported control widths, duplicate/range diagnostics
+and the existing first-label-inside-a-nested-block restriction are unchanged.
+
+The registered `c_test_unbraced_switch_bodies` covers the three issue examples,
+empty and chained bodies, nested switches, nested labels and fallthrough,
+following-statement boundaries, label-prefixed block/if/while bodies,
+break/continue/return, exact-once control evaluation and GNU cleanup ownership.
+Semantic and canonical checks span six native data models, GNU17/GNU23 and both
+frontend forms. Supported desktop drivers execute independent result oracles in
+all four allocator modes and both forms with codegen verification. Negative
+controls retain floating/pointer/128-bit control refusals, duplicate cases and
+defaults, overlapping ranges and the existing first-nested-label refusal.
+
+The existing driver syntax/object diagnostic-equivalence corpus also accepts
+these standard unbraced bodies in C17/C23 and keeps invalid controlling types
+and duplicate labels rejected in both forms. Its former label-free switch
+refusal row now records the valid C behavior.
