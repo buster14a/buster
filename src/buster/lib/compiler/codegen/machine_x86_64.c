@@ -5719,9 +5719,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cpu_query(MachineX64Selector* select
     IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
     bool cpuid = string_equal(extra.literal, S8("cpuid"));
     bool xgetbv = string_equal(extra.literal, S8("xgetbv"));
+    // Explicit literal assembly owns its runtime availability check. Keep
+    // automatic instruction selection and standalone assembly feature gates.
     bool selected = (cpuid || xgetbv) && instruction->operand_count == (cpuid ? 6u : 3u) &&
-                    instruction->immediate_count == instruction->operand_count && !instruction->target_count &&
-                    (!xgetbv || target_cpu_feature_has(selector->target, TARGET_CPU_FEATURE_X86_XSAVE));
+                    instruction->immediate_count == instruction->operand_count && !instruction->target_count;
     u32 inputs[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
     u32 input_mask = 0;
     u32 output_mask = 0;
