@@ -114,7 +114,17 @@ def source_identity(source, sha, main_created):
             "created_at": source["created_at"], "completed_at": source["updated_at"]}
 
 
-def job_evidence(job, source, sha):
+def declared_steps(workflow_bytes):
+    # The existing workflow uses one literal, named step per declaration.
+    # Derive additional controls from those exact bytes, not a second inventory.
+    names = re.findall(r"(?m)^      - name: (.+)$", workflow_bytes.decode("utf-8"))
+    require(len(names) == len(set(names)) and
+            (set(REQUIRED_STEPS) | {FINISH_STEP}) <= set(names),
+            "invalid named workflow step inventory")
+    return set(names)
+
+
+def job_evidence(job, source, sha, expected_steps):
     require(positive_int(job.get("id")) and job.get("name") == JOB_NAME and
             type(job.get("run_id")) is int and job["run_id"] == source["run_id"] and
             type(job.get("run_attempt")) is int and job["run_attempt"] == 1 and
@@ -140,7 +150,7 @@ def job_evidence(job, source, sha):
         require(step.get("status") == "completed" and step.get("conclusion") == conclusion,
                 "source step was not freshly executed: " + name)
         evidence.append({"name": name, "number": number, "conclusion": conclusion})
-    require((set(REQUIRED_STEPS) | {FINISH_STEP}) <= names, "missing mandatory policy step")
+    require(expected_steps <= names, "missing mandatory policy step")
     return {"id": job["id"], "runner_id": job["runner_id"], "labels": job["labels"],
             "started_at": job["started_at"], "completed_at": job["completed_at"],
             "steps": evidence}
@@ -148,6 +158,7 @@ def job_evidence(job, source, sha):
 
 def verify(api, sha, run_id, workflow_bytes):
     require(isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha), "invalid commit SHA")
+    expected_steps = declared_steps(workflow_bytes)
     main = api.get(f"actions/runs/{run_id}")
     run_identity(main, run_id, sha, "push", "main")
     require(main.get("status") == "in_progress" and main.get("conclusion") is None,
@@ -165,7 +176,7 @@ def verify(api, sha, run_id, workflow_bytes):
             type(blob.get("size")) is int and blob["size"] == len(workflow_bytes),
             "local workflow differs from exact-source workflow")
     job = unique_row(api.get(source_path + "/attempts/1/jobs", per_page=100, page=1), "jobs")
-    evidence = job_evidence(job, source, sha)
+    evidence = job_evidence(job, source, sha, expected_steps)
     require(source_identity(discovery(api, sha), sha, main_created) == source and
             source_identity(api.get(source_path), sha, main_created) == source,
             "source was replaced or changed during collection")

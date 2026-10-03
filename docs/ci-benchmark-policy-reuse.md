@@ -9,7 +9,7 @@ self-host, GPU, API-migration, retirement or other independent workflows.
 
 The required job name, runner and five-minute timeout stay unchanged. No job is
 added. `Require CI admission to be enabled` always executes freshly, followed by
-the small offline reuse regression suite. Contents and Actions permissions are
+the stateless-concurrency and small offline reuse regression suites. Contents and Actions permissions are
 read-only; the helper uses the existing bounded GET transport in
 `merge_queue_admission.GitHub`. It never publishes a check or changes a ref.
 
@@ -39,8 +39,9 @@ no more than two hours before the main run was created.
 
 The source must have exactly one successfully executed policy job with matching
 run/attempt/head/branch, the declared runner label, a valid execution interval,
-and unique step names/numbers. Every required test/control step must have
-succeeded. No extra failed or skipped step is accepted. The only skipped source
+and unique step names/numbers. Every named step declared in the exact workflow
+must be present, including additional controls added by other changes; each
+required test/control step must have succeeded. No extra failed or skipped step is accepted. The only skipped source
 step is finalization itself: merge-group runs execute fresh tests, never reuse.
 Discovery and direct source/current-run reads are repeated around collection.
 Incomplete pages, duplicate runs/jobs, missing proof, API errors, reruns and
@@ -59,6 +60,11 @@ execution from newly run controls. The source job API and logs are the original
 execution evidence; this workflow has no required source artifact contract.
 This is point-in-time verification, not an immutable guarantee against a user
 rerunning the source after the main job has finished.
+
+The [stateless concurrency fix](ci-stateless-concurrency.md) remains independent:
+its event/run-ID keys retain main invocations instead of cancelling them. Its
+regression runs freshly on main and must also be present and successful in the
+source evidence. Integration order is #2463, then this reuse change.
 
 ## Reconciler noise
 

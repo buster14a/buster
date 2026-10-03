@@ -38,7 +38,7 @@ class FakeApi:
         self.main.update(status="in_progress", conclusion=None)
         self.source = run_record(SOURCE_ID, "merge_group", "gh-readonly-queue/main/pr-2268-example",
                                  "2026-10-03T10:20:56Z", "2026-10-03T10:21:50Z")
-        names = ("Set up job", "Checkout") + reuse.REQUIRED_STEPS + (reuse.FINISH_STEP, "Complete job")
+        names = ("Set up job", "Checkout", "Prove stateless validation survives merge bursts") + reuse.REQUIRED_STEPS + (reuse.FINISH_STEP, "Complete job")
         self.job = {"id": JOB_ID, "run_id": SOURCE_ID, "run_attempt": 1,
                     "head_sha": SHA, "head_branch": self.source["head_branch"],
                     "workflow_name": reuse.JOB_NAME, "name": reuse.JOB_NAME,
@@ -195,6 +195,25 @@ class EvidenceTests(unittest.TestCase):
                 next(step for step in api.job["steps"] if step["name"] == name)["conclusion"] = conclusion
                 with self.subTest(name=name, conclusion=conclusion):
                     self.assert_refused(api)
+
+    def test_added_declared_control_must_be_present_and_fresh(self):
+        # Independent of REQUIRED_STEPS: new named workflow controls cannot
+        # disappear from the source API snapshot while its job remains green.
+        name = "Prove stateless validation survives merge bursts"
+        for conclusion in ("missing", "skipped", "failure", "cancelled"):
+            api = FakeApi()
+            if conclusion == "missing":
+                api.job["steps"] = [step for step in api.job["steps"] if step["name"] != name]
+            else:
+                next(step for step in api.job["steps"] if step["name"] == name)["conclusion"] = conclusion
+            with self.subTest(conclusion=conclusion):
+                self.assert_refused(api)
+
+    def test_named_step_inventory_rejects_missing_or_duplicate_contract(self):
+        for data in (WORKFLOW.replace(b"      - name: " + reuse.CONTROL_STEP.encode(), b"      - name: Other"),
+                     WORKFLOW + b"      - name: " + reuse.CONTROL_STEP.encode() + b"\n"):
+            with self.assertRaises(reuse.ReuseRefused):
+                reuse.verify(FakeApi(), SHA, MAIN_ID, data)
 
     def test_no_reuse_of_reused_policy_source(self):
         api = FakeApi()
@@ -366,8 +385,9 @@ class WorkflowTests(unittest.TestCase):
                  if "        if: ${{ steps.reuse.outputs.reused != 'true' }}\n" in block]
         self.assertEqual(gated, list(reuse.WORK_STEPS))
         expected = set(reuse.REQUIRED_STEPS) | {reuse.FINISH_STEP}
-        self.assertEqual(set(blocks), expected)
-        for name in ("Require CI admission to be enabled", reuse.CONTROL_STEP, reuse.DECISION_STEP):
+        self.assertTrue(expected <= set(blocks))
+        self.assertIn("Prove stateless validation survives merge bursts", blocks)
+        for name in set(blocks) - set(reuse.WORK_STEPS) - {reuse.FINISH_STEP}:
             self.assertNotIn("        if:", blocks[name])
         self.assertIn("exit 1", blocks["Require CI admission to be enabled"])
         self.assertIn("python3 -B tools/bench_policy_reuse_test.py -v", blocks[reuse.CONTROL_STEP])
