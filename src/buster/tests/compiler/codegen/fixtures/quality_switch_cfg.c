@@ -1,6 +1,12 @@
 // C labels precede their dispatch, but the selector may reorder MIR blocks.
 // Twelve values stay live across loops, shared destinations and fallthrough;
 // the companion synthetic MIR fixture fixes actual table-backedge layout.
+// The registered test stringifies these exact tokens for mobile portability;
+// standalone compilation keeps them as ordinary C functions.
+#ifndef BUSTER_QUALITY_SWITCH_FIXTURE
+#define BUSTER_QUALITY_SWITCH_FIXTURE(...) __VA_ARGS__
+#endif
+BUSTER_QUALITY_SWITCH_FIXTURE(
 unsigned long long quality_switch_cfg(unsigned seed, unsigned rounds)
 {
     unsigned long long a = seed;
@@ -61,3 +67,5 @@ unsigned long long quality_switch_default_only(unsigned key, unsigned long long 
     }
     return a;
 }
+)
+#undef BUSTER_QUALITY_SWITCH_FIXTURE

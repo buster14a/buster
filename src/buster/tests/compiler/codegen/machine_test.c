@@ -29,6 +29,11 @@
 #include <buster/lib/time.h>
 #include <buster/lib/x86_64.h>
 
+// One canonical input serves standalone reference compilation and embedded
+// tests; mobile test staging does not need to carry this private source file.
+#define BUSTER_QUALITY_SWITCH_FIXTURE(...) BUSTER_GLOBAL_LOCAL char8 const machine_quality_switch_source[] = #__VA_ARGS__;
+#include <buster/tests/compiler/codegen/fixtures/quality_switch_cfg.c>
+
 // Size census for the hot records the register-allocator project depends
 // on. The machine rows are all-integer and hold everywhere; the typed IR and
 // codegen records carry pointers, so their checks apply to 64-bit builds
@@ -4085,8 +4090,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_backward_switch_cfg(Unit
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_switch_cfg(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    ByteSlice input = file_read(arguments->arena, S8("src/buster/tests/compiler/codegen/fixtures/quality_switch_cfg.c"), (FileReadOptions){0});
-    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    String8 source = S8(machine_quality_switch_source);
     String8 names[] = {S8("quality_switch_cfg"), S8("quality_switch_forward"), S8("quality_switch_default_only")};
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
