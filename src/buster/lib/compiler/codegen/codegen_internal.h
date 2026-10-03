@@ -6,6 +6,8 @@
 
 typedef struct MachineFunction MachineFunction;
 typedef struct MachineStackPlacement MachineStackPlacement;
+typedef struct MachineSelectResult MachineSelectResult;
+typedef struct MachineEncodeResult MachineEncodeResult;
 
 typedef struct CodegenBuffer CodegenBuffer;
 struct CodegenBuffer
@@ -229,6 +231,8 @@ BUSTER_F_DECL void a64_emit_copy_memory_registers(CodegenBuffer* buffer, u32 des
 BUSTER_F_DECL void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 target, u32 offset, u32 size);
 BUSTER_F_DECL void a64_emit_float_store_offset(CodegenBuffer* buffer, u32 source, u32 offset, u32 size);
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool codegen_test_canonical_block_offsets(u32* offsets, IrFunction* function, MachineSelectResult* selected,
+                                                       MachineEncodeResult* encoded);
 BUSTER_F_DECL void codegen_test_emit_scalar(CodegenBuffer* buffer, u32 byte_count, u64 value);
 BUSTER_F_DECL bool codegen_test_record_machine_locations(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
                                                           MachineFunction const* function, MachineStackPlacement const* placement,

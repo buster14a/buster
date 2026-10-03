@@ -1206,7 +1206,6 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
     // construction through one of the metadata entry points.
     static MachineX64ConsumerSite const consumers[] = {
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_canonical_x64_metadata_emit")},
-        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_canonical_x64_thread_local_general_dynamic")},
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_generate_canonical_module_attempt")},
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_emit_global_assembly")},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_x86_metadata_emit")},
@@ -2435,6 +2434,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
             MachineBlockParameter parameters[] = {{.virtual_register = 0}, {.virtual_register = 1}};
             u32 kinds[BLOCK_COUNT] = {0};
             u32 block_map[BLOCK_COUNT] = {0};
+            u32 original_projection[BLOCK_COUNT];
+            for (u32 block = 0; block < BLOCK_COUNT; block += 1) { original_projection[block] = BLOCK_COUNT - 1u - block; }
+            u32* canonical_entries = variant & 1u ? original_projection : 0;
             u32 row_map[ROW_COUNT] = {0};
             u32 split_ids[EDGE_COUNT];
             memset(split_ids, 0xff, sizeof(split_ids));
@@ -2569,12 +2571,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
                 }
                 expected_edges[edge_cursor++] = copy;
             }
-            bool valid = machine_function_split_parameter_edges(arena, &function);
+            bool valid = machine_function_split_parameter_edges_with_canonical_map(arena, &function, &canonical_entries, BLOCK_COUNT);
             BUSTER_TEST(arguments, valid);
             BUSTER_TEST(arguments, function.block_count == expected_blocks && function.instruction_count == row_cursor && function.edge_count == edge_cursor);
             u64 retained = arena->position - start;
             u64 output_bytes = (u64)row_cursor * sizeof(MachineInstruction) + (u64)expected_blocks * sizeof(MachineBlock) +
-                               (u64)edge_cursor * sizeof(MachineEdge) + sizeof(cases);
+                               (u64)edge_cursor * sizeof(MachineEdge) + sizeof(cases) + sizeof(original_projection);
             BUSTER_TEST(arguments, split_count ? retained >= output_bytes && retained <= output_bytes + 64u : retained == 0);
             // Poison every reclaimed mapping/index word before examining output.
             u32* poison = arena_allocate(arena, u32, ROW_COUNT + 2u * EDGE_COUNT + 3u * BLOCK_COUNT + 16u);
@@ -2586,6 +2588,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
                 BUSTER_TEST(arguments, memcmp(function.edges, expected_edges, (u64)edge_cursor * sizeof(MachineEdge)) == 0);
                 BUSTER_TEST(arguments, memcmp(function.switch_cases, expected_cases, sizeof(cases)) == 0);
                 BUSTER_TEST(arguments, function.edge_copy_sources == copies && function.block_parameters == parameters);
+                BUSTER_TEST(arguments, split_count ? canonical_entries != 0 && canonical_entries != original_projection :
+                                       canonical_entries == (variant & 1u ? original_projection : 0));
+                for (u32 block = 0; canonical_entries && block < BLOCK_COUNT; block += 1)
+                {
+                    BUSTER_TEST(arguments, canonical_entries[block] == block_map[variant & 1u ? original_projection[block] : block]);
+                }
                 BUSTER_TEST(arguments, copies[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1) && copies[1] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0) &&
                                        copies[2] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0) && copies[3] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1));
                 for (u32 value = 0; value < BLOCK_COUNT; value += 1)
@@ -2600,8 +2608,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
                 BUSTER_TEST(arguments, marks[ROW_COUNT + 1].row == row_cursor);
                 u64 before_repeat = arena->position;
                 MachineInstruction* published = function.instructions;
-                BUSTER_TEST(arguments, machine_function_split_parameter_edges(arena, &function));
-                BUSTER_TEST(arguments, arena->position == before_repeat && function.instructions == published);
+                u32* published_projection = canonical_entries;
+                BUSTER_TEST(arguments, machine_function_split_parameter_edges_with_canonical_map(arena, &function, &canonical_entries, BLOCK_COUNT));
+                BUSTER_TEST(arguments, arena->position == before_repeat && function.instructions == published && canonical_entries == published_projection);
             }
             arena_set_position(arena, start);
         }
@@ -9977,7 +9986,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // Stage 2: x86-64 selection, MIR_STACK placement, and encoding over the
     // scalar subset. Selection and encoding are host-independent; execution
     // requires a non-sanitized x86-64 host and runs the same functions
-    // through the canonical NONE path as the differential oracle.
+    // through the MIR_STACK compatibility spelling and optimized allocators.
     Target machine_target = {
         .cpu_arch = CPU_ARCH_X86_64,
         .os = OPERATING_SYSTEM_LINUX,
@@ -10276,11 +10285,54 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                               machine_c_source_extra, machine_c_source_i128, machine_c_source_variadic);
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
+    // Seventeen operands remain outside the MIR inline-assembly vocabulary.
+    // Scalar fixed-register constraints are supported and stay in the positive suite.
+    String8 machine_c_source_unsupported = S8(
+        "int unsupported_inline_assembly(int value, double floating) { __asm__ volatile(\"\" : : "
+        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
+        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
+        "\"x\"(floating), \"x\"(floating), \"x\"(floating), \"x\"(floating), "
+        "\"x\"(floating), \"x\"(floating), \"x\"(floating), \"x\"(floating) : \"memory\"); return value; }\n");
+    IrProgram* unsupported_program =
+        machine_test_compile_c(arguments->arena, S8("machine-unsupported.c"), machine_c_source_unsupported, machine_target);
+    BUSTER_TEST(arguments, unsupported_program != 0);
+    if (unsupported_program && unsupported_program->module_count)
+    {
+        IrModule* unsupported_module = unsupported_program->modules;
+        IrFunction* unsupported_function = machine_test_ir_function_find(unsupported_module, S8("unsupported_inline_assembly"));
+        BUSTER_TEST(arguments, unsupported_function != 0);
+        if (unsupported_function)
+        {
+            MachineSelectResult unsupported_selected =
+                machine_select_canonical_function(arguments->arena, unsupported_program, unsupported_function, machine_target);
+            BUSTER_TEST(arguments, !unsupported_selected.supported && unsupported_selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY);
+        }
+        CodegenRegisterAllocatorMode unsupported_modes[] = {
+            CODEGEN_REGISTER_ALLOCATOR_NONE,
+            CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+            CODEGEN_REGISTER_ALLOCATOR_FAST,
+            CODEGEN_REGISTER_ALLOCATOR_QUALITY,
+        };
+        for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(unsupported_modes); mode_index += 1)
+        {
+            CodegenModule unsupported_result = codegen_generate_canonical_module(
+                arguments->arena, unsupported_program, unsupported_module, machine_target,
+                (CodegenModuleOptions){.register_allocator = (u8)unsupported_modes[mode_index], .record_fallbacks = true});
+            BUSTER_TEST_RAW(arguments,
+                            unsupported_result.error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && !unsupported_result.code.length &&
+                                unsupported_result.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY &&
+                                unsupported_result.statistics.fallback_function_count == 0 && unsupported_result.fallback_record_count == 0,
+                            string_format(arguments->arena, S8("unsupported mode {S8}: error={u32} code={u64} opcode={u32} fallback={u32}"),
+                                          codegen_register_allocator_mode_string(unsupported_modes[mode_index]), (u32)unsupported_result.error,
+                                          unsupported_result.code.length, (u32)unsupported_result.failed_opcode,
+                                          unsupported_result.statistics.fallback_function_count));
+        }
+    }
     if (machine_program && machine_program->module_count)
     {
         IrModule* machine_module = machine_program->modules;
-        // The whole-module NONE oracle: identical IR through the canonical
-        // path, executed at each function's entry offset.
+        // NONE is the public MIR_STACK compatibility spelling; execute the
+        // same selected module under every allocator spelling.
         CodegenModule none_module = codegen_generate_canonical_module(arguments->arena, machine_program, machine_module, machine_target,
                                                                       (CodegenModuleOptions){0});
         BUSTER_TEST(arguments, none_module.error == CODEGEN_ERROR_NONE);
@@ -11312,7 +11364,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         // i128/u128 casts use the same two-eightbyte frame representation as
         // the ABI's integer aggregate pair.  Exercise every signedness
         // direction through the machine bytes and compare against the
-        // canonical NONE entry, including a negative signed widening and an
+        // MIR_STACK compatibility entry, including a negative signed widening and an
         // unsigned value whose low half has its top bit set.
         {
             typedef unsigned __int128 MachineTestCallU128(u64);
@@ -11771,9 +11823,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         codegen_release_executable(none_executable);
 #endif
         // Stage 3 wiring: the same module generated under MIR_STACK routes
-        // every eligible function through the machine path and counts the
-        // rest as explicit fallbacks; the canonical NONE module is the
-        // execution oracle for both kinds.
+        // every function through the machine path; the NONE compatibility
+        // spelling and optimized modes retain the same semantic checks.
         CodegenModule mir_module = codegen_generate_canonical_module(arguments->arena, machine_program, machine_module, machine_target,
                                                                      (CodegenModuleOptions){
                                                                          .register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
@@ -12603,7 +12654,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // target, which carries every feature the vocabulary needs, so
     // selection, verification, placement, and encoding run on every host;
     // the executing differential additionally requires the host's own
-    // cpuid to carry the features, since the canonical NONE oracle emits
+    // cpuid to carry the features, since the MIR_STACK compatibility oracle emits
     // the same AVX-512 instructions the machine rows do.
     Target machine_vector_target = {
         .cpu_arch = CPU_ARCH_X86_64,
@@ -13688,7 +13739,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, a64_add_descriptor && a64_add_descriptor->prolog_size >= 24 && a64_add_descriptor->prolog_size % 4 == 0);
         }
 #if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
-        // Native execution differential: the canonical NONE module is the
+        // Native execution differential: the MIR_STACK compatibility module is the
         // oracle at each function's entry offset. Only call-free,
         // global-free functions execute from raw code copies.
         CodegenExecutable a64_none_executable = codegen_make_executable((CodegenFunction){
