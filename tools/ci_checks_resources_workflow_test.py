@@ -85,6 +85,7 @@ class ResourceWorkflowTests(unittest.TestCase):
         start = step(self.desktop, "Start checks resource observation")
         stop = step(self.desktop, "Stop checks resource observation")
         self.assertIn("!cancelled()", start)
+        self.assertIn("steps.checkout.outcome == 'success'", start)
         self.assertIn("always()", stop)
         self.assertNotIn("checks_resources_start.outcome", stop)
 

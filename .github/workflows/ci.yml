@@ -523,7 +523,7 @@ jobs:
       # the bounded runner scheduling gap. The sidecar never controls payloads.
       - name: Start checks resource observation
         id: checks_resources_start
-        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && env.BUSTER_CI_CHECKS_RESOURCES == '1' && ((matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success')) || (matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' && steps.llvm.outcome == 'success')) }}
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CHECKS_RESOURCES == '1' && ((matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success')) || (matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' && steps.llvm.outcome == 'success')) }}
         timeout-minutes: 2
         shell: bash
         run: |
