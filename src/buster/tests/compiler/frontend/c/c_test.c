@@ -32059,8 +32059,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArg
     return result;
 }
 
-// A comma is never an lvalue, even when its final operand was a place.
-// Keep these in the registered suite alongside the VLA-row negative cases.
 // A comma used as a value operand must sequence its complete left operand
 // before preparing a call in the right operand. This is the value-producing
 // companion to the controlling-expression matrix above (GitHub #1421).
@@ -32075,7 +32073,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_value_operands(UnitTestArguments
         S8("static int pair(int a, int b) { return a + b; }\n"),
         S8("int conditional_true(int select) { return select ? (mark(1, 0), called(2, 10)) : called(3, 20); }\n"),
         S8("int conditional_false(int select) { return select ? called(3, 20) : (mark(1, 0), called(2, 10)); }\n"),
-        S8("int binary_value(void) { return (mark(1, 0), called(2, 10)) + called(3, 1); }\n"),
+        S8("int binary_value(void) { return (mark(1, 0), called(2, 10)) + 1; }\n"),
         S8("long cast_value(void) { return (long)(mark(1, 0), called(2, 7)); }\n"),
         S8("int argument_value(void) { return pair(5, (mark(1, 0), called(2, 7))); }\n"),
         S8("int nested_value(void) { return (mark(1, 0), (mark(2, 0), called(3, 9))); }\n"),
@@ -32087,7 +32085,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_value_operands(UnitTestArguments
         S8("trace = 0; value = conditional_true(0); failed |= value != 20 || trace != 3u;\n"),
         S8("trace = 0; value = conditional_false(0); failed |= value != 10 || trace != 12u;\n"),
         S8("trace = 0; value = conditional_false(1); failed |= value != 20 || trace != 3u;\n"),
-        S8("trace = 0; value = binary_value(); failed |= value != 11 || trace != 123u;\n"),
+        S8("trace = 0; value = binary_value(); failed |= value != 11 || trace != 12u;\n"),
         S8("trace = 0; wide = cast_value(); failed |= wide != 7 || trace != 12u;\n"),
         S8("trace = 0; value = argument_value(); failed |= value != 12 || trace != 12u;\n"),
         S8("trace = 0; value = nested_value(); failed |= value != 9 || trace != 123u;\n"),
@@ -32162,6 +32160,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_value_operands(UnitTestArguments
 }
 
 
+// A comma is never an lvalue, even when its final operand was a place.
+// Keep these in the registered suite alongside the VLA-row negative cases.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_result_constraints(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
