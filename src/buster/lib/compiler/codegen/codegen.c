@@ -75,6 +75,7 @@ bool codegen_module_relocation_kind_is_aarch64(u8 kind)
     case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
     case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
@@ -104,6 +105,7 @@ bool codegen_module_relocation_kind_is_thread_local(u8 kind)
     case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
     case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
     case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32:
@@ -11954,7 +11956,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     // per-global terms -- for a module-level block and for an inline template
     // alike. The total is carried into both emitters, which are the only
     // producers that append after this array is sized.
-    u32 relocation_capacity = instruction_count * 3 + global_relocation_count +
+    u32 relocations_per_instruction = target.cpu_arch == CPU_ARCH_AARCH64 && target.os == OPERATING_SYSTEM_WINDOWS ? 4u : 3u;
+    u32 relocation_capacity = instruction_count * relocations_per_instruction + global_relocation_count +
                               (u32)BUSTER_MIN(assembly_capacity + inline_assembly_capacity, UINT32_MAX - global_relocation_count);
     result.relocations = arena_allocate(arena, CodegenModuleRelocation, relocation_capacity);
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
@@ -13001,7 +13004,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                 ? CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
                                                                 : CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP)
                                                         : thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET
-                                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12
+                                                            ? (encoded.call_sites[site_index].thread_local_low
+                                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12
+                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
                                                         : thread_local_site == MACHINE_THREAD_LOCAL_SITE_DARWIN_DESCRIPTOR
                                                             ? (encoded.call_sites[site_index].thread_local_low
                                                                 ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
@@ -21363,6 +21368,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 codegen_emit_u32(&buffer, 0xb9400129);
                                 codegen_emit_u32(&buffer, 0xf9402e4a);
                                 codegen_emit_u32(&buffer, 0xf8697949);
+                                u32 value_high_offset = (u32)buffer.count;
+                                codegen_emit_u32(&buffer, 0x91400129);
                                 u32 value_offset = (u32)buffer.count;
                                 codegen_emit_u32(&buffer, 0x91000129);
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
@@ -21374,6 +21381,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .symbol = instruction->symbol,
                                     .offset = index_low_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12,
+                                };
+                                result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
+                                    .symbol = instruction->symbol,
+                                    .offset = value_high_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,

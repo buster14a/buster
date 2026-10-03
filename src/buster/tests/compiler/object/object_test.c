@@ -2383,6 +2383,144 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_elf_ldst(UnitTestArgument
 
 #include <buster/tests/compiler/object/executable_test.c>
 
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_ANDROID || BUSTER_IOS
+    arguments->show(arguments, S8("ARM64_TLS_EXTERNAL status=unavailable reason=mobile-host\n"));
+#else
+    String8 link_names[] = {S8("lld-link"), S8("lld-link-21"), S8("lld-link-20"), S8("lld-link-19"), S8("lld-link-18")};
+    String8 read_names[] = {S8("llvm-readobj"), S8("llvm-readobj-21"), S8("llvm-readobj-20"), S8("llvm-readobj-19"), S8("llvm-readobj-18")};
+    String8 linker = {0};
+    String8 reader = {0};
+    for (u32 index = 0; !linker.length && index < BUSTER_ARRAY_LENGTH(link_names); index += 1)
+    {
+        linker = executable_resolve_in_path(arguments->arena, link_names[index]);
+    }
+    for (u32 index = 0; !reader.length && index < BUSTER_ARRAY_LENGTH(read_names); index += 1)
+    {
+        reader = executable_resolve_in_path(arguments->arena, read_names[index]);
+    }
+    if (!linker.length || !reader.length)
+    {
+        arguments->show(arguments, S8("ARM64_TLS_EXTERNAL status=unavailable reason=missing-tools linker={S8} reader={S8}\n"), linker, reader);
+    }
+    else
+    {
+        Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS};
+        u32 offsets[] = {4095, 8192};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(offsets); index += 1)
+        {
+            u32 addend = index == 0 ? 1u : 0u;
+            ByteSlice small = object_test_coff_arm64_page_object(arguments->arena, S8("target"),
+                UINT32_C(0x91400129) | (addend << 10), UINT32_C(0x91000129) | (addend << 10), 9);
+            enum { TLS_SIZE = 8196, RELOCATIONS = 112 + TLS_SIZE, SYMBOLS = RELOCATIONS + 20, SIZE = SYMBOLS + 22 };
+            u8* raw = arena_allocate_zeroed(arguments->arena, u8, SIZE);
+            memcpy(raw, small.pointer, 112);
+            memcpy(raw + RELOCATIONS, small.pointer + OBJECT_TEST_ARM64_COFF_RELOCATION_OFFSET, 20);
+            memcpy(raw + SYMBOLS, small.pointer + OBJECT_TEST_ARM64_COFF_SYMBOL_OFFSET, 22);
+            object_test_coff_write_u32(raw, 8, SYMBOLS);
+            object_test_coff_write_u32(raw, 44, RELOCATIONS);
+            object_test_coff_write_name(raw, 60, S8(".tls$AAA"));
+            object_test_coff_write_u32(raw, 76, TLS_SIZE);
+            object_test_coff_write_u16(raw, RELOCATIONS + 8, 10);
+            object_test_coff_write_u32(raw, SYMBOLS + 8, offsets[index]);
+            ObjectFile object = object_read(arguments->arena, (ByteSlice){.pointer = raw, .length = SIZE}, target);
+            if (BUSTER_REQUIRE(arguments, object.error == OBJECT_ERROR_NONE))
+            {
+                ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
+                if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.length >= 100))
+                {
+                    // Isolate W2's relocation semantics. The existing W3 private
+                    // section name is normalized only in this oracle's input;
+                    // no TLS-index sequence or runtime directory is involved.
+                    // Empty .pdata is also renamed: LLD records its chunk for
+                    // sorting, then removes its zero-size output section and
+                    // dereferences that missing section when sorting the chunk.
+                    u16 section_count = 0;
+                    memcpy(&section_count, artifact.bytes.pointer + 2, 2);
+                    for (u32 section = 0; section < section_count; section += 1)
+                    {
+                        u64 header = 20 + (u64)section * 40;
+                        if (header <= artifact.bytes.length && 40 <= artifact.bytes.length - header)
+                        {
+                            if (memcmp(artifact.bytes.pointer + header, ".tdata", 6) == 0)
+                            {
+                                object_test_coff_write_name(artifact.bytes.pointer, header, S8(".tls$AAA"));
+                            }
+                            u32 raw_size = 0;
+                            memcpy(&raw_size, artifact.bytes.pointer + header + 16, 4);
+                            if (raw_size == 0 && memcmp(artifact.bytes.pointer + header, ".pdata", 6) == 0)
+                            {
+                                object_test_coff_write_name(artifact.bytes.pointer, header, S8(".empty"));
+                            }
+                        }
+                    }
+                    String8 input = buster_test_temporary_path(arguments->arena, S8("arm64-tls-external"), S8(".obj"));
+                    String8 output = buster_test_temporary_path(arguments->arena, S8("arm64-tls-external"), S8(".dll"));
+                    if (BUSTER_REQUIRE(arguments, file_write(input, artifact.bytes)))
+                    {
+                        String8 read_args[] = {reader, S8("--relocations"), input};
+                        ProcessSpawnOptions options = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                       .use_process_environment = true, .new_process_group = true};
+                        ProcessSpawnResult read_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(read_args), (SliceString8){0}, (SliceString8){0}, options);
+                        if (BUSTER_REQUIRE(arguments, read_spawn.handle != 0))
+                        {
+                            ProcessWaitResult read_wait = os_process_wait_deadline(arguments->arena, read_spawn, UINT64_C(30000000));
+                            if (read_wait.result != PROCESS_RESULT_SUCCESS)
+                            {
+                                ByteSlice error = read_wait.streams[STANDARD_STREAM_ERROR];
+                                arguments->show(arguments, S8("ARM64_TLS_EXTERNAL reader stderr={S8}\n"),
+                                                (String8){.pointer = (char8*)error.pointer, .length = BUSTER_MIN(error.length, 2000)});
+                            }
+                            BUSTER_TEST(arguments, read_wait.result == PROCESS_RESULT_SUCCESS &&
+                                object_bytes_contain(read_wait.streams[STANDARD_STREAM_OUTPUT], S8("IMAGE_REL_ARM64_SECREL_HIGH12A")) &&
+                                object_bytes_contain(read_wait.streams[STANDARD_STREAM_OUTPUT], S8("IMAGE_REL_ARM64_SECREL_LOW12A")));
+                        }
+                        String8 link_args[] = {linker, S8("/dll"), S8("/noentry"), S8("/machine:arm64"), S8("/nodefaultlib"),
+                                              string_format(arguments->arena, S8("/out:{S8}"), output), input};
+                        ProcessSpawnResult link_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link_args), (SliceString8){0}, (SliceString8){0}, options);
+                        if (BUSTER_REQUIRE(arguments, link_spawn.handle != 0))
+                        {
+                            ProcessWaitResult link_wait = os_process_wait_deadline(arguments->arena, link_spawn, UINT64_C(30000000));
+                            if (link_wait.result != PROCESS_RESULT_SUCCESS)
+                            {
+                                ByteSlice error = link_wait.streams[STANDARD_STREAM_ERROR];
+                                arguments->show(arguments, S8("ARM64_TLS_EXTERNAL linker stderr={S8}\n"),
+                                                (String8){.pointer = (char8*)error.pointer, .length = BUSTER_MIN(error.length, 2000)});
+                            }
+                            BUSTER_TEST(arguments, link_wait.result == PROCESS_RESULT_SUCCESS);
+                            ByteSlice image = file_read(arguments->arena, output, (FileReadOptions){0});
+                            u32 pairs = 0;
+                            for (u64 offset = 0; link_wait.result == PROCESS_RESULT_SUCCESS && offset + 12 <= image.length; offset += 4)
+                            {
+                                u32 high = 0;
+                                u32 low = 0;
+                                u32 tail = 0;
+                                memcpy(&high, image.pointer + offset, 4);
+                                memcpy(&low, image.pointer + offset + 4, 4);
+                                memcpy(&tail, image.pointer + offset + 8, 4);
+                                if ((high & UINT32_C(0xffc003ff)) == UINT32_C(0x91400129) &&
+                                    (low & UINT32_C(0xffc003ff)) == UINT32_C(0x91000129) && tail == UINT32_C(0xd65f03c0))
+                                {
+                                    BUSTER_TEST(arguments, ((((high >> 10) & 4095) << 12) + ((low >> 10) & 4095)) == offsets[index] + addend);
+                                    pairs += 1;
+                                }
+                            }
+                            BUSTER_TEST(arguments, pairs == 1);
+                            arguments->show(arguments, S8("ARM64_TLS_EXTERNAL offset={u32} addend={u32} pairs={u32} linker_result={u32}\n"),
+                                            offsets[index], addend, pairs, (u32)link_wait.result);
+                        }
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(input) && os_file_delete(output));
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
@@ -2423,6 +2561,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, label_address) == 21);
     BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 22);
     BUSTER_TEST(arguments, CODEGEN_MODULE_RELOCATION_COUNT <= UINT8_MAX);
+    UnitTestResult external_tls = object_test_arm64_tls_external(arguments);
+    result.test_count += external_tls.test_count;
+    result.succeeded_test_count += external_tls.succeeded_test_count;
 
     typedef struct CodegenRelocationKindExpectation CodegenRelocationKindExpectation;
     struct CodegenRelocationKindExpectation
@@ -2458,6 +2599,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12, true, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL, false, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_X86_64_PLT32, false, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12, true, false, true, false, false},
     };
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(relocation_kinds) == CODEGEN_MODULE_RELOCATION_COUNT);
     for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(relocation_kinds); kind_index += 1)
@@ -3500,6 +3642,89 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         ByteSlice ordinary_tls_offset = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008),
                                                                             UINT32_C(0x91000100), 0x0009);
         BUSTER_TEST(arguments, object_read(arguments->arena, ordinary_tls_offset, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+
+        // Original COFF input and literal type 10 keep this oracle independent
+        // of the writer. A shifted ADD still carries an unscaled byte addend.
+        u32 tls_high_addends[] = {0, 1, 4095};
+        for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(tls_high_addends); addend_index += 1)
+        {
+            u32 addend = tls_high_addends[addend_index];
+            u32 high_word = UINT32_C(0x91400100) | (addend << 10);
+            ByteSlice raw = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008), high_word, 10);
+            object_test_coff_write_name(raw.pointer, 60, S8(".tls$AAA"));
+            u8 snapshot[158];
+            BUSTER_TEST(arguments, raw.length == sizeof(snapshot));
+            memcpy(snapshot, raw.pointer, sizeof(snapshot));
+            ObjectFile high = object_read(arguments->arena, raw, arm64_coff_target);
+            if (BUSTER_REQUIRE(arguments, high.error == OBJECT_ERROR_NONE && high.relocation_count == 2))
+            {
+                BUSTER_TEST(arguments, high.relocations[1].kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 &&
+                                           high.relocations[1].addend == addend);
+                u32 canonical = 0;
+                memcpy(&canonical, high.sections[OBJECT_SECTION_TEXT].data.pointer + 4, 4);
+                BUSTER_TEST(arguments, canonical == UINT32_C(0x91400100));
+                ObjectArtifact rewritten = object_write(arguments->arena, &high, OBJECT_FORMAT_COFF);
+                if (BUSTER_REQUIRE(arguments, rewritten.error == OBJECT_ERROR_NONE && rewritten.bytes.length >= 60))
+                {
+                    u32 text_offset = 0;
+                    u32 relocation_offset = 0;
+                    memcpy(&text_offset, rewritten.bytes.pointer + 40, 4);
+                    memcpy(&relocation_offset, rewritten.bytes.pointer + 44, 4);
+                    if (BUSTER_REQUIRE(arguments, text_offset <= rewritten.bytes.length && 8 <= rewritten.bytes.length - text_offset &&
+                                                  relocation_offset <= rewritten.bytes.length && 20 <= rewritten.bytes.length - relocation_offset))
+                    {
+                        u32 inline_word = 0;
+                        u16 high_type = 0;
+                        memcpy(&inline_word, rewritten.bytes.pointer + text_offset + 4, 4);
+                        memcpy(&high_type, rewritten.bytes.pointer + relocation_offset + 18, 2);
+                        BUSTER_TEST(arguments, inline_word == high_word && high_type == 10);
+                    }
+                    ObjectFile reread = object_read(arguments->arena, rewritten.bytes, arm64_coff_target);
+                    BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && reread.relocation_count == 2 &&
+                                               reread.relocations[1].addend == addend);
+                }
+                BUSTER_TEST(arguments, memcmp(raw.pointer, snapshot, sizeof(snapshot)) == 0);
+            }
+        }
+        u32 invalid_high_words[] = {UINT32_C(0x91000100), UINT32_C(0xd1400100), UINT32_C(0xb1400100), UINT32_C(0xd65f03c0)};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_high_words); index += 1)
+        {
+            ByteSlice raw = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008), invalid_high_words[index], 10);
+            object_test_coff_write_name(raw.pointer, 60, S8(".tls$AAA"));
+            BUSTER_TEST(arguments, object_read(arguments->arena, raw, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        }
+        ByteSlice ordinary_high = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008), UINT32_C(0x91400100), 10);
+        BUSTER_TEST(arguments, object_read(arguments->arena, ordinary_high, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+
+        u64 tls_offsets[] = {0, 4095, 4096, 8191, 8192, 65535, UINT64_C(0xffffff)};
+        for (u32 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(tls_offsets); offset_index += 1)
+        {
+            for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(tls_high_addends); addend_index += 1)
+            {
+                u64 expected = tls_offsets[offset_index] + tls_high_addends[addend_index];
+                u32 high = UINT32_C(0x12345678);
+                u32 low = UINT32_C(0x12345678);
+                bool high_ok = object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12, UINT32_C(0x91400100),
+                                                                      tls_offsets[offset_index], tls_high_addends[addend_index], &high);
+                bool low_ok = object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12, UINT32_C(0x91000100),
+                                                                     tls_offsets[offset_index], tls_high_addends[addend_index], &low);
+                BUSTER_TEST(arguments, high_ok == (expected <= UINT64_C(0xffffff)) && low_ok == high_ok);
+                if (high_ok && low_ok)
+                {
+                    BUSTER_TEST(arguments, (high & UINT32_C(0xffc003ff)) == UINT32_C(0x91400100) &&
+                                               (low & UINT32_C(0xffc003ff)) == UINT32_C(0x91000100) &&
+                                               (((u64)((high >> 10) & 4095) << 12) + ((low >> 10) & 4095)) == expected);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, high == UINT32_C(0x12345678) && low == UINT32_C(0x12345678));
+                }
+            }
+        }
+        u32 unchanged = UINT32_C(0x12345678);
+        BUSTER_TEST(arguments, !object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12,
+                                                                       UINT32_C(0x91400100), UINT64_MAX, 1, &unchanged) &&
+                                   unchanged == UINT32_C(0x12345678));
 
         ByteSlice misaligned = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008),
                                                                    UINT32_C(0x91000100), 0x0006);

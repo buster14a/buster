@@ -477,8 +477,17 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   unscaled and register-offset forms fail closed. The exact `__tls_index`
   symbol remains a distinct DATA-symbol contract restricted to a 32-bit
   unsigned-immediate LDR; the writer binds index-pair relocations to that
-  loader symbol. TLS section offsets use type 9
-  (`SECREL_LOW12A`); type 15 is `BRANCH19` and is not treated as TLS. ARM64
+  loader symbol. TLS section offsets use shifted ADD type 10
+  (`SECREL_HIGH12A`) followed by unshifted ADD type 9 (`SECREL_LOW12A`).
+  Canonical and MIR producers emit both halves, preserving offset bits 12..23
+  beyond 4 KiB. COFF's inline imm12 addend is an unscaled byte count even in
+  the shifted ADD; the PE linker adds it before splitting the final template
+  offset. Offsets beyond 24 bits, malformed ADD forms and arithmetic overflow
+  fail before executable publication. Registered codegen, original raw-COFF
+  and final PE byte tests cover both frontend forms, all allocators, carries,
+  initialized/zero-fill placement and output retention. This fixes #1323 W2;
+  platform TLS-index spelling/section interoperability and Mach-O descriptors
+  remain separate work. Type 15 is `BRANCH19` and is not treated as TLS. ARM64
   CodeView uses `SECREL` type 8 and the two-byte `SECTION` type 13, retaining
   checked inline addends. The PE linker applies all of these only after final
   layout and returns no executable bytes on a relocation failure.
