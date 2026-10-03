@@ -100,10 +100,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_label_owner_index(UnitTestArguments* 
                 IrConstructionCounters after = ir_construction_counters();
                 u64 rows = after.values[IR_CONSTRUCTION_VALIDATION_LABEL_OWNER_ROWS] - before.values[IR_CONSTRUCTION_VALIDATION_LABEL_OWNER_ROWS];
                 u64 probes = after.values[IR_CONSTRUCTION_VALIDATION_LABEL_OWNER_PROBES] - before.values[IR_CONSTRUCTION_VALIDATION_LABEL_OWNER_PROBES];
-                u64 bytes = after.values[IR_CONSTRUCTION_VALIDATION_LABEL_SCRATCH_BYTES] - before.values[IR_CONSTRUCTION_VALIDATION_LABEL_SCRATCH_BYTES];
+                u64 scratch_bytes = after.values[IR_CONSTRUCTION_VALIDATION_LABEL_SCRATCH_BYTES] - before.values[IR_CONSTRUCTION_VALIDATION_LABEL_SCRATCH_BYTES];
                 BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
                 BUSTER_TEST(arguments, rows == count && probes >= 3 * (u64)count && probes <= 24 * (u64)count);
-                BUSTER_TEST(arguments, bytes >= sizeof(u32) * (u64)count && bytes <= 16 * (u64)count);
+                BUSTER_TEST(arguments, scratch_bytes >= sizeof(u32) * (u64)count && scratch_bytes <= 16 * (u64)count);
                 u64 work = rows + probes;
                 BUSTER_TEST(arguments, !previous_work || work <= 5 * previous_work);
                 previous_work = work;
@@ -113,8 +113,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_label_owner_index(UnitTestArguments* 
                 {
                     rewound &= context->arenas[index]->position == scratch_positions[index];
                     TemporalArena poison = arena_begin_temporal(context->arenas[index]);
-                    u8* bytes = arena_allocate(poison.arena, u8, 16 * (u64)count);
-                    memset(bytes, 0xa5, 16 * (u64)count);
+                    u8* poison_bytes = arena_allocate(poison.arena, u8, 16 * (u64)count);
+                    memset(poison_bytes, 0xa5, 16 * (u64)count);
                     scratch_end(poison);
                 }
                 BUSTER_TEST(arguments, rewound);
