@@ -195,6 +195,8 @@ BUSTER_C_EXTERN bool c_ir_control_substatement_position(CPreprocessResult const*
 // The cold half of c_ir_named_label_at: the full proof, reached only for a
 // token that already looks like `<identifier> :`.
 BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
+// Exclude member colons after c_ir_named_label_at proves a label shape.
+BUSTER_C_EXTERN bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index);
 // Whether a named label starts at `index`. Both loops that size and fill a
 // body's label table ask this of every body token, so the necessary condition
 // — an identifier followed by a colon — is inline and the proof stays out of
