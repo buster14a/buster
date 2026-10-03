@@ -702,6 +702,16 @@ startup shims and support inventory stay untouched.
 
 ## Node-backed Wasm oracle deadlines
 
+`codegen_test_ebpf_argument_images` checks equality, ordering, unsigned
+division/remainder, right shifts and widening from signed/unsigned 8/16/32-bit
+arguments, Boolean arguments and full-width controls in both frontend forms.
+Clean and dirty incoming register images must give the same value at the
+declared width. The eBPF prologue normalizes a private R0 copy before storing
+each argument; input registers remain available for later captures. Boolean
+capture first discards bits outside its one-bit canonical representation.
+The existing VM executes every case; the kernel verifier/JIT is compared when
+available and its participation is reported separately.
+
 `compiler_driver_test_wasm_integers` runs the frozen integer oracle and the
 additive `tools/wasm_unsigned_div_rem_execution.js` companion on the same freshly
 emitted artifact. It compares the file with the compiler's returned bytes before
