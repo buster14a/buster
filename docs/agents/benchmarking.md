@@ -44,8 +44,89 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.
+- **`tools/uarch_lab.py`** is the micro-architecture lab: one command that
+  says *where* (symbol, line, instruction), *when* (compiler phase, time in the
+  run), *what* and *how many* for time, instructions/IPC, branch misses,
+  L1I/L1D/TLB misses, top-down metric groups and page faults (with the faulting
+  data address and its mapping) over the stage-1 self-host compile, pinned to
+  one CPU. Its steps are `env`, `timed` (N `perf stat` runs, byte-compared
+  outputs, min/median/MAD, drift, IPC, effective clock, ns/byte and
+  instructions/token from `-fsource-metrics`), `topdown` (a cheap
+  `perf stat -M G -- true` dry run, then `perf stat -r 3 -j -M` per discovered
+  metric group, one group per invocation), `timeline`
+  (`perf stat -I 20` intervals split across phases, CSV and SVG/HTML chart),
+  `sampling` (`perf record --call-graph fp` per event, every page fault,
+  annotate and srcline listings), `ibs` (`--sudo` only: IBS op/fetch and
+  `perf mem` on the pinned CPU, the compiler itself run unprivileged) and
+  `micro` (`ide bench`, with the predictor-learning caveat). Every raw file stays
+  in the output directory, failed or unsupported counters render as NA, and
+  `report DIR` re-renders `report.md`, whose first section lists the hottest
+  functions per event, top fault sites, the dominant top-down category and the
+  slowest phase as pointers to the raw files:
+
+  ```sh
+  python3 tools/uarch_lab.py run --ide build/Release/ide --repo-root . \
+      --cpu 2 --output /tmp/lab [--target-minutes 15 | --runs N] [--sudo] [--skip STEP...] \
+      [--no-fresh-copy]
+  python3 tools/uarch_lab.py report /tmp/lab [--perf PATH]
+  python3 -B tools/uarch_lab_test.py
+  ```
+
+  Its `compare` mode is the A/B benchmark for a compiler change; see
+  [Benchmarking a compiler change (A/B)](#benchmarking-a-compiler-change-ab).
+  Both modes also write `summary.json`, the machine-readable result.
+
+  Contracts learned on the first Zen 5 run (perf 7.2.4):
+  - Wall time is the harness's monotonic span around each `perf stat` child
+    (`timed/runs.json`, or `commands.log` for older directories), reported
+    beside the compiler's `wall_ns` and task-clock. perf 7.2.4 reads
+    `duration_time` as 0 whenever it shares the event list, so the lab does
+    not count it, and a metric dividing by it renders NA, never 0.
+  - A step is `ok` only when its section has real data. `report` re-assesses
+    every section from the raw files; a missing or non-positive time (quoted
+    with its raw CSV line), a report with no rows from a capture that has
+    samples or a failed group makes it `degraded`. Rendering divisions go
+    through `ratio()` and each line degrades on its own.
+  - Without `--runs`, the timed count is fixed once after three pilot runs so
+    the whole lab lands near `--target-minutes` (default 15); the report states
+    the chosen count and why. It never adapts to measured results.
+  - Groups whose uncore PMU is absent (Zen 5 desktops expose no `amd_umc` or
+    `amd_l3` PMU; `memory_controller`, `l3_cache`) are `unavailable`, not
+    failures. Uncore groups count system-wide, not per process.
+  - `perf stat -x,` prints metrics with display precision (often one decimal).
+    The lab uses `-j` (six decimals) with `-x,` as a fallback, marks rounded
+    values ("rounded to 0.1", a printed 0.0 as "< 0.05"), and recomputes the
+    branch misprediction rate and branch MPKI from the named event pair. A
+    per-1k-instruction metric is recomputed only from a run that measured it
+    alone, as the sum of its non-instruction events: perf attaches the metric
+    to whichever event prints first, and many Zen 5 metrics sum several events.
+  - Page-fault regions are resolved against the mapping live at fault time;
+    perf records no munmap, so a file mapping later replaced at the same
+    address is grouped as a transient file mapping (preprocessor sources).
+  - A multiplexed group (counters running less than 100% of the time) is
+    re-measured one `-M <metric>` per run; the non-multiplexed values lead and
+    the group value is a flagged fallback.
+  - IBS and `perf mem` record the pinned CPU system-wide. The compiler renames
+    its main thread `main_thread`, so the reports keep the thread ids with
+    samples in the workload binary (`perf report --sort pid,dso`, then
+    `--tid ... --comms ...`), not the exec name. `report DIR` derives these
+    filtered reports from an older directory's raw `ibs/*.data` when perf is
+    available. `perf mem` shares are latency-weighted, so the report shows
+    each load source's sample count beside its share.
+  - Sampling self reports sort by `dso,symbol`, so an unresolved address reads
+    `ide 0x18f5ce` rather than an anonymous hex value.
+
+  The phase breakdown needs a binary that accepts `-fmetrics-out=` and writes
+  a measured `CC_METRICS_INPUT` record (currently the #923 fold, not main); the
+  lab probes for it and otherwise reports the phase sections as NA. Phase
+  boundaries come from the compiler's own clock, which starts after argument
+  parsing, so the report states how much of the run lies outside it.
 - Native-backend retirement has a separate maintainer-approved
   [performance contract](../native-retirement-performance-contract.md). Its
+  [October 3 decision](https://github.com/buster14a/buster/issues/36#issuecomment-5969534074)
+  moves #512 acceptance to the [direct lab gate below](#native-retirement-gate-512),
+  with four allocator-mode cells and one generated-runtime cell. The following
+  service binding/replay instructions retain the historical service contract.
   tighter budgets, immutable #508 binding, dedicated-host admission and
   simultaneous uncertainty rules apply only to the #36/#512 acceptance run;
   they do not silently replace the native harness's ordinary CI guard. Before
@@ -456,6 +537,222 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   same process. Confirm the extracted return addresses too — each one must
   disassemble to the instruction immediately after a `call` to the callee the
   callchain names (`objdump -d --start-address=... --stop-address=...`).
+
+## Benchmarking a compiler change (A/B)
+
+`tools/uarch_lab.py compare` answers "did this change make the stage-1
+self-host compile faster or slower, and why" with one verdict line, a report
+for people and a JSON summary for agents. The reference numbers for the
+dedicated Zen 5 host are in the
+[baseline audit](../performance-audits/2026-10-03T100722Z.md) (stage-1 compile
+about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
+
+1. Build both Release compilers and freeze them. Two worktrees are separate
+   build roots, so keep the provenance rules above in mind: for an effect near
+   the noise, also compare the base built in each root (an A/A cross-root
+   control), or build both revisions serially in one checkout.
+
+   ```sh
+   git worktree add ../ab-base "$(git merge-base origin/main HEAD)"
+   (cd ../ab-base && ./build.sh generate && ./build.sh build --config Release -t ide)
+   ./build.sh build --config Release -t ide
+   cp ../ab-base/build/Release/ide /tmp/ide-base && cp build/Release/ide /tmp/ide-cand
+   ```
+
+2. Compare them on one frozen, configured source tree (it needs
+   `build/generated`; do not edit or rebuild it during the run):
+
+   ```sh
+   python3 tools/uarch_lab.py compare --baseline /tmp/ide-base --candidate /tmp/ide-cand \
+       --repo-root ../ab-base --cpu 2 --output /tmp/ab [--target-minutes 15 | --pairs N] \
+       [--profile-steps topdown,sampling] [--sudo] [--require-identical-output] \
+       [--min-effect PCT] [--no-fresh-copy]
+   python3 tools/uarch_lab.py report /tmp/ab     # re-render report.md and summary.json
+   ```
+
+   Each binary is probed for `-fsource-metrics`/`-fmetrics-out`, warmed up and
+   checked for byte-identical output across its own runs; whether A and B
+   outputs match is reported (`--require-identical-output` stops before timing
+   when they differ, for pure refactors). Runs alternate in ABBA blocks; the
+   pair count is `--pairs` or is fixed once after a 2-pair pilot so the whole
+   comparison fits `--target-minutes` (profile steps included). Profile steps
+   are off by default.
+
+   **Fresh binary copies (default).** Before every timed run and every profile
+   capture, in both `compare` and `run`, the tool copies that variant's binary
+   by plain read/write into a new file under `DIR/<variant>/instances/`
+   (a new inode, never a link or reflink), fsyncs and closes it, runs that
+   copy and deletes it; the copy (about 0.07 s for the 51 MB `ide`) happens
+   outside the timed span and is not counted by `--target-minutes`. Probes and
+   warm-ups run the binary in place. This exists because the LAB3 A/A run on
+   the Zen 5 host (#36), with binaries run in place, reported two
+   byte-identical copies of one `ide` as different: wall B/A 0.9950, CI
+   [0.9941, 0.9958] over 190 pairs, identical instruction counts, cycles
+   -0.53%, the offset stable in AB and BA pairs and in every tenth of the
+   run. The cause is unverified (page-cache placement of each copy's text,
+   perhaps read-only file THP, is the leading hypothesis), but it is a fixed
+   per-instance offset that the pair-to-pair CI cannot cover. With a fresh
+   copy per run, placement varies per run and lands in the CI instead.
+   `--no-fresh-copy` restores the old behaviour (the setting that showed the
+   bias; the report then warns). `plan.fresh_copy` records which was used.
+   With fresh copies `perf record` runs with `--no-buildid-cache` (each
+   copy's unique path would otherwise cache one 51 MB copy per capture in
+   `~/.debug`), so symbols are resolved while the copy exists; `report DIR`
+   cannot re-derive missing IBS reports of such a run later.
+3. Read the first line of `report.md` or `verdict` in `summary.json`. Every
+   outcome is judged against the practical floor `--min-effect` (default
+   0.5%, `verdict.min_effect_percent`; LAB4's A/A with fresh copies measured
+   B/A 0.9995 with 95% CI [0.9986, 1.0003], so 0.5% is about six times the
+   interval's half-width on that host):
+   - `faster`/`slower`: the whole 95% CI of wall-time B/A lies beyond the
+     floor (for 0.5%: `ci_high < 0.995` or `ci_low > 1.005`). The ratio is the
+     median of per-pair ratios; its CI comes from sign-test order statistics
+     (exact and distribution-free; it assumes only independent pairs and needs
+     at least 6). A seeded bootstrap CI of the geometric mean is the
+     cross-check; a disagreement is a warning that the effect sits at the edge
+     of detectability.
+   - `below-floor`: the CI excludes 1.0 but reaches inside the floor. Not
+     evidence of a code effect: per-instance effects of about 0.5% were seen
+     in A/A on this host class. `bound_percent` is the largest change the CI
+     admits.
+   - `no detectable difference`: the CI includes 1.0; `bound_percent` says how
+     large a change the run could have missed. It is not proof of equality.
+     More pairs (or a quieter host) narrow it; the verdict says so when the
+     bound is wider than the floor.
+   - `inconclusive`: fewer than 6 complete pairs.
+
+   Per-metric and per-phase `outcome`s use the same floor (`lower`/`higher`,
+   `faster`/`slower`, `below-floor`), except `instructions`, which is
+   deterministic and exact. When an effect is near the floor, run an A/A
+   comparison (the base binary against a second copy of itself) on the same
+   host first; lower `--min-effect` only with an A/A run that shows the host
+   resolves it.
+
+   Only wall time (the harness span) decides. Instructions, cycles, IPC,
+   branch MPKI, faults and per-phase times explain the change; a proxy
+   change without a wall-time change is reported as a warning, never as a win.
+   Treat `warnings` as part of the result: an order effect (AB and BA pairs
+   disagree), drift (first and second half disagree), nondeterministic
+   output, failed runs or a task-clock/wall disagreement each need a look
+   before the verdict is used. "identical work, different time" (instructions
+   B/A within 1e-6 of 1 while the wall or cycles CI excludes 1.0) points to a
+   placement/instance effect, not a code effect, unless the change only moves
+   code. A count metric whose ratio of medians and median of per-pair ratios
+   differ by more than 5% carries the note "bimodal counts: compare medians,
+   not the paired ratio" (page faults in LAB3: 0.921 against 0.9965).
+   With `--profile-steps`, the top-down table and the per-symbol share movers
+   show where the time moved. Movers come from one capture per variant and are
+   hints only: a capture with fewer than 2,000 samples on either side is
+   marked "too few samples: shares unreliable" and not diffed (LAB3's dTLB
+   capture, 506 and 631 samples, swapped about 25 pp between identical
+   binaries), and a row reads `exceeds bound` only when its share moved more
+   than 3x the binomial 95% bound (LAB3 A/A movers reached about 5x it). A
+   row with one share below the report's percent limit has no bound (`-`).
+   Unresolved addresses read `[unknown] 0x...` in every table.
+4. Record a result worth keeping with `tools/new_audit.py "..."`, quoting the
+   verdict line, both binary sha256s, the command, the pair count and seed,
+   and the host state.
+
+`summary.json` keys (golden-tested in `tools/uarch_lab_test.py`; a change of
+meaning or a removal bumps the schema id):
+
+- `buster-uarch-lab-compare-v2`: `schema`, `directory`, `command`,
+  `repo_root`, `cpu`, `host`, `baseline`/`candidate` (`path`, `sha256`,
+  `size_bytes`, `runs`, `failed`, `identical_runs`, `deterministic`,
+  `metrics_out`, `source_metrics`), `outputs_identical`, `plan` (`pairs`,
+  `reason`, `order`, `fresh_copy`, `seed`, `confidence`,
+  `bootstrap_resamples`, `complete_pairs`), `method`, `verdict` (`metric`,
+  `outcome`, `ratio`, `ci_low`, `ci_high`, `ci_coverage`, `change_percent`,
+  `bound_percent`, `min_effect_percent`, `n`, `explanation`, `text`),
+  `code_bytes` (exact executable-section totals, formats, sections, diagnostic
+  file sizes and B/A ratio), `metrics` and `phases` (per name: `unit`, `direction`, `n`, `a_median`,
+  `b_median`, `a_min`, `b_min`, `a_mad`, `b_mad`, `delta`, `ratio`, `ci_low`,
+  `ci_high`, `ci_coverage`, `geomean_ratio`, `bootstrap_ci_low`,
+  `bootstrap_ci_high`, `ratio_of_medians`, `min_ratio`, `change_percent`,
+  `outcome`, `note`; metrics also carry `label`), `checks` (`order_effect`,
+  `drift`), `profile` (`topdown`; `sampling`/`ibs` with `status` and per
+  capture `a_event_count`, `b_event_count`, `a_samples`, `b_samples`,
+  `reliable`, `note`, `movers`: `symbol`, `a_share`, `b_share`,
+  `delta_share`, `noise_pp`, `beyond_noise`, `exceeds_bound`, `a_estimate`,
+  `b_estimate`, `delta_estimate`), `steps`, `warnings`. v2 (LAB3) changed
+  the meaning of `outcome` (the practical floor applies, and `below-floor` is
+  a new value) and of `noise_pp` (null when one share is NA), and added
+  `plan.fresh_copy`, `verdict.min_effect_percent`, `note`, `reliable` and
+  `exceeds_bound`; `report DIR` renders an older directory as v2, with
+  `fresh_copy` false and the default floor. Metric names: `wall`, `task_clock`, `compiler_wall`,
+  `instructions`, `cycles`, `ipc`, `branch_misses`, `branch_mpki`,
+  `page_faults`, `minor_faults`, `major_faults`, `peak_rss`; phases are the
+  `-fmetrics-out` phases plus `total` (ms), or null.
+- `buster-uarch-lab-run-v1`: `schema`, `directory`, `command`, `cpu`, `ide`
+  (`path`, `sha256`), `host`, `capabilities`, `steps` (`status`, `problems`),
+  `timed` (`runs`, `failed`, `identical`, `plan` (with `fresh_copy`), `metrics` with the metric
+  names above, each `n`, `min`, `p10`, `median`, `p90`, `max`, `mean`, `mad`,
+  `unit`, `label`), `phases` (`median_ms`, `share`), `work`, `topdown`
+  (`group`, `metric`, `value`, `unit`, `source`),
+  `dominant_topdown_category`, `hot_symbols` (per capture: `symbol`,
+  `share`), `findings`.
+
+## Native-retirement gate (#512)
+
+The [maintainer decision](https://github.com/buster14a/buster/issues/36#issuecomment-5969534074)
+defines five required cells: a stage-1 self-host compile in each of `none`,
+`mir-stack`, `fast` and `quality`, then the generated-runtime cell. The latter
+executes the two stage-1 compilers produced by the `fast` cell, compiling the
+same frozen source with `fast`. This measures a real generated program's
+runtime while checking that its two outputs agree byte for byte.
+
+Build and freeze matched Clang Release baseline (`main`) and candidate
+(#522, then the final #514 tree) compilers using the provenance rules above.
+Run on `benchpress` CPU 2 with the recorded H1 state, dispatch disabled,
+no competing work and the exclusive host lock. Keep the source checkout and
+`build/generated` unchanged for the entire campaign. Record their identities,
+the build commands, both compiler hashes and the host facts with the result.
+
+```sh
+flock -n ~/bench/host.lock python3 tools/uarch_lab.py retirement \
+    --baseline /tmp/ide-base --candidate /tmp/ide-cand --repo-root . \
+    --cpu 2 --output /tmp/retirement-attempt-1 \
+    --baseline-rev BASE_COMMIT --candidate-rev CANDIDATE_COMMIT
+python3 tools/uarch_lab.py report /tmp/retirement-attempt-1
+```
+
+Each cell uses fresh binary copies and ABBA paired runs. The default is about
+12 minutes per cell, with the pair count fixed after its timing-only pilot.
+`--pairs N` selects a fixed-count smoke/test plan. `--modes fast` exercises a
+partial run, including generated runtime; missing required modes keep the
+overall result INCONCLUSIVE. Every attempt needs a new or empty output
+directory so earlier observations remain intact.
+
+| Metric | Per-cell B/A limit |
+| --- | --- |
+| Compiler wall time | Upper 95% sign-test bound at most 1.05 |
+| Compiler peak RSS | Upper 95% sign-test bound at most 1.05 |
+| Generated code-section bytes | Exact ratio at most 1.01 |
+| Generated-program runtime | Upper 95% sign-test bound at most 1.03 |
+
+`retirement.json` (`buster-uarch-lab-retirement-v1`) and `retirement.md`
+contain PASS, FAIL or INCONCLUSIVE plus every cell's checks. A passing numeric
+result requires the full planned sample population, successful fresh output
+production, deterministic outputs, no flagged order/drift problem and all
+upper bounds within their limits. A missing sample, unavailable metric or
+interval crossing a limit is inconclusive. The ordinary `compare` practical
+effect floor does not change these acceptance limits. The historical 1.02
+aggregate figures are diagnostic under the decision's per-cell contract.
+
+Peak RSS uses Linux `wait4` high-water bytes for the waited process tree.
+The recorded current harness footprint and a `perf stat -- true` probe bound
+wrapper overhead; values within 1.5 times that floor are unavailable rather
+than reported as compiler memory. Historical harness peaks are not used as
+the inherited footprint. Code bytes sum file-backed ELF sections with
+`SHF_EXECINSTR`; ELF32/ELF64 and either byte order are covered. Unsupported
+formats and malformed sections remain unavailable; whole-file bytes are
+diagnostic. Both metrics also appear in ordinary `compare` reports.
+
+The lab's PASS describes its measured cells. Independently run the candidate's
+repository self-host fixed point and retain its byte-identical evidence.
+After #514 lands, repeat the whole gate on the final integrated source,
+retain all attempts and record the accepted result with `tools/new_audit.py`.
+Those source, host and fixed-point checks are part of #512/#36 acceptance.
 
 ## Performance audit notes
 

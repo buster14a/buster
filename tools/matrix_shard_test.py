@@ -1079,9 +1079,9 @@ class CompletionGateTests(unittest.TestCase):
             observed = re.search(r"^          BUSTER_CI_CHECKS_EVIDENCE: (.+)$", step, re.M).group(1)
             self.assertEqual(observed, capture)
         self.assertEqual(re.search(r"^  BUSTER_CI_CONDITIONS_EVIDENCE: (.+)$", workflow, re.M).group(1), capture)
-        self.assertEqual(workflow.count("BUSTER_CI_CONDITIONS_EVIDENCE:"), 6)
+        self.assertEqual(workflow.count("BUSTER_CI_CONDITIONS_EVIDENCE:"), 11)
         self.assertEqual(re.findall(r"^          BUSTER_CI_CONDITIONS_EVIDENCE: (.+)$", workflow, re.M),
-                         ["${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}"] * 5)
+                         ["${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}"] * 10)
 
     def timing_sample(self, checks_layout="combined"):
         jobs = self.sample(checks_layout)

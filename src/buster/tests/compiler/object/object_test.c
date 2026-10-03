@@ -2874,6 +2874,71 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     // addresses that must sign-extend from a 32-bit field.  Preserve its kind
     // and signed REL addend instead of collapsing it into unsigned ABS32.
     ObjectRelocation absolute32s_relocation = relocation;
+    // Raw ELF type numbers are the oracle here: PC32 exposes an address,
+    // while PLT32 states a PLT reference. Preserve both in RELA and REL,
+    // including REL's signed field addend, then re-emit the exact type.
+    u32 function_reference_types[] = {2, 4};
+    ObjectRelocationKind function_reference_kinds[] = {OBJECT_RELOCATION_X86_64_PC32, OBJECT_RELOCATION_X86_64_PLT32};
+    s32 function_reference_addends[] = {-4, 7, INT32_MIN};
+    for (u32 type = 0; type < 2; type += 1)
+    {
+        for (u32 implicit = 0; implicit < 2; implicit += 1)
+        {
+            for (u32 addend = 0; addend < BUSTER_ARRAY_LENGTH(function_reference_addends); addend += 1)
+            {
+                ObjectArtifact raw = object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64);
+                u64 header = 0;
+                u64 text = 0;
+                bool valid = raw.error == OBJECT_ERROR_NONE && object_test_elf_relocation_offsets(raw.bytes, &header, &text);
+                u64 entries = 0;
+                if (valid)
+                {
+                    memcpy(&entries, raw.bytes.pointer + header + 24, sizeof(entries));
+                    object_test_write_u32(raw.bytes, entries + 8, function_reference_types[type]);
+                    if (implicit)
+                    {
+                        object_test_write_u32(raw.bytes, header + 4, 9);
+                        object_test_write_u64(raw.bytes, header + 32, 16);
+                        object_test_write_u64(raw.bytes, header + 56, 16);
+                        object_test_write_u32(raw.bytes, text + relocation.offset, (u32)function_reference_addends[addend]);
+                    }
+                    else object_test_write_u64(raw.bytes, entries + 16, (u64)(s64)function_reference_addends[addend]);
+                }
+                ObjectFile read = object_read(arguments->arena, raw.bytes, object.target);
+                bool read_ok = valid && read.error == OBJECT_ERROR_NONE && read.relocation_count == 1 &&
+                               read.relocations[0].kind == function_reference_kinds[type] &&
+                               read.relocations[0].addend == function_reference_addends[addend];
+                BUSTER_TEST(arguments, read_ok);
+                if (read_ok)
+                {
+                    ObjectArtifact written = object_write(arguments->arena, &read, OBJECT_FORMAT_ELF64);
+                    u64 written_header = 0;
+                    u64 written_text = 0;
+                    bool written_ok = written.error == OBJECT_ERROR_NONE &&
+                                      object_test_elf_relocation_offsets(written.bytes, &written_header, &written_text);
+                    u64 written_entries = 0;
+                    if (written_ok) memcpy(&written_entries, written.bytes.pointer + written_header + 24, sizeof(written_entries));
+                    u32 written_type = 0;
+                    if (written_ok) memcpy(&written_type, written.bytes.pointer + written_entries + 8, sizeof(written_type));
+                    BUSTER_TEST(arguments, written_ok && written_type == function_reference_types[type]);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+                    if (type == 1 && addend == 0)
+                    {
+                        ObjectExecutable executable = object_link_executable(&read);
+                        BUSTER_TEST(arguments, executable.error == OBJECT_ERROR_NONE && executable.address);
+                        if (executable.address)
+                        {
+                            u64 (*entry)(void) = 0;
+                            memcpy(&entry, &executable.address, sizeof(entry));
+                            BUSTER_TEST(arguments, entry() == 42);
+                        }
+                        object_release_executable(executable);
+                    }
+#endif
+                }
+            }
+        }
+    }
     absolute32s_relocation.kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S;
     ObjectFile absolute32s_object = object;
     absolute32s_object.relocations = &absolute32s_relocation;

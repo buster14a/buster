@@ -97,6 +97,20 @@ the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The
 strict `basic_c_statement_expression_value.c` corpus checks both goto arms.
 
+Label candidates exclude aggregate member bodies: `int : 0` and a typedef
+spelling such as `Word : 0` are bit-fields, not function labels. The existing
+position-index delimiter stack retains the nearest brace's context, and its
+window walk merges label and delimiter events in source order. Parenthesis and
+bracket groups inherit that context; a nested GNU statement-expression brace
+opens a statement context. Both label-table sizing and filling use the filtered
+positions, while a caller without an index uses the same brace classification
+through `c_parse_label_candidate_at`. No block is predeclared for a field colon.
+`c_test_expression_aggregate_bit_fields` checks typedef-named and repeated
+anonymous members, genuine typedef-named and statement-expression labels,
+indexed and unindexed lowering, both frontend forms and all native allocators.
+The tiled position-index regression compares the window and scalar populations
+with anonymous member colons shifted across window boundaries.
+
 A named label can re-enter a token range after control skipped an ordinary
 automatic declaration. Fixed-size objects in a labeled function therefore
 receive their canonical local/place rows before the entry block terminates;
@@ -130,6 +144,12 @@ Temporary places and read aliases preserve C lvalue/qualifier checks without
 emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization
 resolves aliases and compacts values/operand slices. Debug-local names, types,
 IDs, scopes and source ranges are preserved; frontend entity IDs do not escape.
+Named-local initializer provenance consumes old value rows before compaction.
+Dense numbering and retained-root copying share one ascending old-ID scan;
+each destination is at or below its source, so no future source row is
+overwritten. Alias resolution follows in its existing old-ID order. Shared
+operand slices still remap into a fresh dense pool so no old operand is
+interpreted twice through an already updated ID.
 The existing conservative opcode summary also tracks `LOCAL`, so shared
 promotion skips its discovery scan for certified functions with no memory
 locals. Unknown summaries still scan and the shared algorithm stays independent.
@@ -232,6 +252,12 @@ without facts for identical bitcode and diagnostics.
   pins the no-growth contract, `c_test_symbol_find_collisions` the exact
   probe on names sharing the whole key, and `c_test_pasted_keyword_body_walk`
   both the carried ids and the fallback on the same stream with ids cleared.
+
+  Specifier-word queries share `c_parse_word_bits_token`. Its symbol lookup
+  stays first; without a usable symbol table/id, only identifier and INVALID
+  hand-built tokens reach the spelling ladder. Other token kinds answer zero
+  without reading spelling bytes. Keep the INVALID fallback and each caller's
+  GNU/C23 mask: token eligibility does not change dialect admission.
 
 - `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
   without scanning unrelated undo records. A live undo record implies a valid
@@ -559,21 +585,46 @@ without facts for identical bitcode and diagnostics.
   Sibling intervals must remain disjoint; equal-range nesting resolves to the
   deepest child. Empty siblings sort before nonempty siblings at the same
   start. Queries before index construction retain the unindexed fallback.
-- `CAggregateLookup` doubles its slot array at half occupancy. Its stable
-  header and every rehashed slot survive speculative rollback; live type IDs
+- `CAggregateLookup` starts with a complete zero-slot header. Units without
+  unqualified tagged types allocate no slot array; anonymous aggregates and
+  qualified aliases do not trigger it. The first tag owner reserves and zeroes
+  the existing 16,384-slot array, then the array doubles at half occupancy.
+  Its stable header and every rehashed slot survive speculative rollback; live type IDs
   are revalidated, qualified aliases cannot own tags, and duplicate scoped
   tags retain the scope-aware fallback. Only arena exhaustion or count overflow
-  makes the index incomplete. `c_test_aggregate_lookup_growth` covers both
-  8,192 and 16,384 tag boundaries and rollback across growth. With
+  makes the index incomplete. A failed initial reservation leaves no slots
+  and requires scope-aware scanning; a complete empty header certifies absence.
+  `c_test_aggregate_lookup_growth` covers untagged and anonymous source controls,
+  both 8,192 and 16,384 tag boundaries and rollback across growth. Identity and
+  unique-search tests also cover first-reservation failure, dirty slot reuse
+  and rollback of the first insertion. With
   `BUSTER_BENCH_ALLOCATIONS=ON`, it also bounds production probes/rehash work
   and requires zero fallback type visits for unique tags;
   `BUSTER_AGGREGATE_CENSUS=1` prints these diagnostic-only counts. Lowering's
   tag type names (`c_ir_type_name_prefix`) ask `c_parse_aggregate_unique`
-  first: an unused slot on a complete index means no row, and a live slot
+  first: a complete empty header or unused slot means no row, and a live slot
   not marked `multiple` is the only row, whatever the reference scope. Only
   duplicated, stale or incomplete keys search the type table (#1467);
   `c_test_aggregate_unique_search` requires zero lowering search rows for
   unique tags.
+- Static aggregate inference and materialization reserve frame, designator and
+  suspended GNU-range storage from the smaller of the token span and published
+  canonical type count. Active frames follow one by-value containment path;
+  resolved layouts cannot contain their own type by value. Brace elision and
+  borrowed designator continuations preserve that path, and range contexts
+  initialize strict descendants. Flat element counts therefore do not create
+  one work row per leaf. The work-array and range-payload reservations are
+  checked against remaining scratch before allocation and refuse with a
+  structured initializer-capacity diagnostic when they cannot fit.
+  `c_test_initializer_stack_capacity` executes inference and byte materialization
+  for 1,000,001 synthetic integer leaves in bounded scratch, checks every output
+  byte against independent digit values, and retains exhausted-scratch refusal.
+  Its complete frontend source covers the original 190,001-element failure
+  shape in both modes plus borrowed, inferred, nested-range, compound-literal
+  and relocation controls. Translation-unit query storage has its separate
+  reservation boundary; this does not promise arbitrary source sizes or OOM
+  recovery at unguarded allocation sites.
+
 - Each aggregate initializer context retains a `CIrInitializerRelocationExtent`.
   Before clearing a subobject, it incorporates only relocation records appended
   since the preceding query. Clears wholly outside the occupied extent skip

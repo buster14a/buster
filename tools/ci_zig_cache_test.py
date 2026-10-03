@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import ci_zig_cache
+import ci_summary
 
 
 class ZigCachePolicyTests(unittest.TestCase):
@@ -333,6 +334,46 @@ class ZigCacheEvidenceTests(unittest.TestCase):
 
 
 class ZigCacheWorkflowTests(unittest.TestCase):
+    def test_bootstrap_owner_has_a_separate_budget_and_fail_closed_summary(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
+        steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)",
+                                desktop))
+        bootstrap = steps["Bootstrap wrapper regression tests"]
+        self.assertIn("id: bootstrap_wrappers", bootstrap)
+        self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}", bootstrap)
+        self.assertIn("set -euo pipefail", bootstrap)
+        self.assertIn('if [[ "$BUSTER_MATRIX_SHARD" != release ]]', bootstrap)
+        self.assertIn("BOOTSTRAP_WRAPPERS owned-by-release-shard", bootstrap)
+        for command in ("tools/bootstrap_wrapper_cases.py --jobs 2",
+                        "tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v"):
+            self.assertIn(command + ' 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"',
+                          bootstrap)
+        self.assertNotIn("continue-on-error:", bootstrap)
+        policy = steps["Workflow tool regression tests"]
+        self.assertIn("timeout-minutes: ${{ (matrix.os == 'windows' || matrix.os == 'macos') && 5 || 2 }}",
+                      policy)
+        self.assertNotIn("tests/bootstrap_wrapper_test.py", policy)
+        self.assertIn("tools/ci_zig_cache_test.py=zig-cache-policy-test.log", policy)
+        self.assertIn("path: ${{ runner.temp }}/buster-ci/", steps["Retain desktop logs"])
+
+        summary = steps["Desktop result and reproduction"]
+        self.assertIn("always()", summary)
+        self.assertIn("tools/ci_summary.py", summary)
+        expression = re.search(r"BUSTER_CI_REQUIRED: (.+)", summary).group(1)
+        lists = re.findall(r"'([^']*bootstrap_wrappers[^']*)'", expression)
+        self.assertEqual(len(lists), 2)
+        for required in lists:
+            for outcome in (None, "skipped", "cancelled", "failure", "timed_out", "success"):
+                with self.subTest(required=required, outcome=outcome):
+                    outcomes = {name: {"outcome": "success"} for name in required.split()}
+                    if outcome is None:
+                        del outcomes["bootstrap_wrappers"]
+                    else:
+                        outcomes["bootstrap_wrappers"] = {"outcome": outcome, "conclusion": "success"}
+                    self.assertEqual(ci_summary.assess(outcomes, required.split()),
+                                     [] if outcome == "success" else ["bootstrap_wrappers"])
+
     def test_workflow_uses_bounded_ref_derived_cache_controls(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         events = text.split("on:\n", 1)[1].split("\n\n", 1)[0]

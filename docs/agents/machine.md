@@ -4,6 +4,13 @@
 
 The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+`machine_x64_select_switch`, `machine_a64_select_switch` and the direct
+canonical emitters compare matching selector-width bit images. Mask raw keys
+and any excess register bits at that boundary, while leaving the caller's
+immediates and targets unchanged. Signedness does not change SWITCH equality.
+The registered raw-ARGUMENT controls and the exact contract are described in
+[IR validation boundaries](../ir-validation-boundaries.md#switch-case-images).
+
 Canonical fallback identity casts of structs and unions copy the complete
 resolved layout between value frame homes on x86-64 and AArch64. The frontend
 keeps these casts on aggregate comma results to preserve their non-lvalue
@@ -807,8 +814,11 @@ fixture as well as compiling both architectures.
   undefined x86-64 ELF functions use `R_X86_64_PLT32` even in the default
   model so external linkers can put `-c` objects in PIE executables; under
   `-fPIC`, a call to any interposable symbol also uses PLT32. Internal and
-  hidden symbols keep the rip-relative form, and a thread-local address is
-  the thread-local model's to pick -- `codegen_thread_local_model` reads the
+  hidden symbols keep the rip-relative form. On Linux x86-64, an undefined
+  default-visible weak function address uses GOTPCREL even in the default
+  model, so an absent provider stays zero and a present provider retains its
+  actual function address; its direct calls still use PLT32. A thread-local
+  address is the thread-local model's to pick -- `codegen_thread_local_model` reads the
   same flag and answers general-dynamic under it. The canonical emitter and
   machine path make the same call/address distinctions, so the four
   allocators cannot disagree. One object-writer decision follows from the

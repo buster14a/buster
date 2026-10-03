@@ -111,6 +111,23 @@ No branch protection, check requirement, write permission or secret is changed;
 only `CI complete` adds job-scoped `actions: read` for this inventory and
 `checks: read` for the annotations of interrupted jobs.
 
+## Long temporary-base regression
+
+The Linux x86-64 Release shard runs its existing correctness matrix with
+`BUSTER_TEST_TEMPORARY_BASE` set to an exclusively created directory at least
+87 bytes long (GitHub #1400). Its parent is the supplied temporary base, when
+present, or `RUNNER_TEMP`; the override therefore stays on the selected
+filesystem. `CI_LONG_TEMPORARY_BASE_V1` reports the prepared byte count and
+successful cleanup. The test harness owns and removes its per-run children;
+the lane then requires the base to be empty and removes it. Failure cleanup
+removes only the directory created by this step.
+
+The existing flat-aggregate initializer fixture writes its real source file
+below that base and compiles/runs every frontend, optimization and allocator
+combination. Its source-path termination was fixed in #1402; the long-base
+run preserves coverage of the original length-dependent file-open abort.
+No extra test suite or configuration row is added.
+
 ## Reproduce
 
 Use the exact checkout SHA, runner image and tool versions recorded in the
@@ -464,3 +481,82 @@ even when source, compiler and CPU model names match. Neither model names nor
 assertion totals may reconstruct a missing host profile or normalize differing
 censuses. Historical archives without measured host/resource evidence remain
 diagnostic; qualification requires a prospectively declared comparable cohort.
+
+
+### Actual job environment receipts
+
+The unchanged six exact qualification dispatch refs also opt in to
+`tools/ci_job_environment.py` immediately after checkout in Workflow lint,
+UEFI firmware boot, Clang analyzer shards and CI complete. The executed Main CI
+reuse job has the same wiring; its push/main guard stays intact, so the intended
+manual campaign skips it. Each job retains the bounded JSON in its existing
+artifact even when later work fails. CI complete collects under `always()` plus
+the opt-in and includes the receipt in its desktop-partition inventory artifact.
+
+The receipt records only exact repository/source/run/attempt/workflow-job
+bindings and the actual whitelisted job environment: requested runner label,
+runner OS/architecture/instance name, ImageOS/ImageVersion and raw workflow
+provenance. `GITHUB_JOB` is not a numeric API job ID. `GITHUB_WORKFLOW_SHA` is a
+workflow commit, not the ci.yml blob. Join actual source/workflow/API job and
+artifact identities during readback. Keep requested runner label distinct from
+RUNNER_NAME; the latter is instance provenance, not cross-sample equality.
+
+Receipt `status=complete` means every recorded binding/observation is available,
+not that the job or campaign is accepted. Missing, blank, whitespace-only and
+padded unknown sentinels remain verbatim with `status=incomplete`. Readback must
+require complete status before projecting image facts into conditions; the
+unchanged qualifier does not strip strings for the collector. No Setup preamble,
+API label or requested runner value substitutes for actual image environment.
+No API request, executable probe, cache decision or tool-map change runs here.
+CI complete and an executed reuse role still have empty tool/cache maps.
+
+With the same exact opt-in, the Android SDK installer appends a bounded
+`ANDROID_SDK_SYSTEM_IMAGE_REVISION` JSON witness to its existing retained SDK
+log and stdout after structurally validated preinstalled success and validated
+zero-exit installation success. It reads only the same requested system image's
+actual source.properties, retains that file's path/size/SHA-256 and its single
+positive whole Pkg.Revision, and binds source/run/attempt/workflow job. Valid
+preinstalled images are not reinstalled when another package needs repair.
+Missing, duplicate, malformed, oversized, symlinked or changing metadata stays
+unknown; package/API level is not a revision. Default setup outputs, package
+validation, request classification, retries, deadlines and exit policy stay
+intact. The existing strict revision/tool/cache contracts remain unchanged.
+
+This extends the owned prospective #2427 source before the separate observer
+#2430 workflow delta. Final actual main/source/workflow pins, retained receipt
+readbacks and all required role joins must be independently checked before A1.
+Historical cohorts and failed/retried receipts retain their original meanings.
+
+### Offline assembly of one retained sample
+
+`tools/ci_checks_sample.py` derives the runtime manifests needed by the strict
+qualification reader without launching a compiler, test or workflow. It depends
+on the prospective cohort reader introduced by #2427. Prepare one input JSON
+object with `schema=buster-ci-checks-sample-input-v1`, the declared `cohort`,
+`variant`, digest-bound `run` and `conditions` references, and `desktops` entries
+containing exactly `job`, `coverage`, `result`, `phases` and `phase_directory`.
+The run reference contains one run object, not the collector's outer runs array.
+Retain the actual API/artifact bytes and verify downloaded archive digests before
+assembly. SHA-256 integrity alone cannot authenticate invented observations.
+
+```sh
+python3 -B tools/ci_checks_sample.py retained/input-123.json --output sample-123.json
+python3 -B tools/ci_checks_sample_test.py -v
+```
+
+Every input reference and nested selected-tool receipt remains relative to the
+input directory. The output must be a fresh JSON filename in that same directory;
+its sibling `sample-123-tests/` contains the derived runtime manifests. Insert
+the emitted sample object in the campaign's `samples` array and preserve its
+declared cohort in a campaign located in that same directory. Moving only the
+sample or conditions file changes reference roots and is unsupported.
+
+The assembler replays phase journals, derives every selected runtime row from
+actual coverage/capability/inventory/observation records, retains raw log hashes
+and the measured host profile, and preserves audit policy and low-core serial
+fallback. It rejects duplicate capability rows and caller-supplied runtime
+manifests. Existing `qualification.sample()` validates the entire assembled
+sample before publication; missing or unknown conditions fail. Fresh generated
+outputs are removed on rejection while retained inputs remain unchanged.
+Successful assembly is evidence preparation only: the full nine-run comparison,
+resource/deadline/cleanup/reliability review and default-promotion gate remain.

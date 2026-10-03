@@ -235,11 +235,11 @@ BUSTER_GLOBAL_LOCAL String8 meta_layout(Arena* arena, String8 source)
     return (String8){data, length};
 }
 
-BUSTER_GLOBAL_LOCAL u32 meta_target_transform_mask(MetaTarget target, u32 mask)
+BUSTER_GLOBAL_LOCAL u32 meta_target_transform_mask(MetaTarget target, u32 mask, bool ebpf_kernel)
 {
-    // The bounded eBPF test interpreter has no local-call execution contract.
-    // Retain every other requested relation; report this exclusion in meta_run.
-    return target.backend == META_EBPF ? mask & ~BUSTER_META_OUTLINE : mask;
+    // Local calls need the named-entry Linux verifier/JIT oracle. VM-only
+    // campaigns retain every other relation and report the excluded call mask.
+    return target.backend == META_EBPF && !ebpf_kernel ? mask & ~BUSTER_META_OUTLINE : mask;
 }
 
 BUSTER_GLOBAL_LOCAL String8 meta_source(Arena* arena, MetaSpec spec, u32 mask, bool single_function)
@@ -510,29 +510,42 @@ BUSTER_GLOBAL_LOCAL MetaOutcome meta_execute(MetaContext* context, String8 direc
                 else if (target.backend == META_EBPF)
                 {
                     ByteSlice object = file_read(arena, artifact, (FileReadOptions){0});
-                    bool valid = true;
-                    bool interpreted = true;
+                    bool local_calls = (mask & BUSTER_META_OUTLINE) != 0;
+                    bool valid = !local_calls || context->ebpf_kernel;
+                    bool interpreted = false;
+                    bool kernel_executed = false;
                     u32 failing_input = 0;
                     u64 observed = 0, expected = 0, kernel_observed = 0;
                     String8 kernel_reason = context->ebpf_kernel ? S8("not-run") : S8("unavailable");
+                    CodegenTestEbpfObject loaded = {0};
+                    if (valid && context->ebpf_kernel)
+                    {
+                        loaded = codegen_test_ebpf_kernel_object(arena, object, S8("metamorphic"), &kernel_reason);
+                        valid = loaded.code.length != 0;
+                    }
                     for (u32 input = 0; valid && input < spec.input_count; input += 1)
                     {
-                        interpreted = codegen_test_ebpf_execute(object, meta_inputs[input][0], meta_inputs[input][1], &observed);
                         expected = meta_expected(spec, meta_inputs[input][0], meta_inputs[input][1]);
-                        valid = interpreted && observed == expected;
+                        if (!local_calls)
+                        {
+                            interpreted = codegen_test_ebpf_execute(object, meta_inputs[input][0], meta_inputs[input][1], &observed);
+                            valid = interpreted && observed == expected;
+                        }
                         if (valid && context->ebpf_kernel)
                         {
                             // VM execution does not certify kernel acceptance (#1305).
-                            CodegenTestEbpfKernel kernel = codegen_test_ebpf_kernel_run(arena, codegen_test_ebpf_code(object), meta_inputs[input][0],
-                                                                                        meta_inputs[input][1], &kernel_observed, &kernel_reason);
-                            valid = kernel == CODEGEN_TEST_EBPF_KERNEL_EXECUTED && kernel_observed == expected;
+                            CodegenTestEbpfKernel kernel = codegen_test_ebpf_kernel_run_entry(arena, loaded.code, loaded.entry_offset,
+                                                                                             meta_inputs[input][0], meta_inputs[input][1],
+                                                                                             &kernel_observed, &kernel_reason);
+                            kernel_executed = kernel == CODEGEN_TEST_EBPF_KERNEL_EXECUTED;
+                            valid = kernel_executed && kernel_observed == expected;
                         }
                         if (!valid)
                         {
                             failing_input = input + 1;
                         }
                     }
-                    result = (MetaOutcome){.phase = interpreted ? META_PHASE_EXECUTE : META_PHASE_RUNNER, .launched = true, .command = compile_command,
+                    result = (MetaOutcome){.phase = interpreted || kernel_executed ? META_PHASE_EXECUTE : META_PHASE_RUNNER, .launched = true, .command = compile_command,
                                            .wait = {.result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED, .platform_status = failing_input}};
                     if (!valid)
                     {
@@ -763,7 +776,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
         {
             continue;
         }
-        u32 target_mask = meta_target_transform_mask(target, transform_mask);
+        u32 target_mask = meta_target_transform_mask(target, transform_mask, context->ebpf_kernel);
         if (target_mask != transform_mask)
             string_print(S8("METAMORPHIC_TRANSFORMS_UNAVAILABLE target={S8} mask={u32} reason=local-calls-not-interpreted\n"),
                          target.name, transform_mask & ~target_mask);
@@ -985,7 +998,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult meta_generator_tests(UnitTestArguments* argum
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(meta_targets); index += 1)
     {
         u32 expected = meta_targets[index].backend == META_EBPF ? BUSTER_META_ALL_TRANSFORMS & ~BUSTER_META_OUTLINE : BUSTER_META_ALL_TRANSFORMS;
-        BUSTER_TEST(arguments, meta_target_transform_mask(meta_targets[index], BUSTER_META_ALL_TRANSFORMS) == expected);
+        BUSTER_TEST(arguments, meta_target_transform_mask(meta_targets[index], BUSTER_META_ALL_TRANSFORMS, false) == expected);
+        BUSTER_TEST(arguments, meta_target_transform_mask(meta_targets[index], BUSTER_META_ALL_TRANSFORMS, true) == BUSTER_META_ALL_TRANSFORMS);
     }
     return result;
 }
