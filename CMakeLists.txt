@@ -2081,12 +2081,13 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
-# The headless compiler has no production font or image consumer. Keep the
-# reusable modules registered above, but add them to ide only for their tests
-# (and image fuzzing). Future product targets must name their own dependencies.
+# The headless compiler has no production font, image or AArch64 syntax-model
+# consumer. Keep the reusable modules registered above, but add them to ide only
+# for their tests (and image fuzzing). Future product targets must name their
+# own dependencies.
 set(BUSTER_COMPILER_TEST_MODULES)
 if (BUSTER_INCLUDE_TESTS)
-    list(APPEND BUSTER_COMPILER_TEST_MODULES truetype)
+    list(APPEND BUSTER_COMPILER_TEST_MODULES truetype compiler_aarch64_syntax)
 endif()
 if (BUSTER_INCLUDE_TESTS OR BUSTER_FUZZ_AVAILABLE)
     list(APPEND BUSTER_COMPILER_TEST_MODULES image)
@@ -2109,7 +2110,6 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_aarch64_system_registers
     compiler_aarch64_semantics
     compiler_aarch64_system_semantics
-    compiler_aarch64_syntax
     compiler_aarch64_semantic_vm
     compiler_aarch64_direct_simd
     compiler_aarch64_complex_simd
