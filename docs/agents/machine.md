@@ -211,6 +211,10 @@ fixture as well as compiling both architectures.
   landing pads with predecessors outside the region remain ineligible. The
   switch CFG fixture covers table backedges, shared destinations, fallthrough,
   default-only switches, all allocators and both frontend memory forms.
+  Its private input lives at
+  `src/buster/tests/compiler/codegen/fixtures/quality_switch_cfg.c`; the
+  registered machine module reads it as compiler input, preserving the
+  separately approved frozen `tests/` retirement corpus.
 - QUALITY placement accumulates exact u64 weighted traffic for values and loop
   regions, including split-boundary costs. A u32 edit count and maximum weight
   4096 bound a traffic sum below 2^44. The heap preserves its strict-greater tie

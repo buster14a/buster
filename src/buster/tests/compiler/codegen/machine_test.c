@@ -3957,7 +3957,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_dynamic_stack(UnitTestArgume
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_switch_cfg(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    ByteSlice input = file_read(arguments->arena, S8("tests/basic_c_quality_switch_cfg.c"), (FileReadOptions){0});
+    ByteSlice input = file_read(arguments->arena, S8("src/buster/tests/compiler/codegen/fixtures/quality_switch_cfg.c"), (FileReadOptions){0});
     String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
     String8 names[] = {S8("quality_switch_cfg"), S8("quality_switch_forward"), S8("quality_switch_default_only")};
     Target targets[] = {
