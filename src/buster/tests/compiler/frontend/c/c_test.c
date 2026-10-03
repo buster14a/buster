@@ -16715,6 +16715,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
         S8("static int object_call(void) { int (*T)(int) = twice; return (T)(4); }\n"),
         S8("static int size_product(void) { int p = 3; return sizeof (T) * p; }\n"),
         S8("static int cast_type(void) { T value = (T)twice(21); return value; }\n"),
+        S8("static int typedef_loop(void) { int sum = 0; for (T i = 0; i != 3; i++) sum += i; return sum; }\n"),
+        S8("static int typedef_pointer_loop(void) { T values[2] = {4, 5}; int sum = 0; for (T *p = values, *previous = 0; p != values + 2; previous = p, p = p + 1) { if (previous && *previous != 4) return -1; sum += *p; } return sum; }\n"),
+        S8("static int shadow_loop(void) { int T = 0, sum = 0; for (T = 0; T != 3; T++) sum += T; return sum; }\n"),
+        S8("static int declared_shadow_loop(void) { int sum = 0; for (T T = 0; T != 3; T++) sum += T; return sum; }\n"),
         S8("static int label(void) { goto T; T: return 9; }\nstatic int enumeration(void) { enum { T = 9 }; return T; }\n"),
         S8("typedef void V;\nstatic int zero_parameter(int (V));\nstatic int zero_parameter(int (*f)(void)) { return f(); }\nstatic int forty_two(void) { return 42; }\n"),
         S8("static int many(int ((((((((((((((((((((((((((((((((((((((((((((((((T)))))))))))))))))))))))))))))))))))))))))))))))));\nstatic int many(int (*f)(int)) { return f(21); }\n"),
@@ -16723,7 +16727,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
         S8("failed |= nested(invoke) != 42 || wrapped(twice) != 42 || deeper(twice) != 42 || grouped(twice) != 42;\n"),
         S8("failed |= character(char_twice) != 42 || ordinary(11) != 11 || qualified(13) != 13 || named_pointer(twice) != 42;\n"),
         S8("failed |= block() != 5 || member() != 7 || object_product() != 6 || object_call() != 8 || size_product() != 12 || cast_type() != 42;\n"),
-        S8("failed |= label() != 9 || enumeration() != 9 || zero_parameter(forty_two) != 42 || many(twice) != 42;\nreturn failed; }\n"),
+        S8("failed |= label() != 9 || enumeration() != 9 || zero_parameter(forty_two) != 42 || many(twice) != 42;\n"),
+        S8("failed |= typedef_loop() != 3 || typedef_pointer_loop() != 9 || shadow_loop() != 3 || declared_shadow_loop() != 3;\nreturn failed; }\n"),
     };
     String8 source_text = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
     String8 invalid_source = S8("typedef int T;\nstatic int bad(T (T)) { return T; }\n");
@@ -16740,6 +16745,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
         {S8("unary typedef expression"), S8("typedef int T;\nstatic int bad(T (T)) { return +T; }\n"), false},
         {S8("binary typedef expression"), S8("typedef int T;\nstatic int bad(T (T)) { return T + 1; }\n"), false},
         {S8("cast typedef expression"), S8("typedef int T;\nstatic int bad(T (T)) { return (int)T; }\n"), false},
+        {S8("typedef loop condition"), S8("typedef int T;\nstatic int bad(T (T)) { for (; T;) {} return 0; }\n"), false},
     };
     Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)

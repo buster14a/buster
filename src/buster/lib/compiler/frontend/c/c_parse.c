@@ -27312,7 +27312,9 @@ BUSTER_C_INTERNAL void c_parse_validate_statement_expression_range(CTypeParseMac
                 while (limit < close && c_token_is_punctuator(&preprocess.tokens[limit], C_PUNCTUATOR_COMMA))
                     limit = c_parse_constraint_expression_end(result, preprocess, limit + 1, close);
                 CTypeId type = C_TYPE_ID_INVALID;
-                bool declaration_part = for_loop && part_index == 0 && part < limit && c_parse_declaration_keyword_at(result, preprocess, part);
+                bool declaration_part = for_loop && part_index == 0 && part < limit &&
+                    (c_parse_declaration_keyword_at(result, preprocess, part) ||
+                     c_parse_type_start_token(result, preprocess, scope, preprocess.tokens[part]));
                 bool typed = !declaration_part && part < limit && c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess,
                     result, scope, part, limit, &type, diagnostic);
                 bool condition = !for_loop || part_index == 1;
