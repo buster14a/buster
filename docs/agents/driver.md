@@ -654,6 +654,27 @@ preprocessor macro/include operations and dependency requests. Direct `-D`,
 `-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
 preserves any existing artifact instead of reporting a successful stale build.
 
+## Source debug information
+
+`ide cc` omits source debug information by default. Pass `-g` to emit it or
+`-g0` to disable it explicitly; when both occur, the last option wins.
+Other debug levels and formats such as `-g1` remain unsupported. This keeps
+ordinary compilation focused on time to an artifact: it avoids constructing
+source debug models and their larger object payloads unless requested.
+`-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
+objects. Unwind information remains independent of source debug information.
+
+This default also applies when compiler-driver arguments are parsed for an
+embedding caller. The typed invocation API uses its `debug_info` field
+explicitly; a zero-initialized field disables debug output. Release/Debug
+configuration of the Buster compiler executable does not change these source
+compilation options. The self-host recipes pass `-g` explicitly.
+
+The registered driver regression checks the default, both individual switches
+and both orders across x86-64/AArch64 ELF, COFF and Mach-O objects. It reads the
+serialized artifacts, requires debug payloads only in the enabled modes, and
+checks that code/data bytes are unchanged and the default matches `-g0` exactly.
+
 ## Object output (`-c`)
 
 `-c` writes the object through `object_write_borrowing`. The ELF64 writer
@@ -668,6 +689,10 @@ diagnostic `native elf64 object exceeds the object writer's limits (...)`,
 and leaves an existing output file untouched. `-v` prints the writer's exact
 work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
 `-c`. See [object emission](../object-emission.md).
+
+COFF object reads merge same-kind contributions into initialized file-backed
+storage. Alignment gaps and tails introduced by empty aligned sections contain
+zero bytes even when reader arenas are reused; BSS remains virtual-only.
 
 ## ELF TLS companion lookup
 
