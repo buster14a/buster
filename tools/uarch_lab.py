@@ -2760,8 +2760,14 @@ def compare_labs(arguments, output, cpu, extra):
 
 def prepare_variant(lab, warmups):
     """Warm up after both probes and the shared collection policy are saved;
-    the warm-up output becomes the variant's determinism reference."""
+    the warm-up output becomes the variant's determinism reference. With no
+    warm-ups, compile a reference under that policy separately from probes."""
     out = os.path.join(lab.output, "out.exe")
+    if warmups == 0:
+        status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(lab.output, "reference.ccmetrics"))),
+                                         log=os.path.join(lab.output, "reference-run.log"))
+        if status != 0:
+            raise RuntimeError("reference compile failed: " + err.strip()[-400:])
     for index in range(warmups):
         status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(lab.output, "warmup.ccmetrics"))),
                                          log=os.path.join(lab.output, "warmup-%d.log" % index))

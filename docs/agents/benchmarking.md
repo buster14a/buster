@@ -579,7 +579,10 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    `run` continues collecting whenever its own compiler supports the flag.
    Each binary is checked for byte-identical output across its own runs; whether A and B
    outputs match is reported (`--require-identical-output` stops before timing
-   when they differ, for pure refactors). Runs alternate in ABBA blocks; the
+   when they differ, for pure refactors). With `--warmups 0`, each variant
+   gets one untimed reference compile under the shared collection policy;
+   the capability probe's output is never reused as that reference.
+   Runs alternate in ABBA blocks; the
    pair count is `--pairs` or is fixed once after a 2-pair pilot so the whole
    comparison fits `--target-minutes` (profile steps included). Profile steps
    are off by default.

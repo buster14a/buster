@@ -8,6 +8,7 @@ end-to-end runs against a second fake `ide-b`.
 Run: python3 -B tools/uarch_lab_test.py
 """
 
+import io
 import json
 import os
 import shutil
@@ -343,6 +344,9 @@ if args[:1] == ["bench"]:
     print("BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=30 bytes=21042 min_ns=3359552 median_ns=3983033")
     sys.exit(0)
 out = args[args.index("-o") + 1]
+if globals().get("FAIL_PLAIN") and not any(arg.startswith(("-fsource-metrics=", "-fmetrics-out=")) for arg in args):
+    sys.stderr.write("cc: error: requested plain compile failure\n")
+    sys.exit(1)
 for arg in args:
     if arg.startswith("-fsource-metrics="):
         open(arg.split("=", 1)[1], "w").write(SOURCE)
@@ -1154,6 +1158,39 @@ class CompareFlowTests(Fakes, unittest.TestCase):
         self.assertIsNone(summary["phases"])
         self.assertIn("candidate: no measured -fmetrics-out record, so no phase comparison", summary["warnings"])
         self.assertIn("NA -- a variant wrote no measured `-fmetrics-out` record.", report)
+
+    def test_zero_warmups_prepares_matching_references(self):
+        for a_mode, b_mode in (("new", "new"), ("new", "old"), ("old", "new"), ("old", "old")):
+            with self.subTest(a_mode=a_mode, b_mode=b_mode):
+                summary, _, output = self.compare(["--pairs", "2", "--warmups", "0"], {"MODE": b_mode}, {"MODE": a_mode})
+                enabled = a_mode == b_mode == "new"
+                self.assertEqual(summary["plan"]["complete_pairs"], 2)
+                self.assertTrue(summary["outputs_identical"])
+                self.assertEqual(summary["phase_metrics"]["enabled"], enabled)
+                self.assertEqual(lab.load_compare_meta(output)["config"]["warmups"], 0)
+                for key, role in lab.VARIANTS:
+                    calls = self.compile_arguments(output, key)
+                    self.assertEqual(len(calls), 5)  # Two probes, reference, two measured pairs.
+                    self.assertEqual([any(arg.startswith("-fmetrics-out=") for arg in call) for call in calls[2:]], [enabled] * 3)
+                    self.assertTrue(os.path.isfile(os.path.join(output, key, "reference.exe")))
+                    self.assertTrue(summary[role]["deterministic"])
+                    self.assertFalse(os.path.exists(os.path.join(output, key, "warmup-0.log")))
+                    self.assertTrue(os.path.exists(os.path.join(output, key, "reference-run.log")))
+
+    def test_zero_warmup_reference_failure_stops_before_timing(self):
+        root, ide, perf = self.fakes("new")
+        other = os.path.join(root, "ide-b")
+        write_script(other, FAKE_IDE, {"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "old", "FAIL_PLAIN": True})
+        output = os.path.join(root, "cmp")
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            with self.assertRaisesRegex(SystemExit, "compare stopped before the timed series"):
+                lab.main(["compare", "--baseline", ide, "--candidate", other, "--repo-root", root, "--cpu", "-1",
+                          "--output", output, "--perf", perf, "--pairs", "2", "--warmups", "0"])
+        state = lab.load_compare_meta(output)["steps"]["prepare"]
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("reference compile failed: cc: error: requested plain compile failure", state["note"])
+        self.assertFalse(os.path.exists(os.path.join(output, "b", "reference.exe")))
+        self.assertFalse(os.path.exists(os.path.join(output, "pairs.json")))
 
     def test_older_directory_does_not_invent_a_shared_collection_policy(self):
         _, _, output = self.compare(["--pairs", "2"])
