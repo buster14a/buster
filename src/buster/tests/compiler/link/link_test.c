@@ -69,6 +69,346 @@ BUSTER_GLOBAL_LOCAL u32 link_test_comdat_symbol_find(ObjectFile* object, String8
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u32 link_test_set_identity(u32 count, u32 order, u32 object, u32 position)
+{
+    u32 identity = order == 0 ? position : order == 1 ? count - position - 1 : position * 3 % count;
+    return object == 0 ? identity : object == 1 ? count - identity - 1 : (identity + count / 2) % count;
+}
+
+// Bounded legacy negative control: execute the removed deduplication and
+// per-set section scans, rather than inferring their counts from elapsed time.
+BUSTER_GLOBAL_LOCAL u32 link_test_set_legacy(Arena* arena, ObjectFile* objects, u32 object_count, u64* comparisons, u64* visits)
+{
+    u32 matches = 0;
+    u32 capacity = 0;
+    for (u32 object = 0; object < object_count; object += 1) capacity += objects[object].section_count;
+    String8* names = arena_allocate(arena, String8, capacity);
+    u32 count = 0;
+    *comparisons = 0;
+    *visits = 0;
+    for (u32 object = 0; object < object_count; object += 1)
+    {
+        for (u32 section = OBJECT_SECTION_COUNT; section < objects[object].section_count; section += 1)
+        {
+            String8 name = objects[object].sections[section].name;
+            u32 set = 0;
+            bool found = false;
+            while (set < count && !found)
+            {
+                *comparisons += 1;
+                found = string_equal(names[set], name);
+                if (!found) set += 1;
+            }
+            if (!found) names[count++] = name;
+        }
+    }
+    for (u32 set = 0; set < count; set += 1)
+    {
+        for (u32 object = 0; object < object_count; object += 1)
+        {
+            for (u32 section = 0; section < objects[object].section_count; section += 1)
+            {
+                *visits += 1;
+                if (section >= OBJECT_SECTION_COUNT)
+                {
+                    *comparisons += 1;
+                    matches += string_equal(names[set], objects[object].sections[section].name);
+                }
+            }
+        }
+    }
+    return matches;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_section_set_scaling(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* inputs = arena_create((ArenaCreation){0});
+    Arena* output = arena_create((ArenaCreation){0});
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    u32 sizes[] = {1, 2, 8, 32, 128, 512};
+    for (u32 population = 0; population < BUSTER_ARRAY_LENGTH(sizes); population += 1)
+    {
+        u32 count = sizes[population];
+        for (u32 shape = 0; shape < 3; shape += 1)
+        {
+            u32 groups = shape == 0 ? count : shape == 1 ? 1 : BUSTER_MAX(1u, count / 4);
+            for (u32 order = 0; order < 3; order += 1)
+            {
+                ObjectFile objects[3];
+                ObjectSection* section_snapshots[3];
+                ObjectSymbol* symbol_snapshots[3];
+                u64* expected_offsets = arena_allocate(inputs, u64, (u64)count * 3);
+                u64* starts = arena_allocate(inputs, u64, groups);
+                u64* ends = arena_allocate(inputs, u64, groups);
+                bool* placed = arena_allocate_zeroed(inputs, bool, groups);
+                u8* expected = arena_allocate_zeroed(inputs, u8, (u64)count * 36 + 3);
+                for (u32 object_index = 0; object_index < 3; object_index += 1)
+                {
+                    ObjectFile* object = objects + object_index;
+                    *object = link_test_object_make(inputs, target, (ByteSlice){0}, 0, 0, 0, 0);
+                    u32 section_count = OBJECT_SECTION_COUNT + count;
+                    ObjectSection* sections = arena_allocate(inputs, ObjectSection, section_count);
+                    memcpy(sections, object->sections, sizeof(*sections) * OBJECT_SECTION_COUNT);
+                    object->sections = sections;
+                    object->section_count = section_count;
+                    u8* ordinary = arena_allocate(inputs, u8, 1);
+                    *ordinary = (u8)(0xe0 + object_index);
+                    sections[OBJECT_SECTION_DATA].data = (ByteSlice){.pointer = ordinary, .length = 1};
+                    sections[OBJECT_SECTION_DATA].alignment = 1;
+                    expected[object_index] = *ordinary;
+                    object->symbol_count = count + (object_index == 0 ? groups * 2 + 2 : object_index == 2 ? 1 : 0);
+                    object->symbols = arena_allocate(inputs, ObjectSymbol, object->symbol_count);
+                    for (u32 position = 0; position < count; position += 1)
+                    {
+                        u32 identity = link_test_set_identity(count, order, object_index, position);
+                        u32 group = identity % groups;
+                        u8* byte = arena_allocate(inputs, u8, 1);
+                        *byte = (u8)(1 + (object_index * count + position) % 127);
+                        sections[OBJECT_SECTION_COUNT + position] = (ObjectSection){
+                            .name = string_format(inputs, S8("common_prefix_set_{u32}"), group),
+                            .data = {.pointer = object_index == 2 ? 0 : byte, .length = object_index == 2 ? 0 : 1},
+                            .virtual_size = object_index + 1,
+                            .kind = object_index == 0 ? OBJECT_SECTION_READ_ONLY_DATA : object_index == 1 ? OBJECT_SECTION_DATA : OBJECT_SECTION_ZERO,
+                            .alignment = 1u << (identity % 4),
+                        };
+                        object->symbols[position] = (ObjectSymbol){.name = string_format(inputs, S8("set_member_{u32}_{u32}"), object_index, position),
+                            .size = 1, .section = OBJECT_SECTION_COUNT + position, .kind = OBJECT_SYMBOL_DATA,
+                            .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO};
+                    }
+                    if (object_index == 0)
+                    {
+                        for (u32 group = 0; group < groups; group += 1)
+                        {
+                            object->symbols[count + 2 * group] = (ObjectSymbol){.name = string_format(inputs, S8("__start_common_prefix_set_{u32}"), group),
+                                .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = (group & 1) != 0};
+                            object->symbols[count + 2 * group + 1] = (ObjectSymbol){.name = string_format(inputs, S8("__stop_common_prefix_set_{u32}"), group),
+                                .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = (group & 1) == 0};
+                        }
+                        object->symbols[count + 2 * groups] = (ObjectSymbol){.name = S8("__start_absent_set"),
+                            .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true};
+                        object->symbols[count + 2 * groups + 1] = (ObjectSymbol){.name = S8("__stop_absent_set"),
+                            .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true};
+                    }
+                    if (object_index == 2)
+                    {
+                        object->symbols[count] = (ObjectSymbol){.name = S8("__start_common_prefix_set_0"), .size = 1,
+                            .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true,
+                            .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO};
+                    }
+                    section_snapshots[object_index] = arena_allocate(inputs, ObjectSection, section_count);
+                    symbol_snapshots[object_index] = arena_allocate(inputs, ObjectSymbol, object->symbol_count);
+                    memcpy(section_snapshots[object_index], sections, (u64)section_count * sizeof(*sections));
+                    memcpy(symbol_snapshots[object_index], object->symbols, (u64)object->symbol_count * sizeof(*object->symbols));
+                }
+                // Independent oracle: first appearance selects a group; walk
+                // the original inputs to lay out its members using only the
+                // fixture's numeric identity, never production names/indexes.
+                u64 expected_size = 3;
+                for (u32 first = 0; first < count; first += 1)
+                {
+                    u32 group = link_test_set_identity(count, order, 0, first) % groups;
+                    if (!placed[group])
+                    {
+                        placed[group] = true;
+                        bool first_member = true;
+                        for (u32 object_index = 0; object_index < 3; object_index += 1)
+                        {
+                            for (u32 position = 0; position < count; position += 1)
+                            {
+                                u32 identity = link_test_set_identity(count, order, object_index, position);
+                                if (identity % groups == group)
+                                {
+                                    u32 alignment = 1u << (identity % 4);
+                                    expected_size = (expected_size + alignment - 1) & ~((u64)alignment - 1);
+                                    expected_offsets[object_index * count + position] = expected_size;
+                                    if (first_member) starts[group] = expected_size;
+                                    first_member = false;
+                                    if (object_index != 2) expected[expected_size] = (u8)(1 + (object_index * count + position) % 127);
+                                    expected_size += object_index + 1;
+                                }
+                            }
+                        }
+                        ends[group] = expected_size;
+                    }
+                }
+                u64 legacy_comparisons = 0;
+                u64 legacy_visits = 0;
+                u32 legacy_matches = link_test_set_legacy(inputs, objects, 3, &legacy_comparisons, &legacy_visits);
+                BUSTER_TEST(arguments, legacy_matches == count * 3);
+                BUSTER_TEST(arguments, legacy_visits == (u64)groups * 3 * (OBJECT_SECTION_COUNT + count));
+                u32 heap_height = 0;
+                for (u32 remaining = count * 3; remaining; remaining /= 2) heap_height += 1;
+                for (u32 replay = 0; replay < 2; replay += 1)
+                {
+                    memset(arena_allocate(output, u8, expected_size + 65536), 0xa5, expected_size + 65536);
+                    arena_reset_to_start(output);
+                    LinkSectionSetCounts work = {0};
+                    LinkObjectResult linked = link_objects_section_sets_test(output, objects, 3,
+                        (LinkOptions){.allow_undefined_symbols = true}, &work);
+                    // Reuse the released index scope before inspecting output.
+                    // Published bytes and symbol names must own their storage.
+                    TemporalArena released = scratch_begin(&output, 1);
+                    memset(arena_allocate(released.arena, u8, (u64)count * 256 + 4096), 0x7b, (u64)count * 256 + 4096);
+                    scratch_end(released);
+                    BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+                    BUSTER_TEST(arguments, work.input_rows == (u64)3 * (OBJECT_SECTION_COUNT + count));
+                    BUSTER_TEST(arguments, work.members == (u64)count * 3 && work.group_rows == work.members && work.placements == work.members);
+                    BUSTER_TEST(arguments, work.name_comparisons <= work.members * (4 * (u64)heap_height + 4));
+                    BUSTER_TEST(arguments, work.bound_queries == (u64)groups * 2 + 1 &&
+                        work.bound_comparisons <= work.bound_queries * (heap_height + 1));
+                    if (shape == 0 && count >= 128)
+                    {
+                        BUSTER_TEST(arguments, work.input_rows + work.group_rows + work.placements + work.name_comparisons + work.bound_comparisons <
+                            legacy_visits + legacy_comparisons);
+                    }
+                    if (linked.error == LINK_ERROR_NONE)
+                    {
+                        ObjectSection* data = linked.object.sections + OBJECT_SECTION_DATA;
+                        BUSTER_TEST(arguments, data->data.length == expected_size && data->virtual_size == expected_size);
+                        BUSTER_TEST(arguments, data->data.length == expected_size && memcmp(data->data.pointer, expected, expected_size) == 0);
+                        BUSTER_TEST(arguments, data->alignment == BUSTER_MAX(object_section_default_alignment(OBJECT_SECTION_DATA), count >= 4 ? 8u : count == 2 ? 2u : 1u));
+                        BUSTER_TEST(arguments, linked.object.sections[OBJECT_SECTION_READ_ONLY_DATA].virtual_size == 0 &&
+                            linked.object.sections[OBJECT_SECTION_ZERO].virtual_size == 0);
+                        BUSTER_TEST(arguments, linked.object.symbol_count == count * 3 + groups * 2 + 2);
+                        for (u32 object_index = 0; object_index < 3; object_index += 1)
+                        {
+                            u32 base = object_index == 0 ? 0 : count + groups * 2 + 2 + (object_index - 1) * count;
+                            for (u32 position = 0; position < count; position += 1)
+                            {
+                                ObjectSymbol* member = linked.object.symbols + base + position;
+                                BUSTER_TEST(arguments, member->section == OBJECT_SECTION_DATA && member->value == expected_offsets[object_index * count + position]);
+                                BUSTER_TEST(arguments, string_equal(member->name, objects[object_index].symbols[position].name));
+                            }
+                            BUSTER_TEST(arguments, memcmp(objects[object_index].sections, section_snapshots[object_index],
+                                (u64)objects[object_index].section_count * sizeof(ObjectSection)) == 0);
+                            BUSTER_TEST(arguments, memcmp(objects[object_index].symbols, symbol_snapshots[object_index],
+                                (u64)objects[object_index].symbol_count * sizeof(ObjectSymbol)) == 0);
+                        }
+                        for (u32 group = 0; group < groups; group += 1)
+                        {
+                            ObjectSymbol* start = linked.object.symbols + count + group * 2;
+                            ObjectSymbol* stop = start + 1;
+                            BUSTER_TEST(arguments, string_equal(start->name, objects[0].symbols[count + group * 2].name) &&
+                                string_equal(stop->name, objects[0].symbols[count + group * 2 + 1].name));
+                            BUSTER_TEST(arguments, start->section == OBJECT_SECTION_DATA && start->value == (group ? starts[group] : 2));
+                            BUSTER_TEST(arguments, start->hidden == (group != 0) && !start->weak && start->size == (group ? 0u : 1u));
+                            BUSTER_TEST(arguments, stop->section == OBJECT_SECTION_DATA && stop->value == ends[group] && stop->hidden && !stop->weak && stop->size == 0);
+                        }
+                        ObjectSymbol* absent = linked.object.symbols + count + 2 * groups;
+                        BUSTER_TEST(arguments, absent[0].section == OBJECT_SECTION_UNDEFINED && absent[0].weak &&
+                            absent[1].section == OBJECT_SECTION_UNDEFINED && !absent[1].weak);
+                    }
+                    if (!replay && shape == 0 && order != 1)
+                    {
+                        string_print(S8("LINK_SECTION_SET_WORK_V1 count={u32} order={u32} members={u64} input_rows={u64} group_rows={u64} placements={u64} comparisons={u64} bound_queries={u64} bound_comparisons={u64} legacy_comparisons={u64} legacy_visits={u64}\n"),
+                            count, order, work.members, work.input_rows, work.group_rows, work.placements,
+                            work.name_comparisons, work.bound_queries, work.bound_comparisons, legacy_comparisons, legacy_visits);
+                    }
+                    arena_reset_to_start(output);
+                }
+                arena_reset_to_start(inputs);
+            }
+        }
+    }
+    arena_destroy(output, 1);
+    arena_destroy(inputs, 1);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_section_set_edges(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arena_create((ArenaCreation){0});
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    ObjectFile object = link_test_object_make(arena, target, (ByteSlice){0}, 0, 0, 0, 0);
+    ObjectSection* sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT + 4);
+    memcpy(sections, object.sections, sizeof(*sections) * OBJECT_SECTION_COUNT);
+    object.sections = sections;
+    object.section_count += 4;
+    u8 bytes[] = {0x10, 0x21, 0x32, 0x43};
+    for (u32 index = 0; index < 4; index += 1)
+    {
+        sections[OBJECT_SECTION_COUNT + index] = (ObjectSection){.name = index & 1 ? S8("alpha") : S8("zeta"),
+            .data = {.pointer = bytes + index, .length = 1}, .kind = index < 2 ? OBJECT_SECTION_TEXT : OBJECT_SECTION_DATA, .alignment = 1};
+    }
+    LinkObjectResult refused = link_objects(arena, &object, 1, (LinkOptions){0});
+    BUSTER_TEST(arguments, refused.error == LINK_ERROR_UNSUPPORTED_FEATURE && string_equal(refused.symbol, S8("zeta")));
+    BUSTER_TEST(arguments, refused.object.sections == 0);
+    // Names sort alpha first, but the earliest conflicting input was zeta.
+    // Pure code keeps TEXT and the original first-name placement instead.
+    for (u32 index = 0; index < 4; index += 1) sections[OBJECT_SECTION_COUNT + index].kind = OBJECT_SECTION_TEXT;
+    sections[OBJECT_SECTION_COUNT].alignment = 4;
+    sections[OBJECT_SECTION_COUNT + 2].alignment = 16;
+    ObjectSymbol bounds[] = {
+        {.name = S8("__start_zeta"), .section = OBJECT_SECTION_UNDEFINED, .global = true, .weak = true},
+        {.name = S8("__stop_zeta"), .section = OBJECT_SECTION_UNDEFINED, .global = true},
+        {.name = S8("__start_alpha"), .section = OBJECT_SECTION_UNDEFINED, .global = true},
+        {.name = S8("__stop_alpha"), .section = OBJECT_SECTION_UNDEFINED, .global = true, .weak = true},
+    };
+    object.symbols = bounds;
+    object.symbol_count = BUSTER_ARRAY_LENGTH(bounds);
+    LinkObjectResult code = link_objects(arena, &object, 1, (LinkOptions){0});
+    BUSTER_TEST(arguments, code.error == LINK_ERROR_NONE);
+    if (code.error == LINK_ERROR_NONE)
+    {
+        ObjectSection* text = code.object.sections + OBJECT_SECTION_TEXT;
+        BUSTER_TEST(arguments, text->data.length == 19 && text->alignment == 16);
+        if (text->data.length == 19)
+        {
+            BUSTER_TEST(arguments, text->data.pointer[0] == 0x10 && text->data.pointer[16] == 0x32 &&
+                text->data.pointer[17] == 0x21 && text->data.pointer[18] == 0x43);
+            for (u32 offset = 1; offset < 16; offset += 1) BUSTER_TEST(arguments, text->data.pointer[offset] == 0);
+        }
+        u64 expected_bounds[] = {0, 17, 17, 19};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bounds); index += 1)
+        {
+            BUSTER_TEST(arguments, code.object.symbols[index].section == OBJECT_SECTION_TEXT &&
+                code.object.symbols[index].value == expected_bounds[index] && code.object.symbols[index].hidden && !code.object.symbols[index].weak);
+        }
+    }
+    sections[OBJECT_SECTION_COUNT + 2].alignment = 0;
+    refused = link_objects(arena, &object, 1, (LinkOptions){0});
+    BUSTER_TEST(arguments, refused.error == LINK_ERROR_INVALID_INPUT);
+    sections[OBJECT_SECTION_COUNT + 2].alignment = 3;
+    refused = link_objects(arena, &object, 1, (LinkOptions){0});
+    BUSTER_TEST(arguments, refused.error == LINK_ERROR_INVALID_INPUT);
+    // A ZERO-only named set reserves a virtual range without serialized bytes.
+    object.section_count = OBJECT_SECTION_COUNT + 2;
+    sections[OBJECT_SECTION_COUNT] = (ObjectSection){.name = S8("zero_set"), .virtual_size = 3, .kind = OBJECT_SECTION_ZERO, .alignment = 1};
+    sections[OBJECT_SECTION_COUNT + 1] = (ObjectSection){.name = S8("zero_set"), .virtual_size = 2, .kind = OBJECT_SECTION_ZERO, .alignment = 8};
+    bounds[0].name = S8("__start_zero_set");
+    bounds[1].name = S8("__stop_zero_set");
+    object.symbol_count = 2;
+    LinkObjectResult zero = link_objects(arena, &object, 1, (LinkOptions){0});
+    BUSTER_TEST(arguments, zero.error == LINK_ERROR_NONE);
+    if (zero.error == LINK_ERROR_NONE)
+    {
+        ObjectSection* merged = zero.object.sections + OBJECT_SECTION_ZERO;
+        BUSTER_TEST(arguments, merged->virtual_size == 10 && merged->data.length == 0 && merged->data.pointer == 0);
+        BUSTER_TEST(arguments, zero.object.symbols[0].section == OBJECT_SECTION_ZERO && zero.object.symbols[0].value == 0 &&
+            zero.object.symbols[1].section == OBJECT_SECTION_ZERO && zero.object.symbols[1].value == 10);
+    }
+    sections[OBJECT_SECTION_COUNT].virtual_size = UINT64_MAX;
+    refused = link_objects(arena, &object, 1, (LinkOptions){0});
+    BUSTER_TEST(arguments, refused.error == LINK_ERROR_INVALID_INPUT && refused.object.sections == 0);
+    sections[OBJECT_SECTION_COUNT].virtual_size = 3;
+    sections[OBJECT_SECTION_COUNT].name = S8("invalid.name");
+    bounds[0].name = S8("__start_invalid.name");
+    bounds[1].name = S8("__stop_invalid.name");
+    refused = link_objects(arena, &object, 1, (LinkOptions){0});
+    BUSTER_TEST(arguments, refused.error == LINK_ERROR_UNRESOLVED_SYMBOL && string_equal(refused.symbol, bounds[0].name));
+    // Empty/name-free merges keep the old path and perform no index work.
+    object.section_count = OBJECT_SECTION_COUNT;
+    object.symbol_count = 0;
+    LinkSectionSetCounts work = {0};
+    LinkObjectResult empty = link_objects_section_sets_test(arena, &object, 1, (LinkOptions){0}, &work);
+    BUSTER_TEST(arguments, empty.error == LINK_ERROR_NONE && work.members == 0 && work.name_comparisons == 0 &&
+        work.group_rows == 0 && work.placements == 0 && work.bound_queries == 0 && work.bound_comparisons == 0);
+    arena_destroy(arena, 1);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectFile link_test_single_comdat(Arena* arena, Target target, ByteSlice bytes, String8 key,
                                                        ObjectComdatSelection selection, ObjectSymbol* symbols,
                                                        u32 symbol_count, ObjectRelocation* relocations, u32 relocation_count)
@@ -5074,6 +5414,12 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult comdat_scaling = link_test_comdat_association_scaling(arguments);
     result.succeeded_test_count += comdat_scaling.succeeded_test_count;
     result.test_count += comdat_scaling.test_count;
+    UnitTestResult section_set_scaling = link_test_section_set_scaling(arguments);
+    result.succeeded_test_count += section_set_scaling.succeeded_test_count;
+    result.test_count += section_set_scaling.test_count;
+    UnitTestResult section_set_edges = link_test_section_set_edges(arguments);
+    result.succeeded_test_count += section_set_edges.succeeded_test_count;
+    result.test_count += section_set_edges.test_count;
     UnitTestResult thread_local_identity = link_test_thread_local_symbol_identity(arguments);
     result.succeeded_test_count += thread_local_identity.succeeded_test_count;
     result.test_count += thread_local_identity.test_count;
