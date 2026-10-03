@@ -11979,7 +11979,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(Unit
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     Arena* arena = temporary.arena;
-    String8 host_sources[] = {S8("tests/basic_c_parameter_alignment_caller.c"), S8("tests/basic_c_parameter_alignment_observer.c")};
+    String8 host_sources[] = {S8("src/buster/tests/compiler/driver/fixtures/parameter_alignment/caller.c"),
+                             S8("tests/basic_c_parameter_alignment_observer.c")};
     String8 host_objects[BUSTER_ARRAY_LENGTH(host_sources)];
     bool host_compiled = true;
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(host_sources); index += 1)
@@ -12021,7 +12022,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(Unit
             bool native_allocator = allocators[index].mode != CODEGEN_REGISTER_ALLOCATOR_NONE;
             String8 compile[] = {optimizations[optimization_index].flag, allocators[index].flag, S8("-fverify-codegen"),
                                 native_allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"), S8("-c"),
-                                S8("tests/basic_c_parameter_alignment_callee.c"), S8("-o"), object};
+                                S8("src/buster/tests/compiler/driver/fixtures/parameter_alignment/callee.c"), S8("-o"), object};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(case_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
             BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE, context);
             BUSTER_TEST_RAW(arguments, invocation.register_allocator_explicit && invocation.register_allocator == allocators[index].mode, context);
