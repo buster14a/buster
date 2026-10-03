@@ -2011,7 +2011,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_expanded_label_initializers(Unit
     selected.canonical_block_entries[0] = 4;
     selected.canonical_block_entries[1] = 0;
     selected.canonical_block_entries[2] = 2;
-    BUSTER_TEST(arguments, codegen_machine_canonical_block_offsets(retained_offsets, &canonical, &selected, &encoded));
+    BUSTER_TEST(arguments, codegen_test_canonical_block_offsets(retained_offsets, &canonical, &selected, &encoded));
     scratch_end(projection_scratch);
     TemporalArena poison_scratch = scratch_begin(&arguments->arena, 1);
     u32* poison = arena_allocate(poison_scratch.arena, u32, 8);

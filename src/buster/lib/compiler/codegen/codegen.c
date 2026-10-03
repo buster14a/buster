@@ -7857,6 +7857,15 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_canonical_block_offsets(u32* offsets, I
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+bool codegen_test_canonical_block_offsets(u32* offsets, IrFunction* function, MachineSelectResult* selected,
+                                          MachineEncodeResult* encoded)
+{
+    bool result = codegen_machine_canonical_block_offsets(offsets, function, selected, encoded);
+    return result;
+}
+#endif
+
 // One generation of the whole module -- globals, functions and global assembly
 // -- into a code buffer reserved at `capacity_scale` times the flat estimate
 // below. Everything it produces comes out of `arena`, so a caller that does not
