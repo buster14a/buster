@@ -7753,16 +7753,16 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_copy_tzname && aarch64_copy_tzname != aarch64_copy_environ && aarch64_copy_tzname_size == 16);
     // ADRP/ADD references to imported data must use the staging writer's
     // copy slot (including aliases), never the function PLT thunk.
-    // The GOT pair relaxes onto the same copy slot.
+    // The zero-addend GOT pair relaxes onto the same copy slot.
     for (u32 pair = 0; pair < 2 * (BUSTER_ARRAY_LENGTH(aarch64_copy_symbols) - 1); pair += 1)
     {
         u32 import_symbol = 1 + pair / 2;
         bool got = (pair & 1) != 0;
         u32 page_words[] = {UINT32_C(0x52800000), UINT32_C(0xd65f03c0), UINT32_C(0x90000017), got ? UINT32_C(0xf94002f7) : UINT32_C(0x910002f7)};
         ObjectRelocation page_relocations[] = {
-            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = import_symbol, .addend = 1,
+            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = import_symbol, .addend = got ? 0 : 1,
              .kind = got ? OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 : OBJECT_RELOCATION_AARCH64_ELF_PAGE21},
-            {.offset = 12, .section = OBJECT_SECTION_TEXT, .symbol = import_symbol, .addend = 1,
+            {.offset = 12, .section = OBJECT_SECTION_TEXT, .symbol = import_symbol, .addend = got ? 0 : 1,
              .kind = got ? OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12 : OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12},
         };
         ObjectFile page_object = link_test_object_make(arguments->arena, aarch64_target,
@@ -7784,7 +7784,23 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             u32 low = 0;
             BUSTER_TEST(arguments, a64_mc_decode(link_read_u32(page_linked.executable.pointer, text_offset + 8), &page) && page.opcode == A64_OPCODE_ADRP);
             BUSTER_TEST(arguments, a64_add_lo12_read(link_read_u32(page_linked.executable.pointer, text_offset + 12), &low));
-            BUSTER_TEST(arguments, ((text_address + 8) & ~UINT64_C(0xfff)) + (u64)page.operands[1].value + low == copy_address + 1);
+            BUSTER_TEST(arguments, ((text_address + 8) & ~UINT64_C(0xfff)) + (u64)page.operands[1].value + low == copy_address + (got ? 0 : 1));
+        }
+        if (got)
+        {
+            s64 nonzero[] = {-1, 1};
+            for (u32 relocation_index = 0; relocation_index < BUSTER_ARRAY_LENGTH(page_relocations); relocation_index += 1)
+            {
+                for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(nonzero); addend_index += 1)
+                {
+                    page_relocations[relocation_index].addend = nonzero[addend_index];
+                    NativeExecutableLinkResult refused = link_native_executable(arguments->arena, &page_object,
+                        (NativeExecutableLinkOptions){.entry_symbol = S8("main"), .runtime_data_symbols = copy_alias_exports,
+                            .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_exports)});
+                    BUSTER_TEST(arguments, refused.error == LINK_ERROR_RELOCATION);
+                }
+                page_relocations[relocation_index].addend = 0;
+            }
         }
         page_words[2] = UINT32_C(0xd503201f);
         BUSTER_TEST(arguments, link_native_executable(arguments->arena, &page_object,
