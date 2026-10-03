@@ -11994,33 +11994,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(Unit
         BUSTER_TEST(arguments, compiled);
         host_compiled &= compiled;
     }
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
-    for (u32 index = 0; host_compiled && index < BUSTER_ARRAY_LENGTH(allocators); index += 1)
+    struct { String8 flag; u8 mode; } allocators[] = {
+#define BUSTER_PARAMETER_ALIGNMENT_ALLOCATOR(name, mode) {S8("-fregister-allocator=" name), mode},
+        BUSTER_CODEGEN_ALLOCATORS(BUSTER_PARAMETER_ALIGNMENT_ALLOCATOR)
+#undef BUSTER_PARAMETER_ALIGNMENT_ALLOCATOR
+    };
+    struct { String8 flag; u8 level; } optimizations[] = {
+#define BUSTER_PARAMETER_ALIGNMENT_OPTIMIZATION(flag, level) {S8(flag), level},
+        BUSTER_CODEGEN_OPTIMIZATIONS(BUSTER_PARAMETER_ALIGNMENT_OPTIMIZATION)
+#undef BUSTER_PARAMETER_ALIGNMENT_OPTIMIZATION
+    };
+    for (u32 optimization_index = 0; host_compiled && optimization_index < BUSTER_ARRAY_LENGTH(optimizations); optimization_index += 1)
     {
-        String8 object = buster_test_temporary_path(arena, S8("buster-parameter-alignment-callee"), S8(".o"));
-        String8 output = buster_test_temporary_path(arena, S8("buster-parameter-alignment"), S8(""));
-        String8 compile[] = {allocators[index], S8("-c"), S8("tests/basic_c_parameter_alignment_callee.c"), S8("-o"), object};
-        CompilerDriverResult built = compiler_driver_execute_invocation(arena,
-            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
-        BUSTER_TEST(arguments, built.error == COMPILER_DRIVER_ERROR_NONE);
-        if (built.error == COMPILER_DRIVER_ERROR_NONE)
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(allocators); index += 1)
         {
-            String8 link[] = {host_objects[0], host_objects[1], object, S8("-o"), output};
-            CompilerDriverResult linked = compiler_driver_execute_invocation(arena,
-                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
-            BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
-            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            // Each invocation owns a translation-unit arena. Release each
+            // matrix cell before compiling the next optimization/allocator pair.
+            TemporalArena case_temporary = scratch_begin(&arena, 1);
+            Arena* case_arena = case_temporary.arena;
+            String8 suffix = string_format(case_arena, S8("-o{u32}-ra{u32}"), optimization_index, index);
+            String8 object = buster_test_temporary_path(case_arena, S8("buster-parameter-alignment-callee"),
+                string_format(case_arena, S8("{S8}.o"), suffix));
+            String8 output = buster_test_temporary_path(case_arena, S8("buster-parameter-alignment"), suffix);
+            String8 context = string_format(case_arena, S8("parameter alignment {S8} {S8}"), optimizations[optimization_index].flag, allocators[index].flag);
+            // The explicit allocator follows -O: optimization presets must not
+            // silently replace the allocator whose coverage this case claims.
+            bool native_allocator = allocators[index].mode != CODEGEN_REGISTER_ALLOCATOR_NONE;
+            String8 compile[] = {optimizations[optimization_index].flag, allocators[index].flag, S8("-fverify-codegen"),
+                                native_allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"), S8("-c"),
+                                S8("tests/basic_c_parameter_alignment_callee.c"), S8("-o"), object};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(case_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+            BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE, context);
+            BUSTER_TEST_RAW(arguments, invocation.register_allocator_explicit && invocation.register_allocator == allocators[index].mode, context);
+            BUSTER_TEST_RAW(arguments, invocation.optimization_level == optimizations[optimization_index].level, context);
+            if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
             {
-                String8 command[] = {output};
-                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
-                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
-                BUSTER_TEST(arguments, spawned.handle != 0);
-                if (spawned.handle)
+                CompilerDriverResult built = compiler_driver_execute_invocation(case_arena, invocation);
+                BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, context);
+                BUSTER_TEST_RAW(arguments, built.codegen_statistics.verified_ir_module_count == 1, context);
+                BUSTER_TEST_RAW(arguments, built.codegen_statistics.function_count == 5 && built.codegen_statistics.fallback_function_count == 0, context);
+                BUSTER_TEST_RAW(arguments, built.codegen_statistics.verified_mir_function_count == (native_allocator ? 5u : 0u), context);
+                if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object)
                 {
-                    BUSTER_TEST(arguments, os_process_wait_sync(arena, spawned).result == PROCESS_RESULT_SUCCESS);
+                    String8 link[] = {host_objects[0], host_objects[1], object, S8("-o"), output};
+                    CompilerDriverResult linked = compiler_driver_execute_invocation(case_arena,
+                        compiler_driver_parse_arguments(case_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
+                    BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, context);
+                    if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 command[] = {output};
+                        ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST_RAW(arguments, spawned.handle != 0, context);
+                        if (spawned.handle)
+                        {
+                            BUSTER_TEST_RAW(arguments, os_process_wait_sync(case_arena, spawned).result == PROCESS_RESULT_SUCCESS, context);
+                        }
+                    }
                 }
             }
+            scratch_end(case_temporary);
         }
     }
     scratch_end(temporary);
