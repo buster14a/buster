@@ -17408,7 +17408,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_identifier_list_definiti
                 TemporalArena row = scratch_begin(&arena, 1);
                 String8 image = buster_test_temporary_path(
                     row.arena, S8("buster-identifier-list-definition"),
-                    string_format(row.arena, S8("-{u32}-{u32}-{u32}"), dialect, frontend, allocator));
+                    string_format(row.arena, S8("-{u32}-{u32}-{u32}.exe"), dialect, frontend, allocator));
                 String8 command[] = {dialects[dialect], frontends[frontend], allocators[allocator], S8("-fverify-codegen"),
                                      allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
                                      S8("-o"), image, source_path};

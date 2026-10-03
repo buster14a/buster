@@ -302,18 +302,55 @@ when no matrix configure trees are present.
 Qualification uses manual dispatch of the existing `ci.yml` on three branches
 pointing to **the same immutable commit**. Pushes and pull requests keep defaults.
 
-| Branch | Checks layout | Windows grouped-checks admission |
-| --- | --- | --- |
-| `codex/ci-checks-combined-overlap` | Combined | Overlap |
-| `codex/ci-checks-combined-all-builds` | Combined | All builds first |
-| `codex/ci-checks-split-overlap` | Split | Overlap |
+| Cohort | Branch | Checks layout | Windows grouped-checks admission |
+| --- | --- | --- | --- |
+| `legacy-v1` | `codex/ci-checks-combined-overlap` | Combined | Overlap |
+| `legacy-v1` | `codex/ci-checks-combined-all-builds` | Combined | All builds first |
+| `legacy-v1` | `codex/ci-checks-split-overlap` | Split | Overlap |
+| `issue2120-evidence-v2` | `codex/2120-evidence-v2-combined-overlap` | Combined | Overlap |
+| `issue2120-evidence-v2` | `codex/2120-evidence-v2-combined-all-builds` | Combined | All builds first |
+| `issue2120-evidence-v2` | `codex/2120-evidence-v2-split-overlap` | Split | Overlap |
+
+The historical refs remain frozen at
+`e424b387fcb51b00c1d19e87e2d369ae8a212792`; new measurements use the three
+prospective refs after the accepted evidence producers share one source.
+The prospective campaign must declare its immutable source and workflow blob
+before sampling, in addition to the unchanged schema, repository and samples:
+
+```json
+"cohort": {
+  "name": "issue2120-evidence-v2",
+  "head_sha": "<exact 40 lowercase hex source commit>",
+  "workflow_blob_sha": "<exact 40 lowercase hex ci.yml blob>"
+}
+```
+
+Each of the nine samples must match both declared pins and its exact
+cohort/variant branch. Mutually consistent samples at a different source or
+workflow do not satisfy the declaration. Missing, malformed or unknown
+declarations cannot admit the new refs. An omitted `cohort` preserves the
+historical `legacy-v1` reader behavior; an explicit `legacy-v1` declaration
+requires both pins and keeps the old refs. Cohorts cannot mix. The verdict
+retains the validated declaration; declared pins do not authenticate invented
+API or artifact records.
+
+Use the existing sequential order A1 → B1 → C1 → B2 → C2 → A2 → C3 → A3 → B3,
+where A is combined overlap, B is combined all-builds and C is split overlap.
+Leave `cmake_profile` and `analyzer_comparison` false. Investigate any failure,
+source drift or incomparable conditions/census before progressing; retain all
+failed, cancelled and retried attempts separately from successful first-attempt
+samples. A replacement or sampling extension needs a prospective disposition,
+not a relabelled retry or dispatches until green.
 
 The original dispatch inputs and reviewed support ledger stay intact. Ordinary
 dispatches already bypass main-push reuse. Split completion additionally checks
 the exact API branch identity. Historical timing keeps combined and split job
 cohorts separate; admission A/B conclusions require native phase metadata.
+The generic `github_ci_time.py` summary groups by workflow blob and runner
+inventory, so its descriptive medians can pool A and B. Use the qualification
+reader's explicit per-variant medians for the admission comparison.
 
-Only the combination steps on these exact dispatch refs enable
+Only the combination steps on these six exact dispatch refs enable
 `BUSTER_CI_CHECKS_EVIDENCE=1`. The native phase observer then retains each
 runtime invocation's independent module inventory, binary SHA-256 and test log
 in `unit-observations/<task-id>/` beside `matrix-phases/`. These receipts bind
@@ -380,7 +417,7 @@ requires Clang/CMake/Ninja, and UEFI requires compiler/CMake/Ninja plus both QEM
 versions. CI complete and the optional executed reuse decision keep explicit
 empty tool/cache maps. Every job retains its actual image and assigned label.
 
-The three qualification dispatch refs also enable the separate
+The six qualification dispatch refs also enable the separate
 `BUSTER_CI_CONDITIONS_EVIDENCE=1` in five selected setup/payload steps.
 `tools/ci_checks_tools.py` records Go before actionlint, Ninja selected by the
 actual generated `CMAKE_MAKE_PROGRAM` in iOS/analyzer/UEFI, and adb after the
@@ -414,3 +451,48 @@ even when source, compiler and CPU model names match. Neither model names nor
 assertion totals may reconstruct a missing host profile or normalize differing
 censuses. Historical archives without measured host/resource evidence remain
 diagnostic; qualification requires a prospectively declared comparable cohort.
+
+
+### Actual job environment receipts
+
+The unchanged six exact qualification dispatch refs also opt in to
+`tools/ci_job_environment.py` immediately after checkout in Workflow lint,
+UEFI firmware boot, Clang analyzer shards and CI complete. The executed Main CI
+reuse job has the same wiring; its push/main guard stays intact, so the intended
+manual campaign skips it. Each job retains the bounded JSON in its existing
+artifact even when later work fails. CI complete collects under `always()` plus
+the opt-in and includes the receipt in its desktop-partition inventory artifact.
+
+The receipt records only exact repository/source/run/attempt/workflow-job
+bindings and the actual whitelisted job environment: requested runner label,
+runner OS/architecture/instance name, ImageOS/ImageVersion and raw workflow
+provenance. `GITHUB_JOB` is not a numeric API job ID. `GITHUB_WORKFLOW_SHA` is a
+workflow commit, not the ci.yml blob. Join actual source/workflow/API job and
+artifact identities during readback. Keep requested runner label distinct from
+RUNNER_NAME; the latter is instance provenance, not cross-sample equality.
+
+Receipt `status=complete` means every recorded binding/observation is available,
+not that the job or campaign is accepted. Missing, blank, whitespace-only and
+padded unknown sentinels remain verbatim with `status=incomplete`. Readback must
+require complete status before projecting image facts into conditions; the
+unchanged qualifier does not strip strings for the collector. No Setup preamble,
+API label or requested runner value substitutes for actual image environment.
+No API request, executable probe, cache decision or tool-map change runs here.
+CI complete and an executed reuse role still have empty tool/cache maps.
+
+With the same exact opt-in, the Android SDK installer appends a bounded
+`ANDROID_SDK_SYSTEM_IMAGE_REVISION` JSON witness to its existing retained SDK
+log and stdout after structurally validated preinstalled success and validated
+zero-exit installation success. It reads only the same requested system image's
+actual source.properties, retains that file's path/size/SHA-256 and its single
+positive whole Pkg.Revision, and binds source/run/attempt/workflow job. Valid
+preinstalled images are not reinstalled when another package needs repair.
+Missing, duplicate, malformed, oversized, symlinked or changing metadata stays
+unknown; package/API level is not a revision. Default setup outputs, package
+validation, request classification, retries, deadlines and exit policy stay
+intact. The existing strict revision/tool/cache contracts remain unchanged.
+
+This extends the owned prospective #2427 source before the separate observer
+#2430 workflow delta. Final actual main/source/workflow pins, retained receipt
+readbacks and all required role joins must be independently checked before A1.
+Historical cohorts and failed/retried receipts retain their original meanings.

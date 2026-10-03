@@ -41,8 +41,8 @@ env:
   # Sanitizer correctness policy belongs to generated test commands; keeping a
   # second workflow default would conceal precedence regressions.
   BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
-  BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && 'split' || 'combined' }}
-  BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
+  BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && 'split' || 'combined' }}
+  BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
 
 jobs:
   lint:
@@ -52,9 +52,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
       - name: Test merge-parent preservation guard
         shell: bash
         run: python3 -B tools/merge_parent_preservation_test.py -v
@@ -73,6 +81,7 @@ jobs:
           python3 -B tools/ci_unit_tests_campaign_test.py -v
           python3 -B tools/ci_checks_qualification_test.py -v
           python3 -B tools/ci_checks_tools_test.py -v
+          python3 -B tools/ci_job_environment_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
@@ -143,6 +152,7 @@ jobs:
           path: |
             ${{ runner.temp }}/actionlint.log
             ${{ runner.temp }}/selected-go.json
+            ${{ runner.temp }}/job-environment.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -161,8 +171,16 @@ jobs:
       receipt: ${{ steps.admit.outputs.receipt }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
       - name: Verify exact queue execution before scheduling main jobs
         id: admit
         shell: bash
@@ -177,7 +195,9 @@ jobs:
           label: main-ci-reuse
           label_title: Main CI reuse
           name: main-ci-reuse-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/main-ci-reuse.json
+          path: |
+            ${{ runner.temp }}/main-ci-reuse.json
+            ${{ runner.temp }}/job-environment.json
           if-no-files-found: error
           retention-days: 7
 
@@ -203,8 +223,8 @@ jobs:
       fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         lane: [linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64, windows-aarch64]
-        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && '["release", "checks", "sanitized-debug", "sanitized-release", "portability"]' || '["release", "checks"]') }}
-        exclude: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-checks-split-overlap' && '[{"lane":"linux-x86_64","shard":"checks"},{"lane":"linux-aarch64","shard":"checks"},{"lane":"windows-x86_64","shard":"checks"},{"lane":"macos-aarch64","shard":"sanitized-debug"},{"lane":"macos-aarch64","shard":"sanitized-release"},{"lane":"macos-aarch64","shard":"portability"},{"lane":"windows-aarch64","shard":"sanitized-debug"},{"lane":"windows-aarch64","shard":"sanitized-release"},{"lane":"windows-aarch64","shard":"portability"}]' || '[]') }}
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '["release", "checks", "sanitized-debug", "sanitized-release", "portability"]' || '["release", "checks"]') }}
+        exclude: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '[{"lane":"linux-x86_64","shard":"checks"},{"lane":"linux-aarch64","shard":"checks"},{"lane":"windows-x86_64","shard":"checks"},{"lane":"macos-aarch64","shard":"sanitized-debug"},{"lane":"macos-aarch64","shard":"sanitized-release"},{"lane":"macos-aarch64","shard":"portability"},{"lane":"windows-aarch64","shard":"sanitized-debug"},{"lane":"windows-aarch64","shard":"sanitized-release"},{"lane":"windows-aarch64","shard":"portability"}]' || '[]') }}
         include:
           - name: Linux x86-64
             lane: linux-x86_64
@@ -521,7 +541,7 @@ jobs:
         id: combinations_unix
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
-          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
+          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
         if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
         shell: bash
         run: |
@@ -556,8 +576,8 @@ jobs:
         shell: powershell
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
-          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}
-          BUSTER_MATRIX_TEST_ADMISSION: ${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && matrix.shard == 'checks' && github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' && 'all-builds' || 'overlap' }}
+          BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
+          BUSTER_MATRIX_TEST_ADMISSION: ${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && matrix.shard == 'checks' && (github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && 'all-builds' || 'overlap' }}
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
           CLANG_ARCH: ${{ matrix.clang_arch }}
@@ -1154,8 +1174,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/buster-ci/job-environment.json"
       - name: Install pinned QEMU and reference firmware
         shell: bash
         run: |
@@ -1215,6 +1243,7 @@ jobs:
             build/uefi-self-test
             build/uefi-compiler/CMakeCache.txt
             ${{ runner.temp }}/buster-ci/selected-ninja.json
+            ${{ runner.temp }}/buster-ci/job-environment.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -1226,9 +1255,17 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/buster-analyzer/job-environment.json"
       - name: Bootstrap candidate and select reference build driver
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
@@ -1471,8 +1508,16 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
         with:
           persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
       - name: Verify every desktop partition exists
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
@@ -1497,6 +1542,7 @@ jobs:
           path: |
             ${{ runner.temp }}/desktop-partitions.json
             ${{ runner.temp }}/main-ci-reuse-finish.json
+            ${{ runner.temp }}/job-environment.json
           if-no-files-found: error
           retention-days: 7
       - name: Require every shard
