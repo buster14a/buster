@@ -71,7 +71,6 @@ jobs:
           python3 -B tools/ci_checks_qualification_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
-          python3 -B tools/ci_workflow_concurrency_test.py -v
       - name: Validate retired Vulkan installer boundary
         shell: bash
         run: |
@@ -117,7 +116,7 @@ jobs:
         run: |
           set -euo pipefail
           # The pinned actionlint predates GitHub's queue: max field. The
-          # preceding policy test confines that field to reviewed serial workflows.
+          # preceding policy test confines that field to the reviewed workflow.
           go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -ignore 'unexpected key "queue" for "concurrency" section' -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
       - name: Lint result and reproduction
         if: ${{ always() }}

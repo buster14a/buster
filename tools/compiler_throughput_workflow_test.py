@@ -5,6 +5,9 @@ from pathlib import Path
 import re
 import unittest
 
+# Expose the main-push audit through the existing workflow-lint entry point.
+from ci_workflow_concurrency_test import MainPushConcurrencyTests
+
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
