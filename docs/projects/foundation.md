@@ -22,6 +22,15 @@ Numeric, time and base definitions remain alongside these modules in
 [src/buster/lib](../../src/buster/lib/); the table is an entry-point index, not
 an inventory of every helper or a blanket support claim.
 
+The string formatting family consumes typed placeholders such as `{S8}`
+and `{u32}`; its complete vocabulary and integer modifier syntax are documented
+at `string_format` in `string.h`. Escape a literal opening brace as `{{` and
+a closing brace as `}}` (a single closing brace also remains literal).
+Brace-bearing C source can be passed unchanged as a `{S8}` argument.
+Malformed and unknown placeholders are programming errors: they fail with a
+fixed raw diagnostic naming the cause and opening-brace escape, without
+re-entering formatting or allocating while reporting the failure.
+
 ## Validation and work
 
 Use the affected existing module tests and [test registration rules](../agents/testing.md).
