@@ -6289,15 +6289,6 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             }
             destination->sealed = true;
         }
-        u32 value_count = 0;
-        IR_CONSTRUCTION_RECORD(SSA_REMAP_VALUE_ROWS, (u64)count * 3);
-        for (u32 value = 0; value < count; value += 1)
-        {
-            if (value_map[value] != UINT32_MAX)
-            {
-                value_map[value] = value_count++;
-            }
-        }
         // A promoted named local has no surviving LOCAL/LOAD/STORE row. When
         // its sole entry initializer remains an instruction-defined value,
         // retain the local identity on that definition before value IDs are
@@ -6321,11 +6312,20 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                 instruction->canonical_local = local->id;
             }
         }
+        // Resolve named-local provenance before overwriting any old value row.
+        // Dense IDs follow ascending old IDs, so a retained row's destination
+        // cannot exceed its source and cannot overwrite a later source row.
+        u32 value_count = 0;
+        IR_CONSTRUCTION_RECORD(SSA_REMAP_VALUE_ROWS, (u64)count * 2);
         for (u32 value = 0; value < count; value += 1)
         {
-            if (replacements[value] == value && value_map[value] != UINT32_MAX)
+            if (value_map[value] != UINT32_MAX)
             {
-                function->values[value_map[value]] = function->values[value];
+                value_map[value] = value_count++;
+                if (replacements[value] == value)
+                {
+                    function->values[value_map[value]] = function->values[value];
+                }
             }
         }
         for (u32 value = 0; value < count; value += 1)

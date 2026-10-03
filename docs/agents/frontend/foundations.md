@@ -130,6 +130,12 @@ Temporary places and read aliases preserve C lvalue/qualifier checks without
 emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization
 resolves aliases and compacts values/operand slices. Debug-local names, types,
 IDs, scopes and source ranges are preserved; frontend entity IDs do not escape.
+Named-local initializer provenance consumes old value rows before compaction.
+Dense numbering and retained-root copying share one ascending old-ID scan;
+each destination is at or below its source, so no future source row is
+overwritten. Alias resolution follows in its existing old-ID order. Shared
+operand slices still remap into a fresh dense pool so no old operand is
+interpreted twice through an already updated ID.
 The existing conservative opcode summary also tracks `LOCAL`, so shared
 promotion skips its discovery scan for certified functions with no memory
 locals. Unknown summaries still scan and the shared algorithm stays independent.

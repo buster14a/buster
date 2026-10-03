@@ -27907,10 +27907,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArgum
         IrConstructionCounters after = ir_construction_counters();
         u64 blocks = after.values[IR_CONSTRUCTION_BEFORE_SSA_BLOCK_ROWS] - before.values[IR_CONSTRUCTION_BEFORE_SSA_BLOCK_ROWS];
         u64 visits = after.values[IR_CONSTRUCTION_SSA_SIMPLIFY_BLOCK_VISITS] - before.values[IR_CONSTRUCTION_SSA_SIMPLIFY_BLOCK_VISITS];
+        u64 values = after.values[IR_CONSTRUCTION_SSA_REPLACEMENT_ROWS] - before.values[IR_CONSTRUCTION_SSA_REPLACEMENT_ROWS];
+        u64 remap_visits = after.values[IR_CONSTRUCTION_SSA_REMAP_VALUE_ROWS] - before.values[IR_CONSTRUCTION_SSA_REMAP_VALUE_ROWS];
         BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
         // Include the initial block census in this budget. A whole-CFG second
         // sweep exceeds it at every geometric size in this corpus.
         BUSTER_TEST(arguments, visits * 2 < blocks * 3);
+        BUSTER_TEST(arguments, values && remap_visits == values * 2);
 #endif
         CIRLowerResult reference = c_lower_to_ir_with_options(temporary.arena, S8("sparse-finish.c"), tokens, parse, target_native,
             (CIRLowerOptions){.disable_direct_ssa = true});
@@ -27923,6 +27926,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArgum
             BUSTER_TEST(arguments, ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, ir_validate_canonical_module(reference.program, reference.program->modules).error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, ir_prepare_canonical_module(reference.program, reference.program->modules, false).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// Entry initializer provenance must consume old rows before dense copies can
+// replace them. Two named owners share one initializer root; compaction must
+// keep its first identity and bind the later initializer to its own result.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_value_compaction(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int test(int n){int first=n+3;int alias=first;int last=alias+7;return first+last;}");
+    String8 targets[] = {
+        S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"),
+        S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult target = target_parse_triple(targets[target_index]);
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("ssa-value-compaction.c"), tokens, parse, target.target);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && direct.program && !direct.diagnostic_count);
+        if (direct.program && !direct.diagnostic_count)
+        {
+            IrModule* module = direct.program->modules;
+            IrFunction* function = c_test_find_ir_function(module, S8("test"));
+            BUSTER_TEST(arguments, function && direct.direct_ssa.locals == 4);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(direct.program, module).error == IR_VALIDATION_NONE);
+            if (function)
+            {
+                IrDebugLocal* first = 0;
+                IrDebugLocal* alias = 0;
+                IrDebugLocal* last = 0;
+                for (u32 index = 0; index < function->debug_local_count; index += 1)
+                {
+                    IrDebugLocal* local = function->debug_locals + index;
+                    if (string_equal(local->name, S8("first")))
+                    {
+                        first = local;
+                    }
+                    else if (string_equal(local->name, S8("alias")))
+                    {
+                        alias = local;
+                    }
+                    else if (string_equal(local->name, S8("last")))
+                    {
+                        last = local;
+                    }
+                }
+                BUSTER_TEST(arguments, first && alias && last);
+                if (first && alias && last)
+                {
+                    u32 first_definitions = 0;
+                    u32 alias_definitions = 0;
+                    u32 last_definitions = 0;
+                    for (u32 index = 0; index < function->instruction_count; index += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + index;
+                        first_definitions += instruction->canonical_local.value == first->id.value;
+                        alias_definitions += instruction->canonical_local.value == alias->id.value;
+                        last_definitions += instruction->canonical_local.value == last->id.value;
+                        if (instruction->canonical_local.value == first->id.value || instruction->canonical_local.value == last->id.value)
+                        {
+                            BUSTER_TEST(arguments, instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation == IR_BINARY_INTEGER_ADD);
+                            BUSTER_TEST(arguments, instruction->result.value < function->value_count);
+                            if (instruction->result.value < function->value_count)
+                            {
+                                IrValue* value = function->values + instruction->result.value;
+                                BUSTER_TEST(arguments, value->definition.value == index && value->category == IR_VALUE_VALUE);
+                                BUSTER_TEST(arguments, value->canonical_type.value == instruction->canonical_type.value);
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, first_definitions == 1 && alias_definitions == 0 && last_definitions == 1);
+                }
+            }
         }
         scratch_end(temporary);
     }
@@ -32419,6 +32503,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
+    BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
     BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
