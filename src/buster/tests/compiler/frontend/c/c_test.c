@@ -11794,7 +11794,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_stddef_need_protocol(UnitTestArguments
     struct
     {
         u32 requests;
-        i32 extension;
+        s32 extension;
         u32 order;
     } cases[] = {
         {1, -1, 0}, {2, -1, 0}, {4, -1, 0}, {8, -1, 0}, {16, -1, 0}, {32, -1, 0}, {64, -1, 0}, {128, -1, 0},
@@ -11820,7 +11820,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_stddef_need_protocol(UnitTestArguments
                 String8 source = S8("");
                 if (cases[test].extension >= 0)
                 {
-                    source = string_format(temporary.arena, S8("#define __STDC_WANT_LIB_EXT1__ {i32}\n"), cases[test].extension);
+                    source = string_format(temporary.arena, S8("#define __STDC_WANT_LIB_EXT1__ {s32}\n"), cases[test].extension);
                 }
                 for (u32 request = 0; request < BUSTER_ARRAY_LENGTH(requests); request += 1)
                 {
@@ -11846,9 +11846,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_stddef_need_protocol(UnitTestArguments
                 {
                     source = string_format(temporary.arena, S8("{S8}#include <stddef.h>\n"), source);
                 }
-                u32 expected = cases[test].requests ? cases[test].requests : STDDEF_ALL_REQUESTS & ~STDDEF_RSIZE_BIT;
+                u32 expected = cases[test].requests ? cases[test].requests : STDDEF_ALL_REQUESTS & ~(u32)STDDEF_RSIZE_BIT;
                 if (cases[test].extension == 1 || cases[test].order == 2) expected |= STDDEF_RSIZE_BIT;
-                if (dialect == 0) expected &= ~STDDEF_NULLPTR_BIT;
+                if (dialect == 0) expected &= ~(u32)STDDEF_NULLPTR_BIT;
                 for (u32 request = 0; request < BUSTER_ARRAY_LENGTH(requests); request += 1)
                 {
                     source = string_format(temporary.arena, S8("{S8}#ifdef {S8}\n#error unconsumed stddef request\n#endif\n"),
@@ -11896,7 +11896,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_stddef_need_protocol(UnitTestArguments
                     for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
                     {
                         BUSTER_TEST_RAW(arguments, counts[name] == ((expected >> name) & 1),
-                            string_format(temporary.arena, S8("stddef request={u32} order={u32} extension={i32} dialect={u32} name={S8}"),
+                            string_format(temporary.arena, S8("stddef request={u32} order={u32} extension={s32} dialect={u32} name={S8}"),
                                 cases[test].requests, cases[test].order, cases[test].extension, dialect, names[name]));
                     }
                     CParserResult syntax = c_parse_ast(temporary.arena, tokens);
