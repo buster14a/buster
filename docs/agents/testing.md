@@ -64,6 +64,13 @@
   `if (BUSTER_REQUIRE(arguments, prerequisite))`. It records the prerequisite
   with normal assertion accounting, evaluates it once, and skips only the
   guarded body when it fails; unrelated fixtures and modules continue.
+- With a debugger attached, assertion failures stop through `os_fail()` after
+  reporting the diagnostic. The arena, fixture-timing, and prerequisite harness
+  self-tests set `UnitTestArguments.suppress_debugger_break` only around their
+  deliberately failed assertions and clear it before any dependent body or
+  later assertion. Failure counts and diagnostics remain unchanged.
+  `test_debugger_failure_self_test` checks debugger-present/absent decisions,
+  restoration, and argument-free failures without changing registered totals.
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
@@ -673,6 +680,30 @@ normal return and deliberate trap. Each pointer-width/frontend run completes
 against the original returned bytes after execution. The source and oracle are
 generated inline, leaving the frozen support inventory unchanged. Existing
 stack-reservation and memory-hint regressions remain required.
+
+## Direct canonical Wasm bit counts
+
+`compiler_driver_test_wasm_bit_counts` constructs CLZ, CTZ and population-count
+functions directly in canonical IR, so C integer promotions cannot hide a
+narrow backend defect. The block-row protocol commits each argument, unary
+operation and return; canonical preparation validates the module before each
+pointer-width emitter run. Signed and unsigned widths 7, 8, 16, 24, 32, 33, 48
+and 64 separate semantic width from the i32/i64 carrier.
+
+An inline Node oracle checks twelve literal expectations, exhausts both 7- and
+8-bit bit patterns, and checks zero, all ones, sign boundaries, alternating
+patterns, every single bit and its complement at larger widths. Dirty carrier
+bits separately check normalization. Each pointer-size run makes 5,352 actual
+export calls; zero CLZ/CTZ results use the canonical width convention, and
+32/64-bit controls retain full-carrier behavior. The oracle loops over the
+semantic bits instead of calling a host count intrinsic.
+
+Repeated emission must be byte-identical. The consumed module SHA-256 and
+before/after artifact comparisons prove that Node receives the original bytes.
+Normal zero exit, empty stderr and the exact terminal summary are required
+through the existing bounded Node runner. Missing Node is reported as an
+execution skip, not an engine pass. The script is inline; frozen Wasm oracles,
+startup shims and support inventory stay untouched.
 
 ## Node-backed Wasm oracle deadlines
 

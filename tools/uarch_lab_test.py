@@ -2,7 +2,10 @@
 """Offline regressions for tools/uarch_lab.py: every parser on recorded perf
 and compiler output shapes, the statistics, phase attribution, and one full
 `run` against a fake `perf` and a fake `ide` so each step's code path executes
-without a PMU.  Run: python3 -B tools/uarch_lab_test.py
+without a PMU; for `compare`, the sign-test and bootstrap statistics on
+synthetic paired data, ABBA order, verdict logic, golden summary.json keys and
+end-to-end runs against a second fake `ide-b`.
+Run: python3 -B tools/uarch_lab_test.py
 """
 
 import json
@@ -315,8 +318,13 @@ class TimelineTests(unittest.TestCase):
 
 
 FAKE_IDE = r'''#!/usr/bin/env python3
-import sys
+import sys, time
 args = sys.argv[1:]
+if globals().get("ARGV_LOG"):
+    import os
+    info = os.stat(sys.argv[0])
+    open(ARGV_LOG, "a").write("%s %d %d\n" % (sys.argv[0], info.st_ino, info.st_nlink))
+time.sleep(globals().get("DELAY", 0.0))
 if args[:1] == ["bench"]:
     print("BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=30 bytes=21042 min_ns=3359552 median_ns=3983033")
     sys.exit(0)
@@ -329,7 +337,7 @@ for arg in args:
             sys.stderr.write("cc: error: unknown argument\n")
             sys.exit(1)
         open(arg.split("=", 1)[1], "w").write(METRICS)
-open(out, "wb").write(b"\x7fELF same bytes")
+open(out, "wb").write(globals().get("OUTPUT", b"\x7fELF same bytes"))
 '''
 
 FAKE_PERF = r'''#!/usr/bin/env python3
@@ -346,6 +354,9 @@ def sort():
         if arg == "--sort":
             return args[index + 1]
     return None
+# The compare fixtures name the candidate fake `ide-b`: fewer instructions,
+# a shifted cycles profile.
+CANDIDATE = "ide-b" in " ".join(args)
 SPLIT = {"frontend_bound": 22.25, "bad_speculation": 7.5, "backend_bound": 40.125, "retiring": 30.125}
 command = args[0]
 if command == "--version":
@@ -369,6 +380,8 @@ elif command == "stat":
             text = TOPDOWN_JSON if "-j" in args else TOPDOWN
     elif "-I" in args:
         text = INTERVAL
+    elif CANDIDATE:
+        text = text.replace("16934571004", "16595879584")
     if option("-o"):
         open(option("-o"), "w").write(text)
     sys.exit(status)
@@ -378,10 +391,12 @@ elif command == "record":
         sys.stderr.write("The dTLB-load-misses event is not supported.\n")
         sys.exit(255)
     status = child()
-    open(option("-o"), "w").write(event)
+    open(option("-o"), "w").write(event + ("|b" if CANDIDATE else ""))
     sys.exit(status)
 elif command == "report":
-    event = open(option("-i")).read()
+    event, _, variant = open(option("-i")).read().partition("|")
+    if variant:
+        SELF = SELF.replace("4.32%  [.] ir_validate", "2.32%  [.] ir_validate")
     if sort() == "pid,dso":
         print(TASKS)
     elif "--tid" in args:
@@ -483,6 +498,18 @@ class FlowTests(Fakes, unittest.TestCase):
         self.assertIn("BENCH_C_FRONTEND", report)
         rerendered = lab.render_report(output)
         self.assertEqual(rerendered, report)
+        with open(os.path.join(output, "summary.json")) as handle:
+            summary = json.load(handle)
+        self.assertEqual(summary["schema"], lab.RUN_SCHEMA)
+        self.assertEqual(set(summary), RUN_SUMMARY_KEYS)
+        self.assertEqual(set(summary["timed"]["metrics"]), set(COMPARE_METRIC_NAMES))
+        self.assertEqual(summary["timed"]["metrics"]["instructions"]["median"], 16934571004)
+        self.assertEqual(set(summary["timed"]["metrics"]["wall"]), set(lab.SUMMARY_KEYS) | {"unit", "label"})
+        self.assertEqual(summary["phases"]["analysis"]["median_ms"], 30.0)
+        self.assertEqual(summary["dominant_topdown_category"], {"category": "backend_bound", "percent": 40.125})
+        self.assertEqual(summary["hot_symbols"]["cycles"][0], {"symbol": "ir_validate_canonical_function", "share": 4.32})
+        self.assertEqual(summary["steps"]["timed"]["status"], "ok")
+        self.assertEqual(summary["work"]["translated_bytes"], 33560496)
 
     def test_ibs_step(self):
         root, ide, perf = self.fakes("new")
@@ -504,6 +531,25 @@ class FlowTests(Fakes, unittest.TestCase):
         self.assertIn("| RAM hit | 45.97% | 13 |", text)
         with open(os.path.join(root, "out", "ibs", "ibs_op.filter.json")) as handle:
             self.assertEqual(json.load(handle)["options"], ["--tid", "4242", "--comms", "ide,main_thread"])
+
+    def test_ibs_step_with_fresh_copies(self):
+        root, ide, perf = self.fakes("new")
+        real_isdir = os.path.isdir
+        saved_path = os.environ["PATH"]
+        os.environ["PATH"] = root + os.pathsep + saved_path
+        output = os.path.join(root, "out")
+        try:
+            with mock.patch.object(lab.os.path, "isdir", lambda path: path.startswith("/sys/bus/event_source/") or real_isdir(path)):
+                note = lab.step_ibs(lab.Lab(output, perf, None, ide, root, (), True, True))
+        finally:
+            os.environ["PATH"] = saved_path
+        self.assertTrue(note.startswith("ibs_op exit=0; ibs_fetch exit=0; perf mem exit=0; ibs_op: tid 4242"), note)
+        with open(os.path.join(output, "commands.log")) as handle:
+            records = [line for line in handle if " record " in line]
+        self.assertEqual(len(records), 3)
+        self.assertTrue(all("--no-buildid-cache" in line and os.path.join(output, "instances") in line for line in records), records)
+        self.assertEqual(len({line.split(" -- ")[-1] for line in records}), 3)
+        self.assertFalse(os.path.exists(os.path.join(output, "instances")))
 
     def test_binary_without_metrics_out_degrades(self):
         meta, report, _ = self.run_lab("old")
@@ -770,6 +816,487 @@ class Lab2ReviewTests(unittest.TestCase):
         summary = lab.fault_summary(REUSED_FAULT_SCRIPT, buckets=2)
         self.assertEqual(dict(summary["regions"])[lab.TRANSIENT_FILES], 2)
         self.assertNotIn("driver_diagnostic", " ".join(label for label, _ in summary["regions"]))
+
+
+# Golden keys of the machine-readable summaries; a change here is a schema
+# change and needs a new schema id (RUN_SCHEMA / COMPARE_SCHEMA).
+RUN_SUMMARY_KEYS = {"schema", "directory", "command", "cpu", "ide", "host", "capabilities", "steps", "timed", "phases", "work",
+                    "topdown", "dominant_topdown_category", "hot_symbols", "findings"}
+COMPARE_SUMMARY_KEYS = {"schema", "directory", "command", "repo_root", "cpu", "host", "baseline", "candidate", "outputs_identical",
+                        "plan", "method", "verdict", "metrics", "phases", "checks", "profile", "steps", "warnings"}
+COMPARE_METRIC_KEYS = {"unit", "direction", "label", "n", "a_median", "b_median", "a_min", "b_min", "a_mad", "b_mad", "delta", "ratio",
+                       "ci_low", "ci_high", "ci_coverage", "geomean_ratio", "bootstrap_ci_low", "bootstrap_ci_high",
+                       "ratio_of_medians", "min_ratio", "change_percent", "outcome", "note"}
+VARIANT_KEYS = {"path", "sha256", "size_bytes", "runs", "failed", "identical_runs", "deterministic", "metrics_out", "source_metrics"}
+VERDICT_KEYS = {"metric", "outcome", "ratio", "ci_low", "ci_high", "ci_coverage", "change_percent", "bound_percent",
+                "min_effect_percent", "n", "explanation", "text"}
+PLAN_KEYS = {"pairs", "reason", "order", "fresh_copy", "seed", "confidence", "bootstrap_resamples", "complete_pairs"}
+MOVERS_KEYS = {"a_event_count", "b_event_count", "a_samples", "b_samples", "reliable", "note", "movers"}
+MOVER_ROW_KEYS = {"symbol", "a_share", "b_share", "delta_share", "noise_pp", "beyond_noise", "exceeds_bound", "a_estimate",
+                  "b_estimate", "delta_estimate"}
+COMPARE_METRIC_NAMES = ["wall", "task_clock", "compiler_wall", "instructions", "cycles", "ipc", "branch_misses", "branch_mpki",
+                        "page_faults", "minor_faults", "major_faults"]
+
+
+def paired_sample(count, ratio, seed, noise=0.002):
+    """Synthetic paired wall times: B = A x ratio with independent noise."""
+    generator = lab.random.Random(seed)
+    pairs = []
+    for _ in range(count):
+        base = 1.55 * (1.0 + generator.gauss(0.0, noise))
+        pairs.append((base * (1.0 + generator.gauss(0.0, noise)), base * ratio * (1.0 + generator.gauss(0.0, noise))))
+    return pairs
+
+
+class CompareStatisticsTests(unittest.TestCase):
+    def test_sign_test_ranks_match_binomial_tables(self):
+        self.assertEqual(lab.sign_test_rank(5), (0, None))
+        self.assertEqual(lab.sign_test_rank(6), (1, 1 - 2 / 64))
+        self.assertEqual(lab.sign_test_rank(10)[0], 2)
+        self.assertAlmostEqual(lab.sign_test_rank(10)[1], 1 - 22 / 1024)
+        self.assertEqual(lab.sign_test_rank(20)[0], 6)
+        self.assertEqual(lab.sign_test_rank(100)[0], 40)
+        self.assertGreaterEqual(lab.sign_test_rank(1000)[1], 0.95)
+        self.assertEqual(lab.median_ci(list(range(10, 0, -1))), (2, 9, lab.sign_test_rank(10)[1]))
+        self.assertEqual(lab.median_ci([1, 2, 3]), (None, None, None))
+
+    def test_ci_brackets_a_known_ratio(self):
+        result = lab.compare_series(paired_sample(40, 0.99, 7), "s", "lower", 1, time_metric=True)
+        self.assertEqual(result["n"], 40)
+        self.assertLess(result["ci_low"], 0.99)
+        self.assertGreater(result["ci_high"], 0.99)
+        self.assertLess(result["ci_high"], 1.0)
+        self.assertEqual(result["outcome"], "faster")
+        self.assertAlmostEqual(result["ratio"], 0.99, places=2)
+        self.assertLess(result["bootstrap_ci_low"], result["geomean_ratio"])
+        self.assertGreater(result["bootstrap_ci_high"], result["geomean_ratio"])
+        self.assertEqual(set(result) | {"label"}, COMPARE_METRIC_KEYS)
+
+    def test_ci_coverage_on_synthetic_data(self):
+        covered = 0
+        for trial in range(300):
+            low, high, _ = lab.median_ci([b / a for a, b in paired_sample(20, 1.0, 1000 + trial)])
+            covered += low <= 1.0 <= high
+        self.assertGreaterEqual(covered / 300, 0.93)
+
+    def test_seeded_bootstrap_is_deterministic(self):
+        ratios = [b / a for a, b in paired_sample(30, 1.01, 3)]
+        self.assertEqual(lab.bootstrap_geomean_ci(ratios, 5), lab.bootstrap_geomean_ci(ratios, 5))
+        self.assertNotEqual(lab.bootstrap_geomean_ci(ratios, 5), lab.bootstrap_geomean_ci(ratios, 6))
+        self.assertEqual(lab.bootstrap_geomean_ci([1.0], 5), (None, None))
+
+    def test_deterministic_counts_and_zero_values(self):
+        exact = lab.compare_series([(22287659805, 21841906609)] * 8, "count", "lower", 1)
+        self.assertAlmostEqual(exact["ratio"], 0.98, places=6)
+        self.assertEqual((exact["ci_low"], exact["ci_high"]), (exact["ratio"], exact["ratio"]))
+        self.assertEqual(exact["outcome"], "lower")
+        zero = lab.compare_series([(0, 0)] * 8, "count", "lower", 1)
+        self.assertEqual((zero["outcome"], zero["ratio"], zero["delta"]), ("no ratio (a zero value)", None, 0))
+        self.assertEqual(lab.compare_series([(None, 1.0)], "s", "lower", 1)["outcome"], "no data")
+
+    def test_verdict_logic(self):
+        self.assertEqual(lab.classify(0.98, 1.01, True), "no detectable difference")
+        self.assertEqual(lab.classify(0.97, 0.99, True), "faster")
+        self.assertEqual(lab.classify(1.01, 1.02, True), "slower")
+        self.assertEqual(lab.classify(1.01, 1.02), "higher")
+        self.assertEqual(lab.classify(None, None, True), "inconclusive")
+        metrics = {name: lab.compare_series(paired_sample(30, 1.0, 11), "s", "lower", 1, time_metric=True) for name in COMPARE_METRIC_NAMES}
+        verdict = lab.compare_verdict(metrics, None)
+        self.assertEqual(verdict["outcome"], "no detectable difference")
+        self.assertIn("includes 1.0", verdict["text"])
+        self.assertEqual(set(verdict), VERDICT_KEYS)
+        metrics["wall"] = lab.compare_series(paired_sample(4, 0.9, 1), "s", "lower", 1, time_metric=True)
+        self.assertEqual(lab.compare_verdict(metrics, None)["outcome"], "inconclusive")
+        metrics["wall"] = lab.compare_series(paired_sample(30, 0.95, 1), "s", "lower", 1, time_metric=True)
+        self.assertTrue(lab.compare_verdict(metrics, None)["text"].startswith(
+            "Candidate is FASTER: wall time B/A 0.9499 (-5.01%), 95% CI [0.9481, 0.9516] over 30 pairs, beyond the 0.5% practical floor."))
+
+    def test_proxy_alone_is_not_a_win(self):
+        metrics = {name: lab.compare_series(paired_sample(30, 1.0, 11), "s", "lower", 1, time_metric=True) for name in COMPARE_METRIC_NAMES}
+        metrics["instructions"] = lab.compare_series([(100.0, 97.0)] * 30, "count", "lower", 1)
+        variants = {role: dict.fromkeys(VARIANT_KEYS, 0) | {"deterministic": True, "metrics_out": True} for role in ("baseline", "candidate")}
+        warnings = lab.compare_warnings(variants, True, metrics, {}, {"config": {"cpu": 2, "fresh_copy": True}, "steps": {}})
+        self.assertEqual(warnings, ["instructions changed -3.00% but wall time shows no detectable difference: a proxy is not a win"])
+
+    def test_abba_schedule_and_pair_count(self):
+        self.assertEqual(lab.abba_schedule(4), [(1, "a"), (1, "b"), (2, "b"), (2, "a"), (3, "a"), (3, "b"), (4, "b"), (4, "a")])
+        count, reason = lab.choose_pair_count(3.2, 1.6, 20.0, 15.0, 0)
+        self.assertEqual(count % 2, 0)
+        self.assertEqual(count, 2 + int((900 - 20) / 3.2) + (2 + int((900 - 20) / 3.2)) % 2)
+        self.assertIn("3.200 s per pair", reason)
+        self.assertEqual(lab.choose_pair_count(3.2, 1.6, 20.0, 0.01, 0)[0], lab.MIN_PAIRS)
+        self.assertEqual(lab.compare_profile_cost(["g1", "g2"], ["topdown", "sampling"]),
+                         2 * (2 * lab.TOPDOWN_COMPILES_PER_GROUP + len(lab.SAMPLE_EVENTS) + 1))
+
+    def test_order_effect_and_drift_checks(self):
+        def pairs(values):
+            return [{"pair": index + 1, "order": lab.abba_order(index + 1), "metrics_a": {"wall": a}, "metrics_b": {"wall": b}}
+                    for index, (a, b) in enumerate(values)]
+        clean = lab.compare_checks(pairs(paired_sample(40, 1.0, 21)))
+        self.assertFalse(clean["order_effect"]["flag"])
+        self.assertFalse(clean["drift"]["flag"])
+        self.assertEqual(len(clean["drift"]["tenth_medians_ratio"]), 10)
+        # The second run of each pair 2% faster: AB ratios ~0.98, BA ~1.02.
+        positional = [(a, b * (0.98 if lab.abba_order(index + 1) == "AB" else 1.02)) for index, (a, b) in enumerate(paired_sample(40, 1.0, 22))]
+        checks = lab.compare_checks(pairs(positional))
+        self.assertTrue(checks["order_effect"]["flag"])
+        self.assertAlmostEqual(checks["order_effect"]["second_position_factor"], 0.98, places=2)
+        drifting = [(a, b * (1.0 + 0.002 * index)) for index, (a, b) in enumerate(paired_sample(40, 1.0, 23))]
+        self.assertTrue(lab.compare_checks(pairs(drifting))["drift"]["flag"])
+        self.assertFalse(lab.compare_checks(pairs(paired_sample(6, 1.0, 1)))["drift"]["checked"])
+
+    def test_symbol_movers(self):
+        movers = lab.symbol_movers(REPORT_SELF, REPORT_SELF.replace("4.32%  [.] ir_validate", "2.32%  [.] ir_validate"))
+        self.assertEqual(movers["a_event_count"], 5074350792)
+        top = movers["movers"][0]
+        self.assertEqual((top["symbol"], round(top["delta_share"], 6)), ("ir_validate_canonical_function", -2.0))
+        self.assertAlmostEqual(top["delta_estimate"], -0.02 * 5074350792)
+        self.assertEqual(movers["movers"][1]["delta_share"], 0.0)
+
+
+@unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
+class CompareFlowTests(Fakes, unittest.TestCase):
+    def compare(self, arguments, candidate=None, baseline=None):
+        root, ide, perf = self.fakes("new")
+        if baseline:
+            write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new"}, **baseline))
+        other = os.path.join(root, "ide-b")
+        write_script(other, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new"}, **(candidate or {})))
+        output = os.path.join(root, "cmp")
+        stdout = sys.stdout
+        try:
+            sys.stdout = open(os.devnull, "w")
+            lab.main(["compare", "--baseline", ide, "--candidate", other, "--repo-root", root, "--cpu", "-1", "--output", output,
+                      "--perf", perf] + arguments)
+        finally:
+            sys.stdout.close()
+            sys.stdout = stdout
+        with open(os.path.join(output, "summary.json")) as handle:
+            summary = json.load(handle)
+        with open(os.path.join(output, "report.md")) as handle:
+            return summary, handle.read(), output
+
+    def test_slower_candidate_end_to_end(self):
+        summary, report, output = self.compare(
+            ["--pairs", "6", "--profile-steps", "topdown,sampling"],
+            {"DELAY": 0.25, "OUTPUT": b"\x7fELF other bytes", "METRICS": CC_METRICS.replace("analysis_ns=30000000", "analysis_ns=25000000")})
+        self.assertEqual(summary["schema"], lab.COMPARE_SCHEMA)
+        self.assertEqual(set(summary), COMPARE_SUMMARY_KEYS)
+        self.assertEqual(set(summary["metrics"]), set(COMPARE_METRIC_NAMES))
+        for row in summary["metrics"].values():
+            self.assertEqual(set(row), COMPARE_METRIC_KEYS)
+        self.assertEqual(set(summary["baseline"]), VARIANT_KEYS)
+        self.assertEqual(set(summary["verdict"]), VERDICT_KEYS)
+        self.assertEqual(set(summary["plan"]), PLAN_KEYS)
+        self.assertTrue(summary["plan"]["fresh_copy"])
+        self.assertEqual(summary["verdict"]["min_effect_percent"], lab.DEFAULT_MIN_EFFECT)
+        self.assertEqual(set(summary["profile"]["sampling"]["events"]["cycles"]), MOVERS_KEYS)
+        for row in summary["profile"]["sampling"]["events"]["cycles"]["movers"]:
+            self.assertEqual(set(row), MOVER_ROW_KEYS)
+        self.assertEqual(summary["plan"]["pairs"], 6)
+        self.assertEqual(summary["plan"]["complete_pairs"], 6)
+        self.assertEqual(summary["plan"]["seed"], lab.DEFAULT_SEED)
+        self.assertEqual(summary["verdict"]["outcome"], "slower", summary["verdict"])
+        self.assertTrue(summary["verdict"]["text"].startswith("Candidate is SLOWER"))
+        self.assertAlmostEqual(summary["metrics"]["instructions"]["ratio"], 16595879584 / 16934571004)
+        self.assertEqual(summary["metrics"]["instructions"]["outcome"], "lower")
+        self.assertEqual(summary["phases"]["analysis"]["delta"], -5.0)
+        self.assertEqual(summary["phases"]["read"]["outcome"], "no ratio (a zero value)")
+        self.assertTrue(summary["baseline"]["deterministic"] and summary["candidate"]["deterministic"])
+        self.assertFalse(summary["outputs_identical"])
+        self.assertIn("baseline and candidate outputs differ (expected for a code-generation change; a pure refactor should be identical)",
+                      summary["warnings"])
+        self.assertEqual(summary["baseline"]["sha256"], lab.sha256_file(summary["baseline"]["path"]))
+        with open(os.path.join(output, "pairs.json")) as handle:
+            order = [(record["pair"], record["variant"]) for record in json.load(handle)]
+        self.assertEqual(order, lab.abba_schedule(6))
+        movers = summary["profile"]["sampling"]["events"]["cycles"]["movers"]
+        self.assertEqual((movers[0]["symbol"], round(movers[0]["delta_share"], 6)), ("ir_validate_canonical_function", -2.0))
+        self.assertEqual(summary["profile"]["topdown"]["status"], "ok")
+        self.assertIn({"group": "PipelineL1", "metric": "backend_bound", "unit": "%", "a": 40.125, "b": 40.125, "delta": 0.0,
+                       "relative_change_percent": 0.0, "a_source": "alone", "b_source": "alone"}, summary["profile"]["topdown"]["metrics"])
+        self.assertTrue(report.startswith("# A/B compile-time comparison\n\n**Candidate is SLOWER"))
+        self.assertIn("| analysis | 30.00 | 25.00 | -5.00 | 0.8333 |", report)
+        self.assertIn("## Why: symbol share movers, sampling", report)
+        before = open(os.path.join(output, "summary.json")).read()
+        self.assertEqual(lab.render_compare(output), report)
+        self.assertEqual(open(os.path.join(output, "summary.json")).read(), before)
+
+    def test_identical_compilers_with_too_few_pairs(self):
+        summary, report, _ = self.compare(["--pairs", "2"])
+        self.assertEqual(summary["verdict"]["outcome"], "inconclusive")
+        self.assertTrue(summary["outputs_identical"])
+        self.assertEqual(summary["metrics"]["instructions"]["ratio"], 16595879584 / 16934571004)
+        self.assertEqual(summary["profile"], {})
+        self.assertIn("INCONCLUSIVE", report)
+
+    def test_target_minutes_chooses_whole_blocks(self):
+        summary, report, _ = self.compare(["--target-minutes", "0.001"])
+        self.assertEqual(summary["plan"]["pairs"], lab.MIN_PAIRS)
+        self.assertEqual(summary["plan"]["complete_pairs"], lab.MIN_PAIRS)
+        self.assertIn("--target-minutes 0.001:", summary["plan"]["reason"])
+        self.assertTrue(summary["checks"]["drift"]["checked"] is False or summary["checks"]["drift"]["subsets"][0]["n"] == 5)
+
+    def test_capabilities_detected_per_binary(self):
+        summary, report, output = self.compare(["--pairs", "2"], {"MODE": "old"})
+        self.assertTrue(summary["baseline"]["metrics_out"])
+        self.assertFalse(summary["candidate"]["metrics_out"])
+        self.assertIsNone(summary["phases"])
+        self.assertIn("candidate: no measured -fmetrics-out record, so no phase comparison", summary["warnings"])
+        self.assertTrue(os.path.exists(os.path.join(output, "pairs", "0001-a.ccmetrics")))
+        self.assertFalse(os.path.exists(os.path.join(output, "pairs", "0001-b.ccmetrics")))
+        self.assertIn("NA -- a variant wrote no measured `-fmetrics-out` record.", report)
+
+    def test_require_identical_output_stops_before_timing(self):
+        with self.assertRaises(SystemExit):
+            self.compare(["--pairs", "2", "--require-identical-output"], {"OUTPUT": b"different"})
+
+    def logged_runs(self, log):
+        with open(log) as handle:
+            return [(path, int(inode), int(links)) for path, inode, links in (line.split() for line in handle)]
+
+    # LAB3: each timed run and capture executes a new copy of its binary (a
+    # new inode, never a link), fsync'd before the run and deleted after it.
+    def test_fresh_copy_per_run(self):
+        log_dir = tempfile.mkdtemp(prefix="uarch-lab-argv-")
+        self.addCleanup(shutil.rmtree, log_dir, True)
+        logs = {key: os.path.join(log_dir, key + ".log") for key in ("a", "b")}
+        real_fsync = os.fsync
+        with mock.patch.object(lab.os, "fsync", side_effect=real_fsync) as fsync:
+            summary, report, output = self.compare(["--pairs", "6", "--profile-steps", "sampling"],
+                                                   {"ARGV_LOG": logs["b"]}, {"ARGV_LOG": logs["a"]})
+        originals = {"a": summary["baseline"]["path"], "b": summary["candidate"]["path"]}
+        for key in ("a", "b"):
+            runs = self.logged_runs(logs[key])
+            original_inode = os.stat(originals[key]).st_ino
+            fresh = [run for run in runs if run[0] != originals[key]]
+            # 6 timed runs, the sampling captures but dTLB (the fake perf
+            # rejects it before starting the workload) and the fault capture.
+            self.assertEqual(len(fresh), 6 + len(lab.SAMPLE_EVENTS) - 1 + 1, runs)
+            self.assertEqual(len({path for path, _, _ in fresh}), len(fresh))
+            for path, inode, links in fresh:
+                self.assertTrue(path.startswith(os.path.join(output, key, "instances") + os.sep), path)
+                self.assertEqual(os.path.basename(path), os.path.basename(originals[key]))
+                self.assertNotEqual(inode, original_inode)
+                self.assertEqual(links, 1)
+                self.assertFalse(os.path.exists(path))
+            self.assertFalse(os.path.exists(os.path.join(output, key, "instances")))
+        # One fsync'd copy per timed run and per capture attempt, both variants.
+        self.assertEqual(fsync.call_count, 2 * (6 + len(lab.SAMPLE_EVENTS) + 1))
+        self.assertTrue(summary["plan"]["fresh_copy"])
+        self.assertTrue(summary["baseline"]["deterministic"] and summary["candidate"]["deterministic"])
+        self.assertTrue(summary["outputs_identical"])
+        self.assertFalse(any("ran in place" in warning for warning in summary["warnings"]))
+        self.assertIn("binary instances: a fresh copy per timed run and capture", report)
+        with open(os.path.join(output, "compare.json")) as handle:
+            self.assertTrue(json.load(handle)["plan"]["fresh_copy"])
+
+    def test_no_fresh_copy_runs_in_place(self):
+        log_dir = tempfile.mkdtemp(prefix="uarch-lab-argv-")
+        self.addCleanup(shutil.rmtree, log_dir, True)
+        log = os.path.join(log_dir, "a.log")
+        summary, report, output = self.compare(["--pairs", "6", "--no-fresh-copy"], None, {"ARGV_LOG": log})
+        self.assertEqual({path for path, _, _ in self.logged_runs(log)}, {summary["baseline"]["path"]})
+        self.assertFalse(summary["plan"]["fresh_copy"])
+        self.assertTrue(any(warning.startswith("binaries ran in place") for warning in summary["warnings"]))
+        self.assertIn("**run in place**", report)
+
+    def test_min_effect_is_recorded(self):
+        summary, report, _ = self.compare(["--pairs", "6", "--min-effect", "2.5"])
+        self.assertEqual(summary["verdict"]["min_effect_percent"], 2.5)
+        self.assertIn("practical floor 2.5%", report)
+        with self.assertRaises(SystemExit):
+            self.compare(["--pairs", "6", "--min-effect", "-1"])
+
+
+@unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
+class RunFreshCopyTests(Fakes, unittest.TestCase):
+    def test_run_mode_uses_fresh_copies(self):
+        root, ide, perf = self.fakes("new")
+        log = os.path.join(root, "argv.log")
+        write_script(ide, FAKE_IDE, {"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new", "ARGV_LOG": log})
+        output = os.path.join(root, "out")
+        stdout = sys.stdout
+        try:
+            sys.stdout = open(os.devnull, "w")
+            lab.main(["run", "--ide", ide, "--repo-root", root, "--cpu", "-1", "--output", output, "--perf", perf, "--runs", "3",
+                      "--skip", "topdown", "timeline", "sampling", "micro"])
+        finally:
+            sys.stdout.close()
+            sys.stdout = stdout
+        with open(log) as handle:
+            paths = [line.split()[0] for line in handle]
+        fresh = [path for path in paths if path != ide]
+        self.assertEqual(len(fresh), 3)
+        self.assertEqual(len(set(fresh)), 3)
+        self.assertFalse(any(os.path.exists(path) for path in fresh))
+        with open(os.path.join(output, "summary.json")) as handle:
+            summary = json.load(handle)
+        self.assertTrue(summary["timed"]["plan"]["fresh_copy"])
+        self.assertEqual(summary["timed"]["identical"], 3)
+
+    def test_fresh_binary_copy_is_a_new_executable_file(self):
+        root = tempfile.mkdtemp(prefix="uarch-lab-copy-")
+        self.addCleanup(shutil.rmtree, root, True)
+        source = os.path.join(root, "ide")
+        with open(source, "wb") as handle:
+            handle.write(os.urandom(3 << 20))
+        os.chmod(source, 0o755)
+        destination = os.path.join(root, "copy")
+        with mock.patch.object(lab.os, "fsync", side_effect=os.fsync) as fsync:
+            lab.fresh_binary_copy(source, destination)
+        self.assertEqual(fsync.call_count, 1)
+        self.assertTrue(lab.filecmp.cmp(source, destination, shallow=False))
+        self.assertNotEqual(os.stat(source).st_ino, os.stat(destination).st_ino)
+        self.assertEqual(os.stat(destination).st_mode & 0o777, 0o755)
+        with self.assertRaises(FileExistsError):
+            lab.fresh_binary_copy(source, destination)
+
+
+def aa_pairs(count, offset, seed, noise=0.0005):
+    """Pairs whose B carries a fixed offset with small pair-to-pair noise."""
+    return paired_sample(count, offset, seed, noise)
+
+
+class Lab3ReviewTests(unittest.TestCase):
+    def metrics(self, wall, instructions=None, cycles=None):
+        metrics = {name: lab.compare_series(paired_sample(30, 1.0, 11), "s", "lower", 1, time_metric=True, floor=0.01)
+                   for name in COMPARE_METRIC_NAMES}
+        metrics["wall"] = wall
+        metrics["instructions"] = instructions or lab.compare_series([(22287659872, 22287659808)] * 30, "count", "lower", 1)
+        if cycles:
+            metrics["cycles"] = cycles
+        return metrics
+
+    def test_classify_with_floor(self):
+        self.assertEqual(lab.classify(0.97, 0.989, True, 0.01), "faster")
+        self.assertEqual(lab.classify(0.985, 0.995, True, 0.01), "below-floor")
+        self.assertEqual(lab.classify(1.005, 1.02, False, 0.01), "below-floor")
+        self.assertEqual(lab.classify(1.011, 1.02, False, 0.01), "higher")
+        self.assertEqual(lab.classify(0.995, 1.001, True, 0.01), "no detectable difference")
+        self.assertEqual(lab.classify(0.985, 0.995, True), "faster")
+        self.assertEqual(lab.metric_floor("instructions", 1.0), 0.0)
+        self.assertEqual(lab.metric_floor("cycles", 1.0), 0.01)
+
+    def test_verdict_beyond_floor_is_faster(self):
+        wall = lab.compare_series(paired_sample(30, 0.95, 1), "s", "lower", 1, time_metric=True, floor=0.01)
+        verdict = lab.compare_verdict(self.metrics(wall), None, 1.0)
+        self.assertEqual(verdict["outcome"], "faster")
+        self.assertIsNone(verdict["bound_percent"])
+        self.assertEqual(verdict["min_effect_percent"], 1.0)
+
+    def test_verdict_inside_floor_is_below_floor(self):
+        # The LAB3 shape: a stable -0.5% offset, CI far narrower than the offset.
+        wall = lab.compare_series(aa_pairs(190, 0.995, 5), "s", "lower", 1, time_metric=True, floor=0.01)
+        self.assertLess(wall["ci_high"], 1.0)
+        self.assertEqual(wall["outcome"], "below-floor")
+        verdict = lab.compare_verdict(self.metrics(wall), None, 1.0)
+        self.assertEqual(verdict["outcome"], "below-floor")
+        self.assertIn("is below the 1% practical floor", verdict["text"])
+        self.assertIn("measurement-instance effects of ~0.5%", verdict["text"])
+        self.assertAlmostEqual(verdict["bound_percent"], (1.0 - wall["ci_low"]) * 100.0)
+        self.assertEqual(set(verdict), VERDICT_KEYS)
+
+    def test_verdict_ci_with_one_is_no_detectable_difference(self):
+        wall = lab.compare_series(paired_sample(30, 1.0, 11), "s", "lower", 1, time_metric=True, floor=0.01)
+        verdict = lab.compare_verdict(self.metrics(wall), None, 1.0)
+        self.assertEqual(verdict["outcome"], "no detectable difference")
+        self.assertAlmostEqual(verdict["bound_percent"], max(1 - wall["ci_low"], wall["ci_high"] - 1) * 100.0)
+
+    def test_phase_outcomes_use_the_floor(self):
+        phase = lab.compare_series([(a * 1000, b * 1000) for a, b in aa_pairs(60, 0.99, 3)], "ms", "lower", 1, time_metric=True,
+                                   floor=0.005)
+        self.assertEqual(phase["outcome"], "faster")
+        phase = lab.compare_series([(a * 1000, b * 1000) for a, b in aa_pairs(60, 0.997, 3)], "ms", "lower", 1, time_metric=True,
+                                   floor=0.005)
+        self.assertEqual(phase["outcome"], "below-floor")
+
+    def test_instance_warning(self):
+        wall = lab.compare_series(aa_pairs(190, 0.995, 5), "s", "lower", 1, time_metric=True, floor=0.01)
+        variants = {role: dict.fromkeys(VARIANT_KEYS, 0) | {"deterministic": True, "metrics_out": True} for role in ("baseline", "candidate")}
+        meta = {"config": {"cpu": 2, "fresh_copy": True}, "steps": {}}
+        warnings = lab.compare_warnings(variants, True, self.metrics(wall), {}, meta)
+        self.assertEqual([warning for warning in warnings if warning.startswith("identical work, different time")],
+                         ["identical work, different time: instructions B/A 1.000000 but the wall CI excludes 1.0; likely a "
+                          "placement/instance effect, not a code effect (a layout-only change can do this too; confirm with an A/A run)"])
+        changed = lab.compare_series([(100.0, 99.0)] * 30, "count", "lower", 1)
+        warnings = lab.compare_warnings(variants, True, self.metrics(wall, instructions=changed), {}, meta)
+        self.assertFalse(any(warning.startswith("identical work") for warning in warnings))
+        same = lab.compare_series(paired_sample(30, 1.0, 11), "s", "lower", 1, time_metric=True, floor=0.01)
+        warnings = lab.compare_warnings(variants, True, self.metrics(same), {}, meta)
+        self.assertFalse(any(warning.startswith("identical work") for warning in warnings))
+
+    def test_bimodal_count_note(self):
+        series = [(2532, 2532)] * 9 + [(2332, 2332)] * 9 + [(2532, 2332)] * 2
+        row = lab.compare_series(series, "count", "lower", 1, floor=0.01)
+        self.assertAlmostEqual(row["ratio_of_medians"], 2332 / 2532)
+        self.assertEqual(row["ratio"], 1.0)
+        self.assertTrue(row["note"].startswith("bimodal counts: compare medians, not the paired ratio"), row["note"])
+        self.assertIsNone(lab.compare_series([(100, 101)] * 10, "count", "lower", 1)["note"])
+        self.assertIsNone(lab.compare_series(series, "ms", "lower", 1)["note"])
+
+    def test_mover_gating(self):
+        few = REPORT_SELF.replace("# Samples: 15K", "# Samples: 506")
+        movers = lab.symbol_movers(few, few.replace("4.32%  [.] ir_validate", "2.32%  [.] ir_validate"))
+        self.assertFalse(movers["reliable"])
+        self.assertEqual(movers["movers"], [])
+        self.assertTrue(movers["note"].startswith("too few samples: shares unreliable"))
+        candidate = REPORT_SELF.replace("4.32%  [.] ir_validate", "3.62%  [.] ir_validate").replace("     0.50%  [k] asm_exc_page_fault\n", "")
+        movers = lab.symbol_movers(REPORT_SELF, candidate)
+        self.assertTrue(movers["reliable"])
+        rows = {row["symbol"]: row for row in movers["movers"]}
+        moved = rows["ir_validate_canonical_function"]
+        self.assertTrue(moved["beyond_noise"])
+        self.assertFalse(moved["exceeds_bound"])
+        self.assertLess(abs(moved["delta_share"]), lab.MOVER_BOUND_FACTOR * moved["noise_pp"])
+        one_na = rows["asm_exc_page_fault"]
+        self.assertIsNone(one_na["noise_pp"])
+        self.assertIsNone(one_na["exceeds_bound"])
+        self.assertEqual(lab.mover_reading(one_na), "-")
+        self.assertEqual(lab.mover_reading(moved), "within 3x bound")
+        far = lab.symbol_movers(REPORT_SELF, REPORT_SELF.replace("4.32%  [.] ir_validate", "1.32%  [.] ir_validate"))
+        self.assertTrue(far["movers"][0]["exceeds_bound"])
+        self.assertEqual(lab.mover_reading(far["movers"][0]), "exceeds bound")
+
+    def test_unresolved_symbols_named_alike(self):
+        sampling = "# Samples: 4K of event 'dTLB-load-misses:u'\n    17.15%  [unknown]  [k] 0xffffffff85a85cd7\n"
+        ibs = "# Samples: 5K of event 'ibs_op//'\n     4.71%  [k] 0xffffffff868c8a3b\n     1.00%  [.] 0x00000000000123ab\n"
+        self.assertEqual([entry[2] for entry in lab.report_entries(sampling)], ["[unknown] 0xffffffff85a85cd7"])
+        self.assertEqual([entry[2] for entry in lab.report_entries(ibs)], ["[unknown] 0xffffffff868c8a3b", "[unknown] 0x123ab"])
+
+
+
+class CliTests(unittest.TestCase):
+    # LAB3 (Python 3.14 validates help strings when a subparser is added): a
+    # bare `%` in any help text made every subcommand fail before dispatch.
+    # Rendering top-level and per-subcommand help expands every help string on
+    # all supported Python versions.
+    def test_every_help_string_renders(self):
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uarch_lab.py")
+        for arguments in ([], ["run"], ["compare"], ["report"]):
+            result = subprocess.run([sys.executable, script] + arguments + ["--help"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, (arguments, result.stderr))
+
+
+
+class Lab4ReviewTests(unittest.TestCase):
+    # LAB4: adjacent unsymbolised addresses of one routine moved together and
+    # each read "exceeds bound"; they are now one row per binary.
+    def test_unresolved_addresses_collapse_per_binary(self):
+        shares = {"libc.so.6 0x18f622": 3.57, "libc.so.6 0x18f628": 3.50, "[unknown] 0xffffffff85a85cd7": 1.0,
+                  "c_lex_dispatch": 39.91, "ide 0x18f5ce": 0.5}
+        collapsed = lab.collapse_unresolved(shares)
+        self.assertAlmostEqual(collapsed["libc.so.6 (unresolved addresses)"], 7.07)
+        self.assertEqual(collapsed["[unknown] (unresolved addresses)"], 1.0)
+        self.assertEqual(collapsed["ide (unresolved addresses)"], 0.5)
+        self.assertEqual(collapsed["c_lex_dispatch"], 39.91)
+
+    # LAB4: an estimate that rounds to zero printed as "-0".
+    def test_no_negative_zero_estimate(self):
+        self.assertEqual(lab.whole_or_zero(-0.3), 0.0)
+        self.assertEqual(str(lab.whole_or_zero(-0.0)), "0.0")
+        self.assertEqual(lab.whole_or_zero(-80.0), -80.0)
 
 
 if __name__ == "__main__":

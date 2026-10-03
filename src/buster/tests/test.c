@@ -15,6 +15,9 @@
 // boundaries are written live around deterministic lane replay, and
 // test_parallel_crash_child_self_test covers abrupt lane exit without changing
 // registered assertion or TEST_MODULE_TIMING totals.
+// Deliberate harness failures preserve their diagnostics and accounting while
+// suppressing only their debugger stop; test_debugger_failure_self_test checks
+// that ordinary argument-bearing and argument-free failures still stop.
 // A descriptor marked table_audit runs only
 // on the canonical tree per platform (BUSTER_TEST_TABLE_AUDITS, default
 // on) — reserve that flag for results that are a pure function of the
@@ -194,6 +197,17 @@
 #endif
 
 #endif
+
+BUSTER_GLOBAL_LOCAL bool buster_test_debugger_stop_requested(UnitTestArguments* arguments, bool debugger_present)
+{
+    bool result = debugger_present;
+#if BUSTER_INCLUDE_TESTS
+    result = result && (!arguments || !arguments->suppress_debugger_break);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
 
 #if BUSTER_INCLUDE_TESTS
 typedef struct TestDescriptor TestDescriptor;
@@ -1371,6 +1385,22 @@ BUSTER_GLOBAL_LOCAL bool test_parallel_gang_report_self_test(void)
     return passed;
 }
 
+// The debugger-presence input is explicit so these positive and negative
+// controls run without attaching a debugger or deliberately stopping CI.
+BUSTER_GLOBAL_LOCAL bool test_debugger_failure_self_test(void)
+{
+    UnitTestArguments arguments = {0};
+    bool passed = !arguments.suppress_debugger_break &&
+                  !buster_test_debugger_stop_requested(0, false) && !buster_test_debugger_stop_requested(&arguments, false) &&
+                  buster_test_debugger_stop_requested(0, true) && buster_test_debugger_stop_requested(&arguments, true);
+    arguments.suppress_debugger_break = true;
+    passed = passed && !buster_test_debugger_stop_requested(&arguments, false) && !buster_test_debugger_stop_requested(&arguments, true) &&
+             buster_test_debugger_stop_requested(0, true);
+    arguments.suppress_debugger_break = false;
+    passed = passed && buster_test_debugger_stop_requested(&arguments, true);
+    return passed;
+}
+
 // Harness regression: keep accounting out of the registered assertion totals.
 // Failure output is deliberately buffered, rewound, overwritten, then inspected.
 BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
@@ -1415,10 +1445,13 @@ BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
 
     TestArenaScope failed = buster_test_arena_begin(&arguments.base, arena, S8("failed"), false);
     String8 diagnostic = string_format(arena, S8("fixture diagnostic survives rewind"));
+    arguments.base.suppress_debugger_break = true;
     BUSTER_TEST_RAW(&arguments.base, false, diagnostic);
+    arguments.base.suppress_debugger_break = false;
     buster_test_arena_end(&arguments.base, failed, true);
     memset(arena_allocate(arena, u8, 256), 0xa5, 256);
-    passed = passed && result.test_count == 1 && result.succeeded_test_count == 0;
+    passed = passed && result.test_count == 1 && result.succeeded_test_count == 0 &&
+             buster_test_debugger_stop_requested(&arguments.base, true);
     String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
     passed = passed && string_first_sequence(text, S8("fixture diagnostic survives rewind failed at")) != BUSTER_STRING_NO_MATCH;
     passed = passed && string_first_sequence(text, S8("start=67 end=76 retained_bytes=9 high_water=131144 peak_bytes=131077 after=67 live_bytes=0 rewind=1")) != BUSTER_STRING_NO_MATCH;
@@ -1466,7 +1499,9 @@ BUSTER_GLOBAL_LOCAL bool test_fixture_timing_self_test(void)
     passed = passed && arena->position == first.marks[0].start;
     TestArenaScope second = buster_test_arena_begin(&arguments.base, arena, S8("repeated"), false);
     String8 diagnostic = string_format(arena, S8("timed failure survives rewind"));
+    arguments.base.suppress_debugger_break = true;
     BUSTER_TEST_RAW(&arguments.base, false, diagnostic);
+    arguments.base.suppress_debugger_break = false;
     // A scope snapshots enablement; changing the next scope's policy must not
     // lose an already-started interval or expose an uninitialized timestamp.
     arguments.base.fixture_timing_report = false;
@@ -1475,7 +1510,8 @@ BUSTER_GLOBAL_LOCAL bool test_fixture_timing_self_test(void)
     memset(arena_allocate(arena, u8, 256), 0xa5, 256);
     String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
     passed = passed && module.timing && first.timing && second.timing && first.index == 0 && second.index == 1 &&
-             arguments.base.memory_fixture_index == 2 && result.test_count == 1 && result.succeeded_test_count == 0;
+             arguments.base.memory_fixture_index == 2 && result.test_count == 1 && result.succeeded_test_count == 0 &&
+             buster_test_debugger_stop_requested(&arguments.base, true);
     passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_TIMING_V1 kind=fixture module=timing_self_test fixture=repeated index=0 duration_ns=")) != BUSTER_STRING_NO_MATCH;
     passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_TIMING_V1 kind=fixture module=timing_self_test fixture=repeated index=1 duration_ns=")) != BUSTER_STRING_NO_MATCH;
     passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_TIMING_V1 kind=module module=timing_self_test fixture=body index=0 duration_ns=")) != BUSTER_STRING_NO_MATCH;
@@ -1581,7 +1617,10 @@ BUSTER_GLOBAL_LOCAL bool test_require_self_test(void)
     String8 missing_path = string_format_z(arena, S8("tests/buster-require-missing-fixture-{u64}"), os_get_current_process_id());
     ByteSlice missing_fixture = file_read(arena, missing_path, (FileReadOptions){0});
     bool failed_dependent_called = false;
-    if (BUSTER_REQUIRE(&arguments.base, missing_fixture.pointer != 0))
+    arguments.base.suppress_debugger_break = true;
+    bool fixture_available = BUSTER_REQUIRE(&arguments.base, missing_fixture.pointer != 0);
+    arguments.base.suppress_debugger_break = false;
+    if (fixture_available)
     {
         failed_dependent_called = true;
         BUSTER_TEST(&arguments.base, missing_fixture.pointer[0] == 0);
@@ -1595,6 +1634,7 @@ BUSTER_GLOBAL_LOCAL bool test_require_self_test(void)
     }
     String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
     bool passed = !failed_dependent_called && successful_dependent_called && result.test_count == 3 && result.succeeded_test_count == 2 &&
+                  buster_test_debugger_stop_requested(&arguments.base, true) &&
                   string_first_sequence(text, S8("missing_fixture.pointer != 0 failed at")) != BUSTER_STRING_NO_MATCH;
     passed = arena_destroy(arena, 1) && passed;
     passed = arena_destroy(output, 1) && passed;
@@ -1684,7 +1724,7 @@ void buster_test_error(u32 line, String8 function, String8 file_path, String8 fo
     string_print(S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
     scratch_end(scratch);
 
-    if (is_debugger_present())
+    if (buster_test_debugger_stop_requested(0, is_debugger_present()))
     {
         os_fail();
     }
@@ -1701,7 +1741,7 @@ void buster_test_error_arguments(UnitTestArguments* arguments, u32 line, String8
     arguments->show(arguments, S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
     scratch_end(scratch);
 
-    if (is_debugger_present())
+    if (buster_test_debugger_stop_requested(arguments, is_debugger_present()))
     {
         os_fail();
     }
@@ -2428,6 +2468,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
+    BUSTER_VALIDATE(test_debugger_failure_self_test());
     BUSTER_VALIDATE(test_arena_self_test());
     BUSTER_VALIDATE(test_require_self_test());
     BUSTER_CHECK(test_fixture_timing_self_test());

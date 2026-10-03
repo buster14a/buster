@@ -43,6 +43,8 @@
 // renders the -fmetrics-out records (schema: docs/agents/driver.md). A null
 // metrics pointer is the ordinary compile: no clock reads.
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
+// compiler_driver_elf_library_roots shares target/sysroot search roots between
+// export discovery and static-library lookup; explicit -L roots come first.
 
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
@@ -2707,18 +2709,12 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
     return result;
 }
 
-// The ELF counterpart of compiler_driver_pe_library_exports.  A shared library
-// is looked up where the loader would look for it, and a file whose machine
-// disagrees with the target is skipped rather than believed, so a cross link
-// does not read the host's own libc.  Without a sysroot, `/usr/<triple>/lib`
-// is also searched: it is where Debian's cross libc packages (for example
-// libc6-arm64-cross) install and where the GNU cross toolchains look.
-BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
-                                                             NativeDynamicLibrary* library, FileMapRead* export_map)
+// Both ELF library searches use target roots after explicit -L directories.
+// A sysroot replaces every default host root. Without one, /usr/<triple>/lib
+// also covers Debian's cross-libc/compiler-runtime installation convention.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, CompilerDriverInvocation invocation, String8* roots)
 {
     String8 multiarch = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-gnu") : S8("x86_64-linux-gnu");
-    u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
-    String8 roots[7] = {0};
     u32 root_count = 0;
     if (invocation.sysroot.length)
     {
@@ -2739,6 +2735,15 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
         roots[root_count++] = S8("/lib");
         roots[root_count++] = S8("/usr/lib");
     }
+    return root_count;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
+                                                             NativeDynamicLibrary* library, FileMapRead* export_map)
+{
+    u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
+    String8 roots[7];
+    u32 root_count = compiler_driver_elf_library_roots(arena, invocation, roots);
     *export_map = (FileMapRead){0};
     bool found = false;
     u32 candidate_count = invocation.library_path_count + root_count + 1;
@@ -3028,9 +3033,13 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
         } :
         (String8){0};
     bool exact_archive = exact && compiler_driver_archive_input(exact_name);
-    for (u32 path_index = 0; path_index < invocation.library_path_count; path_index += 1)
+    String8 roots[7];
+    u32 root_count = invocation.target.os == OPERATING_SYSTEM_LINUX ? compiler_driver_elf_library_roots(arena, invocation, roots) : 0;
+    u32 candidate_count = invocation.library_path_count + root_count;
+    for (u32 path_index = 0; path_index < candidate_count; path_index += 1)
     {
-        String8 root = invocation.library_paths[path_index];
+        String8 root = path_index < invocation.library_path_count ? invocation.library_paths[path_index]
+                                                                : roots[path_index - invocation.library_path_count];
         if (!exact_archive && invocation.target.os != OPERATING_SYSTEM_UEFI)
         {
             String8 shared_name = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? string_format(arena, S8("{S8}.dll"), requested)

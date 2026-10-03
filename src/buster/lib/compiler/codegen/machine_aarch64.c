@@ -5586,30 +5586,36 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_switch(MachineA64Selector* selector,
     if (machine_a64_operand_register(selector, instruction->operands[0], &condition_register) && instruction->target_count &&
         instruction->target_count == instruction->immediate_count + 1 && instruction->immediates)
     {
-        // A case immediate carries the switched type's own bits, while a
-        // register may hold that value extended past them -- the cast a
-        // narrow switch takes to its promoted type emits `sxtb x, w`, which
-        // sign-extends to 64.  Comparing a 32-bit type at 64 bits therefore
-        // measures the extension rather than the value and `case -1` never
-        // matches.  Compare at the type's width, which is what the x86-64
-        // selector does with the same field.
-        u16 compare_width = 64;
+        u32 value_width = 64;
         if (instruction->operands[0].value < selector->function->value_count)
         {
             IrType* condition_type = ir_type_from_id(&selector->program->types,
                                                       selector->function->values[instruction->operands[0].value].canonical_type);
-            if (condition_type && (condition_type->kind == IR_TYPE_BOOLEAN ||
-                                   (condition_type->kind == IR_TYPE_INTEGER && condition_type->bit_width <= 32)))
+            if (condition_type && condition_type->kind == IR_TYPE_BOOLEAN)
             {
-                compare_width = 32;
+                value_width = 1;
             }
+            else if (condition_type && condition_type->kind == IR_TYPE_INTEGER && condition_type->bit_width < 64)
+            {
+                value_width = condition_type->bit_width;
+            }
+        }
+        u16 compare_width = value_width <= 32 ? 32 : 64;
+        u64 value_mask = value_width == 64 ? UINT64_MAX : (UINT64_C(1) << value_width) - 1;
+        // SWITCH compares selector-width images, independently of signedness
+        // and of any extension left in a register by its producer.
+        if (value_width < compare_width)
+        {
+            u32 mask_register = machine_a64_select_immediate_register(selector, value_mask);
+            condition_register = machine_a64_select_arithmetic_row(selector, compare_width == 32 ? MACHINE_A64_AND32 : MACHINE_A64_AND64,
+                                                                   condition_register, mask_register);
         }
         u32 first_case = selector->switch_cases.total_count;
         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
         {
             MachineSwitchCase* case_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
             *case_row = (MachineSwitchCase){
-                .value = instruction->immediates[case_index],
+                .value = instruction->immediates[case_index] & value_mask,
                 .target_block = machine_a64_block_entry(selector, instruction->targets[case_index].value),
                 .compare_width = compare_width,
             };

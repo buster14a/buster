@@ -131,6 +131,8 @@ history), then the relevant methods in
 Clang-built compiler; self-built stages validate the fixed point. Compare the
 same inputs, flags, target, and machine. Report compile time and useful work,
 not just a proxy or generated-program runtime.
+For a compiler change, run `tools/uarch_lab.py compare` (A/B; `run`
+profiles one binary) and read the verdict in its `summary.json`.
 
 Record an audit with `tools/new_audit.py`: it writes one new file under
 `docs/performance-audits/` and nothing else. Never add a line to the closed

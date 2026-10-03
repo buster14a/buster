@@ -503,7 +503,7 @@ The additive direct-SSA census for #447 separates work inside `c_ir_ssa_*`:
 | `simplify_passes`, `simplify_block_visits`, `simplify_empty_block_visits`, `simplify_parameter_visits`, `simplify_incoming_visits` | Fixed-point sweeps and visited blocks/parameters/incoming rows, including revisits and the initial active-block census. Empty-block visits are a subset of block visits. |
 | `value_scratch_bytes`, `value_clear_bytes`, `replacement_rows` | Value-count-sized table allocation requests, explicit memset bytes for those tables, and identity-map initialization rows. These exclude block-sized scratch, restoration tails, and sparse slots. |
 | `initialization_work_visits`, `live_work_visits` | Values popped from the definite-initialization and live-parameter queues. |
-| `remap_value_rows`, `remap_instruction_rows`, `remap_operand_slots`, `remap_incoming_visits` | Rows visited by the three value compaction passes and final instruction/operand/incoming remapping. |
+| `remap_value_rows`, `remap_instruction_rows`, `remap_operand_slots`, `remap_incoming_visits` | Rows visited by the fused dense numbering/root copy and alias resolution passes, and final instruction/operand/incoming remapping. |
 
 These share the existing saturation, calling-thread and failed-attempt rules.
 They do not add timers, histograms, per-function storage or a reporting switch.

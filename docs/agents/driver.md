@@ -506,6 +506,12 @@ command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
 header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
 output rejects `-emit-llvm`, native link inputs, and `-S`.
 
+The direct backend consumes canonical integer bit-count operations at their
+semantic bit width, independently of the i32/i64 WebAssembly carrier. Leading
+and trailing zeros count within that width; a zero operand produces the width,
+and population count ignores carrier extension bits. This is the canonical IR
+contract rather than a promise about C builtins on undefined zero inputs.
+
 Static archive extraction uses `compiler_driver_archive_extract` in the
 private `driver/archive.c` implementation. Its invocation-owned name table
 records selected definitions and strong/weak undefined references once per
@@ -577,6 +583,26 @@ An undefined weak ELF reference does not select a static archive member.
 It may bind to a member selected for a separate strong dependency, to a
 direct object input, or to an already included shared library. Keep archive
 selection separate from those later resolution rules (GitHub #226).
+
+Linux `-lNAME` static archives are searched in explicit `-L` directories first,
+then the same target roots used by ELF export discovery: `lib/<triple>`,
+`usr/lib/<triple>`, `lib64`, `usr/lib64`, `lib`, and `usr/lib` under a supplied
+sysroot. Without a sysroot, the absolute host roots also include
+`/usr/<triple>/lib` after the two multiarch roots. The sysroot replaces these
+default host paths; explicit `-L` directories retain their literal meaning.
+Each directory prefers `libNAME.so` to `libNAME.a`, so an earlier explicit
+archive wins over a later default shared library. `-l:FILE.a` searches the
+exact archive name without that shared-library probe and retains its existing
+bare-path fallback. Other target search policies are unchanged.
+
+`compiler_driver_archive_test_default_roots`, invoked by the registered lazy
+archive fixture, checks both ELF CPUs and all six literal sysroot roots,
+named/exact/direct image parity, distinct provider precedence, explicit `-L`,
+shared preference, exact archive bypass and output preservation on refusal.
+Its configured native Linux control builds a real archive with host compiler
+and archiver, links an independent host control, and runs both Buster's direct
+and sysroot-default named links. GNU linker-script interpretation and Apple's
+missing-library behavior remain separate #1285 work.
 
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized
