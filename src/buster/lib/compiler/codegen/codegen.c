@@ -16930,6 +16930,85 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                        : instruction_id.value + 1;
                             continue;
                         }
+                        if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && !va_arg_f80_opaque &&
+                            value_type && (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION) &&
+                            aggregate_abi.memory && !aggregate_abi.indirect)
+                        {
+                            if (!value_type->layout.resolved || !value_type->layout.size || !value_type->layout.alignment ||
+                                value_type->layout.alignment > 16 || (value_type->layout.alignment & (value_type->layout.alignment - 1)))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            if (value_type->layout.size > (u64)INT32_MAX - 7)
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
+                            // MEMORY consumes only the overflow image, never GP/FP save slots.
+                            u32 stack_size = (u32)((value_type->layout.size + 7) & ~(u64)7);
+                            c_x64_load(&emitter, 0x85, instruction->operands[0]);
+                            BusterX86MetadataPhysicalOperand overflow_load[] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 64, 8),
+                            };
+                            bool ready = codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), overflow_load, BUSTER_ARRAY_LENGTH(overflow_load));
+                            if (ready && value_type->layout.alignment > 8)
+                            {
+                                BusterX86MetadataPhysicalOperand align_add[] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    codegen_canonical_x64_metadata_immediate(15, 8),
+                                };
+                                BusterX86MetadataPhysicalOperand align_mask[] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    codegen_canonical_x64_metadata_immediate(-16, 8),
+                                };
+                                ready = codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), align_add, BUSTER_ARRAY_LENGTH(align_add)) &&
+                                        codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), align_mask, BUSTER_ARRAY_LENGTH(align_mask));
+                            }
+                            BusterX86MetadataPhysicalOperand cursor_store[] = {
+                                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 64, 8),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                            };
+                            BusterX86MetadataPhysicalOperand cursor_advance[] = {
+                                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 64, 8),
+                                codegen_canonical_x64_metadata_immediate(stack_size, 32),
+                            };
+                            ready = ready &&
+                                    codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), cursor_store, BUSTER_ARRAY_LENGTH(cursor_store)) &&
+                                    codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), cursor_advance, BUSTER_ARRAY_LENGTH(cursor_advance));
+                            for (u64 copied = 0; ready && copied < value_type->layout.size;)
+                            {
+                                u32 chunk = codegen_canonical_copy_chunk(value_type->layout.size - copied, copied, copied);
+                                s64 destination = (s64)result_displacement + (s64)copied;
+                                if (destination < INT32_MIN || destination > INT32_MAX)
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                                u16 width = (u16)(chunk * 8);
+                                BusterX86MetadataPhysicalOperand load[] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, chunk <= 4 ? 32 : 64),
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RDX, width, (s64)copied),
+                                };
+                                BusterX86MetadataPhysicalOperand store[] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, width, destination),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, width),
+                                };
+                                ready = codegen_canonical_x64_metadata_emit(&buffer, chunk <= 2 ? S8("MOVZX") : S8("MOV"),
+                                                                          load, BUSTER_ARRAY_LENGTH(load)) &&
+                                        codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), store, BUSTER_ARRAY_LENGTH(store));
+                                copied += chunk;
+                            }
+                            if (!ready)
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value
+                                                       ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
+                            continue;
+                        }
                         if (!value_type || !value_type->layout.size || value_type->layout.size > 16 ||
                             (!aggregate && !floating && value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_BOOLEAN &&
                              value_type->kind != IR_TYPE_POINTER))
