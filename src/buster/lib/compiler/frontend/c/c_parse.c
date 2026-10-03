@@ -21583,7 +21583,11 @@ BUSTER_C_INTERNAL bool c_parser_identifier_list(CPreprocessResult preprocess, u3
         CToken token = preprocess.tokens[index];
         if (expect_identifier)
         {
-            if (token.kind != C_TOKEN_IDENTIFIER)
+            // Keywords retain the identifier token kind until the parser
+            // interprets them. They can begin a prototype parameter
+            // declaration (`void`, `int`, qualifiers, and so on), but they
+            // cannot name an old-style parameter.
+            if (token.kind != C_TOKEN_IDENTIFIER || c_declaration_keyword_for_dialect_token(preprocess, token))
             {
                 return false;
             }
