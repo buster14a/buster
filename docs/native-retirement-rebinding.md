@@ -323,9 +323,27 @@ changed from 3,124 bytes and SHA-256
 3,241 bytes and SHA-256
 `8c565e3b33d5630695289da2aa0030423dc833c9dfc4346d2b67d5165df89e65`;
 all 559 inputs, 411 subjects, roles, compilation obligations and 78,912 row
-identities remain fixed. The bootstrap leaves the reviewed ledger, fixture and
-blocked profiles unchanged. After it lands, a separate policy transition may
+identities remain fixed. The bootstrap leaves the reviewed ledger, fixture, support-declaration pin
+and blocked recipe policy unchanged; only the duplicated validator byte pin
+advances to the modified reader. After it lands, a separate policy transition may
 update that fixture row and the matching blocked-profile pins.
+
+For #2428, the next reader bootstrap admits exactly two successors while
+retaining every historical declaration digest. The #1836 declaration with only
+the dependency-only `tests/mobile_ci_scripts_test.sh` row changed from 40,218
+bytes / `7286628dfcbf37b6e34a6fbbd421af961ab93e6137dfc187a3ed14d4e37693a6`
+to 41,250 bytes / `0745356ff1ef84e3af0d09a851bf0af09647cd9961579e7a4420ae515f6b973c`
+is `f17dbde795c3afc99f4b3cfd59087d4a63721218dab5018e7e77e090228b3741`. Including the separately reviewed #2203 aligned-typedef row
+produces `8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2`. Both declarations remain 79,756 bytes with the same
+559 inputs, 411 subjects, roles, obligations and row identities. This bootstrap
+changes neither reviewed declaration nor fixture bytes, support pins, blocked
+recipe policy, applicability, schema or thresholds. Its only recipe pin update
+is the modified validator's exact byte digest. Private test projections accept
+only the known old/new mobile and aligned-fixture rows to replay historical
+declarations; unknown, missing and duplicate row versions reject. A separate
+protected policy transition may update the mobile fixture, its exact ledger
+row and support pins after this reader lands, preserving the recorded #2203
+integration order and source ownership.
 
 `authorization_mode: solo-maintainer` is explicit owner authorization of one
 bootstrap or policy transition. It is recorded separately from independent

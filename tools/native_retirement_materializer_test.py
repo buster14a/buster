@@ -32,6 +32,25 @@ def canonical_digest(value):
                              separators=(",", ":")).encode("utf-8"))
 
 
+def _reviewed_support_revision(data, *, mobile=False, aligned=False):
+    """Project only the two exact reviewed row versions in private test bytes."""
+    rows = data.split(b"\n")
+    revisions = (
+        (b"tests/mobile_ci_scripts_test.sh\t",
+         b"tests/mobile_ci_scripts_test.sh\tsupport-file\tdependency-only\t40218\t7286628dfcbf37b6e34a6fbbd421af961ab93e6137dfc187a3ed14d4e37693a6",
+         b"tests/mobile_ci_scripts_test.sh\tsupport-file\tdependency-only\t41250\t0745356ff1ef84e3af0d09a851bf0af09647cd9961579e7a4420ae515f6b973c", mobile),
+        (b"tests/basic_c_ir_validation_values.c\t",
+         b"tests/basic_c_ir_validation_values.c\tsubject\tsupported-object-zero-fallback\t3124\t9ed89c0ff3750cb6c9bc66a894fc617c15cde5732c857e5b9cccf55ddf233080",
+         b"tests/basic_c_ir_validation_values.c\tsubject\tsupported-object-zero-fallback\t3241\t8c565e3b33d5630695289da2aa0030423dc833c9dfc4346d2b67d5165df89e65", aligned),
+    )
+    for prefix, predecessor, successor, selected in revisions:
+        matches = [(index, row) for index, row in enumerate(rows) if row.startswith(prefix)]
+        if len(matches) != 1 or matches[0][1] not in (predecessor, successor):
+            raise ValueError("unknown, missing or duplicate reviewed support row")
+        rows[matches[0][0]] = successor if selected else predecessor
+    return b"\n".join(rows)
+
+
 class MaterializerTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -383,7 +402,9 @@ class ArchivedReplayTests(unittest.TestCase):
                        materializer.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
                        materializer.BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
                        materializer.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
-                       materializer.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256))
+                       materializer.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
+                       materializer.MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+                       materializer.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256))
         with self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
             materializer.materialize(self.manifest, self.root, self.root / "wrong-contract")
         self.assertFalse((self.root / "wrong-contract").exists())
@@ -392,6 +413,7 @@ class ArchivedReplayTests(unittest.TestCase):
     def test_bootstrap_workflow_successor_changes_only_one_dependency_row(self):
         data = (Path(__file__).resolve().parents[1] /
                 "docs/native-retirement-support-v1.tsv").read_bytes()
+        data = _reviewed_support_revision(data)
         bridge = b"tests/github_runner_bridge_test.py\t"
         archived = b"tests/retired/github_runner_bridge_test.py.txt\t"
         data = data.replace(archived, bridge)
@@ -419,6 +441,7 @@ class ArchivedReplayTests(unittest.TestCase):
     def test_aligned_typedef_successor_changes_only_validation_fixture_row(self):
         data = (Path(__file__).resolve().parents[1] /
                 "docs/native-retirement-support-v1.tsv").read_bytes()
+        data = _reviewed_support_revision(data)
         prefix = b"tests/basic_c_ir_validation_values.c\tsubject\tsupported-object-zero-fallback\t"
         rows = [row for row in data.splitlines() if row.startswith(prefix)]
         self.assertEqual(len(rows), 1)
@@ -430,6 +453,56 @@ class ArchivedReplayTests(unittest.TestCase):
         self.assertEqual(digest(after), materializer.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256)
         self.assertEqual(len(data), len(after))
         self.assertEqual(data.count(b"\n"), after.count(b"\n"))
+
+    def test_mobile_capture_successors_authenticate_exact_declaration_bytes(self):
+        data = (Path(__file__).resolve().parents[1] /
+                "docs/native-retirement-support-v1.tsv").read_bytes()
+        baseline = _reviewed_support_revision(data)
+        revisions = (
+            (False, False, materializer.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256),
+            (False, True, materializer.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256),
+            (True, False, materializer.MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256),
+            (True, True, materializer.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256),
+        )
+        for mobile, aligned, pin in revisions:
+            declaration = _reviewed_support_revision(data, mobile=mobile, aligned=aligned)
+            with self.subTest(mobile=mobile, aligned=aligned):
+                self.assertEqual(digest(declaration), pin)
+                self.assertEqual(_reviewed_support_revision(declaration), baseline)
+                self.assertEqual(len(declaration), 79756)
+                self.assertEqual(declaration.count(b"\n"), 560)
+                self.assertEqual([row.split(b"\t")[:3] for row in declaration.splitlines()],
+                                 [row.split(b"\t")[:3] for row in baseline.splitlines()])
+                # An empty private fixture probe exercises declaration admission;
+                # it does not claim a complete archived replay was authenticated.
+                with mock.patch.object(materializer, "_read_no_follow", return_value=declaration):
+                    materializer._verify_archived_fixture_inputs({"fixtures": []}, self.root)
+                corrupted = declaration[:-1] + b" "
+                self.assertEqual(len(corrupted), len(declaration))
+                with mock.patch.object(materializer, "_read_no_follow", return_value=corrupted), \
+                     mock.patch.object(materializer, "_source_path") as resolve, \
+                     self.assertRaisesRegex(materializer.MaterializationError,
+                                            "support contract identity mismatch"):
+                    materializer._verify_archived_fixture_inputs(self.manifest["archived_replay"],
+                                                                 self.root)
+                resolve.assert_not_called()
+
+    def test_reviewed_support_projection_rejects_unknown_missing_duplicate_rows(self):
+        data = _reviewed_support_revision((Path(__file__).resolve().parents[1] /
+                                          "docs/native-retirement-support-v1.tsv").read_bytes())
+        for prefix in (b"tests/mobile_ci_scripts_test.sh\t",
+                       b"tests/basic_c_ir_validation_values.c\t"):
+            row = next(line for line in data.splitlines() if line.startswith(prefix))
+            fields = row.split(b"\t")
+            unknown_hash = b"\t".join([*fields[:-1], b"0" * 64])
+            unknown_bytes = b"\t".join([*fields[:3], b"99999", fields[4]])
+            wrong_role = b"\t".join([fields[0], b"unknown-role", *fields[2:]])
+            for changed in (data.replace(row, unknown_hash), data.replace(row, unknown_bytes),
+                            data.replace(row, wrong_role), data.replace(row + b"\n", b""),
+                            data.replace(row, row + b"\n" + row)):
+                with self.subTest(prefix=prefix, digest=digest(changed)), \
+                     self.assertRaisesRegex(ValueError, "reviewed support row"):
+                    _reviewed_support_revision(changed)
 
     def test_fixture_drift_rejects_publication(self):
         pin = digest(self.contract.read_bytes())
