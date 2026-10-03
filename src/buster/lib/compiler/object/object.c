@@ -4979,6 +4979,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         ELF_REL_SIZE = 16,
         ELF_RELA_SIZE = 24,
         ELF_SHN_LORESERVE = 0xff00,
+        ELF_STO_AARCH64_VARIANT_PCS = 0x80,
     };
     u16 type = 0;
     u16 machine = 0;
@@ -5445,6 +5446,24 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 if (symbol_type == 4)
                 {
                     continue;
+                }
+                // Variant PCS needs preserved symbol metadata and linker/runtime
+                // register-state guarantees that ObjectSymbol cannot represent.
+                // Refuse before section-based skipping can discard that marking.
+                if (target.cpu_arch == CPU_ARCH_AARCH64 && (other & ELF_STO_AARCH64_VARIANT_PCS))
+                {
+                    if (object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
+                    {
+                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                        String8 diagnostic_name = name.length ? name : S8("<unnamed>");
+                        if (diagnostic_name.length <= UINT64_MAX - 128 &&
+                            object_reader_arena_can_allocate_bytes(arena, diagnostic_name.length + 128, BUSTER_ALIGN_OF(char8)))
+                        {
+                            result.diagnostic = string_format(arena, S8("unsupported ELF AArch64 symbol {S8} (index {u32}): STO_AARCH64_VARIANT_PCS"),
+                                                              diagnostic_name, source_index);
+                        }
+                    }
+                    read_ok = false;
                 }
                 // Absolute, common, processor-specific, and SHN_XINDEX symbols do
                 // not identify one of the ordinary section headers represented by an
