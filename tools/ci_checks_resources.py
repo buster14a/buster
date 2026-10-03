@@ -245,6 +245,56 @@ def scan_result(source, pids, read_one):
     return result
 
 
+def uint(value, message, maximum=MAX_COUNTER):
+    require(type(value) is int and 0 <= value <= maximum, message)
+    return value
+
+
+def page_size(value):
+    require(type(value) is int and 0 < value <= MAX_COUNTER and value & (value - 1) == 0,
+            "invalid OS page size")
+    return value
+
+
+def linux_memory(meminfo, pressure):
+    values = {}
+    wanted = {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"}
+    for line in meminfo.splitlines():
+        parts = line.split()
+        if parts and parts[0].rstrip(":") in wanted:
+            name = parts[0].rstrip(":")
+            require(name not in values and parts[0] == name + ":" and len(parts) == 3 and parts[2] == "kB"
+                    and parts[1].isdecimal(), "invalid/duplicate meminfo field")
+            values[name] = uint(int(parts[1]), "meminfo bytes overflow", MAX_COUNTER // 1024) * 1024
+    require(set(values) == wanted and values["MemTotal"] > 0
+            and values["MemAvailable"] <= values["MemTotal"]
+            and values["SwapFree"] <= values["SwapTotal"], "missing/invalid meminfo coverage")
+    activity = unknown("memory PSI unavailable", "unsupported")
+    if pressure is not None:
+        counters = {}
+        for line in pressure.splitlines():
+            parts = line.split()
+            require(len(parts) == 5 and parts[0] in ("some", "full")
+                    and parts[0] not in counters, "invalid/duplicate memory PSI row")
+            fields = {}
+            for part in parts[1:]:
+                key, separator, value = part.partition("=")
+                require(separator and key not in fields, "invalid memory PSI field")
+                fields[key] = value
+            require(set(fields) == {"avg10", "avg60", "avg300", "total"}
+                    and fields["total"].isdecimal(), "missing memory PSI fields")
+            for key in ("avg10", "avg60", "avg300"):
+                value = float(fields[key])
+                require(math.isfinite(value) and 0 <= value <= 100, "invalid memory PSI average")
+            counters[parts[0]] = uint(int(fields["total"]), "memory PSI total overflow")
+        require(set(counters) == {"some", "full"} and counters["full"] <= counters["some"],
+                "missing/invalid memory PSI coverage")
+        activity = {"status": "observed", "unit": "microseconds", "width": 64, "counters": counters}
+    return {"source": "linux-meminfo-memory-psi", "status": "observed" if pressure is not None else "partial",
+            "snapshot": {"unit": "bytes", "values": values, "capacity": {"MemTotal": values["MemTotal"]}},
+            "activity": activity, "available_kind": "kernel-estimate-without-swapping"}
+
+
 class LinuxReader:
     def facts(self):
         result = {"cpu_count": os.cpu_count(), "physical_memory_bytes": safe_fact(
@@ -264,6 +314,17 @@ class LinuxReader:
         result = {"source": "linux-proc-stat", "frequency": os.sysconf("SC_CLK_TCK"),
                   "width": 64, "cpu_count": os.cpu_count(), "counters": dict(zip(names, values))}
         return result
+
+    def memory(self):
+        meminfo = bounded_text("/proc/meminfo")
+        try:
+            pressure = bounded_text("/proc/pressure/memory")
+        except OSError as error:
+            result = linux_memory(meminfo, None)
+            status = "unsupported" if error.errno in (errno.ENOENT, errno.EACCES, errno.EPERM) else "error"
+            result["activity"] = unknown("memory PSI read:" + str(error)[:160], status)
+            return result
+        return linux_memory(meminfo, pressure)
 
     def rss(self):
         pids = []
@@ -296,6 +357,13 @@ class MemoryCounters(ctypes.Structure):
                ("peak", "resident", "peak_paged", "paged", "peak_nonpaged", "nonpaged", "commit", "peak_commit")]
 
 
+class PerformanceInfo(ctypes.Structure):
+    _fields_ = [("cb", U32)] + [(n, SIZE) for n in
+               ("commit_total", "commit_limit", "commit_peak", "physical_total", "physical_available",
+                "system_cache", "kernel_total", "kernel_paged", "kernel_nonpaged", "page_size")] + \
+               [(n, U32) for n in ("handles", "processes", "threads")]
+
+
 def bind(library, name, args, result):
     function = getattr(library, name)
     function.argtypes, function.restype = args, result
@@ -310,6 +378,7 @@ class WindowsReader:
         bind(self.api, "GetActiveProcessorCount", [ctypes.c_uint16], U32)
         bind(self.api, "GetTickCount64", [], U64)
         bind(self.api, "GlobalMemoryStatusEx", [PTR], I32)
+        bind(self.api, "K32GetPerformanceInfo", [ctypes.POINTER(PerformanceInfo), U32], I32)
         bind(self.api, "K32EnumProcesses", [ctypes.POINTER(U32), U32, ctypes.POINTER(U32)], I32)
         bind(self.api, "OpenProcess", [U32, I32, U32], PTR)
         bind(self.api, "K32GetProcessMemoryInfo", [PTR, ctypes.POINTER(MemoryCounters), U32], I32)
@@ -341,6 +410,25 @@ class WindowsReader:
         result = {"source": "windows-get-system-times", "frequency": 10_000_000,
                   "width": 64, "cpu_count": count, "processor_groups": groups, "counters": counters}
         return result
+
+    def memory(self):
+        value = PerformanceInfo()
+        value.cb = ctypes.sizeof(value)
+        if not self.api.K32GetPerformanceInfo(ctypes.byref(value), value.cb):
+            raise EvidenceError("K32GetPerformanceInfo failed:" + str(ctypes.get_last_error()))
+        size = page_size(int(value.page_size))
+        names = ("commit_total", "commit_limit", "commit_peak", "physical_total", "physical_available",
+                 "system_cache", "kernel_total", "kernel_paged", "kernel_nonpaged")
+        values = {name: uint(int(getattr(value, name)), "memory page-byte overflow", MAX_COUNTER // size)
+                  for name in names}
+        require(values["physical_total"] > 0 and values["physical_available"] <= values["physical_total"],
+                "invalid physical memory coverage")
+        return {"source": "windows-k32-performance-info", "status": "observed",
+                "snapshot": {"unit": "pages", "page_size_bytes": size, "values": values,
+                             "capacity": {"physical_total": values["physical_total"]}},
+                "activity": {"status": "not-applicable", "reason": "API-has-no-invocation-cumulative-paging-counter"},
+                "commit_peak_scope": "since-last-system-reboot", "commit_limit_kind": "current-soft-limit",
+                "available_kind": "standby-free-zero-pages"}
 
     def rss(self):
         capacity, done, pids = 256, False, []
@@ -383,12 +471,24 @@ class TaskInfo(ctypes.Structure):
                [("field" + str(i), I32) for i in range(12)]
 
 
+class VmStatistics64(ctypes.Structure):
+    _fields_ = [(n, U32) for n in ("free", "active", "inactive", "wired")] + \
+               [(n, U64) for n in ("zero_fill", "reactivations", "pageins", "pageouts", "faults",
+                                   "cow_faults", "lookups", "hits", "purges")] + \
+               [(n, U32) for n in ("purgeable", "speculative")] + \
+               [(n, U64) for n in ("decompressions", "compressions", "swapins", "swapouts")] + \
+               [(n, U32) for n in ("compressor", "throttled", "external", "internal")] + \
+               [(n, U64) for n in ("uncompressed_in_compressor", "swapped")]
+
+
 class DarwinReader:
     def __init__(self, library=None):
         self.api = library if library is not None else ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
         bind(self.api, "mach_host_self", [], U32)
         bind(self.api, "host_processor_info", [U32, I32, ctypes.POINTER(U32),
                                                ctypes.POINTER(ctypes.POINTER(U32)), ctypes.POINTER(U32)], I32)
+        bind(self.api, "host_page_size", [U32, ctypes.POINTER(SIZE)], I32)
+        bind(self.api, "host_statistics64", [U32, I32, PTR, ctypes.POINTER(U32)], I32)
         bind(self.api, "vm_deallocate", [U32, SIZE, SIZE], I32)
         bind(self.api, "mach_port_deallocate", [U32, U32], I32)
         bind(self.api, "proc_listpids", [U32, U32, PTR, I32], I32)
@@ -428,6 +528,35 @@ class DarwinReader:
                 array_released = self.api.vm_deallocate(self.task, ctypes.cast(output, PTR).value, elements.value * 4)
             port_released = self.api.mach_port_deallocate(self.task, host)
             require(array_released == 0 and port_released == 0, "CPU array/host port release failed")
+        return result
+
+    def memory(self):
+        host, size, value = self.api.mach_host_self(), SIZE(), VmStatistics64()
+        count = U32(ctypes.sizeof(value) // ctypes.sizeof(U32))
+        try:
+            require(self.api.host_page_size(host, ctypes.byref(size)) == 0, "host_page_size failed")
+            size_bytes = page_size(int(size.value))
+            require(self.api.host_statistics64(host, 4, ctypes.byref(value), ctypes.byref(count)) == 0,
+                    "host_statistics64 failed")
+            require(count.value in (38, 40), "unsupported HOST_VM_INFO64 returned count")
+            physical = uint(self.sysctl("hw.memsize", U64), "invalid physical capacity")
+            require(physical > 0, "missing physical capacity")
+            names = ("free", "active", "inactive", "wired", "purgeable", "speculative", "compressor",
+                     "throttled", "external", "internal", "uncompressed_in_compressor")
+            values = {name: uint(int(getattr(value, name)), "memory page-byte overflow", MAX_COUNTER // size_bytes)
+                      for name in names}
+            values["swapped"] = uint(int(value.swapped), "memory page-byte overflow", MAX_COUNTER // size_bytes) \
+                                if count.value == 40 else "unknown"
+            counters = {name: int(getattr(value, name)) for name in
+                        ("compressions", "decompressions", "swapins", "swapouts", "pageins", "pageouts")}
+            result = {"source": "darwin-host-vm-info64", "status": "observed" if count.value == 40 else "partial",
+                      "returned_integer_count": count.value,
+                      "snapshot": {"unit": "pages", "page_size_bytes": size_bytes, "values": values,
+                                   "capacity": {"physical_memory_bytes": physical}},
+                      "activity": {"status": "observed", "unit": "pages", "width": 64, "counters": counters},
+                      "free_kind": "includes-speculative-pages", "freshness": "kernel-may-rate-limit-and-cache"}
+        finally:
+            require(self.api.mach_port_deallocate(self.task, host) == 0, "memory host port release failed")
         return result
 
     def rss(self):
@@ -532,6 +661,48 @@ def rss_read(source, previous=None):
     return result
 
 
+def memory_read(source, previous=None):
+    begin = time.monotonic_ns()
+    try:
+        result = source.memory()
+    except (OSError, ValueError, EvidenceError) as error:
+        result = unknown(type(error).__name__ + ":" + str(error)[:160])
+        result.update(source="unknown", snapshot="unknown", activity="unknown")
+    result.update(begin_ns=begin, end_ns=time.monotonic_ns(), scope="observed-os-instance",
+                  kind="os-memory-state-and-pressure", gap_ns=begin - previous if previous is not None else "unknown")
+    result["duration_ns"] = result["end_ns"] - begin
+    return result
+
+
+def memory_delta(first, last):
+    require(first.get("status") in ("observed", "partial") and last.get("status") in ("observed", "partial"),
+            "OS memory endpoints unavailable")
+    require(first["source"] == last["source"] and first["snapshot"]["unit"] == last["snapshot"]["unit"]
+            and first["snapshot"].get("page_size_bytes") == last["snapshot"].get("page_size_bytes")
+            and first.get("returned_integer_count") == last.get("returned_integer_count")
+            and first["snapshot"]["capacity"] == last["snapshot"]["capacity"]
+            and first["snapshot"]["values"].keys() == last["snapshot"]["values"].keys(),
+            "OS memory source/units/capacity/coverage changed")
+    require(first["begin_ns"] <= first["end_ns"] <= last["begin_ns"] <= last["end_ns"]
+            and last["end_ns"] - first["begin_ns"] <= (MAX_SECONDS + HANDSHAKE_SECONDS) * 1_000_000_000,
+            "invalid OS memory observation window")
+    a, b = first["activity"], last["activity"]
+    if a.get("status") == b.get("status") == "not-applicable":
+        return {"status": "not-applicable", "reason": "API-has-no-invocation-cumulative-paging-counter"}
+    if a.get("status") == b.get("status") == "unsupported":
+        return unknown("OS memory cumulative coverage unavailable", "unsupported")
+    require(a.get("status") == b.get("status") == "observed" and a["unit"] == b["unit"]
+            and a["width"] == b["width"] == 64 and a["counters"].keys() == b["counters"].keys(),
+            "OS memory cumulative coverage unavailable/changed")
+    delta = {}
+    for key, value in a["counters"].items():
+        before = uint(value, "invalid OS memory cumulative counter")
+        after = uint(b["counters"][key], "invalid OS memory cumulative counter")
+        require(after >= before, "OS memory cumulative counter decreased/wrapped: " + key)
+        delta[key] = after - before
+    return {"status": "observed", "unit": a["unit"], "width": 64, "counters": delta}
+
+
 def matching(value, meta):
     require(value.get("schema") == SCHEMA and value.get("session") == meta["session"], "receipt session mismatch")
 
@@ -548,6 +719,12 @@ def observe(session, meta, source, max_seconds=MAX_SECONDS):
             written += len(data)
         start_ns = time.monotonic_ns()
         first = cpu_read(source)
+        memory_first = memory_read(source)
+        memory_previous, memory_gaps, memory_errors, memory_partial = memory_first, 0, 0, 0
+        memory_errors += memory_first["status"] == "error"
+        memory_partial += memory_first["status"] == "partial"
+        memory_comparison_errors = 0
+        memory_comparison_error = "unknown"
         facts = source.facts()
         append({"schema": SCHEMA, "event": "start", "session": meta["session"],
                 "identity": meta["identity"], "producer_sha256": meta["producer_sha256"],
@@ -555,14 +732,25 @@ def observe(session, meta, source, max_seconds=MAX_SECONDS):
                 "cadence_ns": CADENCE_NS, "maximum_seconds": max_seconds,
                 "limits": {"samples": MAX_SAMPLES, "journal_bytes": MAX_JOURNAL_BYTES, "pids": MAX_PIDS},
                 "limitations": LIMITATIONS, "os": {"system": platform.system(), "release": platform.release(),
-                                                  "machine": platform.machine(), "facts": facts}, "cpu": first})
+                                                  "machine": platform.machine(), "facts": facts}, "cpu": first,
+                "os_memory": memory_first})
         count, previous, maximum, gaps, errors, partial = 0, None, None, 0, 0, 0
         stop_status, reason = "error", "maximum-observer-duration"
         done = False
         while not done:
             sample = rss_read(source, previous)
+            memory = memory_read(source, memory_previous["begin_ns"])
+            try:
+                memory_delta(memory_previous, memory)
+            except EvidenceError as error:
+                memory_comparison_errors += 1
+                memory_comparison_error = str(error)
+            memory_previous = memory
+            memory_gaps = max(memory_gaps, memory["gap_ns"])
+            memory_errors += memory["status"] == "error"
+            memory_partial += memory["status"] == "partial"
             append({"schema": SCHEMA, "event": "sample", "session": meta["session"],
-                    "sequence": count, "rss": sample})
+                    "sequence": count, "rss": sample, "os_memory": memory})
             count += 1
             previous = sample["begin_ns"]
             if sample["gap_ns"] != "unknown":
@@ -585,6 +773,18 @@ def observe(session, meta, source, max_seconds=MAX_SECONDS):
                 if remaining > 0:
                     time.sleep(remaining / 1_000_000_000)
         last = cpu_read(source)
+        memory_last = memory_read(source, memory_previous["begin_ns"])
+        memory_gaps = max(memory_gaps, memory_last["gap_ns"])
+        memory_errors += memory_last["status"] == "error"
+        memory_partial += memory_last["status"] == "partial"
+        try:
+            memory_delta(memory_previous, memory_last)
+            memory_total = memory_delta(memory_first, memory_last)
+        except EvidenceError as error:
+            memory_comparison_errors += 1
+            memory_comparison_error = str(error)
+            memory_total = unknown(str(error))
+        memory_status = "error" if memory_errors or memory_comparison_errors else "partial" if memory_partial else "observed"
         try:
             total = cpu_delta(first, last)
         except EvidenceError as error:
@@ -596,7 +796,12 @@ def observe(session, meta, source, max_seconds=MAX_SECONDS):
                     "wall_time_ns": time.time_ns(), "samples": count, "maximum_gap_ns": gaps,
                     "error_samples": errors, "partial_samples": partial,
                     "maximum_observed_scan_sum_bytes": maximum if maximum is not None else "unknown",
-                    "cpu_final": last, "cpu": total}
+                    "cpu_final": last, "cpu": total, "os_memory_final": memory_last,
+                    "os_memory": {"status": memory_status, "observations": count + 2,
+                                  "error_observations": memory_errors, "partial_observations": memory_partial,
+                                  "comparison_error_observations": memory_comparison_errors,
+                                  "comparison_error": memory_comparison_error,
+                                  "maximum_gap_ns": memory_gaps, "cumulative_change": memory_total}}
         data = encode(terminal)
         require(written + len(data) <= MAX_JOURNAL_BYTES, "terminal exceeds journal limit")
         handle.write(data)

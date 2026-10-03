@@ -44,8 +44,9 @@ account on Windows.
 
 Start creates `session.json`, launches a detached observer with no inherited
 stdin/stdout/stderr, then waits at most ten seconds for `ready.json`. Readiness
-means that the start record, baseline CPU read and first resident-set scan have
-been recorded; it does not certify complete measurement coverage. The pinned
+means that the start record, baseline CPU/memory reads and first resident-set
+and OS-memory observations have been recorded; it does not certify complete
+measurement coverage. The pinned
 Python executable is retained as `observer_executable` in `session.json` so
 workflow integration can reuse it after Windows tool setup changes PATH.
 On startup failure, start terminates only its owned observer process, waits one
@@ -158,6 +159,68 @@ deadlines, cleanup and reliability. These observations do not relax the existing
 15% whole-CI / 10% Windows-checks latency targets or 5% runner-seconds ceiling.
 There is no invented CPU/RSS growth allowance and no acceptance flag here.
 
+## Independent OS memory state and pressure
+
+`os_memory` is additive evidence beside CPU and the unchanged partial RSS
+observations. It measures the assigned OS instance, including kernel,
+background and observer activity, without identifying payload-exclusive memory.
+The start record, each sample and `os_memory_final` retain actual monotonic
+read begin/end/duration/gap values. Readiness includes an initial memory
+observation; it does not require that observation to have full coverage. The
+window includes the same complete combination step and scheduling gaps.
+
+| Platform | Snapshot | Cumulative activity |
+| --- | --- | --- |
+| Linux | `/proc/meminfo` MemTotal, MemAvailable, SwapTotal and SwapFree, with explicit KiB-to-byte conversion | `/proc/pressure/memory` `some` and `full` total stall microseconds |
+| Windows | `K32GetPerformanceInfo` physical total/available, commit total/limit, system cache and kernel pools, retaining raw pages and actual page size | This API supplies no invocation cumulative paging counter; activity is explicitly `not-applicable` |
+| macOS | `host_statistics64(HOST_VM_INFO64)` raw free, active, inactive, wired, purgeable, speculative, compressor, throttled, file-backed, anonymous, uncompressed-in-compressor and swapped page counts; `host_page_size` supplies the actual unit | 64-bit pagein/pageout, compression/decompression and swapin/swapout counters |
+
+Linux MemAvailable is the kernel's estimate of memory available to a new
+application without swapping. It is not free RAM or process RSS. A missing or
+denied PSI interface leaves the snapshot retained but activity unsupported and
+the observation partial. Other read failures and malformed counters retain
+errors. PSI `some` is time with at least some tasks stalled; `full` is time with
+all non-idle tasks stalled. Neither is added to CPU execution. Cumulative totals
+retain stall activity that may occur between snapshots.
+
+Windows physical availability includes standby, free and zero lists. Commit
+counts are distinct from resident memory: a committed page need not have been
+touched. CommitLimit is a current soft limit that can change when paging files
+grow. CommitPeak is explicitly **since the last system reboot**, not a peak of
+this invocation; subtracting its baseline does not produce invocation peak
+commit. The observer does not use the calling-process `ullAvailPageFile` value
+as system-wide commit headroom.
+
+Darwin's ABI has 160 bytes and 40 integer words. Returned revision-1 coverage
+(38 words) retains the unavailable swapped-page field as unknown and marks the
+observation partial; older/invalid counts are refused. Speculative pages are
+already included in free pages, so they must not be added again. Gauges overlap
+and must not be summed into invented available memory. The actual host page
+size is queried, never assumed to be 4096 bytes. XNU can rate-limit and cache
+user-facing host statistics: read intervals and the 200 ms observer cadence
+do not establish 200 ms freshness of kernel snapshots.
+
+The end record's separate `os_memory` summary reports observations, partial and
+error counts, maximum actual gap, comparison errors and cumulative change.
+Every successive observation and the final endpoints are checked for source,
+unit, capacity and coverage drift. Memory gauges may rise or fall; cumulative
+64-bit counters may not decrease. A decrease or wrap is an explicit comparison
+error rather than an invented modular delta. An intermediate decrease cannot
+be hidden by later endpoint recovery. Unknown, partial or erroneous memory
+observations prevent the corresponding complete scoped claim.
+
+The existing CPU/RSS `measurement_status` and stop-success contract remain
+unchanged; `os_memory.status` is independent. A controlled successful stop can
+therefore retain incomplete OS-memory evidence. Check both statuses and every
+raw observation during resource review. Partial RSS stays partial even when
+OS-memory state is observed. These distinct measurements may inform a declared
+operational resource comparison; OS physical state, commit and pressure do not
+replace or close an exact peak-RSS claim. Do not pool platform-specific fields,
+sum independent runner peaks, infer unobserved setup/upload memory, or treat
+successful protocol completion as no regression. The owning issues still need
+the declared matched-sample comparison and deadline/capture/cleanup/all-attempt
+review. No automatic acceptance or numerical resource allowance is added.
+
 ## Validation and primary API sources
 
 `python3 -B tools/ci_checks_resources_test.py -v` runs focused protocol, limits,
@@ -167,7 +230,8 @@ not qualify a cohort. Local execution covers Linux; actual Windows x64/ARM and
 macOS ARM smoke must run on the hosted Release lanes before qualification. These
 tests launch no C compiler or build/test payload.
 
-- [Linux procfs semantics and visibility](https://docs.kernel.org/filesystems/proc.html).
+- [Linux procfs semantics and visibility](https://docs.kernel.org/filesystems/proc.html)
+  and [memory pressure stall accounting](https://docs.kernel.org/accounting/psi.html).
 - Microsoft [GetSystemTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getsystemtimes),
   [processor groups](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getactiveprocessorgroupcount),
   [active processor count](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getactiveprocessorcount),
@@ -175,6 +239,9 @@ tests launch no C compiler or build/test payload.
   [OpenProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess),
   [GetProcessMemoryInfo](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo)
   and [current working-set bytes](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters).
+- Microsoft [GetPerformanceInfo](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getperformanceinfo),
+  [system memory ABI/semantics](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-performance_information)
+  and [calling-process commit availability](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/ns-sysinfoapi-memorystatusex).
 - Apple [host_processor_info](https://developer.apple.com/documentation/kernel/1502854-host_processor_info)
   and pinned XNU `f6217f891ac0bb64f3d375211650a4c1ff8ca1ea`:
   [processor counters](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/kern/processor.c),
@@ -182,6 +249,10 @@ tests launch no C compiler or build/test payload.
   [process ABI](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/proc_info.h),
   [process access checks](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/proc_info.c)
   and [libproc declarations](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/libsyscall/wrappers/libproc/libproc.h).
+- Pinned XNU [VM statistics ABI](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/mach/vm_statistics.h),
+  [VM count revisions](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/mach/host_info.h),
+  [host API declarations](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/mach/mach_host.defs)
+  and [statistics/caching implementation](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/kern/host.c).
 - GitHub [runner semantics](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
   [runner/workflow variables](https://docs.github.com/en/actions/reference/workflows-and-actions/variables)
   and [job assignment API](https://docs.github.com/en/rest/actions/workflow-jobs).
