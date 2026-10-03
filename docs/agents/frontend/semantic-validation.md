@@ -181,6 +181,19 @@ the gate through the private seam beside the unchanged diagnostics.
 
 ## Regression contract
 
+The registered `c_test_integer_semantics_agreement` matrix pins #1577's
+nearest-object lookup for `sizeof(x)`, `sizeof x` and `_Alignof(x)` when a
+local character array shadows an outer pointer typedef. Literal operands select
+the immediate assertion route (historically the legacy route); enumerator-dependent bounds and answers use the
+deferred typed route. Both routes require the independent array size 256 and
+alignment 1 across six native target layouts, semantic-only/canonical analysis
+and both frontend SSA forms. False-value neighbors must report a static
+assertion diagnostic and publish no program. GNU17 is explicit because
+expression operands to `_Alignof` are a GNU extension. Both routes now prefer the shared typed constant answer when available.
+The production shadow guard is the previously landed #1529 repair; this matrix supplies the remaining
+explicit route/spelling coverage without changing it.
+
+
 `compiler_driver_test_syntax_diagnostic_equivalence` contains frozen acceptance
 expectations, valid neighbors and rejected cases from the migration. Each source
 runs through syntax-only and object actions in both frontend SSA forms. The test
