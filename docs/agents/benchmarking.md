@@ -44,6 +44,78 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.
+- **`tools/uarch_lab.py`** is the micro-architecture lab: one command that
+  says *where* (symbol, line, instruction), *when* (compiler phase, time in the
+  run), *what* and *how many* for time, instructions/IPC, branch misses,
+  L1I/L1D/TLB misses, top-down metric groups and page faults (with the faulting
+  data address and its mapping) over the stage-1 self-host compile, pinned to
+  one CPU. Its steps are `env`, `timed` (N `perf stat` runs, byte-compared
+  outputs, min/median/MAD, drift, IPC, effective clock, ns/byte and
+  instructions/token from `-fsource-metrics`), `topdown` (a cheap
+  `perf stat -M G -- true` dry run, then `perf stat -r 3 -j -M` per discovered
+  metric group, one group per invocation), `timeline`
+  (`perf stat -I 20` intervals split across phases, CSV and SVG/HTML chart),
+  `sampling` (`perf record --call-graph fp` per event, every page fault,
+  annotate and srcline listings), `ibs` (`--sudo` only: IBS op/fetch and
+  `perf mem` on the pinned CPU, the compiler itself run unprivileged) and
+  `micro` (`ide bench`, with the predictor-learning caveat). Every raw file stays
+  in the output directory, failed or unsupported counters render as NA, and
+  `report DIR` re-renders `report.md`, whose first section lists the hottest
+  functions per event, top fault sites, the dominant top-down category and the
+  slowest phase as pointers to the raw files:
+
+  ```sh
+  python3 tools/uarch_lab.py run --ide build/Release/ide --repo-root . \
+      --cpu 2 --output /tmp/lab [--target-minutes 15 | --runs N] [--sudo] [--skip STEP...]
+  python3 tools/uarch_lab.py report /tmp/lab [--perf PATH]
+  python3 -B tools/uarch_lab_test.py
+  ```
+
+  Contracts learned on the first Zen 5 run (perf 7.2.4):
+  - Wall time is the harness's monotonic span around each `perf stat` child
+    (`timed/runs.json`, or `commands.log` for older directories), reported
+    beside the compiler's `wall_ns` and task-clock. perf 7.2.4 reads
+    `duration_time` as 0 whenever it shares the event list, so the lab does
+    not count it, and a metric dividing by it renders NA, never 0.
+  - A step is `ok` only when its section has real data. `report` re-assesses
+    every section from the raw files; a missing or non-positive time (quoted
+    with its raw CSV line), a report with no rows from a capture that has
+    samples or a failed group makes it `degraded`. Rendering divisions go
+    through `ratio()` and each line degrades on its own.
+  - Without `--runs`, the timed count is fixed once after three pilot runs so
+    the whole lab lands near `--target-minutes` (default 15); the report states
+    the chosen count and why. It never adapts to measured results.
+  - Groups whose uncore PMU is absent (Zen 5 desktops expose no `amd_umc` or
+    `amd_l3` PMU; `memory_controller`, `l3_cache`) are `unavailable`, not
+    failures. Uncore groups count system-wide, not per process.
+  - `perf stat -x,` prints metrics with display precision (often one decimal).
+    The lab uses `-j` (six decimals) with `-x,` as a fallback, marks rounded
+    values ("rounded to 0.1", a printed 0.0 as "< 0.05"), and recomputes the
+    branch misprediction rate and branch MPKI from the named event pair. A
+    per-1k-instruction metric is recomputed only from a run that measured it
+    alone, as the sum of its non-instruction events: perf attaches the metric
+    to whichever event prints first, and many Zen 5 metrics sum several events.
+  - Page-fault regions are resolved against the mapping live at fault time;
+    perf records no munmap, so a file mapping later replaced at the same
+    address is grouped as a transient file mapping (preprocessor sources).
+  - A multiplexed group (counters running less than 100% of the time) is
+    re-measured one `-M <metric>` per run; the non-multiplexed values lead and
+    the group value is a flagged fallback.
+  - IBS and `perf mem` record the pinned CPU system-wide. The compiler renames
+    its main thread `main_thread`, so the reports keep the thread ids with
+    samples in the workload binary (`perf report --sort pid,dso`, then
+    `--tid ... --comms ...`), not the exec name. `report DIR` derives these
+    filtered reports from an older directory's raw `ibs/*.data` when perf is
+    available. `perf mem` shares are latency-weighted, so the report shows
+    each load source's sample count beside its share.
+  - Sampling self reports sort by `dso,symbol`, so an unresolved address reads
+    `ide 0x18f5ce` rather than an anonymous hex value.
+
+  The phase breakdown needs a binary that accepts `-fmetrics-out=` and writes
+  a measured `CC_METRICS_INPUT` record (currently the #923 fold, not main); the
+  lab probes for it and otherwise reports the phase sections as NA. Phase
+  boundaries come from the compiler's own clock, which starts after argument
+  parsing, so the report states how much of the run lies outside it.
 - Native-backend retirement has a separate maintainer-approved
   [performance contract](../native-retirement-performance-contract.md). Its
   tighter budgets, immutable #508 binding, dedicated-host admission and
