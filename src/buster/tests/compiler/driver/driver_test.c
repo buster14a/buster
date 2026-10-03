@@ -4481,7 +4481,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_options(UnitTestAr
                     }
                 }
             }
-            arena_end_temporal(target_temporary);
+            scratch_end(target_temporary);
         }
     }
     scratch_end(temporary);
