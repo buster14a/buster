@@ -23,6 +23,34 @@ sees the same bits as one that reduces it. The C producer's single row
 emitter (`c_ir_emit_integer_value_at`) reduces an out-of-range spelling such as
 a bit-field clear mask `~mask` built at 64 bits for an 8-bit access.
 
+## SWITCH case images
+
+Canonical SWITCH equality compares the selector and each raw case key modulo
+the selector's declared integer width, independently of signedness. For an
+8-bit selector, keys 7 and 263 therefore name the same bit pattern; both a
+low-width all-ones key and `UINT64_MAX` match signed -1. A singleton key may
+retain high bits in its raw payload. Case keys must be distinct under this
+same equality; defensive uniqueness validation is tracked separately in
+[#2378](https://github.com/buster14a/buster/issues/2378). The final target remains
+the default, and different cases may share a destination.
+
+The native MIR selectors and direct emitters form matching selector/key images
+at the existing SWITCH boundary. Their 32/64-bit machine comparisons clear any
+extension beyond a narrower semantic width; 32-bit selectors compare at
+32 bits, and 64-bit selectors preserve the full image. Source keys and targets
+remain unchanged. LLVM's typed case constants and eBPF's existing image
+normalization use the same equality. Remaining Wasm normalization and runtime
+verification are tracked in [#2385](https://github.com/buster14a/buster/issues/2385).
+
+Registered `codegen_test_canonical_switch_key_images` redirects a lowered C
+SWITCH to its original typed ARGUMENT, bypassing C's integer promotion. It
+validates raw IR before each native consumer and requires successful emission
+with zero fallback in every allocator. Signed/unsigned 8/16/32/64-bit inputs
+cover singleton aliases, low/full-width all-ones keys, positive/default controls
+and a distinct high 64-bit key. Unsanitized desktop runs call the emitted
+function through a matching host C signature and check integer bit-vector
+expectations; sanitizer/mobile runs retain validation and emission controls.
+
 ## Scalar binary operation families
 
 Scalar arithmetic and numeric comparisons require the operation's family to
