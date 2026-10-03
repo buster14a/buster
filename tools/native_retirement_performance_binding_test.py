@@ -2215,6 +2215,30 @@ class BootstrapSupportPinsTests(unittest.TestCase):
             binding._check_support_output(ROOT, record, None)
         read.assert_not_called()
 
+    def test_aligned_typedef_successor_changes_only_validation_fixture_row(self):
+        data = (ROOT / binding.SUPPORT_DECLARATION_PATH).read_bytes()
+        prefix = b"tests/basic_c_ir_validation_values.c\tsubject\tsupported-object-zero-fallback\t"
+        row = next(line for line in data.splitlines() if line.startswith(prefix))
+        predecessor = prefix + b"3124\t9ed89c0ff3750cb6c9bc66a894fc617c15cde5732c857e5b9cccf55ddf233080"
+        successor = prefix + b"3241\t8c565e3b33d5630695289da2aa0030423dc833c9dfc4346d2b67d5165df89e65"
+        self.assertEqual(row, predecessor)
+        revisions = (
+            (data, binding.RETIRED_BRIDGE_SUPPORT_DECLARATION_SHA256),
+            (data.replace(predecessor, successor),
+             binding.ALIGNED_TYPEDEF_SUPPORT_DECLARATION_SHA256),
+        )
+        for declaration, digest in revisions:
+            self.assertEqual(hashlib.sha256(declaration).hexdigest(), digest)
+            files = [{"path": binding.SUPPORT_DECLARATION_PATH, "sha256": digest}
+                     for _ in binding.SUPPORT_FILE_ROLES]
+            record = {"support": {"files": files}}
+            with self.subTest(digest=digest), \
+                 mock.patch.object(binding, "_evidence_bytes", side_effect=[declaration, b""]), \
+                 self.assertRaisesRegex(ValueError, "manifest is empty"):
+                binding._check_support_output(ROOT, record, None)
+        self.assertEqual(len(revisions[0][0]), len(revisions[1][0]))
+        self.assertEqual(revisions[0][0].count(b"\n"), revisions[1][0].count(b"\n"))
+
 
 if __name__ == "__main__":
     unittest.main()
