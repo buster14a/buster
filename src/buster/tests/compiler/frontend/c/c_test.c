@@ -18989,6 +18989,166 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_then_nested_conditionals(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_conditional_conversions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_parts[] = {
+        S8("#if !(1 ? (1 ? -3 : 5U) : 7)\n#error nested preprocessing truth\n#endif\n"),
+        S8("#if (1 ? (1 ? -3 : 5U) : 7) <= 0\n#error preprocessing unsigned common type\n#endif\n"),
+        S8("#if (0 ? 1 : 0 ? 2 : 3) != 3\n#error nested preprocessing selection\n#endif\n"),
+        S8("_Static_assert((1 ? (1 ? -3 : 5U) : 7LL) == 4294967293LL, \"nested unsigned second\");\n"),
+        S8("_Static_assert((0 ? 7LL : (0 ? 5U : -3)) == 4294967293LL, \"nested unsigned third\");\n"),
+        S8("_Static_assert((0 ? 7LL : 0 ? 5U : -3) == 4294967293LL, \"nested unsigned chain\");\n"),
+        S8("enum { folded = (1 ? (1 ? -3 : 5U) : 7LL) == 4294967293LL };\n"),
+        S8("static int bound[folded];\n"),
+        S8("static long long sa = 1 ? (1 ? -3 : 5U) : 7LL;\n"),
+        S8("static long long sb = 0 ? 7LL : 0 ? 5U : -3;\n"),
+        S8("static unsigned long long sg = 1 ? (0 ? 5U : -3) : 7ULL;\n"),
+        S8("static double se = 1 ? (1 ? -3 : 5U) : 1.0;\n"),
+        S8("static double sf = 1 ? (1 ? 16777217 : 1.0f) : 1.0;\n"),
+        S8("static double sh = 0 ? 1.0 : (0 ? 1.0f : 16777217);\n"),
+        S8("static volatile unsigned trace;\n"),
+        S8("static int mark(int digit, int value) { trace = trace * 10u + (unsigned)digit; return value; }\n"),
+        S8("struct Item { int value; };\n"),
+        S8("int main(void) { int failed = 0; volatile int c = 1, z = 0; unsigned u = 5; long long l = 7;\n"),
+        S8("long long a = c ? (c ? -3 : u) : l; failed |= a != 4294967293LL;\n"),
+        S8("long lp64 = c ? (c ? -3 : u) : 7L; failed |= sizeof(long) == 8 && lp64 != 4294967293LL;\n"),
+        S8("long long b = z ? l : (z ? u : -3); failed |= b != 4294967293LL;\n"),
+        S8("long long r = z ? l : z ? u : -3; failed |= r != 4294967293LL;\n"),
+        S8("double e = c ? (c ? -3 : u) : 1.0; failed |= e != 4294967293.0;\n"),
+        S8("unsigned long long g = c ? (z ? u : -3) : 7ULL; failed |= g != 4294967293ULL;\n"),
+        S8("long long j = 1 ? (c ? -3 : u) : l; failed |= j != 4294967293LL;\n"),
+        S8("long long inner_constant = c ? (1 ? -3 : u) : l; failed |= inner_constant != 4294967293LL;\n"),
+        S8("long long k = c ? ((void)0, (c ? -3 : u)) : l; failed |= k != 4294967293LL;\n"),
+        S8("long long m = c ? (long long)(c ? -3 : u) : l; failed |= m != 4294967293LL;\n"),
+        S8("double rounded = c ? (c ? 16777217 : 1.0f) : 1.0; failed |= rounded != 16777216.0;\n"),
+        S8("double rounded_third = z ? 1.0 : z ? 1.0f : 16777217; failed |= rounded_third != 16777216.0;\n"),
+        S8("long long arithmetic = c ? 1LL + (c ? -3 : u) : l; failed |= arithmetic != 4294967294LL;\n"),
+        S8("long long deeper = c ? (c ? (c ? -3 : u) : l) : l; failed |= deeper != 4294967293LL;\n"),
+        S8("failed |= _Generic((c ? -3 : u), unsigned: 1, default: 0) != 1;\n"),
+        S8("failed |= _Generic((c ? (c ? -3 : u) : l), long long: 1, default: 0) != 1;\n"),
+        S8("failed |= sa != 4294967293LL || sb != 4294967293LL || sg != 4294967293ULL;\n"),
+        S8("failed |= se != 4294967293.0 || sf != 16777216.0 || sh != 16777216.0 || sizeof(bound) != sizeof(int);\n"),
+        S8("_Static_assert((1 ? (1 ? -3 : 5U) : 7LL) == 4294967293LL, \"block nested constant\");\n"),
+        S8("trace = 0; unsigned long long side = mark(1, 1) ? (mark(2, 0) ? (unsigned)mark(3, 5) : mark(4, -3)) : (unsigned long long)mark(5, 7);\n"),
+        S8("failed |= side != 4294967293ULL || trace != 124u;\n"),
+        S8("trace = 0; (c ? (z ? (void)mark(1, 1) : (void)mark(2, 2)) : (void)mark(3, 3)); failed |= trace != 2u;\n"),
+        S8("int item = 9; const int *pointer = c ? (z ? &item : (void *)0) : (const int *)&item; failed |= pointer != 0;\n"),
+        S8("pointer = c ? (c ? &item : (void *)0) : (const int *)&item; failed |= pointer != &item;\n"),
+        S8("struct Item ia = {1}, ib = {2}; struct Item picked = c ? (z ? ib : ia) : ib; failed |= picked.value != 1;\n"),
+        S8("return failed != 0; }\n"),
+    };
+    String8 source_text = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            Arena* conflicts[] = {arguments->arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("nested-conditional-conversions.c"), tokens, parsed, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("nested-conditional-conversions"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 optimization = 0; optimization < 2; optimization += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+                {
+                    Arena* conflicts[] = {arguments->arena};
+                    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("nested-conditional-conversions-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], optimization == 0 ? S8("-O0") : S8("-O2"), S8("-fverify-codegen"), S8("-o"), output, source_path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("nested conditional {S8} {S8}: status={u32} timed_out={u32}"),
+                                    modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        String8 references[] = {S8("gcc"), S8("clang")};
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+        {
+            for (u32 optimization = 0; optimization < 2; optimization += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("nested-conditional-reference"), S8(".exe"));
+                if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                {
+                    String8 command[] = {compiler, optimization == 0 ? S8("-O0") : S8("-O2"), S8("-std=gnu17"), S8("-fwrapv"), S8("-nostdinc"), S8("-o"), output, source_path};
+                    ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                              .use_process_environment = true, .search_path = true});
+                    if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                    {
+                        ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, 30000000);
+                        String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
+                        BUSTER_TEST_RAW(arguments, !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("nested conditional oracle {S8} {S8}: status={u32} timeout={u32}\n{S8}"),
+                                compiler, optimization == 0 ? S8("-O0") : S8("-O2"), compilation.platform_status, (u32)compilation.timed_out,
+                                string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                        if (BUSTER_REQUIRE(arguments, !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS))
+                        {
+                            String8 run[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena, S8("nested conditional oracle run {S8} {S8}: status={u32} timeout={u32}"),
+                                        compiler, optimization == 0 ? S8("-O0") : S8("-O2"), execution.platform_status, (u32)execution.timed_out));
+                            }
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+#endif
+    return result;
+}
+
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -33147,6 +33307,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
     BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
+    BUSTER_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_conversion_rank);
