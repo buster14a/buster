@@ -271,6 +271,50 @@ class PhaseValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Apple sanitizer trees require grouped checks"):
                     phases.validate_plan(candidate, coverage, {})
 
+    def test_nested_setup_conserves_enclosing_child_phase_time(self):
+        for direct in (False, True):
+            for setup_us in (0, 4):
+                with self.subTest(direct=direct, setup_us=setup_us), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    coverage = fixture(root, direct=direct)
+                    original = phases.analyze(root, coverage)
+                    parent_path = next(root.glob("tree0-validation-Debug.*.end.json"))
+                    parent = phases.read(parent_path)
+                    parent["child_start_us"] += 2
+                    write(root, parent_path.name, parent)
+                    child_path = next(root.glob("tree0-test-Debug.*.end.json"))
+                    child = phases.read(child_path)
+                    child["child_start_us"] += setup_us
+                    write(root, child_path.name, child)
+                    report = phases.analyze(root, coverage)
+                    tree = next(value for value in report["trees"] if value["id"] == "tree0")
+                    outer = [event for event in report["events"] if event["tree"] == "tree0" and event["phase"] != "test"]
+                    observed_us = sum(event["end_us"] - event["child_start_us"] for event in outer)
+                    self.assertEqual(sum(tree["elapsed_us"].values()), observed_us)
+                    self.assertEqual(tree["elapsed_us"]["test"], 20 - setup_us)
+                    self.assertEqual(tree["elapsed_us"]["post_test"], 5)
+                    self.assertEqual(tree["elapsed_us"]["build"], (100 if not direct else 0) + 3 + setup_us)
+                    self.assertEqual(report["predictions"], original["predictions"])
+                    self.assertEqual(set(tree["elapsed_us"]), set(original["trees"][0]["elapsed_us"]))
+                    print("PHASE_ACCOUNTING_CONTROL " + json.dumps(dict(
+                        scheduler=report["scheduler"], nested_setup_us=setup_us,
+                        exclusive_child_us=observed_us, elapsed_us=tree["elapsed_us"]), sort_keys=True))
+
+    def test_positive_nested_setup_keeps_failure_and_missing_records_fatal(self):
+        self.mutate("tree0-test-*.end.json", lambda value: value.update(child_start_us=value["start_us"] + 4))
+        self.assertTrue(self.check()["complete"])
+        path = next(self.root.glob("tree0-test-*.end.json"))
+        original = phases.read(path)
+        for changed in (dict(original, state="failure", result=1), dict(original, platform_status=256),
+                        dict(original, child_start_us=original["end_us"] + 1)):
+            write(self.root, path.name, changed)
+            with self.assertRaises(ValueError):
+                self.check()
+        write(self.root, path.name, original)
+        path.unlink()
+        with self.assertRaisesRegex(ValueError, "failed/cancelled/interrupted publication"):
+            self.check()
+
     def test_direct_and_pooled_same_phase_schema(self):
         pooled = self.check()
         with tempfile.TemporaryDirectory() as temp:
