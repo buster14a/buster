@@ -138,10 +138,16 @@ import random
 import re
 import shutil
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+try:
+    import resource
+except ImportError:  # not POSIX: no peak RSS
+    resource = None
 
 STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "micro")
 DEFAULT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
@@ -206,7 +212,17 @@ COMPARE_METRICS = (("wall", "s", "lower", "wall time (harness span)"), ("task_cl
                    ("cycles", "count", "lower", "cycles:u"), ("ipc", "ratio", "higher", "IPC"),
                    ("branch_misses", "count", "lower", "branch-misses:u"), ("branch_mpki", "per_1k_instr", "lower", "branch MPKI"),
                    ("page_faults", "count", "lower", "page faults"), ("minor_faults", "count", "lower", "minor faults"),
-                   ("major_faults", "count", "lower", "major faults"))
+                   ("major_faults", "count", "lower", "major faults"), ("peak_rss", "bytes", "lower", "peak RSS (wait4 ru_maxrss)"))
+# Peak RSS (run_measured, rss_value): a run's ru_maxrss is the maximum of the
+# harness's own high-water RSS (inherited at exec), the taskset/perf process
+# and every descendant it reaped, so it is the compiler's only when clearly
+# above both the harness's high-water mark at spawn and perf's own floor
+# (probe_workload measures `perf stat -- true`); a value within this factor of
+# the larger is NA.
+RSS_WRAPPER_MARGIN = 1.5
+# Generated code bytes (code_sections): ELF section flag and type.
+SHF_EXECINSTR = 0x4
+SHT_NOBITS = 8
 # A/B compare (command_compare): variants, ABBA pair planning, statistics.
 VARIANTS = (("a", "baseline"), ("b", "candidate"))
 PROFILE_STEPS = ("topdown", "sampling", "ibs")
@@ -249,6 +265,35 @@ COMPARE_METHOD = {
                   "deleted afterwards, so page-cache placement varies per run instead of biasing one variant (--no-fresh-copy disables)",
     "order_effect": "AB and BA pairs' median-ratio CIs must overlap",
     "drift": "first-half and second-half median-ratio CIs must overlap; per-tenth medians shown"}
+# Native-retirement gate (command_retirement): the #512 decision record
+# rescoped the gate to this lab and kept the #511 per-cell limits unchanged.
+RETIREMENT_SCHEMA = "buster-uarch-lab-retirement-v1"
+RETIREMENT_DECISION = "https://github.com/buster14a/buster/issues/36#issuecomment-5969534074"
+RETIREMENT_CONTRACT = "docs/native-retirement-performance-contract.md"
+RETIREMENT_MODES = ("none", "mir-stack", "fast", "quality")
+RETIREMENT_ROLES = (("baseline", "A"), ("candidate", "B"))
+RUNTIME_CELL = "generated-runtime"
+# The generated-runtime cell times the stage-1 compilers A and B wrote in this
+# mode's cell, compiling the same source in this mode.
+RUNTIME_SOURCE_MODE = "fast"
+DEFAULT_CELL_MINUTES = 12.0
+# #511 "Measurements and denominators", per-workload policy column: wall time
+# and peak RSS upper simultaneous bound at most 1.05, generated code bytes
+# exact ratio at most 1.01 in every cell, generated-program runtime upper
+# simultaneous bound at most 1.03.  #511's 1.02 primary aggregate bounds for
+# wall time and RSS are not in the decision record's table; the geometric mean
+# of the mode cells' ratios is reported against them as a diagnostic only
+# (retirement_aggregates).
+RETIREMENT_AGGREGATE_LIMIT = 1.02
+RETIREMENT_LIMITS = {"compiler_wall_time": 1.05, "peak_rss": 1.05, "code_bytes": 1.01, "generated_runtime": 1.03}
+RETIREMENT_LIMIT_TEXT = {
+    "compiler_wall_time": ("each allocator-mode cell: harness span of the timed compile (metric `wall`)", "upper 95% bound"),
+    "peak_rss": ("each allocator-mode cell: wait4 ru_maxrss of the compile (metric `peak_rss`)", "upper 95% bound"),
+    "code_bytes": ("each allocator-mode cell: executable-section bytes of the stage-1 output (`code_bytes`)", "exact ratio"),
+    "generated_runtime": ("generated-runtime cell: harness span of the stage-1 compilers' compile (metric `wall`)", "upper 95% bound")}
+RETIREMENT_EXTERNAL = [{"check": "self_host_fixed_point",
+                        "how": "the decision record also requires the repository's byte-identical self-host fixed point on the candidate "
+                               "tree (`./build.sh test_self_host --config Release`); the lab does not run it"}]
 
 
 # ---------------------------------------------------------------- parsers
@@ -854,6 +899,8 @@ class Lab:
         self.environment = dict(os.environ, LC_ALL="C", LANG="C")
         self.meta = load_meta(self.output)
         self.last_elapsed = None
+        self.last_maxrss = None
+        self.last_harness_rss = None
 
     def path(self, *parts):
         full = os.path.join(self.output, *parts)
@@ -902,16 +949,11 @@ class Lab:
                 os.rmdir(parent)
 
     def run_command(self, argv, log=None, timeout=COMMAND_TIMEOUT, stdout_path=None):
-        """Run argv in the repository root; returns (exit status, stdout, stderr)."""
+        """Run argv in the repository root; returns (exit status, stdout, stderr).
+        last_elapsed is its monotonic span; last_maxrss and last_harness_rss
+        are run_measured's peak RSS and harness floor in bytes (or None)."""
         started = time.monotonic()
-        try:
-            completed = subprocess.run(argv, cwd=self.repo_root, env=self.environment, timeout=timeout,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            status, out, err = completed.returncode, completed.stdout, completed.stderr
-        except FileNotFoundError as error:
-            status, out, err = 127, b"", str(error).encode()
-        except subprocess.TimeoutExpired as error:
-            status, out, err = 124, error.stdout or b"", (error.stderr or b"") + b"\ntimeout\n"
+        status, out, err, self.last_maxrss, self.last_harness_rss = run_measured(argv, self.repo_root, self.environment, timeout)
         self.last_elapsed = time.monotonic() - started
         out_text = out.decode("utf-8", "replace")
         err_text = err.decode("utf-8", "replace")
@@ -929,6 +971,62 @@ class Lab:
     def save_meta(self):
         with open(self.path("lab.json"), "w") as handle:
             json.dump(self.meta, handle, indent=2, sort_keys=True)
+
+
+def maxrss_bytes(kilobytes_or_bytes):
+    """ru_maxrss in bytes: Linux reports KiB, macOS bytes."""
+    return kilobytes_or_bytes * (1 if sys.platform == "darwin" else 1024)
+
+
+def run_measured(argv, cwd, environment, timeout):
+    """(exit status, stdout bytes, stderr bytes, peak RSS bytes, harness
+    high-water RSS bytes) of argv; both RSS values None where unsupported.
+
+    Peak RSS is ru_maxrss from os.wait4 on the direct child.  At reap Linux
+    reports the largest of that process's own high-water RSS and the ru_maxrss
+    of every descendant it waited for; it is a maximum, never a sum.  The
+    process's own mark survives exec, and at exec it absorbs the high-water
+    mark of the memory it replaces -- for a vfork/posix_spawn child, the
+    parent's, so the harness's own high-water RSS at spawn (returned
+    second) is a floor of every value (measured: a harness that once held
+    300 MB reports at least 300 MB for `true`).  Under `taskset -c N perf
+    stat -- ide ...` the value is max(harness, perf's own RSS, the compiler's
+    RSS over all its threads); rss_value keeps only values clearly above the
+    first two.  Output goes to temporary files, so a chatty child cannot
+    block on a full pipe."""
+    harness = maxrss_bytes(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) if resource else None
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            process = subprocess.Popen(argv, cwd=cwd, env=environment, stdout=out, stderr=err)
+        except FileNotFoundError as error:
+            return 127, b"", str(error).encode(), None, harness
+        expired = []
+
+        def expire():
+            expired.append(True)
+            process.kill()
+        timer = threading.Timer(timeout, expire)
+        timer.start()
+        try:
+            if hasattr(os, "wait4"):
+                _, wait_status, usage = os.wait4(process.pid, 0)
+                process.returncode = os.waitstatus_to_exitcode(wait_status)
+                rss = maxrss_bytes(usage.ru_maxrss)
+            else:
+                process.wait()
+                rss = None
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            timer.cancel()
+        out.seek(0)
+        err.seek(0)
+        stdout, stderr = out.read(), err.read()
+    if expired:
+        return 124, stdout, stderr + b"\ntimeout\n", rss, harness
+    return process.returncode, stdout, stderr, rss, harness
 
 
 def shell_join(argv):
@@ -974,6 +1072,81 @@ def fresh_binary_copy(source, destination):
 
 def safe_name(text):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", text)[:80]
+
+
+def code_sections(path):
+    """Generated code bytes of one output: {format, code_bytes, file_bytes,
+    sections [{name, size}], reason}.  code_bytes is the exact sum of sh_size
+    over ELF sections with SHF_EXECINSTR that occupy file bytes (not
+    SHT_NOBITS), ELF32 or ELF64 of either byte order.  Mach-O, PE and anything
+    else are NA with a reason (#511: no validated parser, and whole-file size
+    is never substituted); file_bytes stays diagnostic.  Only the header,
+    section table and section-name table are read (elf_code_sections), so
+    the harness's own peak RSS (a floor of every measured run) stays small."""
+    result = {"format": None, "code_bytes": None, "file_bytes": None, "sections": [], "reason": None}
+    try:
+        with open(path, "rb") as handle:
+            result["file_bytes"] = os.fstat(handle.fileno()).st_size
+            magic = handle.read(64)
+            if magic[:4] in (b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe"):
+                result.update(format="mach-o", reason="no validated Mach-O code-section parser")
+            elif magic[:2] == b"MZ":
+                result.update(format="pe", reason="no validated PE code-section parser")
+            elif magic[:4] != b"\x7fELF":
+                result.update(format="unknown", reason="not an ELF, Mach-O or PE file")
+            else:
+                elf_code_sections(handle, magic, result)
+    except OSError as error:
+        result["reason"] = "unreadable: %s" % error
+    return result
+
+
+def elf_code_sections(handle, header_bytes, result):
+    """Fill result (code_sections) from an open ELF file whose first 64
+    bytes are header_bytes."""
+    size = result["file_bytes"]
+    wide, endian = header_bytes[4:5] == b"\x02", {b"\x01": "<", b"\x02": ">"}.get(header_bytes[5:6])
+    result["format"] = "elf64" if wide else "elf32" if header_bytes[4:5] == b"\x01" else "elf"
+    if result["format"] == "elf" or endian is None:
+        result["reason"] = "truncated ELF header" if len(header_bytes) < 6 else "unknown ELF class or data encoding"
+        return
+    header = struct.Struct(endian + ("16xHHIQQQIHHHHHH" if wide else "16xHHIIIIIHHHHHH"))
+    entry = struct.Struct(endian + ("IIQQQQIIQQ" if wide else "IIIIIIIIII"))
+    if len(header_bytes) < header.size:
+        result["reason"] = "truncated ELF header"
+        return
+    fields = header.unpack_from(header_bytes)
+    shoff, shentsize, shnum, shstrndx = fields[5], fields[10], fields[11], fields[12]
+    if shoff == 0 or shentsize < entry.size or shoff + entry.size > size:
+        result["reason"] = "no usable section header table"
+        return
+    handle.seek(shoff)
+    first = entry.unpack(handle.read(entry.size))
+    if shnum == 0:  # extended numbering: the count is section 0's sh_size
+        shnum = first[5]
+    if shstrndx == 0xffff:  # SHN_XINDEX: the index is section 0's sh_link
+        shstrndx = first[6]
+    if shnum == 0 or shoff + shnum * shentsize > size:
+        result["reason"] = "section header table outside the file (%d entries at %d)" % (shnum, shoff)
+        return
+    handle.seek(shoff)
+    table_bytes = handle.read(shnum * shentsize)
+    # (sh_name, sh_type, sh_flags, sh_offset, sh_size)
+    sections = [tuple(entry.unpack_from(table_bytes, index * shentsize)[i] for i in (0, 1, 2, 4, 5)) for index in range(shnum)]
+    names = None
+    if shstrndx < shnum and sections[shstrndx][1] != SHT_NOBITS and sections[shstrndx][3] + sections[shstrndx][4] <= size:
+        handle.seek(sections[shstrndx][3])
+        names = handle.read(sections[shstrndx][4])
+    total = 0
+    for name, kind, flags, _, length in sections:
+        if flags & SHF_EXECINSTR and kind != SHT_NOBITS:
+            total += length
+            label = "#%d" % name
+            if names is not None and name < len(names):
+                end = names.find(b"\0", name)
+                label = names[name:end if end >= 0 else len(names)].decode("utf-8", "replace")
+            result["sections"].append({"name": label, "size": length})
+    result["code_bytes"] = total
 
 
 # ---------------------------------------------------------------- steps (raw files)
@@ -1075,11 +1248,21 @@ def task_seconds(rows):
     return None
 
 
+def timed_command(lab, csv_path):
+    """The pinned `perf stat` prefix of every timed run (the workload follows `--`)."""
+    return lab.pin() + [lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--"]
+
+
 def probe_workload(lab, directory, out):
     """Run the workload once with `-fsource-metrics` (plain when the binary
     rejects it) and once with `-fmetrics-out`, recording both capabilities
-    in lab.json; raises when the workload itself fails."""
+    in lab.json; raises when the workload itself fails.  Also records the
+    timed wrapper's own peak RSS (`perf stat -- true`, wrapper_rss_bytes),
+    the floor rss_value compares every run against."""
     capabilities = lab.meta["capabilities"]
+    status, _, _ = lab.run_command(timed_command(lab, os.path.join(directory, "wrapper.csv")) + ["true"],
+                                   log=os.path.join(directory, "wrapper-rss.log"))
+    capabilities["wrapper_rss_bytes"] = lab.last_maxrss if status == 0 else None
     # Work denominators (and the -fsource-metrics probe) from a separate run.
     source = os.path.join(directory, "source.metrics")
     status, _, _ = lab.run_command(lab.pin() + lab.workload(out, ["-fsource-metrics=" + source]), log=os.path.join(directory, "source-run.log"))
@@ -1116,8 +1299,7 @@ def step_timed(lab, runs, warmups, target_minutes=15.0, lab_started=None, other_
         csv_path = os.path.join(directory, "run-%04d.csv" % index)
         metrics_path = os.path.join(directory, "run-%04d.ccmetrics" % index)
         with lab.instance():
-            status, out_text, err = lab.run_command(lab.pin() + [lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--"]
-                                                    + lab.workload(out, compile_flags(lab, metrics_path)))
+            status, out_text, err = lab.run_command(timed_command(lab, csv_path) + lab.workload(out, compile_flags(lab, metrics_path)))
         span = lab.last_elapsed
         identical = status == 0 and filecmp.cmp(reference, out, shallow=False)
         if status != 0:
@@ -1128,7 +1310,9 @@ def step_timed(lab, runs, warmups, target_minutes=15.0, lab_started=None, other_
         wall_ns = parse_cc_metrics(read_text(metrics_path) or "")["header"].get("wall_ns")
         if status == 0:
             best = span if best is None else min(best, span)
-        records.append({"run": index, "exit": status, "identical": identical, "span_s": round(span, 6)})
+        records.append({"run": index, "exit": status, "identical": identical, "span_s": round(span, 6),
+                        "maxrss_bytes": lab.last_maxrss, "harness_rss_bytes": lab.last_harness_rss,
+                        "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes")})
         warning = "" if task is not None and task > 0 else " TASK-CLOCK %s: %s" % (
             "MISSING" if task is None else "NON-POSITIVE", stat_lines(rows).get("task-clock", "no task-clock line in " + csv_path))
         print("[timed] %d/%s span %.4f s, task-clock %s s, compiler wall %s s (min span %s)%s%s" % (
@@ -1480,7 +1664,25 @@ def run_metrics(run):
     return {"wall": positive(run["span_s"]), "task_clock": positive(run["task_s"]), "compiler_wall": positive(run["cc_wall_s"]),
             "instructions": instructions, "cycles": values.get("cycles"), "ipc": ratio(instructions, values.get("cycles")),
             "branch_misses": misses, "branch_mpki": ratio(misses, instructions, 1000), "page_faults": values.get("page-faults"),
-            "minor_faults": values.get("minor-faults"), "major_faults": values.get("major-faults")}
+            "minor_faults": values.get("minor-faults"), "major_faults": values.get("major-faults"), "peak_rss": rss_value(run)}
+
+
+def rss_floor(run):
+    """The larger of the two non-compiler terms in a run's maxrss_bytes: the
+    harness's high-water RSS at spawn and the perf wrapper's own (probe), or
+    None when either is unknown."""
+    harness, wrapper = positive(run.get("harness_rss_bytes")), positive(run.get("wrapper_rss_bytes"))
+    return max(harness, wrapper) if harness is not None and wrapper is not None else None
+
+
+def rss_value(run):
+    """A run's compiler peak RSS in bytes, or None.  maxrss_bytes is the
+    maximum of the harness floor, the perf wrapper and the compiler
+    (run_measured), so it is the compiler's only when above
+    RSS_WRAPPER_MARGIN times rss_floor; without a floor (probe failed, older
+    directory) it is NA."""
+    value, floor = positive(run.get("maxrss_bytes")), rss_floor(run)
+    return value if value is not None and floor is not None and value > RSS_WRAPPER_MARGIN * floor else None
 
 
 def timed_problems(good):
@@ -1593,6 +1795,8 @@ def render_timed(directory, findings, problems):
             stats = summarize(column(name))
             return "- %s per run: median %s, min %s, max %s" % (name, fmt(stats and stats["median"]), fmt(stats and stats["min"]), fmt(stats and stats["max"]))
         guarded(lines, problems, fault_line)
+    guarded(lines, problems, lambda: rss_line(good))
+    guarded(lines, problems, lambda: code_line(os.path.join(directory, "timed", "reference.exe")))
     low, mid = summary and summary["min"], summary and summary["median"]
     if work_bytes:
         guarded(lines, problems, lambda: "- work (-fsource-metrics): %s translated bytes, %s code lines, %s tokens; at the %s minimum %s ns/byte, %s MB/s; median %s ns/byte, %s MB/s" % (
@@ -1607,6 +1811,25 @@ def render_timed(directory, findings, problems):
         guarded(lines, problems, lambda: findings.append("Wall (%s) min %s s / median %s s, IPC %s, %s MB/s at the minimum (timed/)" % (
             primary, fmt(low, ".4f"), fmt(mid, ".4f"), fmt(median_ipc, ".3f"), fmt(ratio(work_bytes, low, 1e-6), ".2f"))))
     return lines
+
+
+def rss_line(good):
+    """Peak RSS of the timed runs (rss_value) against the perf wrapper's floor."""
+    values = [rss_value(run) for run in good]
+    stats = summarize([value for value in values if value is not None])
+    floors = [rss_floor(run) for run in good if rss_floor(run)]
+    return "- peak RSS (wait4 ru_maxrss of taskset/perf and the compiler; harness/perf floor up to %s bytes): median %s, min %s, max %s bytes%s" % (
+        fmt(max(floors) if floors else None), fmt(stats and stats["median"]), fmt(stats and stats["min"]), fmt(stats and stats["max"]),
+        "" if all(value is not None for value in values) else "; %d of %d runs NA (not above %gx the floor, or not measured)" % (
+            sum(value is None for value in values), len(values), RSS_WRAPPER_MARGIN))
+
+
+def code_line(path):
+    if not os.path.isfile(path):
+        return None
+    code = code_sections(path)
+    return "- output code sections (%s): %s bytes of %s file bytes%s" % (
+        code["format"], fmt(code["code_bytes"]), fmt(code["file_bytes"]), " (%s)" % code["reason"] if code["reason"] else "")
 
 
 def timed_phase_lines(directory, good, findings):
@@ -2514,13 +2737,14 @@ def run_pair_member(lab, directory, pair, key):
     base = os.path.join(directory, "pairs", "%04d-%s" % (pair, key))
     out = os.path.join(lab.output, "out.exe")
     with lab.instance():
-        status, out_text, err = lab.run_command(lab.pin() + [lab.perf, "stat", "-x,", "-o", base + ".csv", "-e", ",".join(TIMED_EVENTS), "--"]
-                                                + lab.workload(out, compile_flags(lab, base + ".ccmetrics")))
+        status, out_text, err = lab.run_command(timed_command(lab, base + ".csv") + lab.workload(out, compile_flags(lab, base + ".ccmetrics")))
     span = lab.last_elapsed
     if status != 0:
         write_text(base + ".err", out_text[-20000:] + err[-20000:])
     identical = status == 0 and filecmp.cmp(os.path.join(lab.output, "reference.exe"), out, shallow=False)
-    return {"pair": pair, "order": abba_order(pair), "variant": key, "exit": status, "identical": identical, "span_s": round(span, 6)}
+    return {"pair": pair, "order": abba_order(pair), "variant": key, "exit": status, "identical": identical, "span_s": round(span, 6),
+            "maxrss_bytes": lab.last_maxrss, "harness_rss_bytes": lab.last_harness_rss,
+            "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes")}
 
 
 def compare_timed(labs, directory, meta, arguments, started, other_compiles):
@@ -2852,15 +3076,47 @@ def compare_summary(directory):
                                         "ms", "lower", seed, time_metric=True, floor=min_effect / 100.0) for phase in PHASES + ("total",)}
     checks = compare_checks(pairs)
     verdict = compare_verdict(metrics, phases, min_effect)
+    code = code_bytes_summary(references)
     return {"schema": COMPARE_SCHEMA, "directory": directory, "command": config.get("command"), "repo_root": config.get("repo_root"),
             "cpu": config.get("cpu"), "host": host_facts(os.path.join(directory, "a")),
             "baseline": variants["baseline"], "candidate": variants["candidate"], "outputs_identical": outputs_identical,
+            "code_bytes": code,
             "plan": dict(meta.get("plan") or {}, seed=seed, confidence=CONFIDENCE, bootstrap_resamples=BOOTSTRAP_RESAMPLES,
                          complete_pairs=len(pairs), fresh_copy=bool(config.get("fresh_copy"))),
             "method": COMPARE_METHOD, "verdict": verdict, "metrics": metrics, "phases": phases, "checks": checks,
             "profile": compare_profile(directory, meta),
             "steps": {name: state.get("status") for name, state in meta.get("steps", {}).items()},
-            "warnings": compare_warnings(variants, outputs_identical, metrics, checks, meta)}
+            "warnings": compare_warnings(variants, outputs_identical, metrics, checks, meta) + rss_warnings(runs)}
+
+
+def code_bytes_summary(references):
+    """Generated code bytes of A's and B's reference outputs (code_sections):
+    exact, so ratio is b_value / a_value with no interval; None when either
+    is NA or the baseline payload is zero (no denominator, #511)."""
+    a, b = (code_sections(path) if os.path.isfile(path) else None for path in references)
+    a_value, b_value = a and a["code_bytes"], b and b["code_bytes"]
+    note = None
+    if a is None or b is None:
+        note = "no reference output for %s" % " and ".join(role for (_, role), info in zip(VARIANTS, (a, b)) if info is None)
+    elif a_value is None or b_value is None:
+        note = "; ".join("%s: %s %s" % (role, info["format"], info["reason"]) for (_, role), info in zip(VARIANTS, (a, b)) if info["reason"])
+    elif a_value == 0:
+        note = "zero baseline code payload: no ratio denominator"
+    return {"a_value": a_value, "b_value": b_value, "ratio": b_value / a_value if a_value and b_value is not None else None,
+            "a_format": a and a["format"], "b_format": b and b["format"], "a_file_bytes": a and a["file_bytes"],
+            "b_file_bytes": b and b["file_bytes"], "a_sections": a and a["sections"], "b_sections": b and b["sections"], "note": note}
+
+
+def rss_warnings(runs):
+    """A warning per variant whose successful runs have a peak RSS NA (rss_value)."""
+    warnings = []
+    for key, role in VARIANTS:
+        good = [run for run in runs if run["variant"] == key and run["exit"] == 0]
+        missing = [run for run in good if rss_value(run) is None]
+        if missing:
+            warnings.append("%s: peak RSS NA in %d of %d runs (not above %gx the harness/perf floor of %s bytes, or not measured)" % (
+                role, len(missing), len(good), RSS_WRAPPER_MARGIN, fmt(rss_floor(missing[0]))))
+    return warnings
 
 
 def value_text(value, unit):
@@ -2870,7 +3126,7 @@ def value_text(value, unit):
         return "%.4f" % value
     if unit == "ms":
         return "%.2f" % value
-    if unit == "count":
+    if unit in ("count", "bytes"):
         return fmt(value)
     return "%.4f" % value
 
@@ -2890,7 +3146,11 @@ def compare_markdown(summary):
             role, "A" if role == "baseline" else "B", info["path"], info["sha256"], info["runs"], info["failed"],
             "deterministic output" if info["deterministic"] else "**nondeterministic output**",
             "measured (-fmetrics-out)" if info["metrics_out"] else "NA"))
+    code = summary.get("code_bytes") or {}
     lines += ["- outputs of A and B: %s" % {True: "byte-identical", False: "differ", None: "NA"}[summary["outputs_identical"]],
+              "- generated code bytes (executable sections, exact): A %s, B %s, B/A %s%s" % (
+                  fmt(code.get("a_value")), fmt(code.get("b_value")), fmt(code.get("ratio"), ".6f"),
+                  "; " + code["note"] if code.get("note") else ""),
               "- workload `%s` in `%s`, %s; %s complete pairs in ABBA order (%s)" % (
                   summary["command"], summary["repo_root"], "unpinned" if summary["cpu"] is None else "pinned to CPU %s" % summary["cpu"],
                   plan.get("complete_pairs"), plan.get("reason", "NA")),
@@ -2991,6 +3251,328 @@ def render_compare(directory):
     write_json(os.path.join(directory, "summary.json"), summary)
     text = compare_markdown(summary)
     write_text(os.path.join(directory, "report.md"), text)
+    return text
+
+
+# ---------------------------------------------------------------- native-retirement gate (#512)
+
+def limit_outcome(low, high, limit):
+    """#511 verdict of one interval metric against its limit: PASS when the
+    upper 95% bound is at most the limit, FAIL when even the lower bound
+    exceeds it, INCONCLUSIVE when the interval crosses it or is missing."""
+    if low is None or high is None:
+        return "INCONCLUSIVE", "no 95% CI (too few complete pairs or no measured values)"
+    if high <= limit:
+        return "PASS", "upper bound %.4f <= %g" % (high, limit)
+    if low > limit:
+        return "FAIL", "lower bound %.4f > %g" % (low, limit)
+    return "INCONCLUSIVE", "CI [%.4f, %.4f] crosses %g" % (low, high, limit)
+
+
+def exact_outcome(value, limit, note=None):
+    """#511 verdict of an exact (deterministic) ratio against its limit."""
+    if value is None:
+        return "INCONCLUSIVE", note or "no exact ratio"
+    return ("PASS", "%.6f <= %g" % (value, limit)) if value <= limit else ("FAIL", "%.6f > %g" % (value, limit))
+
+
+def interval_check(row, limit, label):
+    outcome, reason = limit_outcome(row and row.get("ci_low"), row and row.get("ci_high"), limit)
+    return {"label": label, "kind": "interval", "ratio": row and row.get("ratio"), "ci_low": row and row.get("ci_low"),
+            "ci_high": row and row.get("ci_high"), "ci_coverage": row and row.get("ci_coverage"), "n": row and row.get("n"),
+            "a_value": row and row.get("a_median"), "b_value": row and row.get("b_median"), "limit": limit,
+            "outcome": outcome, "reason": reason}
+
+
+def correctness_check(label, passed, reason):
+    """passed: True, False or None (not established)."""
+    outcome = {True: "PASS", False: "FAIL", None: "INCONCLUSIVE"}[passed]
+    return {"label": label, "kind": "correctness", "ratio": None, "ci_low": None, "ci_high": None, "ci_coverage": None, "n": None,
+            "a_value": None, "b_value": None, "limit": None, "outcome": outcome, "reason": reason}
+
+
+def variant_checks(summary):
+    """Correctness of one cell's two compilers: every timed run succeeded and
+    every output is byte-identical to the variant's warm-up output."""
+    roles = [summary.get(role) or {} for role, _ in RETIREMENT_ROLES]
+    ran = all(info.get("runs") for info in roles)
+    failed = [label for (_, label), info in zip(RETIREMENT_ROLES, roles) if info.get("failed")]
+    unstable = [label for (_, label), info in zip(RETIREMENT_ROLES, roles) if info.get("runs") and not info.get("deterministic")]
+    return {"runs_succeeded": correctness_check("every timed run succeeded", None if not ran else not failed,
+                                                "no timed runs" if not ran else "failed runs: " + ", ".join(failed) if failed else "all runs exited 0"),
+            "deterministic": correctness_check("outputs deterministic", None if not ran else not unstable,
+                                               "no timed runs" if not ran else "nondeterministic: " + ", ".join(unstable) if unstable
+                                               else "every run byte-identical to its warm-up output")}
+
+
+def cell_checks(kind, summary):
+    """{check name: check} for one cell from its compare summary.json."""
+    metrics = summary.get("metrics") or {}
+    checks = {}
+    if kind == "compiler":
+        code = summary.get("code_bytes") or {}
+        checks["compiler_wall_time"] = interval_check(metrics.get("wall"), RETIREMENT_LIMITS["compiler_wall_time"], "compiler wall time")
+        checks["peak_rss"] = interval_check(metrics.get("peak_rss"), RETIREMENT_LIMITS["peak_rss"], "compiler peak RSS")
+        outcome, reason = exact_outcome(code.get("ratio"), RETIREMENT_LIMITS["code_bytes"], code.get("note"))
+        checks["code_bytes"] = {"label": "generated code bytes", "kind": "exact", "ratio": code.get("ratio"), "ci_low": None, "ci_high": None,
+                                "ci_coverage": None, "n": None, "a_value": code.get("a_value"), "b_value": code.get("b_value"),
+                                "limit": RETIREMENT_LIMITS["code_bytes"], "outcome": outcome, "reason": reason}
+    else:
+        checks["generated_runtime"] = interval_check(metrics.get("wall"), RETIREMENT_LIMITS["generated_runtime"], "generated-program runtime")
+        identical = summary.get("outputs_identical")
+        checks["generated_compilers_agree"] = correctness_check(
+            "generated compilers agree", identical,
+            {True: "both stage-1 compilers wrote byte-identical outputs", False: "the stage-1 compilers' outputs differ",
+             None: "outputs not compared"}[identical])
+    checks.update(variant_checks(summary))
+    return checks
+
+
+def cell_outcome(checks):
+    outcomes = {check["outcome"] for check in checks.values()}
+    return "FAIL" if "FAIL" in outcomes else "PASS" if outcomes == {"PASS"} else "INCONCLUSIVE"
+
+
+def retirement_verdict(cells, required):
+    """Overall #512 outcome: FAIL when any check fails; PASS only when every
+    required cell ran and every one of its checks passed; else INCONCLUSIVE
+    (a missing, partial or imprecise cell never passes)."""
+    by_name = {cell["cell"]: cell for cell in cells}
+    missing = [name for name in required if name not in by_name or by_name[name]["status"] == "not run"]
+    failed, open_ = [], []
+    for cell in cells:
+        for name, check in cell["checks"].items():
+            if check["outcome"] == "FAIL":
+                failed.append("%s %s (%s)" % (cell["cell"], name, check["reason"]))
+            elif check["outcome"] != "PASS":
+                open_.append("%s %s (%s)" % (cell["cell"], name, check["reason"]))
+        if cell["status"] == "failed":
+            open_.append("%s sub-run failed (%s)" % (cell["cell"], cell["note"]))
+    if failed:
+        outcome = "FAIL"
+    elif missing or open_ or not cells:
+        outcome = "INCONCLUSIVE"
+    else:
+        outcome = "PASS"
+    text = {"PASS": "PASS: every required cell (%s) is within the #511 limits and its correctness checks hold." % ", ".join(required),
+            "FAIL": "FAIL: %s." % "; ".join(failed),
+            "INCONCLUSIVE": "INCONCLUSIVE: %s." % "; ".join(
+                (["cells not measured: " + ", ".join(missing)] if missing else []) + open_)}[outcome]
+    return {"outcome": outcome, "text": text, "failed": failed, "inconclusive": open_, "missing_cells": missing}
+
+
+def retirement_cells(arguments):
+    """[(cell, kind, extra compile args)] in run order."""
+    modes = [mode for mode in arguments.modes.replace(" ", "").split(",") if mode]
+    cells = [(mode, "compiler", ["-fregister-allocator=" + mode]) for mode in modes]
+    return cells + [(RUNTIME_CELL, "generated-runtime", ["-fregister-allocator=" + RUNTIME_SOURCE_MODE])]
+
+
+def run_cell(directory, name, baseline, candidate, extra, arguments):
+    """One `compare` sub-run in DIR/<name>; (status, note).  Its own
+    exit (compare stopped early) or an exception is recorded, not raised."""
+    argv = ["compare", "--baseline", baseline, "--candidate", candidate, "--repo-root", arguments.repo_root,
+            "--cpu", str(arguments.cpu), "--output", os.path.join(directory, name), "--perf", arguments.perf,
+            "--seed", str(arguments.seed), "--warmups", str(arguments.warmups)]
+    argv += ["--pairs", str(arguments.pairs)] if arguments.pairs is not None else ["--target-minutes", str(arguments.target_minutes_per_cell)]
+    argv += (["--profile-steps", arguments.profile_steps] if arguments.profile_steps else []) + (["--sudo"] if arguments.sudo else [])
+    print("uarch_lab: retirement cell %s: compare %s" % (name, " ".join(extra)), flush=True)
+    try:
+        main(argv + ["--"] + extra)
+        return "ok", ""
+    except SystemExit as error:
+        return "failed", str(error.code)
+    except Exception as error:  # recorded; the gate then reads the cell as failed
+        return "failed", "%s: %s" % (type(error).__name__, error)
+
+
+def stage1_compilers(directory, config):
+    """Copy the stage-1 executables A and B wrote in the source cell (their
+    reference outputs) to DIR/generated-runtime/stage1/<role>/ide, executable;
+    returns ({role: path}, note) or (None, reason)."""
+    source = os.path.join(directory, RUNTIME_SOURCE_MODE)
+    summary = json.loads(read_text(os.path.join(source, "summary.json")) or "{}")
+    unstable = [role for role, _ in RETIREMENT_ROLES if not (summary.get(role) or {}).get("deterministic")]
+    if not summary or unstable:
+        return None, "%s cell has no deterministic stage-1 output for %s" % (RUNTIME_SOURCE_MODE, ", ".join(unstable) or "either variant")
+    paths = {}
+    for (key, _), (role, _) in zip(VARIANTS, RETIREMENT_ROLES):
+        target = os.path.join(directory, RUNTIME_CELL, "stage1", role, "ide")
+        shutil.rmtree(os.path.dirname(target), ignore_errors=True)
+        os.makedirs(os.path.dirname(target))
+        fresh_binary_copy(os.path.join(source, key, "reference.exe"), target)
+        os.chmod(target, 0o755)
+        paths[role] = target
+        config["stage1"][role] = {"path": target, "sha256": sha256_file(target), "size_bytes": os.path.getsize(target)}
+    return paths, ""
+
+
+def command_retirement(arguments):
+    modes = [mode for mode in arguments.modes.replace(" ", "").split(",") if mode]
+    unknown = [mode for mode in modes if mode not in RETIREMENT_MODES]
+    if unknown or not modes or len(set(modes)) != len(modes):
+        sys.exit("uarch_lab: --modes takes distinct values from %s" % ",".join(RETIREMENT_MODES))
+    if arguments.pairs is not None and arguments.pairs < 1:
+        sys.exit("uarch_lab: --pairs must be at least 1")
+    directory = os.path.abspath(arguments.output)
+    os.makedirs(directory, exist_ok=True)
+    for stale in ("retirement.json", "retirement.md"):
+        if os.path.exists(os.path.join(directory, stale)):
+            os.remove(os.path.join(directory, stale))
+    binaries = {}
+    for role, label in RETIREMENT_ROLES:
+        path = os.path.abspath(getattr(arguments, role))
+        if not os.path.isfile(path):
+            sys.exit("uarch_lab: no %s binary at %s" % (role, path))
+        binaries[role] = {"path": path, "sha256": sha256_file(path), "size_bytes": os.path.getsize(path),
+                          "revision": getattr(arguments, role + "_rev"), "label": label}
+    cells = retirement_cells(arguments)
+    per_cell = "%d pairs (--pairs)" % arguments.pairs if arguments.pairs is not None else "about %g min" % arguments.target_minutes_per_cell
+    estimate = None if arguments.pairs is not None else len(cells) * arguments.target_minutes_per_cell
+    config = {"version": 1, "mode": "retirement", "baseline": binaries["baseline"], "candidate": binaries["candidate"],
+              "repo_root": os.path.abspath(arguments.repo_root), "cpu": arguments.cpu if arguments.cpu >= 0 else None,
+              "perf": arguments.perf, "modes": modes, "pairs": arguments.pairs, "target_minutes_per_cell": arguments.target_minutes_per_cell,
+              "estimated_minutes": estimate, "seed": arguments.seed, "warmups": arguments.warmups, "profile_steps": arguments.profile_steps,
+              "sudo": arguments.sudo, "cells": [{"cell": name, "kind": kind, "extra": extra, "status": "not run", "note": ""}
+                                                for name, kind, extra in cells], "stage1": {}}
+    write_json(os.path.join(directory, "retirement-config.json"), config)
+    print("uarch_lab: retirement gate (#512, %s) in %s\nuarch_lab: plan: %d cells x %s%s:" % (
+        RETIREMENT_DECISION, directory, len(cells), per_cell, " = about %g min" % estimate if estimate else ""), flush=True)
+    for name, kind, extra in cells:
+        print("    %-18s %s" % (name, "stage-1 self-host compile, %s" % " ".join(extra) if kind == "compiler" else
+                                "the %s cell's stage-1 compilers (A-built vs B-built) compiling the same source, %s" % (
+                                    RUNTIME_SOURCE_MODE, " ".join(extra))), flush=True)
+    started = time.monotonic()
+    for entry in config["cells"]:
+        if entry["kind"] == "compiler":
+            entry["status"], entry["note"] = run_cell(directory, entry["cell"], binaries["baseline"]["path"],
+                                                      binaries["candidate"]["path"], entry["extra"], arguments)
+        elif RUNTIME_SOURCE_MODE not in modes:
+            entry["note"] = "needs the %s cell (--modes)" % RUNTIME_SOURCE_MODE
+        else:
+            paths, note = stage1_compilers(directory, config)
+            if paths is None:
+                entry["note"] = note
+            else:
+                entry["status"], entry["note"] = run_cell(directory, entry["cell"], paths["baseline"], paths["candidate"], entry["extra"], arguments)
+        write_json(os.path.join(directory, "retirement-config.json"), config)
+    config["total_s"] = round(time.monotonic() - started, 1)
+    write_json(os.path.join(directory, "retirement-config.json"), config)
+    render_retirement(directory)
+    summary = json.loads(read_text(os.path.join(directory, "retirement.json")) or "{}")
+    print("uarch_lab: retirement total %.1f s\n%s\nuarch_lab: report %s, summary %s" % (
+        config["total_s"], summary.get("verdict", {}).get("text", "no verdict"), os.path.join(directory, "retirement.md"),
+        os.path.join(directory, "retirement.json")))
+
+
+def retirement_summary(directory):
+    """retirement.json (RETIREMENT_SCHEMA) from retirement-config.json and each cell's summary.json."""
+    config = json.loads(read_text(os.path.join(directory, "retirement-config.json")) or "{}")
+    cells, warnings, host = [], [], None
+    for entry in config.get("cells", []):
+        cell_dir = os.path.join(directory, entry["cell"])
+        summary = json.loads(read_text(os.path.join(cell_dir, "summary.json")) or "{}") if entry["status"] != "not run" else {}
+        checks = cell_checks(entry["kind"], summary) if summary else {}
+        if entry["status"] == "not run" or not summary:
+            checks["cell_measured"] = correctness_check("cell measured", None, entry.get("note") or "no summary.json")
+        host = host or (summary.get("host") if summary else None)
+        warnings += ["%s: %s" % (entry["cell"], warning) for warning in summary.get("warnings", [])]
+        diagnostics = {key: {"ratio": row.get("ratio"), "ci_low": row.get("ci_low"), "ci_high": row.get("ci_high"), "outcome": row.get("outcome")}
+                       for key, row in (summary.get("metrics") or {}).items() if key in ("task_clock", "instructions", "cycles", "peak_rss")}
+        cells.append({"cell": entry["cell"], "kind": entry["kind"], "extra_args": entry["extra"], "status": entry["status"],
+                      "note": entry.get("note", ""), "directory": cell_dir,
+                      "summary": os.path.join(entry["cell"], "summary.json") if summary else None,
+                      "summary_schema": summary.get("schema"),
+                      "baseline": {key: (summary.get("baseline") or {}).get(key) for key in ("path", "sha256", "runs", "failed", "deterministic")},
+                      "candidate": {key: (summary.get("candidate") or {}).get(key) for key in ("path", "sha256", "runs", "failed", "deterministic")},
+                      "complete_pairs": (summary.get("plan") or {}).get("complete_pairs"), "outputs_identical": summary.get("outputs_identical"),
+                      "checks": checks, "diagnostics": diagnostics, "outcome": cell_outcome(checks)})
+    required = list(RETIREMENT_MODES) + [RUNTIME_CELL]
+    if config.get("pairs") is not None:
+        warnings.insert(0, "pair count fixed by --pairs %d instead of --target-minutes-per-cell: a test setting, not the gate's plan"
+                        % config["pairs"])
+    if config.get("cpu") is None:
+        warnings.insert(0, "runs were not pinned to a CPU (--cpu -1)")
+    return {"schema": RETIREMENT_SCHEMA, "directory": directory, "decision": RETIREMENT_DECISION, "contract": RETIREMENT_CONTRACT,
+            "verdict": retirement_verdict(cells, required),
+            "baseline": config.get("baseline"), "candidate": config.get("candidate"), "stage1": config.get("stage1", {}),
+            "repo_root": config.get("repo_root"), "cpu": config.get("cpu"), "host": host,
+            "plan": {"modes": config.get("modes"), "required_cells": required, "pairs": config.get("pairs"),
+                     "target_minutes_per_cell": config.get("target_minutes_per_cell"), "estimated_minutes": config.get("estimated_minutes"),
+                     "seed": config.get("seed"), "warmups": config.get("warmups"), "profile_steps": config.get("profile_steps"),
+                     "total_s": config.get("total_s")},
+            "limits": {name: {"limit": limit, "applies_to": RETIREMENT_LIMIT_TEXT[name][0], "bound": RETIREMENT_LIMIT_TEXT[name][1]}
+                       for name, limit in RETIREMENT_LIMITS.items()},
+            "cells": cells, "aggregates": retirement_aggregates(cells), "external_checks": RETIREMENT_EXTERNAL, "warnings": warnings}
+
+
+def retirement_aggregates(cells):
+    """Diagnostic, not gating: per interval metric of the allocator-mode
+    cells, the geometric mean of their median ratios and of their upper
+    bounds, beside #511's 1.02 primary aggregate limit."""
+    compiler = [cell for cell in cells if cell["kind"] == "compiler"]
+    result = {}
+    for name in ("compiler_wall_time", "peak_rss"):
+        rows = [cell["checks"].get(name) or {} for cell in compiler]
+        complete = bool(rows) and all(positive(row.get("ratio")) and positive(row.get("ci_high")) for row in rows)
+        result[name] = {"cells": len(rows), "limit": RETIREMENT_AGGREGATE_LIMIT, "gating": False,
+                        "geomean_ratio": math.exp(statistics.fmean(math.log(row["ratio"]) for row in rows)) if complete else None,
+                        "geomean_upper_bound": math.exp(statistics.fmean(math.log(row["ci_high"]) for row in rows)) if complete else None}
+    return result
+
+
+def retirement_markdown(summary):
+    verdict = summary["verdict"]
+    lines = ["# Native-retirement performance gate (#512)", "", "**%s**" % verdict["text"], "",
+             "Decision record: %s; limits: `%s` (#511), per cell." % (summary["decision"], summary["contract"]), ""]
+    for role in ("baseline", "candidate"):
+        info = summary.get(role) or {}
+        lines.append("- %s (%s): `%s` sha256 `%s`%s" % (role, "A" if role == "baseline" else "B", info.get("path"), info.get("sha256"),
+                                                       ", revision %s" % info["revision"] if info.get("revision") else ""))
+    for role, info in sorted(summary.get("stage1", {}).items()):
+        lines.append("- stage-1 compiler built by the %s (%s cell): sha256 `%s`, %s bytes" % (role, RUNTIME_SOURCE_MODE, info["sha256"], fmt(info["size_bytes"])))
+    plan = summary["plan"]
+    lines += ["- source `%s`, %s; per cell %s; seed %s" % (
+        summary["repo_root"], "unpinned" if summary["cpu"] is None else "pinned to CPU %s" % summary["cpu"],
+        "%d pairs (--pairs)" % plan["pairs"] if plan.get("pairs") is not None else "about %g min" % plan["target_minutes_per_cell"], plan["seed"]),
+              "- machine-readable: `retirement.json` (schema `%s`); `python3 tools/uarch_lab.py report %s` re-renders it and every cell" % (
+                  summary["schema"], summary["directory"]), "", "## Cells", ""]
+    rows = []
+    for cell in summary["cells"]:
+        for name, check in cell["checks"].items():
+            interval = "[%.4f, %.4f]" % (check["ci_low"], check["ci_high"]) if check["ci_low"] is not None else "exact" if check["kind"] == "exact" else "-"
+            rows.append([cell["cell"], check["label"], "-" if check["ratio"] is None else "%.4f" % check["ratio"], interval,
+                         "-" if check["limit"] is None else "%g" % check["limit"], "**%s**" % check["outcome"], check["reason"]])
+    lines += table(["cell", "metric", "B/A", "95% CI", "limit", "outcome", "reason"], rows)
+    lines += ["", "Cell outcomes: " + ", ".join("%s %s (%s)" % (cell["cell"], cell["outcome"], cell["status"]) for cell in summary["cells"]),
+              "", "## Limits (#511, per cell)", ""]
+    lines += ["- %s: B/A %s at most %g (%s)" % (name, row["bound"], row["limit"], row["applies_to"]) for name, row in summary["limits"].items()]
+    lines += ["", "Diagnostic only (not in the decision record's table): geometric mean over the %d allocator-mode cells against #511's "
+              "%g primary aggregate limit: %s." % (
+                  summary["aggregates"]["compiler_wall_time"]["cells"], RETIREMENT_AGGREGATE_LIMIT,
+                  "; ".join("%s ratio %s, upper bounds %s" % (name, fmt(row["geomean_ratio"], ".4f"), fmt(row["geomean_upper_bound"], ".4f"))
+                            for name, row in summary["aggregates"].items()))]
+    lines += ["", "## Not checked by the lab", ""] + ["- %s: %s" % (row["check"], row["how"]) for row in summary["external_checks"]]
+    lines += ["", "## Warnings", ""] + (["- " + warning for warning in summary["warnings"]] or ["- none"])
+    lines += ["", "Each cell is a full `compare` directory (`<cell>/report.md`, `<cell>/summary.json`). Interval metrics use the "
+              "median paired ratio and its exact sign-test 95% CI; code bytes are the exact ratio of executable-section bytes of the "
+              "two stage-1 outputs. PASS needs the upper bound within the limit, FAIL a lower bound above it; an interval that "
+              "crosses it is INCONCLUSIVE."]
+    return "\n".join(lines) + "\n"
+
+
+def render_retirement(directory, cells=False):
+    """retirement.json and retirement.md from the raw files; with cells, each
+    cell's compare directory is re-rendered first."""
+    if cells:
+        config = json.loads(read_text(os.path.join(directory, "retirement-config.json")) or "{}")
+        for entry in config.get("cells", []):
+            if os.path.isfile(os.path.join(directory, entry["cell"], "compare.json")):
+                render_compare(os.path.join(directory, entry["cell"]))
+    summary = retirement_summary(directory)
+    write_json(os.path.join(directory, "retirement.json"), summary)
+    text = retirement_markdown(summary)
+    write_text(os.path.join(directory, "retirement.md"), text)
     return text
 
 
@@ -3102,7 +3684,26 @@ def main(argv=None):
     compare.add_argument("--no-fresh-copy", dest="fresh_copy", action="store_false",
                          help="run each binary in place instead of a fresh copy per run (the setting that showed a 0.5%% A/A bias in LAB3)")
     compare.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
-    report = commands.add_parser("report", help="re-render DIR/report.md and DIR/summary.json from raw files (run or compare)")
+    retire = commands.add_parser("retirement", help="#512 native-retirement gate: compare per allocator mode plus generated-program "
+                                 "runtime, judged against the #511 limits (retirement.md, retirement.json)")
+    retire.add_argument("--baseline", required=True, help="the A compiler: Clang Release ide from main")
+    retire.add_argument("--candidate", required=True, help="the B compiler: Clang Release ide of the MIR-only tree")
+    retire.add_argument("--repo-root", default=".", help="the frozen source tree every cell compiles")
+    retire.add_argument("--cpu", type=int, default=2, help="CPU to pin to (-1: unpinned)")
+    retire.add_argument("--output", required=True)
+    retire.add_argument("--modes", default=",".join(RETIREMENT_MODES),
+                        help="comma list of allocator modes (default: all four; fewer is a partial, never passing, run)")
+    retire.add_argument("--target-minutes-per-cell", type=float, default=DEFAULT_CELL_MINUTES,
+                        help="each cell's compare --target-minutes (default %(default)s)")
+    retire.add_argument("--pairs", type=int, default=None, help="fixed pairs per cell (testing; overrides --target-minutes-per-cell)")
+    retire.add_argument("--warmups", type=int, default=1)
+    retire.add_argument("--perf", default="perf")
+    retire.add_argument("--profile-steps", default="", help="passed to every cell's compare (default: none)")
+    retire.add_argument("--sudo", action="store_true", help="passed to every cell's compare (adds the ibs profile step)")
+    retire.add_argument("--seed", type=int, default=DEFAULT_SEED, help="bootstrap seed (recorded)")
+    retire.add_argument("--baseline-rev", default=None, help="revision label of the baseline (recorded)")
+    retire.add_argument("--candidate-rev", default=None, help="revision label of the candidate (recorded)")
+    report = commands.add_parser("report", help="re-render DIR/report.md and DIR/summary.json from raw files (run, compare or retirement)")
     report.add_argument("directory")
     report.add_argument("--perf", default=None, help="perf used to derive reports an older run lacks (default: the recorded one, then PATH)")
     arguments = parser.parse_args(argv)
@@ -3110,9 +3711,13 @@ def main(argv=None):
         command_run(arguments)
     elif arguments.command == "compare":
         command_compare(arguments)
+    elif arguments.command == "retirement":
+        command_retirement(arguments)
     else:
         directory = os.path.abspath(arguments.directory)
-        if os.path.isfile(os.path.join(directory, "compare.json")):
+        if os.path.isfile(os.path.join(directory, "retirement-config.json")):
+            print(render_retirement(directory, cells=True), end="")
+        elif os.path.isfile(os.path.join(directory, "compare.json")):
             print(render_compare(directory), end="")
         else:
             print(render_report(directory, resolve_perf(load_meta(directory), arguments.perf)), end="")
