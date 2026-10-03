@@ -27125,6 +27125,57 @@ BUSTER_C_INTERNAL void c_parse_validate_control_statements(CTypeParseMachine* ma
     arena_set_position(machine->scratch_arena, mark);
 }
 
+// GNU fallthrough is an attribute on a null statement. The lowering walker
+// skips leading GNU lists, so semantic validation must reject a missing ';'
+// before that skip can turn an attributed expression into an ordinary one.
+BUSTER_C_INTERNAL void c_parse_validate_gnu_fallthrough(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+    CParseLoweringConstraintDiagnostic* diagnostic)
+{
+    u32 cursor = start;
+    u32 fallthrough = UINT32_MAX;
+    bool attributes = true;
+    while (attributes && cursor + 2 < end)
+    {
+        CToken token = preprocess.tokens[cursor];
+        attributes = token.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(preprocess.spelling_base, token,
+                C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT)) &&
+            c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            c_token_is_punctuator(&preprocess.tokens[cursor + 2], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (attributes)
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor + 1);
+            attributes = close < end;
+            if (attributes)
+            {
+                for (u32 item = cursor + 3; item + 1 < close; item += 1)
+                {
+                    CToken name = preprocess.tokens[item];
+                    bool argument = c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+                    u32 argument_close = argument ? c_parse_matching_delimiter_indexed(result, preprocess, item + 1) : item;
+                    if (name.kind == C_TOKEN_IDENTIFIER)
+                    {
+                        String8 spelling = c_token_spelling(preprocess.spelling_base, name);
+                        if (string_equal(spelling, S8("fallthrough")) || string_equal(spelling, S8("__fallthrough__")))
+                        {
+                            if (fallthrough == UINT32_MAX) fallthrough = item;
+                            if (argument && argument_close != item + 2)
+                                c_parse_lowering_constraint_consider(diagnostic, S8("fallthrough attribute takes no arguments"), item, item);
+                        }
+                    }
+                    if (argument)
+                    {
+                        item = argument_close < close ? argument_close : close - 1;
+                    }
+                }
+                cursor = close + 1;
+            }
+        }
+    }
+    if (fallthrough != UINT32_MAX && (cursor >= end || !c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_SEMICOLON)))
+        c_parse_lowering_constraint_consider(diagnostic, S8("fallthrough attribute requires a null statement"), start, fallthrough);
+}
+
 // Walk statement starts without building another syntax representation. Delimiter
 // indices skip expression groups, while compound statements and control headers
 // expose their child statements in source order.
@@ -27134,6 +27185,9 @@ BUSTER_C_INTERNAL void c_parse_validate_statement_expression_range(CTypeParseMac
     while (cursor < end)
     {
         CToken token = preprocess.tokens[cursor];
+        if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token,
+                C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT)))
+            c_parse_validate_gnu_fallthrough(result, preprocess, cursor, end, diagnostic);
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) ||
             c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) || c_token_in_well_known_set(preprocess.spelling_base, token,
                 C_SYMBOL_WELL_KNOWN_BIT(ELSE) | C_SYMBOL_WELL_KNOWN_BIT(DO)))
