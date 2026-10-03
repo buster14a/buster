@@ -451,3 +451,48 @@ even when source, compiler and CPU model names match. Neither model names nor
 assertion totals may reconstruct a missing host profile or normalize differing
 censuses. Historical archives without measured host/resource evidence remain
 diagnostic; qualification requires a prospectively declared comparable cohort.
+
+
+### Actual job environment receipts
+
+The unchanged six exact qualification dispatch refs also opt in to
+`tools/ci_job_environment.py` immediately after checkout in Workflow lint,
+UEFI firmware boot, Clang analyzer shards and CI complete. The executed Main CI
+reuse job has the same wiring; its push/main guard stays intact, so the intended
+manual campaign skips it. Each job retains the bounded JSON in its existing
+artifact even when later work fails. CI complete collects under `always()` plus
+the opt-in and includes the receipt in its desktop-partition inventory artifact.
+
+The receipt records only exact repository/source/run/attempt/workflow-job
+bindings and the actual whitelisted job environment: requested runner label,
+runner OS/architecture/instance name, ImageOS/ImageVersion and raw workflow
+provenance. `GITHUB_JOB` is not a numeric API job ID. `GITHUB_WORKFLOW_SHA` is a
+workflow commit, not the ci.yml blob. Join actual source/workflow/API job and
+artifact identities during readback. Keep requested runner label distinct from
+RUNNER_NAME; the latter is instance provenance, not cross-sample equality.
+
+Receipt `status=complete` means every recorded binding/observation is available,
+not that the job or campaign is accepted. Missing, blank, whitespace-only and
+padded unknown sentinels remain verbatim with `status=incomplete`. Readback must
+require complete status before projecting image facts into conditions; the
+unchanged qualifier does not strip strings for the collector. No Setup preamble,
+API label or requested runner value substitutes for actual image environment.
+No API request, executable probe, cache decision or tool-map change runs here.
+CI complete and an executed reuse role still have empty tool/cache maps.
+
+With the same exact opt-in, the Android SDK installer appends a bounded
+`ANDROID_SDK_SYSTEM_IMAGE_REVISION` JSON witness to its existing retained SDK
+log and stdout after structurally validated preinstalled success and validated
+zero-exit installation success. It reads only the same requested system image's
+actual source.properties, retains that file's path/size/SHA-256 and its single
+positive whole Pkg.Revision, and binds source/run/attempt/workflow job. Valid
+preinstalled images are not reinstalled when another package needs repair.
+Missing, duplicate, malformed, oversized, symlinked or changing metadata stays
+unknown; package/API level is not a revision. Default setup outputs, package
+validation, request classification, retries, deadlines and exit policy stay
+intact. The existing strict revision/tool/cache contracts remain unchanged.
+
+This extends the owned prospective #2427 source before the separate observer
+#2430 workflow delta. Final actual main/source/workflow pins, retained receipt
+readbacks and all required role joins must be independently checked before A1.
+Historical cohorts and failed/retried receipts retain their original meanings.
