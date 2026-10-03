@@ -3,6 +3,7 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/tests/compiler/codegen/ebpf_test_internal.h>
+#include <buster/tests/compiler/codegen/ebpf_call_test_internal.h>
 
 enum
 {
@@ -2405,6 +2406,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_switch_key_images(Unit
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_symbols(arguments);
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_ebpf_local_calls);
     UnitTestResult switch_key_images = codegen_test_canonical_switch_key_images(arguments);
     result.succeeded_test_count += switch_key_images.succeeded_test_count;
     result.test_count += switch_key_images.test_count;
