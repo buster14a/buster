@@ -5,10 +5,24 @@
 ## Compiler output streams
 
 `ide cc` writes warnings, source diagnostics, and `cc: error:` driver errors to
-stderr. With `-E` or `-S` and no `-o`, the generated text goes to stdout;
+stderr. With `-E` or `-S` and no `-o`, or with `-o -`, generated text
+goes to stdout;
 warnings cannot enter the preprocessed or assembly stream. `#warning` and
 `#error` messages retain the spelling between the first and last message
 tokens, including punctuation and internal whitespace, without expanding macros.
+
+The invocation API retains that text in `CompilerDriverResult.output`.
+`-o -` is refused for binary output and for multiple inputs. An explicit
+`-o` with multiple `-E` inputs is refused, as for `-c` and `-S`. Default
+LLVM bitcode output uses the source basename in the current directory, matching
+object output.
+
+C, assembly and direct canonical emitters retain atomic publication for regular
+files. Existing POSIX character devices and FIFOs such as `/dev/null` are
+written directly. Symbolic links/reparse points, directories and other special
+destinations are explicitly refused. Write failures name the path and the OS
+error when supplied; native link failures identify the executable or PDB that
+failed. External GPU tools retain their own file-publication behavior.
 
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
@@ -601,8 +615,22 @@ named/exact/direct image parity, distinct provider precedence, explicit `-L`,
 shared preference, exact archive bypass and output preservation on refusal.
 Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
-and sysroot-default named links. GNU linker-script interpretation and Apple's
-missing-library behavior remain separate #1285 work.
+and sysroot-default named links.
+
+For requested Linux shared libraries, a located GNU linker script beginning
+with `INPUT`, `GROUP`, `AS_NEEDED`, `OUTPUT_FORMAT`, `OUTPUT_ARCH`, or
+`SEARCH_DIR` and an opening parenthesis is refused as
+`unsupported GNU linker script <path> requested by -l<request>`. Leading
+whitespace and C block comments are accepted for this classification. The
+first script in search order stops lookup; a later ELF library cannot hide it.
+The driver neither interprets script members nor creates an image from them.
+Ordinary missing/malformed-library policy and automatic runtime-provider
+lookup retain their existing behavior. `compiler_driver_test_elf_linker_scripts`
+covers literal script/non-script boundaries, both ELF CPUs, normal/exact
+library spellings, single/multi-input links, first-request error ordering,
+later-ELF/script precedence, and preservation of an existing output.
+General GNU linker-script interpretation and Apple's missing-library behavior
+remain separate #1285 work.
 
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized

@@ -4058,7 +4058,11 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult pre
     bool call_base = base_end > base_start + 2 && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER &&
                      c_token_is_punctuator(&preprocess.tokens[base_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                      c_token_is_punctuator(&preprocess.tokens[base_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
-    if ((base_end == base_start + 1 || call_base) && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER)
+    if (base_start < base_end && preprocess.tokens[base_start].kind == C_TOKEN_STRING_LITERAL)
+    {
+        type = c_parse_string_literal_expression_type(result->arena, preprocess, result, base_start, base_end);
+    }
+    else if ((base_end == base_start + 1 || call_base) && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER)
     {
         CEntityId entity_id = C_ENTITY_ID_INVALID;
         u32 base_use_index = c_parse_identifier_use_index(result, base_start);
@@ -5545,6 +5549,10 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     {
                         break;
                     }
+                    if (index > task->start && close + 1 == task->end && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                    {
+                        task->trailing_subscript_plus_one = index + 1;
+                    }
                     u32 use = index + 1 < close ? c_parse_identifier_use_index(result, index + 1) : C_ID_UNDERLYING_INVALID;
                     CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity : C_ENTITY_ID_INVALID;
                     bool value_name = entity.value < result->entity_count && result->entities[entity.value].kind != C_ENTITY_TYPEDEF;
@@ -5606,6 +5614,10 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     best_precedence = precedence;
                     best_operator = index;
                 }
+            }
+            if (cast_prefix_close != UINT32_MAX)
+            {
+                task->trailing_subscript_plus_one = 0;
             }
             bool conditional = question != task->end && colon != task->end && (best_operator == task->end || best_precedence > 3);
             if (conditional)
@@ -5672,6 +5684,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     .start = task->start + 1,
                     .end = task->end,
                     .operators_checked = task->operators_checked,
+                    .trailing_subscript_plus_one = task->trailing_subscript_plus_one,
                 };
                 continue;
             }
@@ -5688,6 +5701,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     .start = task->start + 1,
                     .end = task->end,
                     .operators_checked = true,
+                    .trailing_subscript_plus_one = task->trailing_subscript_plus_one,
                 };
                 continue;
             }
@@ -5714,7 +5728,27 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     .start = task->start + 1,
                     .end = task->end,
                     .operators_checked = true,
+                    .trailing_subscript_plus_one = task->trailing_subscript_plus_one,
                 };
+                continue;
+            }
+            // A subscript is *(base + index), including the commuted spelling.
+            // Keep both operand queries on this task stack; a literal or a
+            // computed base need not be an identifier chain. Casts and sizeof
+            // retain their leaf policy and precedence.
+            bool size_query = c_token_in_well_known_set(preprocess.spelling_base, first,
+                C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF));
+            if (task->trailing_subscript_plus_one && cast_prefix_close == UINT32_MAX && !size_query)
+            {
+                task->split = task->trailing_subscript_plus_one - 1;
+                task->operation = C_PARSE_EXPRESSION_TYPE_SUBSCRIPT;
+                task->state = 1;
+                if (task_count >= capacity)
+                {
+                    last = C_TYPE_ID_INVALID;
+                    break;
+                }
+                tasks[task_count++] = (CParseExpressionTypeTask){.start = task->start, .end = task->split};
                 continue;
             }
             frame->task_count = task_count;
@@ -5894,7 +5928,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             }
             tasks[task_count++] = (CParseExpressionTypeTask){
                 .start = right_start,
-                .end = task->end,
+                .end = task->operation == C_PARSE_EXPRESSION_TYPE_SUBSCRIPT ? task->end - 1 : task->end,
             };
             continue;
         }
@@ -5968,6 +6002,20 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         }
         switch (task->operation)
         {
+        case C_PARSE_EXPRESSION_TYPE_SUBSCRIPT:
+        {
+            bool left_sequence = left_type->kind == C_TYPE_ARRAY || left_type->kind == C_TYPE_POINTER || left_type->kind == C_TYPE_VECTOR;
+            bool right_sequence = right_type->kind == C_TYPE_ARRAY || right_type->kind == C_TYPE_POINTER;
+            CType sequence = left_sequence ? *left_type : *right_type;
+            bool valid = (left_sequence && c_parse_expression_integer_kind(right_type->kind)) ||
+                         (right_sequence && c_parse_expression_integer_kind(left_type->kind));
+            last = valid ? sequence.element_type : C_TYPE_ID_INVALID;
+            if (last.value < result->type_count && sequence.kind == C_TYPE_ARRAY && (sequence.is_const || sequence.is_volatile))
+            {
+                last = c_parse_add_qualified_type(result, last, (CType){.is_const = sequence.is_const, .is_volatile = sequence.is_volatile});
+            }
+        }
+        break;
         case C_PARSE_EXPRESSION_TYPE_COMMA:
         {
             // A comma produces a value: arrays/functions decay, and only
@@ -26333,7 +26381,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                         ir_abi_convention_for_target(preprocess.target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
                         target_data_layout(preprocess.target).long_double_type.bit_width == 80 && !value.is_atomic &&
                         value.kind != C_TYPE_LONG_DOUBLE_COMPLEX &&
-                        c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment) && size <= 16;
+                        c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment);
                     supported |= !value.is_atomic && c_ir_target_supports_f128_transport(preprocess.target) &&
                                  (value.kind == C_TYPE_LONG_DOUBLE || value.kind == C_TYPE_LONG_DOUBLE_COMPLEX || value.kind == C_TYPE_STRUCT ||
                                   value.kind == C_TYPE_UNION || value.kind == C_TYPE_ARRAY);

@@ -422,6 +422,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics(UnitTestAr
                                        !refused.failed_input_count && !refused.output.length);
         }
     }
+    // Metrics retain the checked publication refusal and count no object
+    // bytes when an existing directory cannot become the output file.
+    String8 refused_output = buster_test_temporary_path(arena, S8("buster-metrics-refused-output"), S8(".o"));
+    if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(refused_output)))
+    {
+        String8 command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-g0"),
+                             S8("-c"), S8("-o"), refused_output, path};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        CompilerDriverResult plain = compiler_driver_execute_invocation(arena, invocation);
+        invocation.collect_input_metrics = true;
+        CompilerDriverResult measured = compiler_driver_execute_invocation(arena, invocation);
+        BUSTER_TEST_RAW(arguments, plain.error == COMPILER_DRIVER_ERROR_FILE_WRITE, plain.diagnostic);
+        BUSTER_TEST(arguments, measured.error == plain.error && string_equal(measured.diagnostic, plain.diagnostic));
+        BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(measured.diagnostic, refused_output) &&
+                                   compiler_driver_metrics_test_contains(measured.diagnostic, S8("unsupported output destination")));
+        if (BUSTER_REQUIRE(arguments, measured.input_result_count == 1 && measured.failed_input_count == 1))
+        {
+            CompilerDriverInputResult* input = &measured.inputs[0];
+            BUSTER_TEST(arguments, input->status == COMPILER_DRIVER_INPUT_STATUS_FAILED && input->error == COMPILER_DRIVER_ERROR_FILE_WRITE &&
+                                       input->measured && input->object_file_bytes == 0 && input->codegen.code_bytes != 0);
+            BUSTER_TEST(arguments, string_equal(input->message, measured.diagnostic));
+        }
+        BUSTER_TEST(arguments, os_directory_delete(refused_output));
+    }
     (void)os_file_delete(path);
 
     // Both assembly spellings hand -E text to the emit phase. Measuring

@@ -14639,10 +14639,14 @@ struct CIrLowerFrame
         {
             u32 start;
             u32 end;
+            u32 question;
+            u32 colon;
             IrBlockId block;
             IrBlockId continuation;
             IrValueId place;
             IrTypeId type;
+            IrValueId inner_place;
+            IrTypeId inner_type;
             IrSourceRange source;
         } selection;
         struct
@@ -14786,10 +14790,13 @@ struct CIrLowerFrame
         struct
         {
             CIrLowerFrame* tasks;
+            IrTypeId* types;
             IrValueId place;
             IrTypeId type;
             IrBlockId final_block;
             IrBlockId leaf_continuation;
+            IrValueId leaf_place;
+            IrTypeId leaf_type;
             IrSourceRange source;
             u32 start;
             u32 end;
@@ -21563,18 +21570,15 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             // the value in a sixteen-aligned overflow slot and never in the
             // register save area; an aggregate whose classification carries
             // no x87 class at all is copied by the ordinary eightbyte path.
-            // That second arm stops at the two eightbytes the emitter's
-            // va_arg copies -- `long double _Complex` is the shape past it --
-            // so a wide value it cannot read back is named here rather than
-            // reaching code generation.  Every other wide-float shape still
-            // has no lowering at all.
-            IrType* wide_result_type = ir_type_from_id(&builder->program->types, result_type);
+            // MEMORY-class aggregates copy their complete storage image from
+            // the overflow area, including values past two eightbytes.  The
+            // opaque predicate rejects COMPLEX_X87 results; those still need
+            // a separate wide-float variadic transport contract.
             bool binary128_va_arg = c_ir_type_is_binary128_runtime(builder, result_type);
             bool wide_va_arg_supported =
                 binary128_va_arg || c_ir_type_is_binary128_aggregate(builder, result_type) ||
                 c_ir_type_is_f80_x87_shape(builder->program, builder->wide_float_cache, result_type, builder->target) ||
-                (c_ir_type_is_f80_opaque_aggregate(builder->program, builder->wide_float_cache, result_type, builder->target) &&
-                 wide_result_type && wide_result_type->layout.resolved && wide_result_type->layout.size <= 16);
+                c_ir_type_is_f80_opaque_aggregate(builder->program, builder->wide_float_cache, result_type, builder->target);
             if (!wide_va_arg_supported && c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, result_type))
             {
                 builder->failure_message = S8("C IR lowering does not yet support wide floating-point va_arg");
@@ -33689,6 +33693,81 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* build
     return result.result_type;
 }
 
+// Type immediate conditional children in postorder before flattening their
+// control flow. Reuse the selection task storage, then retain only one type
+// per question token; no general query result survives a lowering mutation.
+BUSTER_C_INTERNAL bool c_ir_selection_types(CIntegerIrBuilder* builder, CIrLowerFrame* tasks, u32 capacity, u32 start, u32 end, IrTypeId* types)
+{
+    u32 count = 1;
+    IrTypeId last = IR_TYPE_ID_INVALID;
+    bool success = true;
+    tasks[0] = (CIrLowerFrame){.as.selection = {.start = start, .end = end}};
+    while (count && success)
+    {
+        CIrLowerFrame* task = tasks + count - 1;
+        if (!task->stage)
+        {
+            u32 expression_start = 0;
+            u32 expression_end = 0;
+            if (c_ir_root_conditional(builder, task->as.selection.start, task->as.selection.end, &expression_start,
+                                       &task->as.selection.question, &task->as.selection.colon, &expression_end))
+            {
+                task->as.selection.start = expression_start;
+                task->as.selection.end = expression_end;
+                task->stage = 1;
+                if (count < capacity)
+                {
+                    tasks[count++] = (CIrLowerFrame){.as.selection = {.start = task->as.selection.question + 1, .end = task->as.selection.colon}};
+                }
+                else
+                {
+                    success = false;
+                }
+            }
+            else
+            {
+                last = c_ir_predict_expression_type(builder, task->as.selection.start, task->as.selection.end);
+                success = last.value != IR_ID_UNDERLYING_INVALID;
+                count -= 1;
+            }
+        }
+        else if (task->stage == 1)
+        {
+            task->as.selection.inner_type = last;
+            task->stage = 2;
+            if (count < capacity)
+            {
+                tasks[count++] = (CIrLowerFrame){.as.selection = {.start = task->as.selection.colon + 1, .end = task->as.selection.end}};
+            }
+            else
+            {
+                success = false;
+            }
+        }
+        else
+        {
+            IrTypeId false_type = last;
+            last = c_ir_conditional_result_type(builder, task->as.selection.inner_type, false_type, task->as.selection.question + 1,
+                                                  task->as.selection.colon, task->as.selection.colon + 1, task->as.selection.end);
+            success = last.value != IR_ID_UNDERLYING_INVALID;
+            if (!success && !builder->failure_message.length)
+            {
+                IrType* true_type_value = ir_type_from_id(&builder->program->types, task->as.selection.inner_type);
+                IrType* false_type_value = ir_type_from_id(&builder->program->types, false_type);
+                builder->failure_message = string_format(builder->arena, S8("conditional expression has incompatible branch types '{S8}' and '{S8}'"),
+                                                          c_ir_diagnostic_type_name(builder->arena, true_type_value),
+                                                          c_ir_diagnostic_type_name(builder->arena, false_type_value));
+            }
+            if (success)
+            {
+                types[task->as.selection.question - start] = last;
+            }
+            count -= 1;
+        }
+    }
+    return success;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -33703,7 +33782,7 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
     if (frame->stage == C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_TASK)
     {
         IrValueId value = machine->child_result.value;
-        IrType* task_type = ir_type_from_id(&builder->program->types, frame->as.conditional.type);
+        IrType* task_type = ir_type_from_id(&builder->program->types, frame->as.conditional.leaf_type);
         if (!machine->child_result.success || !task_type ||
             (task_type->kind != IR_TYPE_VOID && value.value >= builder->function->value_count))
         {
@@ -33726,7 +33805,7 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
             return;
         }
-        if (task_type->is_nullptr && builder->function->values[value.value].canonical_type.value != frame->as.conditional.type.value)
+        if (task_type->is_nullptr && builder->function->values[value.value].canonical_type.value != frame->as.conditional.leaf_type.value)
         {
             u64 branch_constant = 0;
             if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, frame->as.conditional.leaf_start,
@@ -33736,11 +33815,11 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
-            value = c_ir_emit_integer_to_pointer(builder, value, frame->as.conditional.type, frame->as.conditional.source);
+            value = c_ir_emit_integer_to_pointer(builder, value, frame->as.conditional.leaf_type, frame->as.conditional.source);
         }
-        c_ir_vla_conditional_shape(builder, frame->as.conditional.place, value);
+        c_ir_vla_conditional_shape(builder, frame->as.conditional.leaf_place, value);
         if (value.value == IR_ID_UNDERLYING_INVALID ||
-            !c_ir_emit_store_place(builder, frame->as.conditional.place, frame->as.conditional.type, value, frame->as.conditional.source) ||
+            !c_ir_emit_store_place(builder, frame->as.conditional.leaf_place, frame->as.conditional.leaf_type, value, frame->as.conditional.source) ||
             !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &frame->as.conditional.leaf_continuation, 1,
                             frame->as.conditional.source))
         {
@@ -33775,19 +33854,33 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             }
             return;
         }
-        IrTypeId true_type = c_ir_predict_expression_type(builder, question + 1, colon);
-        IrTypeId false_type = c_ir_predict_expression_type(builder, colon + 1, expression_end);
-        IrType* true_type_value = ir_type_from_id(&builder->program->types, true_type);
-        IrType* false_type_value = ir_type_from_id(&builder->program->types, false_type);
-        IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end);
-        if (result_type.value == IR_ID_UNDERLYING_INVALID)
+        u64 task_capacity = (u64)end - start + 1;
+        u64 position = builder->temporary_arena->position;
+        bool fits = task_capacity <= UINT32_MAX &&
+                    c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(CIrLowerFrame),
+                                                     task_capacity, BUSTER_ALIGN_OF(CIrLowerFrame)) &&
+                    c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(IrTypeId),
+                                                     end - start, BUSTER_ALIGN_OF(IrTypeId));
+        if (!fits)
         {
-            builder->failure_message =
-                string_format(builder->arena, S8("conditional expression has incompatible branch types '{S8}' and '{S8}'"),
-                              c_ir_diagnostic_type_name(builder->arena, true_type_value), c_ir_diagnostic_type_name(builder->arena, false_type_value));
+            builder->failure_message = S8("C conditional lowering scratch reservation exceeded");
+            builder->failure_token_index = expression_start;
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
+        frame->as.conditional.task_capacity = (u32)task_capacity;
+        frame->as.conditional.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.conditional.task_capacity);
+        frame->as.conditional.types = arena_allocate(builder->temporary_arena, IrTypeId, end - start);
+        if (!c_ir_selection_types(builder, frame->as.conditional.tasks, frame->as.conditional.task_capacity, start, end, frame->as.conditional.types))
+        {
+            if (!builder->failure_message.length)
+            {
+                builder->failure_message = S8("could not determine conditional expression branch types");
+            }
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        IrTypeId result_type = frame->as.conditional.types[question - start];
         frame->as.conditional.source =
             c_ir_token_source_range(builder, builder->preprocess.tokens[expression_start]);
         frame->as.conditional.type = result_type;
@@ -33795,8 +33888,6 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         bool result_is_void = result_type_value && result_type_value->kind == IR_TYPE_VOID;
         frame->as.conditional.place = result_is_void ? IR_VALUE_ID_INVALID : c_ir_emit_temporary(builder, result_type, frame->as.conditional.source);
         frame->as.conditional.final_block = c_ir_block_create(builder);
-        frame->as.conditional.task_capacity = end - start + 1;
-        frame->as.conditional.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.conditional.task_capacity);
         if ((!result_is_void && frame->as.conditional.place.value == IR_ID_UNDERLYING_INVALID) ||
             frame->as.conditional.final_block.value == IR_ID_UNDERLYING_INVALID)
         {
@@ -33829,6 +33920,17 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         }
         if (task.kind == C_IR_LOWER_FRAME_SELECTION_CONTINUE)
         {
+            if (task.as.selection.inner_place.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrValueId inner = c_ir_emit_load_place(builder, task.as.selection.inner_place, task.as.selection.inner_type, task.as.selection.source);
+                c_ir_vla_conditional_shape(builder, task.as.selection.place, inner);
+                if (inner.value == IR_ID_UNDERLYING_INVALID ||
+                    !c_ir_emit_store_place(builder, task.as.selection.place, task.as.selection.type, inner, task.as.selection.source))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+            }
             if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.as.selection.continuation, 1, task.as.selection.source))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -33846,6 +33948,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             frame->as.conditional.leaf_start = task.as.selection.start;
             frame->as.conditional.leaf_end = task.as.selection.end;
             frame->as.conditional.leaf_continuation = task.as.selection.continuation;
+            frame->as.conditional.leaf_place = task.as.selection.place;
+            frame->as.conditional.leaf_type = task.as.selection.type;
             frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_TASK;
             // Assignment leaves need the full expression lowering machine:
             // the logical-value core intentionally accepts only arithmetic
@@ -33884,6 +33988,21 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             }
             return;
         }
+        // Flatten control flow, but retain each conditional's own conversion
+        // before its value reaches the containing conditional's result place.
+        IrTypeId nested_type = frame->as.conditional.types[nested_question - frame->as.conditional.start];
+        IrType* nested_type_value = ir_type_from_id(&builder->program->types, nested_type);
+        bool conversion = nested_type.value != task.as.selection.type.value;
+        IrValueId nested_place = task.as.selection.place;
+        if (conversion && nested_type_value && nested_type_value->kind != IR_TYPE_VOID)
+        {
+            nested_place = c_ir_emit_temporary(builder, nested_type, task.as.selection.source);
+        }
+        if (!nested_type_value || (nested_type_value->kind != IR_TYPE_VOID && nested_place.value == IR_ID_UNDERLYING_INVALID))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
         IrBlockId true_block = c_ir_block_create(builder);
         IrBlockId false_block = c_ir_block_create(builder);
         IrBlockId merge_block = c_ir_block_create(builder);
@@ -33896,7 +34015,16 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         }
         frame->as.conditional.tasks[frame->as.conditional.task_count++] = (CIrLowerFrame){
             .kind = C_IR_LOWER_FRAME_SELECTION_CONTINUE,
-            .as.selection = {.block = merge_block, .continuation = task.as.selection.continuation, .source = task.as.selection.source},
+            .as.selection =
+                {
+                    .block = merge_block,
+                    .continuation = task.as.selection.continuation,
+                    .place = task.as.selection.place,
+                    .type = task.as.selection.type,
+                    .inner_place = conversion ? nested_place : IR_VALUE_ID_INVALID,
+                    .inner_type = nested_type,
+                    .source = task.as.selection.source,
+                },
         };
         frame->as.conditional.tasks[frame->as.conditional.task_count++] = (CIrLowerFrame){
             .kind = C_IR_LOWER_FRAME_SELECTION_EXPRESSION,
@@ -33906,8 +34034,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                     .end = nested_end,
                     .block = false_block,
                     .continuation = merge_block,
-                    .place = task.as.selection.place,
-                    .type = task.as.selection.type,
+                    .place = nested_place,
+                    .type = nested_type,
                     .source = task.as.selection.source,
                 },
         };
@@ -33919,8 +34047,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                     .end = nested_colon,
                     .block = true_block,
                     .continuation = merge_block,
-                    .place = task.as.selection.place,
-                    .type = task.as.selection.type,
+                    .place = nested_place,
+                    .type = nested_type,
                     .source = task.as.selection.source,
                 },
         };

@@ -103,6 +103,19 @@ allocator modes and both frontend forms.
   it -- hence the by-shape strip. `tests/basic_c_typeof_conditional.c` runs
   both macros under all four allocators and
   `c_test_typeof_conditional_type` pins the resolved types themselves.
+- **Every conditional converts to its own common type before its consumer.**
+  The selection worklist types immediate children in postorder, retaining only
+  the type at each question token. Flattened control flow shares a result place
+  only when the types agree; a differing nested type gets its own place and its
+  merge continuation converts that value into the parent place. This preserves
+  unsigned widening and rounding through float before conversion to double.
+  Void arms retain effects without result storage. The arithmetic-plus special
+  path lowers its nested conditional as an independent value.
+  `c_test_nested_conditional_conversions` checks six native target layouts,
+  both frontend forms, static/enum/array/block constant controls, preprocessing
+  intmax arithmetic, pointer/void/aggregate neighbors and selected-arm effects.
+  Its desktop runtime matrix covers all four allocators and O0/O2, with
+  independent GCC/Clang execution on hosted Linux x86-64 (GitHub #2523).
 - **A comma expression can be any value operand, including when its right side
   calls a function.** The lowering expression machine sequences the complete
   left operand before it prepares the right operand's calls, then yields only
@@ -241,6 +254,17 @@ allocator modes and both frontend forms.
   The modern CRT `__crt_va_*` macros use the same bridge when already defined.
 
 ## Declarator constraints
+
+Semantic expression queries type a string literal through its target and dialect
+element type before applying subscripts. Both `literal[index]` and
+`index[literal]` retain that element identity for `typeof`; `_Generic` applies
+the ordinary lvalue conversion, and arithmetic applies integer promotions.
+The expression task stack queries both operands without evaluating either one.
+`c_test_generic_string_subscripts` checks all five prefixes, parentheses,
+concatenation, commuted subscripts, computed indices, promotions and rejected
+operand pairs on six native layouts in GNU17/GNU23 and both frontend forms.
+Its embedded native fixture checks every allocator and preserves unevaluated
+index effects.
 
 Function types reject array and function return types when their declarators
 are formed, including unused prototypes, typedef return types and nested

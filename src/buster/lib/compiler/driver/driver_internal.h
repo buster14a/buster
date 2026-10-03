@@ -8,3 +8,4 @@ BUSTER_F_DECL bool compiler_driver_language_is_native(CompilerDriverLanguage lan
 // restores COMPILER_DRIVER_INPUT_FUNCTION_LIMIT. Set only between invocations.
 BUSTER_F_DECL void compiler_driver_test_set_function_limit(u32 limit);
 #endif
+BUSTER_F_DECL bool compiler_driver_elf_linker_script(ByteSlice bytes);

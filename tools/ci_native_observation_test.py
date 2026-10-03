@@ -762,7 +762,8 @@ class NativeObservationTest(unittest.TestCase):
         ])
         self.assertEqual(shards.group(1),
             "github.event_name == 'workflow_dispatch' && "
-            "github.ref == 'refs/heads/codex/ci-checks-split-overlap' && "
+            "(github.ref == 'refs/heads/codex/ci-checks-split-overlap' || "
+            "github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && "
             "'[\"release\", \"checks\", \"sanitized-debug\", \"sanitized-release\", \"portability\"]' "
             "|| '[\"release\", \"checks\"]'")
         steps = dict(re.findall(

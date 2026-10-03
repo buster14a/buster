@@ -178,6 +178,24 @@ Registered `c_trigraph_preprocess_tests` checks directives, literals, comments,
 stringizing and included source, and compares fixed semantic token expectations
 with both GCC and Clang on hosted Linux x86-64 in C99/C11/C17/GNU17 modes.
 
+## Digraph token identity
+
+All C dialects recognize `<:`, `:>`, `<%`, `%>`, `%:` and `%:%:` as the
+ordinary bracket, brace, hash and double-hash punctuators. The scalar emitter
+and prewarmed SIMD spelling tables publish canonical ids in both token rows
+and shape sidecars; no later normalization pass or parser-specific alternative
+checks are needed. The spelling table retains its longest-match scan order,
+including the four-byte `%:%:` form.
+
+Token offsets and lengths preserve the original digraph bytes. Macro `#` and
+`##`, stringification, diagnostic positions and preprocessing output therefore
+retain physical spelling. The printer's separator check distinguishes `%:`
+from `#` by those bytes, since adjacent `%:` tokens must not merge into `%:%:`.
+Registered `c_test_digraphs` pins all six ids at every 64-byte scanner phase,
+overlapping maximal munch, literal/comment controls, directives, stringification,
+paste, separators, nine dialects, canonical IR through both frontend forms and
+a self-checking native driver program.
+
 ## Universal character names in identifiers
 
 C99/GNU99 identifier escapes use [N1256 Annex D](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf),
