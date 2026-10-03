@@ -9100,6 +9100,8 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_mnemonic(String8 mnemonic)
 {
     if (assembly_word_equal(mnemonic, S8("loopz"))) return S8("loope");
     if (assembly_word_equal(mnemonic, S8("loopnz"))) return S8("loopne");
+    // SAL is the architectural alias of SHL; XED publishes only SHL rows.
+    if (assembly_word_equal(mnemonic, S8("sal"))) return S8("shl");
     // GNU/AT&T spellings for the accumulator sign-extension family are
     // aliases of the Intel mnemonics represented by metadata.
     if (assembly_word_equal(mnemonic, S8("cbtw"))) return S8("cbw");
@@ -10679,7 +10681,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         // merely because the data operand is 16/32/64 bits wide.
         if (assembly_word_equal(mnemonic, S8("imul")) || assembly_word_equal(mnemonic, S8("shld")) ||
             assembly_word_equal(mnemonic, S8("shrd")) || assembly_x86_opcode_is_rotate(mnemonic_suffix_info.opcode) ||
-            assembly_x86_opcode_is_shift(mnemonic_suffix_info.opcode))
+            assembly_x86_opcode_is_shift(source_opcode))
         {
             continue;
         }
