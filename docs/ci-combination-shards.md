@@ -306,6 +306,14 @@ the same evidence capture. Ordinary runs retain their original stream behavior.
 The inventory query and evidence overhead are part of the qualification cohort;
 all three variants use it. No tests run during the independent inventory query.
 
+Retained test logs may contain arbitrary bytes from negative-test diagnostics.
+The offline unit-test reader preserves those bytes and their original digest;
+it requires valid UTF-8 for machine proof records, including records with
+damaged markers. Timestamp and ANSI wrappers do not relax that requirement.
+UTF-16 logs with a byte-order mark remain strictly decoded. Run the reader's
+encoding controls with `python3 -B tools/ci_unit_tests_measure_test.py -v`;
+ordinary workflow lint runs them and the campaign controls on every CI run.
+
 Each variant needs three complete first attempts with matching source, runner
 images, toolchains and cache conditions. Compare queue-inclusive whole-workflow
 wall time, total runner seconds, exact policy/module/assertion census and all
