@@ -4207,6 +4207,205 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_clear_instruction_cache(UnitTest
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_timestamps(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "unsigned long long stamp_clobber(unsigned long long seed) {"
+        " __asm__ volatile(\"rdtsc\" ::: \"rax\", \"rdx\", \"memory\"); return seed; }"
+        "unsigned long long stamp_output(unsigned* image, unsigned long long seed) { unsigned lo, hi;"
+        " __asm__ volatile(\"rdtsc\" : \"=a\"(lo), \"=d\"(hi)); image[0] = lo; image[1] = hi; return seed; }"
+        "unsigned long long stamp_serial_clobber(unsigned long long seed) {"
+        " __asm__ volatile(\"rdtscp\" ::: \"rax\", \"rdx\", \"rcx\", \"memory\"); return seed; }"
+        "unsigned long long stamp_serial_output(unsigned* image, unsigned long long seed) { unsigned lo, hi, aux;"
+        " __asm__ volatile(\"rdtscp\" : \"=a\"(lo), \"=d\"(hi), \"=c\"(aux));"
+        " image[0] = lo; image[1] = hi; image[2] = aux; return seed; }");
+    String8 names[] = {S8("stamp_clobber"), S8("stamp_output"), S8("stamp_serial_clobber"), S8("stamp_serial_output")};
+    String8 bytes[] = {S8("\x0f\x31"), S8("\x0f\x01\xf9")};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS,
+                                OPERATING_SYSTEM_ANDROID, OPERATING_SYSTEM_IOS, OPERATING_SYSTEM_UEFI};
+    CpuModel models[] = {CPU_MODEL_BASELINE, CPU_MODEL_INTEL_HASWELL, CPU_MODEL_AMD_ZEN_5};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        for (u32 model = 0; model < BUSTER_ARRAY_LENGTH(models); model += 1)
+        {
+            Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = models[model], .os = systems[system]};
+            for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("inline-timestamps.c"), source, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                BUSTER_TEST(arguments, program && program->module_count == 1);
+                if (program && program->module_count == 1)
+                {
+                    for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                    {
+                        IrFunction* function = machine_test_ir_function_find(program->modules, names[name]);
+                        BUSTER_TEST_RAW(arguments, function != 0, names[name]);
+                        if (function)
+                        {
+                            MachineSelectResult selected;
+                            MachineEncodeResult encoded = machine_test_encode(temporary.arena, program, function, target, &selected);
+                            BUSTER_TEST_RAW(arguments, selected.supported && encoded.valid, names[name]);
+                            if (selected.supported && encoded.valid)
+                            {
+                                BUSTER_TEST(arguments, selected.function.inline_assembly_count == 1);
+                                if (selected.function.inline_assembly_count == 1)
+                                {
+                                    MachineInlineAssembly* descriptor = selected.function.inline_assemblies;
+                                    String8 expected = bytes[name / 2];
+                                    u64 mask = (UINT64_C(1) << MACHINE_X64_RAX) | (UINT64_C(1) << MACHINE_X64_RDX) |
+                                               (name >= 2 ? UINT64_C(1) << MACHINE_X64_RCX : 0);
+                                    BUSTER_TEST_RAW(arguments, descriptor->bytes.length == expected.length &&
+                                        memcmp(descriptor->bytes.pointer, expected.pointer, expected.length) == 0, names[name]);
+                                    BUSTER_TEST(arguments, descriptor->relocation_count == 0 && descriptor->clobber_mask == mask);
+                                    BUSTER_TEST(arguments, descriptor->effects == (name & 1u ? 0 : MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY));
+                                    BUSTER_TEST(arguments, descriptor->operand_count == (name & 1u ? 2u + (name >= 2) : 0));
+                                    for (u32 operand = 0; operand < descriptor->operand_count && operand < 3; operand += 1)
+                                    {
+                                        MachineInlineAssemblyOperand* output = selected.function.inline_assembly_operands +
+                                                                               descriptor->first_operand + operand;
+                                        u32 registers[] = {MACHINE_X64_RAX, MACHINE_X64_RDX, MACHINE_X64_RCX};
+                                        BUSTER_TEST(arguments, output->physical_register == registers[operand] && output->byte_size == 4 &&
+                                            (output->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                                            !(output->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                    {
+                        CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, program->modules, target,
+                            (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                        if (system == 0 && generated.error == CODEGEN_ERROR_NONE)
+                        {
+                            u32 capabilities[4];
+                            __asm__ volatile("cpuid" : "=a"(capabilities[0]), "=b"(capabilities[1]), "=c"(capabilities[2]), "=d"(capabilities[3])
+                                             : "a"(1), "c"(0));
+                            bool native_tsc = (capabilities[3] & (1u << 4)) != 0;
+                            __asm__ volatile("cpuid" : "=a"(capabilities[0]), "=b"(capabilities[1]), "=c"(capabilities[2]), "=d"(capabilities[3])
+                                             : "a"(UINT32_C(0x80000000)), "c"(0));
+                            bool native_rdtscp = false;
+                            if (capabilities[0] >= UINT32_C(0x80000001))
+                            {
+                                __asm__ volatile("cpuid" : "=a"(capabilities[0]), "=b"(capabilities[1]), "=c"(capabilities[2]), "=d"(capabilities[3])
+                                                 : "a"(UINT32_C(0x80000001)), "c"(0));
+                                native_rdtscp = (capabilities[3] & (1u << 27)) != 0;
+                            }
+                            CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                            BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                            u64 seeds[] = {0, 1, UINT64_C(0xfedcba9876543210), UINT64_MAX};
+                            for (u32 name = 0; executable.address && native_tsc && name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                            {
+                                if (name >= 2 && !native_rdtscp) { continue; }
+                                u32 offset = machine_test_module_offset(&generated, program->modules, names[name]);
+                                BUSTER_TEST(arguments, offset != UINT32_MAX);
+                                if (offset != UINT32_MAX)
+                                {
+                                    void* address = (u8*)executable.address + offset;
+                                    for (u32 seed = 0; seed < BUSTER_ARRAY_LENGTH(seeds); seed += 1)
+                                    {
+                                        u64 actual;
+                                        if (name & 1u)
+                                        {
+                                            typedef u64 TimestampCapture(u32*, u64);
+                                            TimestampCapture* call = 0;
+                                            memcpy(&call, &address, sizeof(call));
+                                            u32 image[3] = {0};
+                                            actual = call(image, seeds[seed]);
+                                        }
+                                        else
+                                        {
+                                            typedef u64 TimestampClobber(u64);
+                                            TimestampClobber* call = 0;
+                                            memcpy(&call, &address, sizeof(call));
+                                            actual = call(seeds[seed]);
+                                        }
+                                        // The timestamp is deliberately unconstrained; only live-value
+                                        // preservation has a deterministic expected result.
+                                        BUSTER_TEST_RAW(arguments, actual == seeds[seed], names[name]);
+                                    }
+                                }
+                            }
+                            codegen_release_executable(executable);
+                        }
+#endif
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    // Architectural goldens are independent of assembler metadata and exclude
+    // opcode aliases: RDTSC is 0F 31; RDTSCP is 0F 01 F9, with no explicit operands.
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    String8 mnemonics[] = {S8("rdtsc"), S8("rdtscp")};
+    for (u32 mnemonic = 0; mnemonic < BUSTER_ARRAY_LENGTH(mnemonics); mnemonic += 1)
+    {
+        for (u32 inline_context = 0; inline_context < 2; inline_context += 1)
+        {
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, mnemonics[mnemonic],
+                (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT, .inline_assembly = inline_context != 0});
+            if (mnemonic == 1 && !inline_context)
+            {
+                BUSTER_TEST(arguments, encoded.diagnostic_count != 0 && encoded.bytes.length == 0);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                    encoded.bytes.length == bytes[mnemonic].length &&
+                    memcmp(encoded.bytes.pointer, bytes[mnemonic].pointer, bytes[mnemonic].length) == 0);
+            }
+        }
+    }
+    // Inline authorization is instruction-local: another gated mnemonic in
+    // the same template still fails. Explicit RDTSCP operands remain invalid.
+    String8 assembler_rejected[] = {S8("rdtscp %eax"), S8("rdtscp $1"), S8("rdrand %eax"), S8("rdtscp\nrdrand %eax")};
+    for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(assembler_rejected); invalid += 1)
+    {
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, assembler_rejected[invalid],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT, .inline_assembly = true});
+        BUSTER_TEST_RAW(arguments, encoded.diagnostic_count != 0, assembler_rejected[invalid]);
+        if (invalid >= 2 && encoded.diagnostic_count)
+        {
+            BUSTER_TEST_RAW(arguments, encoded.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                encoded.diagnostics[0].line == (invalid == 3 ? 2u : 1u), assembler_rejected[invalid]);
+        }
+        // Raw assembly retains earlier valid instructions on a later source
+        // diagnostic. Both inline codegen callers reject the whole template
+        // using diagnostic_count, so only the valid RDTSCP prefix may remain.
+        if (invalid == 3)
+        {
+            BUSTER_TEST_RAW(arguments, encoded.bytes.length == bytes[1].length &&
+                memcmp(encoded.bytes.pointer, bytes[1].pointer, bytes[1].length) == 0, assembler_rejected[invalid]);
+        }
+        else
+        {
+            BUSTER_TEST_RAW(arguments, encoded.bytes.length == 0, assembler_rejected[invalid]);
+        }
+    }
+    String8 rejected[] = {S8("rdtsc %eax"), S8("rdtscp $1"), S8("rdtscx")};
+    for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(rejected); invalid += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 invalid_source = string_format(temporary.arena,
+            S8("void rejected(void) {{ __asm__ volatile(\"{S8}\" ::: \"rax\", \"rdx\", \"rcx\"); }}"), rejected[invalid]);
+        IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("inline-timestamp-invalid.c"), invalid_source,
+            target, (CIRLowerOptions){0});
+        BUSTER_TEST(arguments, program && program->module_count == 1);
+        if (program && program->module_count == 1)
+        {
+            MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, program->modules->functions, target);
+            BUSTER_TEST(arguments, !selected.supported && selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_cpu_queries(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8076,6 +8275,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_aarch64_call_relocations);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_block_relocations);
     BUSTER_TEST_FIXTURE(arguments, machine_test_cpu_queries);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_inline_timestamps);
     BUSTER_TEST_FIXTURE(arguments, machine_test_compiler_barrier);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_alias);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_overlap);
