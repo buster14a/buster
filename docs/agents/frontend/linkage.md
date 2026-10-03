@@ -364,6 +364,29 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   driver could not open exports whatever it happens to export; a link missing
   one of them keeps the import it made before, which is also why a target
   whose libraries are never read, Android today, is unchanged.
+- **Linux x86-64 fixed-address imported function pointers preserve provider
+  identity** (#1275). GOT address references use separate loader-filled
+  `GLOB_DAT` slots; lazy `.got.plt` slots remain call-only. Pointer-wide
+  literals use `R_X86_64_64`, preserving the signed addend, including weak
+  and protected providers. Read-only literal sites publish `DT_TEXTREL` so
+  the loader can write them during relocation. A direct `PC32`, `PC64`, or
+  32-bit absolute address instead needs the psABI's canonical PLT value:
+  undefined `STT_FUNC`, nonzero `st_value`, unchanged jump-slot binding.
+  Only complete provider metadata proving a strong, default-visible
+  `STT_FUNC` permits that representation. Protected, weak, IFUNC or unknown
+  direct addresses are refused by name; use PIC GOT references or pointer-wide
+  literals. An absent weak address stays zero. The ELF reader preserves
+  explicit `PLT32` references rather than collapsing them to `PC32`; arbitrary
+  preceding instruction bytes cannot prove a call. PIE/shared imported or
+  preemptible-function direct addresses are refused, while GOT/literal
+  references remain loader-bound and same-image direct calls retain the
+  documented local binding policy. AArch64 and Android staging explicitly
+  retain their prior address policy and remain #1275 acceptance work.
+  `compiler_driver_test_imported_function_addresses` uses an independent host
+  PIC provider and preload library, typed pointer getters, static and constant
+  pointer tables, protected call-only functions, weak-present/absent functions
+  and imported data. Both frontend forms and all four allocators execute PIC
+  and non-PIC forms under lazy/eager binding and default/preloaded definitions.
 - **A C library keeps some of its own names out of its shared object**, and
   this linker imports from the shared object alone, so it has to supply the
   rest itself. glibc puts `atexit` and `at_quick_exit` in libc_nonshared.a as
