@@ -533,6 +533,12 @@ the live step log and to `resources-<phase>.jsonl` in the existing job artifact.
 The step shell stops and waits for the sampler on exit; the sampler does not
 change the payload result or start another build/test worker.
 
+The resource cleanup regression waits for a complete first sample in its fresh
+log before making the step fail with exit 7. Its readiness wait is bounded
+inside the existing 12-second fixture timeout, and timeout cleanup owns the
+shell's entire process session. A fixed interpreter-startup delay cannot prove
+that the first sample was emitted; missing sample or END evidence still fails.
+
 Each record identifies the phase, UTC time and elapsed time; it reports host
 load, a descendant-only process count, CPU percentage, RSS, and the three
 largest process names (no arguments or environment). It also reports macOS

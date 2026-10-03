@@ -496,3 +496,37 @@ This extends the owned prospective #2427 source before the separate observer
 #2430 workflow delta. Final actual main/source/workflow pins, retained receipt
 readbacks and all required role joins must be independently checked before A1.
 Historical cohorts and failed/retried receipts retain their original meanings.
+
+### Offline assembly of one retained sample
+
+`tools/ci_checks_sample.py` derives the runtime manifests needed by the strict
+qualification reader without launching a compiler, test or workflow. It depends
+on the prospective cohort reader introduced by #2427. Prepare one input JSON
+object with `schema=buster-ci-checks-sample-input-v1`, the declared `cohort`,
+`variant`, digest-bound `run` and `conditions` references, and `desktops` entries
+containing exactly `job`, `coverage`, `result`, `phases` and `phase_directory`.
+The run reference contains one run object, not the collector's outer runs array.
+Retain the actual API/artifact bytes and verify downloaded archive digests before
+assembly. SHA-256 integrity alone cannot authenticate invented observations.
+
+```sh
+python3 -B tools/ci_checks_sample.py retained/input-123.json --output sample-123.json
+python3 -B tools/ci_checks_sample_test.py -v
+```
+
+Every input reference and nested selected-tool receipt remains relative to the
+input directory. The output must be a fresh JSON filename in that same directory;
+its sibling `sample-123-tests/` contains the derived runtime manifests. Insert
+the emitted sample object in the campaign's `samples` array and preserve its
+declared cohort in a campaign located in that same directory. Moving only the
+sample or conditions file changes reference roots and is unsupported.
+
+The assembler replays phase journals, derives every selected runtime row from
+actual coverage/capability/inventory/observation records, retains raw log hashes
+and the measured host profile, and preserves audit policy and low-core serial
+fallback. It rejects duplicate capability rows and caller-supplied runtime
+manifests. Existing `qualification.sample()` validates the entire assembled
+sample before publication; missing or unknown conditions fail. Fresh generated
+outputs are removed on rejection while retained inputs remain unchanged.
+Successful assembly is evidence preparation only: the full nine-run comparison,
+resource/deadline/cleanup/reliability review and default-promotion gate remain.
