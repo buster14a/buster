@@ -30,8 +30,9 @@ nothing per unit and leave `CompilerDriverResult.object` unset.
 zero in the invocation API) means one worker. Only consecutive native C
 inputs in a link invocation are batched; preprocessing, syntax-only, `-S`,
 `-c`, LLVM/GPU/Wasm/eBPF paths and single-input fast paths retain their
-existing execution. Objects, archives and assembly are serial boundaries,
-even when `-x c` is present. Worker count is clamped to logical CPUs, input
+existing execution. Objects, archives, assembly and each `-l` occurrence are
+serial boundaries, even when `-x c` is present. A library between C sources
+ends the cohort before later translation units can publish definitions. Worker count is clamped to logical CPUs, input
 count and one inside an embedding caller's multi-lane gang.
 
 Each cohort contains at most one full TU per worker. `lane_range` gives
@@ -371,9 +372,27 @@ newly selected object. Each archive occurrence builds symbol-to-member provider
 lists and a heap ordered by `(scan pass, member index)`. A dependency discovered
 behind the cursor belongs to the next pass, preserving the former forward
 fixed-point selection sequence and first-definition behavior. Earlier archives
-are revisited only when explicitly present again; `-l` archives retain their
-existing driver placement after ordinary inputs. Definition binding strength
-does not alter eligibility once a selected definition exists.
+are revisited only when explicitly present again. Parsed native links apply
+static `-lfoo`, `-l foo` and `-l:filename` archives at their original CLI
+positions among source, object and directly named archive inputs. A found
+library has the same extraction eligibility as that archive named directly
+at the same position. Repeated occurrences remain separate requests; a later
+object can introduce demand for an explicit repeat, but cannot implicitly
+revisit an earlier occurrence. Global `-L` roots remain shared search state.
+Definition binding strength does not alter eligibility once a selected
+definition exists.
+
+The parser stores this order in `CompilerDriverInvocation.link_operations`,
+with indices into the existing input and library arrays; per-file `-x`
+selections remain attached to the input array. A nonzero stream must cover
+all files and library occurrences exactly once, retaining each array's
+order, or execution diagnoses an invalid invocation before reading inputs.
+The parser reserves one operation record per expanded argument; the native
+consumer walks it without another allocation. API-built invocations with a
+zero `link_operation_count` retain the explicit legacy order of all inputs
+followed by all libraries. Non-link output actions retain their prior order.
+Group/whole-archive and dynamic-library as-needed/interposition policy are
+unchanged.
 
 Provider state changes are monotonic: an edge is revisited at most three times.
 Selection work is expected O(S + A + D log(M + 1)), with S visited selected
