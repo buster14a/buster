@@ -2764,7 +2764,7 @@ bool compiler_driver_elf_linker_script(ByteSlice bytes)
         {
             cursor += 1;
         }
-        String8 command = {.pointer = bytes.pointer + start, .length = cursor - start};
+        String8 command = {.pointer = (char8*)bytes.pointer + start, .length = cursor - start};
         bool recognized = false;
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(commands); index += 1)
         {
