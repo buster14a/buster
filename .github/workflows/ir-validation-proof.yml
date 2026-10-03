@@ -19,7 +19,7 @@ jobs:
       BUSTER_IR_BASELINE_SHA: 8feebe0f93351bc28e146313b4d77600fd56f1cb
       # Replace with the immutable source-only candidate commit, before the
       # separate temporary workflow commit is created on the proof branch.
-      BUSTER_IR_CANDIDATE_SHA: 187463b50ed2b377ede81df72626239004abffad
+      BUSTER_IR_CANDIDATE_SHA: 68fc85e04d586e5dc2b1b268e130c834628f6e70
     steps:
       - name: Prepare retained evidence and hosted perf
         id: setup
