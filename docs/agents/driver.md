@@ -73,6 +73,10 @@ and maximum native vector width. `-target`/`--target` strings are
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
+Windows targets implement the MSVC ABI only, so the MinGW spellings
+(`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
+`unsupported target environment` instead of being aliased to MSVC (#1492);
+MinGW's GCC `ms_struct` layout is not modelled.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
 every optimization level, including the default and `-O0`, while
 `-fno-register-allocator` selects the canonical stack emitter. Advanced and

@@ -242,6 +242,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_target(Arena* arena, CompilerDriver
     case TARGET_PARSE_ERROR_EXCESS_COMPONENT:
         compiler_driver_argument_error(arena, invocation, S8("unsupported target component: {S8}"), parsed.invalid_component);
         return false;
+    case TARGET_PARSE_ERROR_ENVIRONMENT:
+        compiler_driver_argument_error(arena, invocation,
+                                       S8("unsupported target environment: {S8} (MinGW's ABI is not implemented; Windows targets use the MSVC ABI, spelled *-windows-msvc)"),
+                                       parsed.invalid_component);
+        return false;
     case TARGET_PARSE_ERROR_EMPTY:
     case TARGET_PARSE_ERROR_ARCHITECTURE:
     case TARGET_PARSE_ERROR_OPERATING_SYSTEM:

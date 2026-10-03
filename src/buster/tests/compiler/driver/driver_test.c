@@ -17944,6 +17944,16 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_excess_component_command_line));
     BUSTER_TEST(arguments, target_excess_component.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, target_excess_component.diagnostic, S8("unsupported target component: notacpu"));
+    // A MinGW spelling used to select the MSVC ABI silently (#1492).
+    String8 target_mingw_command_line[] = {
+        S8("--target=x86_64-w64-mingw32"),
+        S8("-c"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation target_mingw = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_mingw_command_line));
+    BUSTER_TEST(arguments, target_mingw.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, target_mingw.diagnostic,
+                       S8("unsupported target environment: mingw32 (MinGW's ABI is not implemented; Windows targets use the MSVC ABI, spelled *-windows-msvc)"));
     // The spelling that works, and the wide vector registers it unlocks.
     String8 target_march_command_line[] = {
         S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-march=znver4"), S8("-c"), S8("source.c"),
