@@ -4230,6 +4230,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_shift_breakpoint(Unit
                            0x48, 0xc1, 0xe8, 3, 0x48, 0xc1, 0xe0, 3, 0xcd, 0x80, 0xcc};
     AssemblyEncodeResult assembled = assembly_encode(arguments->arena, assembly_source,
         (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    for (u32 diagnostic = 0; diagnostic < assembled.diagnostic_count; diagnostic += 1)
+    {
+        BUSTER_TEST_RAW(arguments, false, assembled.diagnostics[diagnostic].message);
+    }
     if (BUSTER_REQUIRE(arguments, assembled.diagnostic_count == 0 && assembled.bytes.length == sizeof(expected_bytes)))
     {
         BUSTER_TEST(arguments, memcmp(assembled.bytes.pointer, expected_bytes, sizeof(expected_bytes)) == 0);
@@ -4281,7 +4285,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_shift_breakpoint(Unit
                 {
                     CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
                         (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
-                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    String8 description = string_format(temporary.arena, S8("os={u32} memory-form={u32} allocator={u32} error={u32}"),
+                        system, memory_form, mode, (u32)generated.error);
+                    BUSTER_TEST_RAW(arguments, generated.error == CODEGEN_ERROR_NONE, description);
                     BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
                     // Only shift functions execute. Breakpoints are byte-generation controls.
