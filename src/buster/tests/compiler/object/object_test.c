@@ -1661,9 +1661,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_variant_pcs(UnitTestArguments
                             memcpy(expected, original, sizeof(expected));
                             expected[124] = (u8)((bindings[binding] << 4) | types[type]);
                             expected[125] = (u8)(visibility | (marked ? 0x80 : 0));
-                            object_test_write_u32(BUSTER_ARRAY_TO_SLICE(expected), 428, bindings[binding] ? 2 : 3);
-                            object_test_write_u16(BUSTER_ARRAY_TO_SLICE(expected), 126, defined ? 1 : 0);
-                            object_test_write_u64(BUSTER_ARRAY_TO_SLICE(expected), 136, defined ? 4 : 0);
+                            object_test_write_u32((ByteSlice)BUSTER_ARRAY_TO_SLICE(expected), 428, bindings[binding] ? 2 : 3);
+                            object_test_write_u16((ByteSlice)BUSTER_ARRAY_TO_SLICE(expected), 126, defined ? 1 : 0);
+                            object_test_write_u64((ByteSlice)BUSTER_ARRAY_TO_SLICE(expected), 136, defined ? 4 : 0);
                             BUSTER_TEST(arguments, memcmp(input, expected, sizeof(input)) == 0);
                             arena_set_position(arguments->arena, scope.position);
                         }
@@ -1682,8 +1682,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_variant_pcs(UnitTestArguments
                 u8 input[576];
                 memcpy(input, original, sizeof(input));
                 input[125] = 0x80;
-                object_test_write_u16(BUSTER_ARRAY_TO_SLICE(input), 126, indexes[index]);
-                ObjectFile object = object_read(arguments->arena, BUSTER_ARRAY_TO_SLICE(input), target);
+                object_test_write_u16((ByteSlice)BUSTER_ARRAY_TO_SLICE(input), 126, indexes[index]);
+                ObjectFile object = object_read(arguments->arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(input), target);
                 BUSTER_TEST(arguments, object.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
                 BUSTER_STRING_TEST(arguments, object.diagnostic,
                                    S8("unsupported ELF AArch64 symbol variant_target (index 2): STO_AARCH64_VARIANT_PCS"));
@@ -1694,13 +1694,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_variant_pcs(UnitTestArguments
                 u8 input[576];
                 memcpy(input, original, sizeof(input));
                 input[125] = 0x80;
-                object_test_write_u32(BUSTER_ARRAY_TO_SLICE(input), 120, 0);
-                ObjectFile object = object_read(arguments->arena, BUSTER_ARRAY_TO_SLICE(input), target);
+                object_test_write_u32((ByteSlice)BUSTER_ARRAY_TO_SLICE(input), 120, 0);
+                ObjectFile object = object_read(arguments->arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(input), target);
                 BUSTER_TEST(arguments, object.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
                 BUSTER_STRING_TEST(arguments, object.diagnostic,
                                    S8("unsupported ELF AArch64 symbol <unnamed> (index 2): STO_AARCH64_VARIANT_PCS"));
-                object_test_write_u32(BUSTER_ARRAY_TO_SLICE(input), 120, 28);
-                object = object_read(arguments->arena, BUSTER_ARRAY_TO_SLICE(input), target);
+                object_test_write_u32((ByteSlice)BUSTER_ARRAY_TO_SLICE(input), 120, 28);
+                object = object_read(arguments->arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(input), target);
                 BUSTER_TEST(arguments, object.error == OBJECT_ERROR_INVALID_INPUT && !object.diagnostic.length);
                 arena_set_position(arguments->arena, scope.position);
             }
@@ -1714,10 +1714,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_variant_pcs(UnitTestArguments
             input[77] = 0x80;
             input[124] = 4;
             input[125] = 0x80;
-            object_test_write_u16(BUSTER_ARRAY_TO_SLICE(input), 126, 0xfff1);
-            object_test_write_u64(BUSTER_ARRAY_TO_SLICE(input), 136, 0);
-            object_test_write_u32(BUSTER_ARRAY_TO_SLICE(input), 428, 3);
-            ObjectFile object = object_read(arguments->arena, BUSTER_ARRAY_TO_SLICE(input), target);
+            object_test_write_u16((ByteSlice)BUSTER_ARRAY_TO_SLICE(input), 126, 0xfff1);
+            object_test_write_u64((ByteSlice)BUSTER_ARRAY_TO_SLICE(input), 136, 0);
+            object_test_write_u32((ByteSlice)BUSTER_ARRAY_TO_SLICE(input), 428, 3);
+            ObjectFile object = object_read(arguments->arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(input), target);
             BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE && !object.diagnostic.length && object.symbol_count == 1);
             arena_set_position(arguments->arena, scope.position);
         }
