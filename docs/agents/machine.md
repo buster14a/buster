@@ -72,6 +72,17 @@ fixture as well as compiling both architectures.
   `vector_register_mask` describes class membership including
   nonallocatable registers. Target-less synthetic functions still accept
   bounded physical references without imposing a target class map.
+- MIR_STACK and FAST/QUALITY use the shared private frame arithmetic in
+  `machine_frame_internal.h`. Each home, colored slot group, dedicated slot
+  and edge-copy tile checks wide addition/alignment before publishing a
+  32-bit offset; outgoing storage and push parity are checked before the final
+  frame is published. x86-64 actual offsets and allocation sizes fit signed
+  disp32. AArch64 retains unsigned offsets and checks the encoder's footer and
+  Windows save areas. Capacity refusals remain distinct from malformed MIR,
+  including strict verification, and reach the driver as `codegen.capacity`.
+  Registered `machine_test_frame_capacity` checks representation boundaries,
+  parity, groups, outgoing storage and both frontend forms of a large-local C
+  witness without allocating or executing that native stack (GitHub #1838).
 - Stack alignments and call-target reference forms remain optional, defaulting
   to eight and DIRECT. Line marks permit duplicate rows and a final row equal
   to `instruction_count`; zero-row lowering can produce both. Validate every

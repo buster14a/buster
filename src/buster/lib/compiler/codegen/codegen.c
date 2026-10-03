@@ -12756,7 +12756,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
                         if (options.verify_invariants && !scheduled_placement.valid)
                         {
-                            buffer.error = CODEGEN_ERROR_INVALID_IR;
+                            buffer.error = scheduled_placement.capacity_exceeded ? CODEGEN_ERROR_CAPACITY : CODEGEN_ERROR_INVALID_IR;
                             scratch_end(machine_scratch);
                             break;
                         }
@@ -12782,7 +12782,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     fallback_reason = CODEGEN_FALLBACK_PLACEMENT;
                     if (options.verify_invariants)
                     {
-                        buffer.error = CODEGEN_ERROR_INVALID_IR;
+                        buffer.error = placement.capacity_exceeded ? CODEGEN_ERROR_CAPACITY : CODEGEN_ERROR_INVALID_IR;
                         scratch_end(machine_scratch);
                         break;
                     }
