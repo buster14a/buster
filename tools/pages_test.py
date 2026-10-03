@@ -163,7 +163,7 @@ class PagesTests(unittest.TestCase):
         self.assertNotIn("permissions:", build.split("\njobs:\n")[1])
         self.assertNotIn("write", build)
         self.assertIn("persist-credentials: false", build)
-        self.assertIn("run: python3 tests/pages_test.py -v", build)
+        self.assertIn("run: python3 tools/pages_test.py -v", build)
         self.assertIn("uses: " + UPLOAD, build)
         self.assertIn("path: site\n          retention-days: 1", build)
         self.assertNotIn("pull_request_target", text)

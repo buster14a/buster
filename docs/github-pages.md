@@ -44,7 +44,7 @@ license remains a separate decision; the linked license records are authoritativ
 From a complete repository checkout:
 
 ```sh
-python3 tests/pages_test.py -v
+python3 tools/pages_test.py -v
 python3 tools/check_action_pins.py .github/workflows/pages.yml
 python3 tests/action_pins_test.py
 ```

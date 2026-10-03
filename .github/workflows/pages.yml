@@ -11,7 +11,7 @@ on:
       - 'PROJECTS.md'
       - 'README.md'
       - 'THIRD_PARTY_NOTICES.md'
-      - 'tests/pages_test.py'
+      - 'tools/pages_test.py'
       - 'tools/check_action_pins.py'
       - '.github/workflows/pages.yml'
   pull_request:
@@ -23,7 +23,7 @@ on:
       - 'PROJECTS.md'
       - 'README.md'
       - 'THIRD_PARTY_NOTICES.md'
-      - 'tests/pages_test.py'
+      - 'tools/pages_test.py'
       - 'tools/check_action_pins.py'
       - '.github/workflows/pages.yml'
   merge_group:
@@ -47,7 +47,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Validate site and deployment boundaries
-        run: python3 tests/pages_test.py -v
+        run: python3 tools/pages_test.py -v
       - name: Check approved action pins
         run: python3 tools/check_action_pins.py .github/workflows/pages.yml
       - name: Package static site
