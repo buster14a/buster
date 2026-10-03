@@ -210,6 +210,7 @@ jobs:
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
+      BUSTER_CI_CHECKS_RESOURCES: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
       # Profiling is diagnostic and opt-in. The manual dispatch input is
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
@@ -379,6 +380,8 @@ jobs:
             tools/ci_sanitize_logs_test.py=sanitize-logs-test.log
             tools/github_ci_time_test.py=ci-queue-timing-test.log
             tools/ci_workflow_tools_test.py=workflow-tools-runner-test.log
+            tools/ci_checks_resources_test.py=checks-resource-observer-test.log
+            tools/ci_checks_resources_workflow_test.py=checks-resource-workflow-test.log
           )
           if [[ '${{ matrix.os }}' == macos ]]; then
             suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)
@@ -539,6 +542,25 @@ jobs:
           # build.c selects and reports the actual GCC row before configuration.
           zig version
 
+      # Observe the complete existing combination step, including its setup and
+      # the bounded runner scheduling gap. The sidecar never controls payloads.
+      - name: Start checks resource observation
+        id: checks_resources_start
+        if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CHECKS_RESOURCES == '1' && ((matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success')) || (matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' && steps.llvm.outcome == 'success')) }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          BUSTER_CI_RESOURCES_PYTHON=$("$BUSTER_CI_PYTHON" -c 'import pathlib,sys; sys.stdout.write(pathlib.Path(sys.executable).resolve().as_posix())')
+          printf 'BUSTER_CI_RESOURCES_PYTHON=%s\n' "$BUSTER_CI_RESOURCES_PYTHON" >> "$GITHUB_ENV"
+          "$BUSTER_CI_RESOURCES_PYTHON" tools/ci_checks_resources.py start \
+            --session "$RUNNER_TEMP/buster-ci/runner-resources" \
+            --source-revision "$(git rev-parse HEAD)" \
+            --source-tree "$(git rev-parse 'HEAD^{tree}')" \
+            --workflow-blob "$(git rev-parse 'HEAD:.github/workflows/ci.yml')" \
+            --role "${{ matrix.lane }}" --invocation "${{ matrix.shard }}"
+
       - name: Combination matrix (Linux, macOS)
         id: combinations_unix
         env:
@@ -603,6 +625,15 @@ jobs:
           cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Stop checks resource observation
+        id: checks_resources_stop
+        if: ${{ always() && env.BUSTER_CI_CHECKS_RESOURCES == '1' && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${BUSTER_CI_RESOURCES_PYTHON:-$BUSTER_CI_PYTHON}" tools/ci_checks_resources.py stop --session "$RUNNER_TEMP/buster-ci/runner-resources"
+
       # Postprocess only: build.c still owns every configure, probe and build.
       # Keep raw diagnostics outside build/ so failed attempts survive cleanup.
       - name: Collect CMake configure evidence
@@ -620,7 +651,7 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ matrix.shard == 'release' && (matrix.platform == 'unix' && 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_windows') || (matrix.platform == 'unix' && 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_windows') }}
+          BUSTER_CI_REQUIRED: ${{ format('{0}{1}', matrix.shard == 'release' && (matrix.platform == 'unix' && 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_windows') || (matrix.platform == 'unix' && 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_windows'), env.BUSTER_CI_CHECKS_RESOURCES == '1' && ' checks_resources_start checks_resources_stop' || '') }}
           BUSTER_CI_REPRO: Set BUSTER_MATRIX_SHARD=${{ matrix.shard }} and run the matching hosted bootstrap plus test_all_combinations_ci in docs/ci-combination-shards.md. Use BUSTER_MATRIX_SHARD=all for the full local matrix.
           BUSTER_CI_ZIG_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
