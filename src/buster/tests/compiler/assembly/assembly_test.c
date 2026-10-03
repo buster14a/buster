@@ -2726,6 +2726,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArgument
     return result;
 }
 
+// Explicit port operands must match the hidden XED accumulator/port topology.
+// Size prefixes describe transferred data independently of DX's 16-bit width.
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_port_suffixes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2760,14 +2762,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_port_suffixes(UnitTestArgum
         {
             AssemblyEncodeResult encoded = assembly_encode(arguments->arena, cases[row].source[syntax],
                 (AssemblyEncodeOptions){.target = target, .syntax = syntax ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
-            BUSTER_TEST_RAW(arguments, encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
-                assembly_test_bytes_equal(encoded.bytes, cases[row].bytes, cases[row].byte_count), cases[row].source[syntax]);
+            bool exact = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                         assembly_test_bytes_equal(encoded.bytes, cases[row].bytes, cases[row].byte_count);
+            if (!exact)
+            {
+                arguments->show(arguments, S8("X86_PORT_ENCODING row={u32} syntax={u32} diagnostics={u32} bytes={u64} expected={u32} input={S8}"),
+                    row, syntax, encoded.diagnostic_count, (u64)encoded.bytes.length, (u32)cases[row].byte_count, cases[row].source[syntax]);
+                if (encoded.diagnostic_count)
+                    arguments->show(arguments, S8("X86_PORT_DIAGNOSTIC {S8}"), encoded.diagnostics[0].message);
+                for (u32 index = 0; index < encoded.bytes.length && index < 3; index += 1)
+                    arguments->show(arguments, S8("X86_PORT_BYTE index={u32} value={u32}"), index, (u32)encoded.bytes.pointer[index]);
+            }
+            BUSTER_TEST_RAW(arguments, exact, cases[row].source[syntax]);
         }
     }
     String8 invalid_sources[] = {
         S8("inb %dx,%ax\n"), S8("outb %eax,%dx\n"),
         S8("inw %dx,%al\n"), S8("outl %ax,%dx\n"),
         S8("inb %dx,%ah\n"), S8("outb %bl,%dx\n"),
+        S8("inw %dx,%bx\n"), S8("outl %ecx,%dx\n"),
         S8("inb %cx,%al\n"), S8("outb %al,%dl\n"),
         S8("inb %edx,%al\n"), S8("outb %al,%rdx\n"),
         S8("inb (%rdx),%al\n"), S8("outb %al,(%rdx)\n"),

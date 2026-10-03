@@ -130,6 +130,10 @@ For explicit two-operand AT&T port I/O, `inb`/`inw`/`inl` and
 `outb`/`outw`/`outl` apply the suffix to the accumulator's data width.
 The port operand retains its separate architectural DX16 or imm8 role;
 metadata validates the exact accumulator, port register and immediate range.
+Source selection consumes both operands even though the imported XED rows mark
+the accumulator and DX as implicit. The hidden `OeAX()` accumulator selects
+AX or EAX and has no ModRM field; its width determines the word prefix rather
+than DX's fixed 16-bit width.
 `assembly_test_att_port_suffixes` checks exact bytes against matching Intel
 spellings, including immediate boundaries, word prefixes and invalid register,
 memory, suffix-width and 64-bit neighbours. It never executes port I/O.

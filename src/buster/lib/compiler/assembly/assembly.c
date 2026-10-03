@@ -10819,12 +10819,16 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         .include_privileged = true,
         .include_not64 = false,
-        .include_implicit = operand_count && physical[operand_count - 1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+        // XED's IN/OUT rows mark their source-spelled accumulator and DX
+        // registers IMPL. Consume the complete explicit two-operand topology;
+        // exact metadata still validates their identities and port width.
+        .include_implicit = (operand_count == 2 && (assembly_word_equal(mnemonic, S8("in")) || assembly_word_equal(mnemonic, S8("out")))) ||
+                            (operand_count && physical[operand_count - 1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
                             physical[operand_count - 1].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
                             physical[operand_count - 1].reg.index == 1 && physical[operand_count - 1].reg.width == 8 &&
                             (assembly_word_equal(mnemonic, S8("rol")) || assembly_word_equal(mnemonic, S8("ror")) ||
                              assembly_word_equal(mnemonic, S8("rcl")) || assembly_word_equal(mnemonic, S8("rcr")) ||
-                             assembly_word_equal(mnemonic, S8("shld")) || assembly_word_equal(mnemonic, S8("shrd"))),
+                             assembly_word_equal(mnemonic, S8("shld")) || assembly_word_equal(mnemonic, S8("shrd")))),
         .source_semantics = true,
     };
     bool relative_literal = false;
