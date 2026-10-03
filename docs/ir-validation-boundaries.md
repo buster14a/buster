@@ -51,6 +51,22 @@ and a distinct high 64-bit key. Unsanitized desktop runs call the emitted
 function through a matching host C signature and check integer bit-vector
 expectations; sanitizer/mobile runs retain validation and emission controls.
 
+## Unary value categories
+
+Every `UNARY` operand and result is a `VALUE` at the operation's canonical
+type. A storage `PLACE` requires an explicit `LOAD` before integer, floating,
+Boolean or vector unary arithmetic; matching type IDs do not authorize an
+implicit load or an addressable unary result. Invalid categories are refused
+with `IR_VALIDATION_OPERATION` at the unary row.
+
+`ir_test_canonical_unary_categories` uses an original complete raw
+`LOCAL` -> `LOAD` -> `UNARY` -> void `RETURN` fixture for all ten operations.
+It preserves each valid family while independently replacing the operand,
+result or both with places, and includes invalid operand/result categories.
+Uncertified preparation must reject these controls at `CANONICAL_INPUT`,
+before CFG or completion publication and without mutating the source rows.
+Valid neighboring modules prepare, publish zero edges and revalidate.
+
 ## Scalar binary operation families
 
 Scalar arithmetic and numeric comparisons require the operation's family to

@@ -1016,6 +1016,8 @@ struct CEnumMember
     // finalized once, at the closing brace, according to the selected dialect.
     CTypeId declaration_type;
     CTypeId type;
+    // The declaration-point ICE survives completion. On Microsoft targets an
+    // implicit successor's published signed-int value can differ from it.
     CIntegerConstant integer_constant;
     u64 value;
     bool is_negative;

@@ -5,6 +5,7 @@
 #include <buster/lib/compiler/work_ledger.h>
 
 typedef struct MachineFunction MachineFunction;
+typedef struct MachineEncodeResult MachineEncodeResult;
 typedef struct MachineStackPlacement MachineStackPlacement;
 
 typedef struct CodegenBuffer CodegenBuffer;
@@ -111,6 +112,12 @@ BUSTER_F_DECL IrSymbolId codegen_global_assembly_symbol(IrProgram* program, Stri
 BUSTER_F_DECL bool codegen_assembly_durable_name(String8 durable, String8* name);
 BUSTER_F_DECL bool codegen_global_assembly_apply_symbol_directive(IrProgram* program, Target target, String8 line,
                                                                   String8 durable_names, bool* recognized);
+
+// Machine references publish atomically before line/debug rows. A refused
+// encoding leaves the existing live relocation prefix and count unchanged.
+BUSTER_F_DECL bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* result, u32 relocation_capacity,
+                                                       MachineFunction const* function, MachineEncodeResult const* encoded,
+                                                       u32 code_base, Target target);
 
 // What the stack pointer is worth on entry to a body and at every call, and so
 // the alignment an outgoing-argument area gets for free.
