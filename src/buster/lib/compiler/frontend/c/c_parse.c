@@ -17778,13 +17778,24 @@ BUSTER_C_INTERNAL u32 c_parse_gnu_attribute_names_end(CPreprocessResult preproce
     return cursor;
 }
 
-BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start,
-                                                              u32 end)
+BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CScopeId scope, u32 declaration_index, u32 member_start);
+
+BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
+                                                              CPreprocessResult preprocess, CScopeId scope, u32 declaration_index,
+                                                              u32 start, u32 end, bool source_order)
 {
     u32 bracket_depth = 0;
     u32 attribute_resume = UINT32_MAX;
+    TemporalArena record_scratch = {0};
+    u32* record_ranges = 0;
+    u32 record_count = 0;
+    u32 record_capacity = 0;
     for (u32 token_index = start; token_index < end; token_index += 1)
     {
+        while (record_count && token_index > record_ranges[(record_count - 1) * 2])
+        {
+            record_count -= 1;
+        }
         // A C23 attribute list -- `int * [[gnu::aligned(16)]] p;` -- is
         // bracketed too, but its tokens name attributes, not objects.
         u32 c23_attribute_end = 0;
@@ -17794,6 +17805,50 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParse
             continue;
         }
         CToken token = preprocess.tokens[token_index];
+        // A record defined inside a bound's sizeof operand still declares
+        // members. Bind only arrays nested inside that record, never its
+        // member names. The explicit stack is allocated only for this shape.
+        if (source_order && bracket_depth && token.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_AGGREGATE_KEYWORDS))
+        {
+            u32 open = token_index + 1;
+            if (open < end && preprocess.tokens[open].kind == C_TOKEN_IDENTIFIER)
+            {
+                open += 1;
+            }
+            if (open < end && c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_BRACE))
+            {
+                u32 close = c_parse_matching_delimiter_indexed(result, preprocess, open);
+                if (close < end)
+                {
+                    if (!c_parse_aggregate_definition_registered(result, open))
+                    {
+                        u32 enum_start = result->enum_member_count;
+                        u32 declarator_start = 0;
+                        c_parse_scalar_type_in_scope(machine, result, preprocess, scope, token_index, close + 1, &declarator_start);
+                        c_parse_publish_enum_members(result, scope, declaration_index, enum_start);
+                    }
+                    if (record_count == record_capacity)
+                    {
+                        if (!record_ranges)
+                        {
+                            record_scratch = scratch_begin(&arena, 1);
+                        }
+                        u32 next_capacity = record_capacity ? record_capacity * 2 : 8;
+                        u32* next = arena_allocate(record_scratch.arena, u32, next_capacity * 2);
+                        if (record_count)
+                        {
+                            memcpy(next, record_ranges, sizeof(*next) * record_count * 2);
+                        }
+                        record_ranges = next;
+                        record_capacity = next_capacity;
+                    }
+                    record_ranges[record_count * 2] = close;
+                    record_ranges[record_count * 2 + 1] = bracket_depth;
+                    record_count += 1;
+                }
+            }
+        }
         // An array bound may be spelled with offsetof -- SQLite sizes a save
         // buffer as `sizeof(Parse) - offsetof(Parse, sLastToken)` -- and the
         // member named there is not an object this scope can resolve.
@@ -17822,7 +17877,8 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParse
             }
             continue;
         }
-        if (!bracket_depth || token.kind != C_TOKEN_IDENTIFIER || c_parse_declaration_keyword_at(result, preprocess, token_index) ||
+        if (!bracket_depth || (record_count && bracket_depth <= record_ranges[(record_count - 1) * 2 + 1]) ||
+            token.kind != C_TOKEN_IDENTIFIER || c_parse_declaration_keyword_at(result, preprocess, token_index) ||
             c_parse_identifier_is_bound(result, token_index))
         {
             continue;
@@ -17833,8 +17889,20 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParse
                         c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[token_index - 1], C_PARSE_AGGREGATE_KEYWORDS);
         if (!member && !tag_name)
         {
-            c_parse_bind_identifier(arena, result, preprocess, scope, token_index);
+            if (source_order)
+            {
+                c_parse_bind_identifier_entity(arena, result, preprocess, scope, token_index,
+                                               c_parse_lookup_entity_at_token(result, preprocess, scope, token_index));
+            }
+            else
+            {
+                c_parse_bind_identifier(arena, result, preprocess, scope, token_index);
+            }
         }
+    }
+    if (record_ranges)
+    {
+        scratch_end(record_scratch);
     }
 }
 
@@ -19106,7 +19174,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             c_parse_validate_cleanup_attribute(arena, result, preprocess, entity, cleanup, is_typedef, is_register, is_extern, is_thread_local);
         }
         c_parse_scope_add_entity(result, scope, entity, declared_symbol);
-        c_parse_bind_array_bound_identifiers(arena, result, preprocess, scope, segment_start, suffix_end);
+        c_parse_bind_array_bound_identifiers(machine, arena, result, preprocess, scope, declaration_index, segment_start, suffix_end, false);
         u32 initializer_start = suffix_end < segment_end ? suffix_end + 1 : segment_end;
         if (is_constexpr)
         {
@@ -19965,33 +20033,34 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         // innermost scope is declared there as soon as the walk reaches it,
         // so a use earlier in the expression still binds the outer name. The
         // later c_parse_bind_expression_aggregates pass finds it registered.
-        // An enum body holds only enumerators and the constant expressions
-        // the type parse has just evaluated, so it is stepped over rather than
-        // read as uses. A struct or union body is walked as before, which binds
-        // the names in its member bounds for the lowering's layout.
+        // A record in another expression is registered at the same source
+        // point. Its body holds member declarations, not block statements;
+        // walking a bit-field as a local declaration misreads its ':' and
+        // publishes ordinary members as locals. Keep bound uses attached to
+        // their source-point entity after publishing any nested enumerators;
+        // the type parser owns the remaining member declarations and widths.
         u32 aggregate_close = 0;
-        if (shape == C_TOKEN_IDENTIFIER && index < scope_header_end[scope_count - 1] &&
+        bool enumeration = shape == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_ENUM);
+        if (shape == C_TOKEN_IDENTIFIER && (index < scope_header_end[scope_count - 1] || (!statement_start && !enumeration)) &&
             c_parse_aggregate_definition_at(preprocess, index, body_end, &aggregate_close))
         {
             CScopeId statement_scope = scope_stack[scope_count - 1];
             u32 aggregate_open = preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER ? index + 2 : index + 1;
-            bool enumeration = c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_ENUM);
             if (!c_parse_aggregate_definition_registered(result, aggregate_open))
             {
                 u32 enum_member_start = result->enum_member_count;
                 u32 declarator_start = 0;
                 c_parse_scalar_type_in_scope(machine, result, preprocess, statement_scope, index, aggregate_close + 1, &declarator_start);
-                if (enumeration)
-                {
-                    c_parse_publish_enum_members(result, statement_scope, declaration_index, enum_member_start);
-                }
+                c_parse_publish_enum_members(result, statement_scope, declaration_index, enum_member_start);
             }
-            if (enumeration)
+            if (!enumeration)
             {
-                index = aggregate_close + 1;
-                statement_start = false;
-                continue;
+                c_parse_bind_array_bound_identifiers(machine, result_arena, result, preprocess, statement_scope, declaration_index,
+                                                     aggregate_open + 1, aggregate_close, true);
             }
+            index = aggregate_close + 1;
+            statement_start = false;
+            continue;
         }
         if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
         {

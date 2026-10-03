@@ -593,6 +593,24 @@ without facts for identical bitcode and diagnostics.
   duplicated, stale or incomplete keys search the type table (#1467);
   `c_test_aggregate_unique_search` requires zero lowering search rows for
   unique tags.
+- Static aggregate inference and materialization reserve frame, designator and
+  suspended GNU-range storage from the smaller of the token span and published
+  canonical type count. Active frames follow one by-value containment path;
+  resolved layouts cannot contain their own type by value. Brace elision and
+  borrowed designator continuations preserve that path, and range contexts
+  initialize strict descendants. Flat element counts therefore do not create
+  one work row per leaf. The work-array and range-payload reservations are
+  checked against remaining scratch before allocation and refuse with a
+  structured initializer-capacity diagnostic when they cannot fit.
+  `c_test_initializer_stack_capacity` executes inference and byte materialization
+  for 1,000,001 synthetic integer leaves in bounded scratch, checks every output
+  byte against independent digit values, and retains exhausted-scratch refusal.
+  Its complete frontend source covers the original 190,001-element failure
+  shape in both modes plus borrowed, inferred, nested-range, compound-literal
+  and relocation controls. Translation-unit query storage has its separate
+  reservation boundary; this does not promise arbitrary source sizes or OOM
+  recovery at unguarded allocation sites.
+
 - Each aggregate initializer context retains a `CIrInitializerRelocationExtent`.
   Before clearing a subobject, it incorporates only relocation records appended
   since the preceding query. Clears wholly outside the occupied extent skip

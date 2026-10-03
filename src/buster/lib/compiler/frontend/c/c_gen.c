@@ -122,12 +122,35 @@
 //                                                 the functions of one module
 //   c_ir_lower_capacity_plan                      non-mutating count and
 //                                                 overflow validation
+//   c_ir_arena_reservation_advance,                checked scratch capacities
+//   c_lower_to_ir_run                             before canonical publication
 //   c_lower_to_ir                                 the driver
 
 #include "c_internal.h"
 #include <buster/lib/compiler/ir/ir_construction.h>
 
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
+
+// Simulate an array carve without touching the arena. Compound preflights
+// retain the exact allocation order and alignment, including empty arrays.
+BUSTER_C_INTERNAL bool c_ir_arena_reservation_advance(u64 reserved_size, u64* position, u64 element_size, u64 count, u64 alignment)
+{
+    u64 aligned_position;
+    bool fits = position && element_size && reserved_size <= ARENA_MAX_RESERVATION &&
+                *position >= arena_minimum_position && *position <= reserved_size &&
+                count <= ARENA_MAX_RESERVATION / element_size &&
+                align_forward_checked(*position, alignment, &aligned_position) && aligned_position <= reserved_size;
+    if (fits)
+    {
+        u64 size = element_size * count;
+        fits = size <= reserved_size - aligned_position;
+        if (fits)
+        {
+            *position = aligned_position + size;
+        }
+    }
+    return fits;
+}
 
 // Preprocess file indices are registered as IR sources in table order, so a
 // token's file index is also its IR source id. A range keeps exactly what a
@@ -2923,6 +2946,18 @@ struct CIntegerIrBuilder
     bool label_metadata_store_cleared;
 };
 
+BUSTER_C_INTERNAL bool c_ir_lower_scratch_reservation(CIntegerIrBuilder* builder, u64 element_size, u64 count, u64 alignment)
+{
+    u64 position = builder->scratch_arena->position;
+    bool fits = c_ir_arena_reservation_advance(builder->scratch_arena->reserved_size, &position, element_size, count, alignment);
+    if (!fits)
+    {
+        builder->failure_message = S8("C function lowering scratch reservation exceeded");
+        builder->lower_machine.failed = true;
+    }
+    return fits;
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind kind);
 
 BUSTER_C_INTERNAL CIrVlaValue c_ir_vla_value(CIntegerIrBuilder* builder, IrValueId value)
@@ -5290,47 +5325,62 @@ BUSTER_C_INTERNAL bool c_ir_ssa_local_eligible(CIntegerIrBuilder* builder, CEnti
 BUSTER_C_INTERNAL u32 c_ir_ssa_event(CIntegerIrBuilder* builder, u32 local, u32 opcode, IrValueId value, IrSourceRange source)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
+    u32 index = UINT32_MAX;
+    bool fits = true;
     if (ssa->event_count == ssa->event_capacity)
     {
-        u32 capacity = ssa->event_capacity ? ssa->event_capacity * 2 : 32;
-        CIrSsaEvent* events = arena_allocate(builder->scratch_arena, CIrSsaEvent, capacity);
-        if (ssa->event_count)
+        u64 capacity = ssa->event_capacity ? (u64)ssa->event_capacity * 2 : 32;
+        fits = capacity <= UINT32_MAX &&
+               c_ir_lower_scratch_reservation(builder, sizeof(CIrSsaEvent), capacity, BUSTER_ALIGN_OF(CIrSsaEvent));
+        if (fits)
         {
-            memcpy(events, ssa->events, sizeof(*events) * ssa->event_count);
+            CIrSsaEvent* events = arena_allocate(builder->scratch_arena, CIrSsaEvent, capacity);
+            if (ssa->event_count)
+            {
+                memcpy(events, ssa->events, sizeof(*events) * ssa->event_count);
+            }
+            ssa->events = events;
+            ssa->event_capacity = (u32)capacity;
         }
-        ssa->events = events;
-        ssa->event_capacity = capacity;
-    }
-    u32 index = ssa->event_count++;
-    u32 previous = ssa->locals[local].last_event;
-    if (opcode == IR_OPCODE_STORE)
-    {
-        bool initializes_entry = previous != UINT32_MAX && ssa->events[previous].opcode == IR_OPCODE_LOCAL &&
-                                 builder->current_block.value == builder->function->entry.value;
-        if (initializes_entry)
+        else
         {
-            // The first access initializes this owner before any entry edge.
-            // Every reachable read is initialized; stores' RHS dependencies are
-            // checked separately so copying an uninitialized other local is not
-            // mistaken for a defined value.
-            ssa->locals[local].initialized_entry = true;
+            builder->failure_message = S8("C frontend SSA event capacity exceeds the lowering scratch reservation");
+            builder->lower_machine.failed = true;
         }
-        // A later write permanently revokes the single-definition shortcut.
-        ssa->locals[local].single_entry_definition = initializes_entry;
     }
-    ssa->events[index] = (CIrSsaEvent){
-        .source = source, .after = builder->last_instruction, .block = builder->current_block,
-        .value = value, .local = local, .next_local = UINT32_MAX, .previous_local = ssa->locals[local].last_event, .opcode = (u8)opcode,
-    };
-    if (ssa->locals[local].last_event != UINT32_MAX)
+    if (fits)
     {
-        ssa->events[ssa->locals[local].last_event].next_local = index;
+        index = ssa->event_count++;
+        u32 previous = ssa->locals[local].last_event;
+        if (opcode == IR_OPCODE_STORE)
+        {
+            bool initializes_entry = previous != UINT32_MAX && ssa->events[previous].opcode == IR_OPCODE_LOCAL &&
+                                     builder->current_block.value == builder->function->entry.value;
+            if (initializes_entry)
+            {
+                // The first access initializes this owner before any entry edge.
+                // Every reachable read is initialized; stores' RHS dependencies are
+                // checked separately so copying an uninitialized other local is not
+                // mistaken for a defined value.
+                ssa->locals[local].initialized_entry = true;
+            }
+            // A later write permanently revokes the single-definition shortcut.
+            ssa->locals[local].single_entry_definition = initializes_entry;
+        }
+        ssa->events[index] = (CIrSsaEvent){
+            .source = source, .after = builder->last_instruction, .block = builder->current_block,
+            .value = value, .local = local, .next_local = UINT32_MAX, .previous_local = ssa->locals[local].last_event, .opcode = (u8)opcode,
+        };
+        if (ssa->locals[local].last_event != UINT32_MAX)
+        {
+            ssa->events[ssa->locals[local].last_event].next_local = index;
+        }
+        else
+        {
+            ssa->locals[local].first_event = index;
+        }
+        ssa->locals[local].last_event = index;
     }
-    else
-    {
-        ssa->locals[local].first_event = index;
-    }
-    ssa->locals[local].last_event = index;
     return index;
 }
 
@@ -5554,27 +5604,49 @@ BUSTER_C_INTERNAL CIrSsaLocal* c_ir_ssa_place_local(CIntegerIrBuilder* builder, 
 BUSTER_C_INTERNAL IrValueId c_ir_ssa_read(CIntegerIrBuilder* builder, CIrSsaLocal* local, IrSourceRange source, bool named_load)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
-    IrValueId current = c_ir_ssa_current(builder, builder->current_block.value, (u32)(local - builder->direct_ssa->locals));
-    IrValueId value = c_ir_add_result(builder, local->type);
-    builder->function->values[value.value].points_to_read_only = builder->function->values[local->place.value].points_to_read_only;
+    IrValueId value = IR_VALUE_ID_INVALID;
+    bool fits = true;
     if (ssa->read_count == ssa->read_capacity)
     {
-        u32 capacity = ssa->read_capacity ? ssa->read_capacity * 2 : 32;
-        CIrSsaRead* reads = arena_allocate(builder->scratch_arena, CIrSsaRead, capacity);
-        if (ssa->read_count)
+        u64 capacity = ssa->read_capacity ? (u64)ssa->read_capacity * 2 : 32;
+        fits = capacity <= UINT32_MAX &&
+               c_ir_lower_scratch_reservation(builder, sizeof(CIrSsaRead), capacity, BUSTER_ALIGN_OF(CIrSsaRead));
+        if (fits)
         {
-            memcpy(reads, ssa->reads, sizeof(*reads) * ssa->read_count);
+            CIrSsaRead* reads = arena_allocate(builder->scratch_arena, CIrSsaRead, capacity);
+            if (ssa->read_count)
+            {
+                memcpy(reads, ssa->reads, sizeof(*reads) * ssa->read_count);
+            }
+            ssa->reads = reads;
+            ssa->read_capacity = (u32)capacity;
         }
-        ssa->reads = reads;
-        ssa->read_capacity = capacity;
+        else
+        {
+            builder->failure_message = S8("C frontend SSA read capacity exceeds the lowering scratch reservation");
+            builder->lower_machine.failed = true;
+        }
     }
-    u32 event = c_ir_ssa_event(builder, (u32)(local - ssa->locals), IR_OPCODE_LOAD, value, source);
-    ssa->events[event].named_load = named_load;
-    ssa->reads[ssa->read_count++] = (CIrSsaRead){
-        .value = value, .replacement = current, .place = local->place,
-        .instruction_count = builder->function->instruction_count, .block = builder->current_block,
-        .event = event,
-    };
+    if (fits)
+    {
+        IrValueId current = c_ir_ssa_current(builder, builder->current_block.value, (u32)(local - builder->direct_ssa->locals));
+        value = c_ir_add_result(builder, local->type);
+        builder->function->values[value.value].points_to_read_only = builder->function->values[local->place.value].points_to_read_only;
+        u32 event = c_ir_ssa_event(builder, (u32)(local - ssa->locals), IR_OPCODE_LOAD, value, source);
+        if (event != UINT32_MAX)
+        {
+            ssa->events[event].named_load = named_load;
+            ssa->reads[ssa->read_count++] = (CIrSsaRead){
+                .value = value, .replacement = current, .place = local->place,
+                .instruction_count = builder->function->instruction_count, .block = builder->current_block,
+                .event = event,
+            };
+        }
+        else
+        {
+            value = IR_VALUE_ID_INVALID;
+        }
+    }
     return value;
 }
 
@@ -34458,20 +34530,27 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                     }
                     if (assignment_index < assignment_close)
                     {
-                        CIrLowerAssignmentStatementState* assignment_state =
-                            arena_allocate(builder->scratch_arena, CIrLowerAssignmentStatementState, 1);
-                        *assignment_state = (CIrLowerAssignmentStatementState){
-                            .place = IR_VALUE_ID_INVALID,
-                            .base = IR_VALUE_ID_INVALID,
-                            .type = IR_TYPE_ID_INVALID,
-                            .start = assignment_start,
-                            .end = assignment_close,
-                        };
-                        frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_VOID_ASSIGNMENT;
-                        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                            .kind = C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT,
-                                                            .as.assignment_statement = assignment_state,
-                                                        }))
+                        if (c_ir_lower_scratch_reservation(builder, sizeof(CIrLowerAssignmentStatementState), 1, BUSTER_ALIGN_OF(CIrLowerAssignmentStatementState)))
+                        {
+                            CIrLowerAssignmentStatementState* assignment_state =
+                                arena_allocate(builder->scratch_arena, CIrLowerAssignmentStatementState, 1);
+                            *assignment_state = (CIrLowerAssignmentStatementState){
+                                .place = IR_VALUE_ID_INVALID,
+                                .base = IR_VALUE_ID_INVALID,
+                                .type = IR_TYPE_ID_INVALID,
+                                .start = assignment_start,
+                                .end = assignment_close,
+                            };
+                            frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_VOID_ASSIGNMENT;
+                            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                                .kind = C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT,
+                                                                .as.assignment_statement = assignment_state,
+                                                            }))
+                            {
+                                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                            }
+                        }
+                        else
                         {
                             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                         }
@@ -38568,6 +38647,9 @@ BUSTER_C_INTERNAL u32 c_ir_label_candidate_lower_bound(CIntegerIrBuilder* builde
     return low;
 }
 
+BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* builder, CIrLowerBodyState* state,
+                                                              u32 label_capacity, u32 candidate_cursor);
+
 BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
     CDeclaration declaration = state->declaration;
@@ -38596,6 +38678,19 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
             label_capacity += c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end);
         }
     }
+    bool initialized = c_ir_lower_scratch_reservation(builder, sizeof(CIrLabel), label_capacity ? label_capacity : 1, BUSTER_ALIGN_OF(CIrLabel));
+    if (initialized)
+    {
+        initialized = c_ir_lower_body_initialize_labels_run(builder, state, label_capacity, candidate_cursor);
+    }
+    return initialized;
+}
+
+BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* builder, CIrLowerBodyState* state,
+                                                              u32 label_capacity, u32 candidate_cursor)
+{
+    CDeclaration declaration = state->declaration;
+    u32 body_end = declaration.body_start + declaration.body_token_count;
     state->labels = arena_allocate(builder->scratch_arena, CIrLabel, label_capacity ? label_capacity : 1);
     state->label_count = 0;
     for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
@@ -38686,8 +38781,17 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
         task_capacity += switch_label;
         switch_case_capacity += switch_label;
     }
-    if (task_capacity > UINT32_MAX)
+    u64 position = builder->scratch_arena->position;
+    u64 reserved_size = builder->scratch_arena->reserved_size;
+    u32 case_capacity = switch_case_capacity ? switch_case_capacity : 1;
+    bool fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrBodyTask), task_capacity, BUSTER_ALIGN_OF(CIrBodyTask)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrSwitchCase), case_capacity, BUSTER_ALIGN_OF(CIrSwitchCase)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrSubstatementCase), case_capacity, BUSTER_ALIGN_OF(CIrSubstatementCase)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrBodyTask), 1, BUSTER_ALIGN_OF(CIrBodyTask));
+    if (task_capacity > UINT32_MAX || !fits)
     {
+        builder->failure_message = S8("C function body task capacity exceeds the lowering scratch reservation");
+        builder->lower_machine.failed = true;
         return false;
     }
     state->tasks = arena_allocate(builder->scratch_arena, CIrBodyTask, (u32)task_capacity);
@@ -40834,19 +40938,22 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     state->task_count = task_count;
                     return false;
                 }
-                CIrLowerAssignmentStatementState* statement_state = arena_allocate(builder->scratch_arena, CIrLowerAssignmentStatementState, 1);
-                *statement_state = (CIrLowerAssignmentStatementState){
-                    .place = IR_VALUE_ID_INVALID,
-                    .base = IR_VALUE_ID_INVALID,
-                    .type = IR_TYPE_ID_INVALID,
-                    .start = index,
-                    .end = end,
-                };
-                c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1, C_IR_LOWER_BODY_CONTINUE_STATEMENT,
-                                      (CIrLowerFrame){
-                                          .kind = C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT,
-                                          .as.assignment_statement = statement_state,
-                                      });
+                if (c_ir_lower_scratch_reservation(builder, sizeof(CIrLowerAssignmentStatementState), 1, BUSTER_ALIGN_OF(CIrLowerAssignmentStatementState)))
+                {
+                    CIrLowerAssignmentStatementState* statement_state = arena_allocate(builder->scratch_arena, CIrLowerAssignmentStatementState, 1);
+                    *statement_state = (CIrLowerAssignmentStatementState){
+                        .place = IR_VALUE_ID_INVALID,
+                        .base = IR_VALUE_ID_INVALID,
+                        .type = IR_TYPE_ID_INVALID,
+                        .start = index,
+                        .end = end,
+                    };
+                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1, C_IR_LOWER_BODY_CONTINUE_STATEMENT,
+                                          (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT,
+                                              .as.assignment_statement = statement_state,
+                                          });
+                }
                 state->task_count = task_count;
                 return false;
             }
@@ -43694,9 +43801,17 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
             return true;
         }
     }
-    u64 span = (u64)end - start;
+    // Each active frame follows a by-value aggregate descent. A resolved
+    // type cannot contain itself by value; the inferred root is one extra
+    // synthetic frame. Flat element counts therefore do not size the stack.
+    u64 span = BUSTER_MIN((u64)end - start, (u64)builder->program->types.count);
+    u64 work_position = temporary_arena->position;
     if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrInitializerInferenceFrame) ||
-        span + 1 > UINT32_MAX / sizeof(CIrInitializerContinuation))
+        span + 1 > UINT32_MAX / sizeof(CIrInitializerContinuation) ||
+        !c_ir_arena_reservation_advance(temporary_arena->reserved_size, &work_position, sizeof(CIrInitializerInferenceFrame), span + 2,
+                                       BUSTER_ALIGN_OF(CIrInitializerInferenceFrame)) ||
+        !c_ir_arena_reservation_advance(temporary_arena->reserved_size, &work_position, sizeof(CIrInitializerContinuation), span + 1,
+                                       BUSTER_ALIGN_OF(CIrInitializerContinuation)))
     {
         return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer nesting exceeds its capacity"), start);
     }
@@ -44155,7 +44270,7 @@ struct CIrConstantInitializerContext
     CIrConstantInitializerRange* range_work;
     u32 frame_capacity;
     u32 frame_count;
-    u32 span;
+    u32 work_capacity;
     bool finished;
     bool reserved[3];
     CIrConstantInitializerContextStep step;
@@ -44236,10 +44351,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_apply_materialized_range(CInteg
     {
         return false;
     }
-    u64* indices = arena_allocate(task_arena, u64, designator->range_count ? designator->range_count : 1);
+    u64 index_count = designator->range_count ? designator->range_count : 1;
+    u64 work_position = task_arena->position;
+    u64* indices = c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(u64), index_count, BUSTER_ALIGN_OF(u64))
+                       ? arena_allocate(task_arena, u64, index_count) : 0;
     if (!indices)
     {
-        return false;
+        return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), designator->value_start);
     }
     for (u32 range_index = 0; range_index < designator->range_count; range_index += 1)
     {
@@ -44903,7 +45021,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
     u64 byte_count = context->byte_count;
     u32 capacity = context->frame_capacity;
     u32 frame_count = context->frame_count;
-    u64 span = context->span;
+    u32 work_capacity = context->work_capacity;
     while (frame_count)
     {
         CIrConstantInitializerFrame* frame = frames + frame_count - 1;
@@ -44951,7 +45069,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             continue;
         }
         CIrConstantInitializerDesignator designator = {0};
-        if (!c_ir_constant_initializer_designator(builder, frame, continuation_work, (u32)(span + 1), range_work, (u32)(span + 1), &designator)) return false;
+        if (!c_ir_constant_initializer_designator(builder, frame, continuation_work, work_capacity, range_work, work_capacity, &designator)) return false;
         u64 selected = designator.selected;
         u32 value_start = designator.value_start;
         if ((!designator.has_designator && designator.selected_end >= slot_count) ||
@@ -45144,7 +45262,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
                     return c_ir_constant_initializer_fail(builder, S8("aggregate initializer index overflows the target size"), frame->cursor);
                 }
                 frame->next_index = selected + 1;
-                if (frame_count + designator.continuation_count > capacity)
+                if (frame_count + designator.continuation_count >= capacity)
                 {
                     return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), value_start);
                 }
@@ -45317,13 +45435,23 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_begin(CIntegerIrBuilder
         context->finished = true;
         return true;
     }
-    u64 span = (u64)end - start;
+    // Frames, designator continuations and ranges follow one by-value type
+    // path, including brace elision and promoted anonymous members. The
+    // finalized type count bounds that path without scanning a flat list.
+    u64 span = BUSTER_MIN((u64)end - start, (u64)builder->program->types.count);
+    u64 work_position = task_arena->position;
     if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrConstantInitializerFrame) ||
-        span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerContinuation) || span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerRange))
+        span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerContinuation) || span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerRange) ||
+        !c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(CIrConstantInitializerFrame), span + 2,
+                                       BUSTER_ALIGN_OF(CIrConstantInitializerFrame)) ||
+        !c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(CIrConstantInitializerContinuation), span + 1,
+                                       BUSTER_ALIGN_OF(CIrConstantInitializerContinuation)) ||
+        !c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(CIrConstantInitializerRange), span + 1,
+                                       BUSTER_ALIGN_OF(CIrConstantInitializerRange)))
     {
         return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
     }
-    context->span = (u32)span;
+    context->work_capacity = (u32)(span + 1);
     context->frame_capacity = (u32)(span + 2);
     context->frames = arena_allocate(task_arena, CIrConstantInitializerFrame, context->frame_capacity);
     context->continuation_work = arena_allocate(task_arena, CIrConstantInitializerContinuation, (u32)(span + 1));
@@ -45350,8 +45478,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
     {
         return false;
     }
-    u64 context_capacity_u64 = (u64)end - start + 2;
-    if (context_capacity_u64 > UINT32_MAX || context_capacity_u64 > UINT32_MAX / sizeof(CIrConstantInitializerContext))
+    // A suspended GNU range initializes a strict subobject of its parent's
+    // current frame, so context nesting has the same by-value type bound.
+    u64 context_capacity_u64 = BUSTER_MIN((u64)end - start, (u64)builder->program->types.count) + 2;
+    u64 work_position = task_arena->position;
+    if (context_capacity_u64 > UINT32_MAX || context_capacity_u64 > UINT32_MAX / sizeof(CIrConstantInitializerContext) ||
+        !c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(CIrConstantInitializerContext), context_capacity_u64,
+                                       BUSTER_ALIGN_OF(CIrConstantInitializerContext)))
     {
         return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
     }
@@ -45428,9 +45561,14 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
         {
             return c_ir_constant_initializer_fail(builder, S8("range initializer exceeds the target object"), pending->value_start);
         }
+        work_position = task_arena->position;
         if (!c_ir_constant_initializer_relocation_capacity(builder, value_type->layout.size,
                                                             (u64)pending->value_end - pending->value_start,
-                                                            &pending->value_relocation_capacity))
+                                                            &pending->value_relocation_capacity) ||
+            !c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(u8),
+                                           value_type->layout.size ? value_type->layout.size : 1, BUSTER_ALIGN_OF(u8)) ||
+            !c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(IrGlobalRelocation),
+                                           pending->value_relocation_capacity, BUSTER_ALIGN_OF(IrGlobalRelocation)))
         {
             return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), pending->value_start);
         }
@@ -45469,6 +45607,68 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, u32 element_count, u8* bytes,
+                                   u64* inferred_count, u64* scratch_bytes, String8* failure_message)
+{
+    bool valid = arena && task_arena && bytes && inferred_count && scratch_bytes && failure_message &&
+                 element_count && element_count <= (UINT32_MAX - 2) / 2;
+    if (valid)
+    {
+        u32 token_count = element_count * 2 + 2;
+        CToken* tokens = arena_allocate_zeroed(arena, CToken, token_count);
+        tokens[0] = (CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_LEFT_BRACE};
+        for (u32 element = 0; element < element_count; element += 1)
+        {
+            tokens[element * 2 + 1] = (CToken){.kind = C_TOKEN_PREPROCESSING_NUMBER, .offset = element % 10, .length = 1};
+            tokens[element * 2 + 2] = (CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_COMMA};
+        }
+        tokens[token_count - 1] = (CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_RIGHT_BRACE};
+        IrProgram program = ir_program_initialize(arena, 0, C_TYPE_COUNT + 8, 0, 0);
+        program.data_layout = target_data_layout(target_native);
+        CIrTypeContext type_context = {.program = &program, .target = target_native};
+        for (u32 kind = 0; kind < C_TYPE_COUNT; kind += 1)
+        {
+            type_context.scalar_types[kind] = IR_TYPE_ID_INVALID;
+        }
+        IrTypeId integer = c_ir_scalar_type(&type_context, C_TYPE_INT);
+        IrTypeId element_type = c_ir_scalar_type(&type_context, C_TYPE_UNSIGNED_SHORT);
+        IrTypeId array = ir_program_add_type(&program, (IrType){
+            .kind = IR_TYPE_ARRAY, .element_type = element_type, .element_count = element_count,
+            .layout = {.size = (u64)element_count * 2, .alignment = 2, .resolved = true},
+        });
+        CIrQueryFrame query_frames[16] = {0};
+        CIrQueryFrame query_completed[16] = {0};
+        CIrConstantValue query_values[16] = {0};
+        CIrConstantOperator query_operators[16] = {0};
+        CIrQueryResume query_resumes[16] = {0};
+        CIrQueryMachine queries = {
+            .frames = query_frames, .completed = query_completed, .values = query_values,
+            .operators = query_operators, .resumes = query_resumes,
+            .frame_capacity = 16, .completed_capacity = 16, .value_capacity = 16, .operator_capacity = 16,
+        };
+        CIntegerIrBuilder builder = {
+            .arena = arena, .temporary_arena = task_arena, .scratch_arena = task_arena, .program = &program,
+            .preprocess = {.tokens = tokens, .token_count = token_count, .spelling_base = S8("0123456789").pointer,
+                           .target = target_native, .dialect = C_PREPROCESS_DIALECT_GNU17},
+            .target = target_native, .type_context = &type_context, .scalar_types = type_context.scalar_types,
+            .literal_limits = type_context.literal_limits, .s32_type = integer, .queries = &queries,
+        };
+        u32 failure_token = 0;
+        u32 relocation_count = 0;
+        TemporalArena temporary = arena_begin_temporal(task_arena);
+        valid = c_ir_infer_initializer_array_count_core(&builder, task_arena, (CScopeId){0}, element_type, 0, token_count,
+                                                       inferred_count, failure_message, &failure_token);
+        scratch_end(temporary);
+        if (valid)
+        {
+            valid = c_ir_constant_initializer_bytes(&builder, 0, token_count, array, bytes, (u64)element_count * 2, 0, &relocation_count, 0);
+            *failure_message = builder.failure_message;
+        }
+        *scratch_bytes = arena_dirty_position(task_arena) - temporary.position;
+    }
+    return valid;
+}
+
 void c_test_initializer_relocation_replay(Arena* arena, u32 pointer_size, u64 byte_count, u32 capacity,
                                           CTestInitializerRelocationOperation const* operations, u32 operation_count,
                                           CTestInitializerRelocationReplay* replay)
@@ -50534,24 +50734,25 @@ bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult pars
     return valid;
 }
 
-BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
-                                                    CIRLowerOptions options)
+BUSTER_C_INTERNAL bool c_ir_query_scratch_reservation(u64 reserved_size, u64* position, u32 capacity)
+{
+    bool fits = c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryFrame), capacity, BUSTER_ALIGN_OF(CIrQueryFrame)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryFrame), capacity, BUSTER_ALIGN_OF(CIrQueryFrame)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrConstantValue), capacity, BUSTER_ALIGN_OF(CIrConstantValue)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrConstantOperator), capacity, BUSTER_ALIGN_OF(CIrConstantOperator)) &&
+                c_ir_arena_reservation_advance(reserved_size, position, sizeof(CIrQueryResume), capacity, BUSTER_ALIGN_OF(CIrQueryResume));
+    return fits;
+}
+
+BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
+                                                             CIRLowerOptions options, CIrLowerCapacityPlan plan, Arena* temporary_arena,
+                                                             u64 function_reservation_limit)
 {
     CIRLowerResult result = {0};
-    CIrLowerCapacityPlan plan = {0};
-    if (!arena || !c_ir_lower_capacity_plan(preprocess, parse, &plan))
-    {
-        return result;
-    }
     u32 type_capacity = plan.type_capacity;
     u32 symbol_capacity = plan.symbol_capacity;
     u32 function_capacity = plan.function_capacity;
     u32 query_frame_capacity = plan.query_frame_capacity;
-    Arena* temporary_conflicts[] = {
-        arena,
-    };
-    TemporalArena temporary = scratch_begin(temporary_conflicts, BUSTER_ARRAY_LENGTH(temporary_conflicts));
-    Arena* temporary_arena = temporary.arena;
     // Scopes are final here, so every builder copy of this parse result can
     // answer c_parse_scope_for_token by descent instead of a full scope scan.
     if (!parse.scope_children_offsets) c_parse_index_scope_children(&parse, temporary_arena);
@@ -50565,16 +50766,16 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     u32 const* stream_matching_delimiters_plus_one =
         label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters_plus_one : 0;
     CIrQueryMachine queries = {
-        .frames = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
-        .completed = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
-        .values = arena_allocate(temporary_arena, CIrConstantValue, (u32)query_frame_capacity),
-        .operators = arena_allocate(temporary_arena, CIrConstantOperator, (u32)query_frame_capacity),
-        .resumes = arena_allocate(temporary_arena, CIrQueryResume, (u32)query_frame_capacity),
         .frame_capacity = (u32)query_frame_capacity,
         .completed_capacity = (u32)query_frame_capacity,
         .value_capacity = (u32)query_frame_capacity,
         .operator_capacity = (u32)query_frame_capacity,
     };
+    queries.frames = arena_allocate(temporary_arena, CIrQueryFrame, query_frame_capacity);
+    queries.completed = arena_allocate(temporary_arena, CIrQueryFrame, query_frame_capacity);
+    queries.values = arena_allocate(temporary_arena, CIrConstantValue, query_frame_capacity);
+    queries.operators = arena_allocate(temporary_arena, CIrConstantOperator, query_frame_capacity);
+    queries.resumes = arena_allocate(temporary_arena, CIrQueryResume, query_frame_capacity);
     // One per declaration for the lowering failures, one per entity for the
     // definition failures, one per deferred static assertion, a second per
     // declaration for an __attribute__((alias)) naming a target this unit
@@ -50862,7 +51063,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     CIrFunctionNameIndex function_names = {0};
     if (!c_ir_build_function_name_index(arena, &parse, &function_names))
     {
-        scratch_end(temporary);
         return (CIRLowerResult){0};
     }
     IrSymbolId* entity_symbols = arena_allocate(arena, IrSymbolId, parse.entity_count);
@@ -52481,7 +52681,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
     u64 function_dependency_capacity64 = (u64)parse.identifier_use_count + cleanup_entity_count;
     if (function_dependency_capacity64 > UINT32_MAX)
     {
-        scratch_end(temporary);
         return result;
     }
     u32 function_dependency_capacity = (u32)function_dependency_capacity64;
@@ -52783,7 +52982,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             .location = parse.declaration_count ? c_preprocess_site_location(&preprocess, parse.declarations[0].location) : (CSourceLocation){0},
             .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
         };
-        scratch_end(temporary);
         return result;
     }
     // Counting a definition's locals by scanning every entity per function is
@@ -52916,12 +53114,41 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         // the body is long does not exhaust the stack.  The other consumers of
         // lowering_capacity are per-value arrays the bound does not widen.
         u64 lower_frame_capacity = lowering_capacity + (u64)(declaration.body_start - declaration_start) * 3;
+        u64 reserved_size = function_reservation_limit ? BUSTER_MIN(function_reservation_limit, lowering_arena->reserved_size) : lowering_arena->reserved_size;
+        u64 position = lowering_arena->position;
+        u64 local_array_capacity = local_capacity ? local_capacity : 1;
+        u64 call_array_capacity = prepared_call_capacity ? prepared_call_capacity : 1;
+        u64 body_array_capacity = declaration.body_token_count ? declaration.body_token_count : 1;
+        u64 cleanup_capacity = cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index];
+        // Match the builder initializer's carve order before allocating its
+        // first array. Capacity failure is a source diagnostic, never a bump
+        // allocator assertion after reserving only part of the builder.
+        bool scratch_fits =
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrLowerFrame), lower_frame_capacity, BUSTER_ALIGN_OF(CIrLowerFrame)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIntegerIrLocal), local_array_capacity, BUSTER_ALIGN_OF(CIntegerIrLocal)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_slot_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(IrBlockId), lowering_capacity, BUSTER_ALIGN_OF(IrBlockId)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(bool), lowering_capacity, BUSTER_ALIGN_OF(bool)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), lowering_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), lowering_capacity, BUSTER_ALIGN_OF(u32)) &&
+            (!cleanup_capacity || c_ir_arena_reservation_advance(reserved_size, &position, sizeof(IrValueId), cleanup_capacity, BUSTER_ALIGN_OF(IrValueId))) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedCall), call_array_capacity, BUSTER_ALIGN_OF(CIrPreparedCall)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), call_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            (stream_matching_delimiters_plus_one || c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32))) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedControlExpression),
+                                          prepared_control_expression_capacity ? prepared_control_expression_capacity : 1,
+                                          BUSTER_ALIGN_OF(CIrPreparedControlExpression));
         if (lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || local_slot_capacity > UINT32_MAX ||
-            prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX)
+            prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX || !scratch_fits)
         {
             scratch_end(lowering_temporary);
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = S8("C function body is too large to lower"),
+                .message = scratch_fits ? S8("C function body is too large to lower") : S8("C function lowering scratch reservation exceeded"),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
@@ -52981,7 +53208,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             .queries = &queries,
             .lower_machine =
                 {
-                    .frames = arena_allocate(lowering_temporary.arena, CIrLowerFrame, (u32)lower_frame_capacity),
                     .frame_capacity = (u32)lower_frame_capacity,
                 },
             .function_names = &function_names,
@@ -53009,33 +53235,13 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             .last_instruction = IR_INSTRUCTION_ID_INVALID,
             .failure_token_index = UINT32_MAX,
             .declaration_index = declaration_index,
-            .locals = arena_allocate(lowering_temporary.arena, CIntegerIrLocal, local_capacity ? (u32)local_capacity : 1),
-            .local_entities = arena_allocate(lowering_temporary.arena, u32, local_capacity ? (u32)local_capacity : 1),
-            .local_symbols = arena_allocate(lowering_temporary.arena, u32, local_capacity ? (u32)local_capacity : 1),
-            .local_entity_slots = arena_allocate(lowering_temporary.arena, u32, (u32)local_slot_capacity),
             .local_entity_slot_mask = (u32)local_slot_capacity - 1,
             .local_capacity = local_capacity ? (u32)local_capacity : 1,
-            .label_metadata_store_blocks = arena_allocate(lowering_temporary.arena, IrBlockId, (u32)lowering_capacity),
-            .label_metadata_store_valid = arena_allocate(lowering_temporary.arena, bool, (u32)lowering_capacity),
-            .label_place_head = arena_allocate(lowering_temporary.arena, u32, (u32)lowering_capacity),
-            .label_place_next = arena_allocate(lowering_temporary.arena, u32, (u32)lowering_capacity),
             .label_metadata_store_capacity = (u32)lowering_capacity,
-            .cleanup_flags = cleanup_offsets[declaration_index + 1] != cleanup_offsets[declaration_index]
-                                 ? arena_allocate(lowering_temporary.arena, IrValueId, cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index])
-                                 : 0,
             .cleanup_entities = cleanup_entities,
             .cleanup_entity_entries = cleanup_entity_entries,
             .cleanup_flag_base = cleanup_offsets[declaration_index],
             .cleanup_flag_count = cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index],
-            .prepared_calls = arena_allocate(lowering_temporary.arena, CIrPreparedCall, prepared_call_capacity ? (u32)prepared_call_capacity : 1),
-            .prepared_call_indices = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
-            .prepared_call_token_heads = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
-            .prepared_call_token_next = arena_allocate(lowering_temporary.arena, u32, prepared_call_capacity ? (u32)prepared_call_capacity : 1),
-            .group_type_names = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
-            .matching_delimiters_plus_one =
-                stream_matching_delimiters_plus_one
-                    ? 0
-                    : arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
             .stream_matching_delimiters_plus_one = stream_matching_delimiters_plus_one,
             .label_candidate_positions = label_candidate_positions,
             .label_candidate_count = label_candidate_count,
@@ -53043,12 +53249,28 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             .prepared_call_capacity = prepared_call_capacity ? (u32)prepared_call_capacity : 1,
             .body_token_start = declaration.body_start,
             .body_token_count = declaration.body_token_count,
-            .prepared_control_expressions = arena_allocate(lowering_temporary.arena, CIrPreparedControlExpression,
-                                                           prepared_control_expression_capacity ? (u32)prepared_control_expression_capacity : 1),
             .prepared_control_expression_capacity = prepared_control_expression_capacity ? (u32)prepared_control_expression_capacity : 1,
             .returns_void = signatures[declaration_index].returns_void,
             .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
         };
+        builder.lower_machine.frames = arena_allocate(lowering_temporary.arena, CIrLowerFrame, lower_frame_capacity);
+        builder.locals = arena_allocate(lowering_temporary.arena, CIntegerIrLocal, local_array_capacity);
+        builder.local_entities = arena_allocate(lowering_temporary.arena, u32, local_array_capacity);
+        builder.local_symbols = arena_allocate(lowering_temporary.arena, u32, local_array_capacity);
+        builder.local_entity_slots = arena_allocate(lowering_temporary.arena, u32, local_slot_capacity);
+        builder.label_metadata_store_blocks = arena_allocate(lowering_temporary.arena, IrBlockId, lowering_capacity);
+        builder.label_metadata_store_valid = arena_allocate(lowering_temporary.arena, bool, lowering_capacity);
+        builder.label_place_head = arena_allocate(lowering_temporary.arena, u32, lowering_capacity);
+        builder.label_place_next = arena_allocate(lowering_temporary.arena, u32, lowering_capacity);
+        builder.cleanup_flags = cleanup_capacity ? arena_allocate(lowering_temporary.arena, IrValueId, cleanup_capacity) : 0;
+        builder.prepared_calls = arena_allocate(lowering_temporary.arena, CIrPreparedCall, call_array_capacity);
+        builder.prepared_call_indices = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
+        builder.prepared_call_token_heads = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
+        builder.prepared_call_token_next = arena_allocate(lowering_temporary.arena, u32, call_array_capacity);
+        builder.group_type_names = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
+        builder.matching_delimiters_plus_one = stream_matching_delimiters_plus_one ? 0 : arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
+        builder.prepared_control_expressions = arena_allocate(lowering_temporary.arena, CIrPreparedControlExpression,
+                                                              prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
         memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);
         for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
         {
@@ -53093,7 +53315,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                 object_type = value_type;
             }
             if (!c_ir_emit_parameter(&builder, c_ir_space_name_token(&builder, parameter.name), parameter_index,
-                                     value_type, object_type, parameter.entity))
+                                     value_type, object_type, parameter.entity) || builder.lower_machine.failed)
             {
                 parameters_lowered = false;
                 break;
@@ -53171,7 +53393,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         {
             builder.failure_message = S8("could not initialize cleanup state");
         }
-        if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || !c_ir_lower_body(&builder, declaration, false, 0) ||
+        if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || builder.lower_machine.failed || !c_ir_lower_body(&builder, declaration, false, 0) ||
             !c_ir_atomic_aggregate_accesses_lowerable(&builder) || !c_ir_ssa_finish(&builder, &result.direct_ssa) ||
             !c_ir_finish_construction(&builder))
         {
@@ -53358,9 +53580,53 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         };
     }
     arena_destroy(lowering_arena, 1);
-    scratch_end(temporary);
     result.canonical_ir_certified = result.program && !result.diagnostic_count &&
                                     !program->rejected_function_count && !module->rejected_function_count;
+    return result;
+}
+
+BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
+                                                   CIRLowerOptions options, u64 query_reservation_limit, u64 function_reservation_limit)
+{
+    CIRLowerResult result = {0};
+    CIrLowerCapacityPlan plan = {0};
+    if (arena && c_ir_lower_capacity_plan(preprocess, parse, &plan))
+    {
+        Arena* temporary_conflicts[] = {arena};
+        TemporalArena temporary = scratch_begin(temporary_conflicts, BUSTER_ARRAY_LENGTH(temporary_conflicts));
+        Arena* temporary_arena = temporary.arena;
+        u64 reserved_size = query_reservation_limit ? BUSTER_MIN(query_reservation_limit, temporary_arena->reserved_size) : temporary_arena->reserved_size;
+        u64 position = temporary_arena->position;
+        bool fits = true;
+        if (!parse.scope_children_offsets)
+        {
+            // c_parse_index_scope_children carves offsets, children and
+            // cursors before the queries, with one child per valid parent.
+            u32 child_count = 0;
+            for (u32 scope_index = 0; scope_index < parse.scope_count; scope_index += 1)
+            {
+                CScopeId parent = parse.scopes[scope_index].parent;
+                child_count += parent.value < parse.scope_count && parent.value != scope_index;
+            }
+            fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)parse.scope_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                   c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), child_count, BUSTER_ALIGN_OF(u32)) &&
+                   c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), parse.scope_count, BUSTER_ALIGN_OF(u32));
+        }
+        fits = fits && c_ir_query_scratch_reservation(reserved_size, &position, plan.query_frame_capacity);
+        if (fits)
+        {
+            result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena, function_reservation_limit);
+        }
+        else
+        {
+            *c_ir_lower_diagnostic_slot(&result, arena, 1) = (CDiagnostic){
+                .message = S8("C IR query capacity exceeds the lowering scratch reservation"),
+                .location = parse.declaration_count ? c_preprocess_site_location(&preprocess, parse.declarations[0].location) : (CSourceLocation){0},
+                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+            };
+        }
+        scratch_end(temporary);
+    }
     return result;
 }
 
@@ -53368,7 +53634,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                                          CIRLowerOptions options)
 {
     C_CENSUS_PHASE_BEGIN(LOWER);
-    CIRLowerResult result = c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options);
+    CIRLowerResult result = c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, 0, 0);
     C_CENSUS_PHASE_END();
     return result;
 }
@@ -53377,3 +53643,53 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
 {
     return c_lower_to_ir_with_options(arena, source_path, preprocess, analysis, target, (CIRLowerOptions){0});
 }
+
+#if BUSTER_INCLUDE_TESTS
+CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
+                                                     CIRLowerOptions options, u64 query_reservation_limit, u64 function_reservation_limit)
+{
+    return c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, query_reservation_limit, function_reservation_limit);
+}
+
+bool c_test_ir_arena_reservation_advance(u64 reserved_size, u64* position, u64 element_size, u64 count, u64 alignment)
+{
+    return c_ir_arena_reservation_advance(reserved_size, position, element_size, count, alignment);
+}
+
+bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclaration declaration, CTestIrScratchProbeKind kind)
+{
+    bool rejected = false;
+    Arena* scratch = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(64),
+                                                 .granularity = BUSTER_KB(64), .flags = {.no_pool = true}});
+    if (scratch)
+    {
+        u64 remaining = kind == C_TEST_IR_SCRATCH_BODY_TASKS ? sizeof(CIrLabel) : 0;
+        arena_allocate_bytes(scratch, scratch->reserved_size - scratch->position - remaining, 1);
+        CIrSsaLocal local = {.last_event = UINT32_MAX};
+        CIrDirectSsa ssa = {.locals = &local, .local_count = 1};
+        CIntegerIrBuilder builder = {.scratch_arena = scratch, .direct_ssa = &ssa, .preprocess = preprocess};
+        bool refused;
+        switch (kind)
+        {
+            case C_TEST_IR_SCRATCH_EVENTS:
+                refused = c_ir_ssa_event(&builder, 0, IR_OPCODE_LOAD, IR_VALUE_ID_INVALID, (IrSourceRange){0}) == UINT32_MAX;
+                break;
+            case C_TEST_IR_SCRATCH_READS:
+                refused = c_ir_ssa_read(&builder, &local, (IrSourceRange){0}, false).value == IR_ID_UNDERLYING_INVALID;
+                break;
+            case C_TEST_IR_SCRATCH_BODY_TASKS:
+            {
+                CIrLowerBodyState state = {.declaration = declaration};
+                refused = !c_ir_lower_body_initialize(&builder, &state);
+                break;
+            }
+            default:
+                refused = false;
+                break;
+        }
+        rejected = refused && builder.lower_machine.failed && builder.failure_message.length;
+        arena_destroy(scratch, 1);
+    }
+    return rejected;
+}
+#endif

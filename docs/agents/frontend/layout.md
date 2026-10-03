@@ -9,6 +9,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   model and returns stable integer facts without entering the live declaration
   machine. Enum consumers retain the explicit ENUM compatibility mode until
   their declaration preparation is migrated (#1247).
+- Record definitions in expression type names are registered in the containing
+  C scope as their keyword is reached. Their braces hold member declarations;
+  the block binder skips those bodies instead of opening a local scope or
+  parsing a bit-field's colon as a local declarator trailer. The existing type
+  parser owns widths and nested record definitions, while array-bound tokens
+  keep source-point identifier bindings after nested enumeration constants are
+  published in the containing scope. This includes
+  `sizeof` operands in returns, arguments and controlling expressions.
+  `c_test_expression_aggregate_bit_fields` checks these contexts, unnamed and
+  zero-width members, arithmetic widths, tag visibility and local/member name
+  separation across six target layouts and both frontend forms. Its embedded
+  runtime source checks fixed sizes and unevaluated width operands in all four
+  native allocators; invalid member declarations retain structured diagnostics.
 - A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
   alignment above the native stack's sixteen-byte guarantee, both canonical
   and machine emitters compute `align_down(old_sp - size, alignment)` and
