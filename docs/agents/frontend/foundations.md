@@ -732,6 +732,23 @@ without facts for identical bitcode and diagnostics.
   own rows. `c_test_cast_and_noreturn_operands` pins the shapes with canonical
   validation, and `c_test_cast_and_noreturn_operand_runtime` runs them under
   every allocator.
+- **GNU `__attribute__((error("message")))` rejects a reachable direct call**
+  (GitHub #1951). `CIrSignature.error_attribute_token_plus_one` records the
+  attribute (`error`, `__error__`, or `[[gnu::error(...)]]`) and is joined
+  across the entity's declarations the way `noreturn` is. Each direct call
+  records its block, and `c_ir_check_error_attribute_calls` runs after
+  `c_ir_lower_body`, before SSA completion. It walks the body CFG from the
+  entry and fails the function with `C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL`
+  (`c.error-attribute-call`) at the first reachable call, citing the message
+  and the attribute's site. The boundary is that unoptimized CFG: `if (0)`,
+  `while (0)`, a constant conditional's dead arm, and code after `return` are
+  never reached, so they are accepted, as GCC accepts them. A call that needs
+  inlining or value propagation to vanish is diagnosed, as both GCC and Clang
+  do at `-O0`. Address-taking, calls through pointers, `cleanup(error)` and
+  `warning(...)` are not diagnosed. `__has_attribute(error)` stays 0, because
+  code that probes for it (the kernel's `compiletime_assert`) expects an
+  optimizer to delete the guarded calls. `c_test_error_attribute_calls` pins
+  the positive and negative shapes.
 - `builder->size_type` and `builder->ptrdiff_type` are chosen against the width
   of the scalar type the lowering built, not against `program->data_layout`'s
   own `unsigned long` entry. The two can disagree: the layout comes from the
