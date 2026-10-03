@@ -780,6 +780,14 @@ fixture as well as compiling both architectures.
   hatch. X86 RIP-relative `lea` label addresses use the final block relocation;
   control-like `call`/`xbegin` label references and AArch64 label-address/call
   forms that the canonical backend did not support remain fail-closed controls.
+- Scalar x86 inline assembly admits SAR/SHL/SHR/SAL, including AT&T byte,
+  word, dword and qword suffixes, with immediate or CL counts. The shared
+  assembler validates count registers, widths and immediate bounds. Explicit
+  `cc` clobbers remain part of the closed transaction. INT imm8 and INT3 also
+  use checked metadata; generating a breakpoint does not execute it during
+  compiler validation. `machine_test_x64_inline_shift_breakpoint` checks fixed
+  encodings, rejected neighbouring operands and native shift results across
+  both frontend forms and every allocator.
 - x86 CPUID/XGETBV literal assembly with complete 32-bit pure outputs and
   separate fixed inputs selects constrained machine rows. Numeric/named ties
   retain the input's fixed register. CPUID consumes RAX/RCX together and

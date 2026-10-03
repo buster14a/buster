@@ -4206,6 +4206,134 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_clear_instruction_cache(UnitTest
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_shift_breakpoint(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    // Fixed-register encodings from the architectural scalar shift forms.
+    // Check the exact stream separately from C transport/allocation below.
+    String8 assembly_source = S8("sarb $3, %al\n"
+                                "sarw $3, %ax\n"
+                                "sarl $3, %eax\n"
+                                "sarq $3, %rax\n"
+                                "shlb %cl, %al\n"
+                                "shlw %cl, %ax\n"
+                                "shll %cl, %eax\n"
+                                "shlq %cl, %rax\n"
+                                "shr $3, %rax\n"
+                                "sal $3, %rax\n"
+                                "int $128\n"
+                                "int3\n");
+    u8 expected_bytes[] = {0xc0, 0xf8, 3, 0x66, 0xc1, 0xf8, 3, 0xc1, 0xf8, 3, 0x48, 0xc1, 0xf8, 3,
+                           0xd2, 0xe0, 0x66, 0xd3, 0xe0, 0xd3, 0xe0, 0x48, 0xd3, 0xe0,
+                           0x48, 0xc1, 0xe8, 3, 0x48, 0xc1, 0xe0, 3, 0xcd, 0x80, 0xcc};
+    AssemblyEncodeResult assembled = assembly_encode(arguments->arena, assembly_source,
+        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    if (BUSTER_REQUIRE(arguments, assembled.diagnostic_count == 0 && assembled.bytes.length == sizeof(expected_bytes)))
+    {
+        BUSTER_TEST(arguments, memcmp(assembled.bytes.pointer, expected_bytes, sizeof(expected_bytes)) == 0);
+    }
+    String8 rejected[] = {S8("sarq %dl, %rax"), S8("shlq $256, %rax"), S8("int $256"), S8("int3 $1")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+    {
+        AssemblyEncodeResult invalid = assembly_encode(arguments->arena, rejected[index],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST_RAW(arguments, invalid.diagnostic_count != 0, rejected[index]);
+    }
+
+    String8 operations[] = {S8("sar"), S8("shl"), S8("shr"), S8("sal")};
+    String8 suffixes[] = {S8("b"), S8("w"), S8("l"), S8("q"), S8("")};
+    String8 types[] = {S8("unsigned char"), S8("unsigned short"), S8("unsigned int"), S8("unsigned long long"), S8("unsigned long long")};
+    u32 widths[] = {8, 16, 32, 64, 64};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
+    for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(operations); operation += 1)
+    {
+        for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
+        {
+            for (u32 count_form = 0; count_form < 2; count_form += 1)
+            {
+                String8 count_text = count_form ? S8("%%cl") : S8("$3");
+                String8 input_text = count_form ? S8("\"c\"(count)") : S8("");
+                String8 source = string_format(arguments->arena,
+                    S8("unsigned long long shift(unsigned long long input, unsigned count) { "
+                       "{S8} value = ({S8})input; __asm__ volatile(\"{S8}{S8} {S8}, %0\" : \"+r\"(value) : {S8} : \"cc\"); "
+                       "return value; } "
+                       "void breakpoint(void) { __asm__ volatile(\"int $3; int3\"); return; }"),
+                    types[width_index], types[width_index], operations[operation], suffixes[width_index], count_text, input_text);
+                for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+                {
+                    target.os = systems[system];
+                    for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("inline-shift-breakpoint.c"), source, target,
+                            (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                        if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
+                        {
+                            IrModule* module = program->modules;
+                            for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                            {
+                                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                                    (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                                BUSTER_TEST_RAW(arguments, generated.error == CODEGEN_ERROR_NONE, source);
+                                BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                                // Only the shift function executes. Breakpoints are byte-generation controls.
+                                if (system == 0 && generated.error == CODEGEN_ERROR_NONE)
+                                {
+                                    CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                                    if (BUSTER_REQUIRE(arguments, executable.error == CODEGEN_ERROR_NONE && executable.address))
+                                    {
+                                        u32 offset = machine_test_module_offset(&generated, module, S8("shift"));
+                                        if (BUSTER_REQUIRE(arguments, offset != UINT32_MAX))
+                                        {
+                                            typedef u64 Shift(u64, u32);
+                                            Shift* call = 0;
+                                            void* address = (u8*)executable.address + offset;
+                                            memcpy(&call, &address, sizeof(call));
+                                            u64 values[] = {0, 1, UINT64_C(0x8181818181818180), UINT64_MAX};
+                                            u32 counts[] = {0, 1, 3, 31, 32, 63, 64, 65, 255};
+                                            u32 width = widths[width_index];
+                                            u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+                                            for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1)
+                                            {
+                                                for (u32 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(counts); count_index += 1)
+                                                {
+                                                    u32 count = count_form ? counts[count_index] & (width == 64 ? 63u : 31u) : 3u;
+                                                    u64 value = values[value_index] & mask;
+                                                    u64 expected;
+                                                    if (operation == 1 || operation == 3)
+                                                    {
+                                                        expected = count >= width ? 0 : (value << count) & mask;
+                                                    }
+                                                    else
+                                                    {
+                                                        expected = count >= width ? 0 : value >> count;
+                                                        if (operation == 0 && (value & (UINT64_C(1) << (width - 1))))
+                                                        {
+                                                            expected |= count >= width ? mask : mask ^ (mask >> count);
+                                                        }
+                                                    }
+                                                    BUSTER_TEST_RAW(arguments, call(values[value_index], counts[count_index]) == expected, source);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    codegen_release_executable(executable);
+                                }
+#endif
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_cpu_queries(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7997,6 +8125,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_sysv_va_list_extent);
     BUSTER_TEST_FIXTURE(arguments, machine_test_aarch64_call_relocations);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_block_relocations);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_inline_shift_breakpoint);
     BUSTER_TEST_FIXTURE(arguments, machine_test_cpu_queries);
     BUSTER_TEST_FIXTURE(arguments, machine_test_compiler_barrier);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_alias);

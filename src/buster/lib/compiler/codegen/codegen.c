@@ -185,6 +185,13 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     S8_INITIALIZER("xchgq"), S8_INITIALIZER("inc"), S8_INITIALIZER("incb"), S8_INITIALIZER("incw"), S8_INITIALIZER("incl"), S8_INITIALIZER("incq"), S8_INITIALIZER("dec"), S8_INITIALIZER("decb"), S8_INITIALIZER("decw"), S8_INITIALIZER("decl"), S8_INITIALIZER("decq"),
     S8_INITIALIZER("neg"), S8_INITIALIZER("negb"), S8_INITIALIZER("negw"), S8_INITIALIZER("negl"), S8_INITIALIZER("negq"), S8_INITIALIZER("not"), S8_INITIALIZER("notb"), S8_INITIALIZER("notw"), S8_INITIALIZER("notl"), S8_INITIALIZER("notq"), S8_INITIALIZER("bswap"),
     S8_INITIALIZER("bswapl"), S8_INITIALIZER("bswapq"),
+    // Scalar shifts retain their explicit operand and cc contracts. The
+    // shared assembler checks immediate/CL counts and destination widths.
+    S8_INITIALIZER("sar"), S8_INITIALIZER("sarb"), S8_INITIALIZER("sarw"), S8_INITIALIZER("sarl"), S8_INITIALIZER("sarq"),
+    S8_INITIALIZER("shl"), S8_INITIALIZER("shlb"), S8_INITIALIZER("shlw"), S8_INITIALIZER("shll"), S8_INITIALIZER("shlq"),
+    S8_INITIALIZER("shr"), S8_INITIALIZER("shrb"), S8_INITIALIZER("shrw"), S8_INITIALIZER("shrl"), S8_INITIALIZER("shrq"),
+    S8_INITIALIZER("sal"), S8_INITIALIZER("salb"), S8_INITIALIZER("salw"), S8_INITIALIZER("sall"), S8_INITIALIZER("salq"),
+    S8_INITIALIZER("int"), S8_INITIALIZER("int3"),
     // SYSCALL takes no operands at all, so it needs none of the memory or
     // immediate machinery this list exists to keep out; its register effects
     // are exactly what a C-level constraint and clobber list already state.
