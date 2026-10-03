@@ -574,6 +574,8 @@ struct CRecordLayoutPlacement
 };
 
 BUSTER_C_EXTERN CRecordLayoutRule c_record_layout_rule(Target target);
+BUSTER_C_EXTERN u64 c_array_object_size_limit(u32 pointer_bit_width);
+BUSTER_C_EXTERN bool c_array_object_size_valid(u32 pointer_bit_width, u64 element_size, u64 element_count);
 BUSTER_C_EXTERN CRecordLayoutCursor c_record_layout_begin(Target target, bool is_union, u32 pack_alignment);
 BUSTER_C_EXTERN CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor* cursor, CRecordLayoutMember member);
 // The record's size, once `alignment` -- the cursor's, raised by any aligned

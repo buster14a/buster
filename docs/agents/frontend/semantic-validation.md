@@ -67,6 +67,37 @@ issues #1854, #1855, #1856, and #1859 through semantics-only analysis and both
 canonical lowering forms. Rejected inputs must have source diagnostics and may
 not become successful partial programs.
 
+## Constant array object sizes
+
+`c_parse_validate_array_object_sizes` diagnoses a nonzero-element array whose
+constant byte product exceeds the target size_t width or 61-bit byte limit,
+before static-initializer validation and again for newly materialized body
+query types. This follows Clang 18's
+[`ConstantArrayType::getMaxSizeBits`](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.3/clang/lib/AST/Type.cpp),
+which caps size_t at 61 bits so bit sizes fit u64; it is not a PTRDIFF_MAX rule.
+The inspected upstream source is Apache-2.0 WITH LLVM-exception; no code is
+imported. Buster's first-party license remains unselected under #621.
+
+Admitted cached layouts need no new constant evaluation. Simple runtime
+identifier bounds remain VLAs. An unresolved/oversized legacy layout, or a
+bound with wide-integer provenance, uses the isolated TYPE query before a new
+source diagnostic is issued; narrowing casts are not rejected merely because
+the legacy layout retokenizer erased a cast. The ordinary type-layout evaluator
+and declaration-point authority are unchanged. Canonical array construction
+checks division before multiplication, and direct lowering retains a source
+report rather than silently losing an oversized global. High integer limbs
+cannot become a small direct-lowering array count.
+
+`c_test_array_object_size_limits` covers independent literal boundaries,
+product overflow, nested/member/local/prototype/pointer/typedef contexts,
+wide and typedef-mediated bounds, syntax-only/full/direct-API refusal, narrowing
+casts, zero bounds, VLAs and flexible arrays across six native layouts plus
+Wasm32/Wasm64 and both frontend forms. Types at the accepted limit have no
+backing object in the regression. GNU arrays of zero-sized elements retain
+zero-byte products; existing static range-designator tests pin that extension.
+Record member sums and final alignment rounding remain the separate #1479
+follow-up; this bounded repair does not certify those operations.
+
 ## Lowering diagnostic inventory
 
 The inventory covers source-dependent rejection sites in `c_gen.c`, including

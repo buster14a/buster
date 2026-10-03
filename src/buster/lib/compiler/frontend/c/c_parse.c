@@ -1811,6 +1811,21 @@ BUSTER_C_SHARED CRecordLayoutRule c_record_layout_rule(Target target)
                                                             : C_RECORD_LAYOUT_ITANIUM;
 }
 
+// Object byte sizes must fit the target size_t and the shared u64 bit-size
+// representation. The 61-bit cap also matches Clang's constant-array limit
+// (ConstantArrayType::getMaxSizeBits); it is not a PTRDIFF_MAX rule.
+BUSTER_C_SHARED u64 c_array_object_size_limit(u32 pointer_bit_width)
+{
+    u32 bits = BUSTER_MIN(pointer_bit_width, 61u);
+    return bits ? (UINT64_MAX >> (64 - bits)) : 0;
+}
+
+BUSTER_C_SHARED bool c_array_object_size_valid(u32 pointer_bit_width, u64 element_size, u64 element_count)
+{
+    u64 limit = c_array_object_size_limit(pointer_bit_width);
+    return !element_size || element_count <= limit / element_size;
+}
+
 BUSTER_C_SHARED CRecordLayoutCursor c_record_layout_begin(Target target, bool is_union, u32 pack_alignment)
 {
     CRecordLayoutCursor cursor = {
@@ -3163,8 +3178,11 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 }
                 else if (bound.is_star || unresolved_identifier || !bound.token_count ||
                          !c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
-                         evaluation.diagnostic_count ||
-                         (count && c_parse_layout_size(context, agenda, type.element_type.value) > UINT64_MAX / count))
+                         evaluation.diagnostic_count)
+                {
+                    continue;
+                }
+                if (count && c_parse_layout_size(context, agenda, type.element_type.value) > UINT64_MAX / count)
                 {
                     continue;
                 }
@@ -27074,6 +27092,108 @@ BUSTER_C_INTERNAL void c_parse_validate_statement_expressions(CTypeParseMachine*
     }
 }
 
+BUSTER_C_INTERNAL bool c_parse_array_bound_has_wide_integer(CParseResult* result, CPreprocessResult preprocess,
+                                                            CScopeId scope, u32 start, u32 end)
+{
+    bool wide = false;
+    for (u32 index = start; !wide && index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            wide = string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__int128"));
+            CEntityId entity = wide ? C_ENTITY_ID_INVALID : c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+            if (entity.value < result->entity_count)
+            {
+                CTypeId type = result->entities[entity.value].type;
+                if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_ENUM)
+                {
+                    type = result->types[type.value].element_type;
+                }
+                wide = type.value < result->type_count &&
+                    (result->types[type.value].kind == C_TYPE_INT128 || result->types[type.value].kind == C_TYPE_UNSIGNED_INT128);
+            }
+        }
+    }
+    return wide;
+}
+
+// Diagnose written constant bounds before lowering can lose an unresolved
+// array mapping. Resolved, admitted layouts need no new bound evaluation.
+// Only unresolved or oversized legacy layouts use the protected TYPE query;
+// this does not select a new constant/layout authority for ordinary bounds.
+BUSTER_C_INTERNAL u32 c_parse_validate_array_object_sizes(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, u32 type_start)
+{
+    u64 mark = machine->scratch_arena->position;
+    u32 bound_count = result->array_bound_count;
+    u32 type_count = result->type_count;
+    u8* seen = arena_allocate_zeroed(machine->scratch_arena, u8, bound_count);
+    u32 pointer_bits = target_data_layout(preprocess.target).pointer.bit_width;
+    for (u32 index = type_start; index < type_count; index += 1)
+    {
+        CType type = result->types[index];
+        if (type.kind != C_TYPE_ARRAY || type.array_bound >= bound_count || seen[type.array_bound]) continue;
+        seen[type.array_bound] = 1;
+        CArrayBound bound = result->array_bounds[type.array_bound];
+        if (bound.is_star || (!bound.token_count && !bound.has_inferred_count)) continue;
+        u32 start = bound.token_start;
+        u32 end = BUSTER_MIN((u32)preprocess.token_count, start + bound.token_count);
+        CType qualifiers = {0};
+        while (start < end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+               (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("static")) ||
+                c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[start], &qualifiers) ||
+                c_parse_nullability_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]))))
+        {
+            start += 1;
+        }
+        CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
+        // A simple ordinary-object bound is a VLA. It has no constant size to
+        // exceed this limit, and needs neither a layout solve nor a TYPE copy.
+        if (!bound.has_inferred_count && end == start + 1 && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+        {
+            CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, preprocess.tokens + start);
+            if (entity.value < result->entity_count && !result->entities[entity.value].has_constant_value &&
+                !result->entities[entity.value].is_constexpr && result->entities[entity.value].kind != C_ENTITY_ENUMERATOR) continue;
+        }
+        bool wide = target_data_layout(preprocess.target).has_128_bit_integer &&
+                    c_parse_array_bound_has_wide_integer(result, preprocess, scope, start, end);
+        u64 array_size = 0;
+        u32 array_alignment = 0;
+        if (!wide && c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, (CTypeId){.value = index}, &array_size, &array_alignment) &&
+            array_size <= c_array_object_size_limit(pointer_bits)) continue;
+        u64 query_mark = machine->scratch_arena->position;
+        CIntegerConstant count = bound.has_inferred_count ? (CIntegerConstant){.magnitude = bound.inferred_count, .valid = true}
+            : c_parse_type_integer_constant_query(machine->scratch_arena, preprocess, result, scope, start, end, 0, 0);
+        u64 element_size = 0;
+        u32 alignment = 0;
+        bool oversized = count.valid && !count.is_negative &&
+            c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type.element_type, &element_size, &alignment) &&
+            element_size && (count.magnitude_high || !c_array_object_size_valid(pointer_bits, element_size, count.magnitude));
+        arena_set_position(machine->scratch_arena, query_mark);
+        if (oversized && start < preprocess.token_count)
+        {
+            CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[start]);
+            bool reported = false;
+            for (u32 diagnostic = 0; !reported && diagnostic < result->diagnostic_count; diagnostic += 1)
+            {
+                CDiagnostic previous = result->diagnostics[diagnostic];
+                reported = previous.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                    previous.location.file == location.file && previous.location.map_offset == location.map_offset &&
+                    previous.location.offset == location.offset &&
+                    string_first_sequence(previous.message, S8("array is too large")) != BUSTER_STRING_NO_MATCH;
+            }
+            if (!reported)
+            {
+                c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                    string_format(result->arena, S8("array is too large for target object-size limit of {u64} bytes"),
+                                  c_array_object_size_limit(pointer_bits)));
+            }
+        }
+    }
+    arena_set_position(machine->scratch_arena, mark);
+    return type_count;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_array_strides(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
 {
     u64 mark = machine->scratch_arena->position;
@@ -27257,6 +27377,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_INVALID_ALIGNMENT, message);
         }
     }
+    u32 array_object_size_type_count = c_parse_validate_array_object_sizes(machine, result, preprocess, 0);
     c_parse_validate_bit_field_widths(machine, arena, result, preprocess);
     c_parse_validate_deferred_assertions(machine, arena, result, preprocess);
     c_parse_validate_alias_targets(arena, result, preprocess);
@@ -27373,6 +27494,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
                                string_format(arena, S8("in function '{S8}': {S8}"), declaration->name, diagnostic.message));
         }
     }
+    c_parse_validate_array_object_sizes(machine, result, preprocess, array_object_size_type_count);
     c_parse_validate_array_strides(machine, result, preprocess);
     c_parse_validate_alignment_redeclarations(machine, result, preprocess);
     // Array bounds are parsed before the function-body and initializer walks.
