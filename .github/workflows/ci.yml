@@ -82,6 +82,7 @@ jobs:
           python3 -B tools/ci_checks_qualification_test.py -v
           python3 -B tools/ci_checks_tools_test.py -v
           python3 -B tools/ci_job_environment_test.py -v
+          python3 -B tools/ci_ios_simulator_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
