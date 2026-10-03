@@ -3,7 +3,9 @@
 // argv into a CompilerDriverInvocation — dialect, target/CPU/features,
 // inputs classified as C source, objects, or archives, and every output
 // mode — rejecting unknown languages and retired options explicitly
-// rather than guessing. It first replaces `@path` arguments through
+// rather than guessing. compiler_driver_validate_request is the request
+// combination authority both calls share, so an API-built invocation is refused
+// exactly as its argv spelling would be. The parser first replaces `@path` arguments through
 // compiler_driver_expand_response_files (bounded, one level, no nesting).
 // Comma-separated -Wl payloads become individual linker arguments;
 // link_validate_linker_arguments owns their supported semantic subset.
@@ -576,6 +578,65 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
         compiler_driver_argument_error(arena, invocation, S8("GPU llc override is incompatible with GPU target: {S8}"),
                                        gpu_target_to_string(arena, invocation->gpu_target));
     }
+}
+
+// Native code-generation policies need the native code generator, so the
+// pipeline a resolved invocation selects must be able to honor each one.
+BUSTER_GLOBAL_LOCAL void compiler_driver_validate_codegen_request(CompilerDriverInvocation* invocation)
+{
+    bool native_codegen_action = invocation->action != COMPILER_DRIVER_ACTION_PREPROCESS && invocation->action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY;
+    bool native_machine = !invocation->has_gpu_target && !invocation->emit_llvm_bitcode &&
+                          (invocation->target.cpu_arch == CPU_ARCH_X86_64 || invocation->target.cpu_arch == CPU_ARCH_AARCH64);
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        if (invocation->emit_llvm_bitcode &&
+            (invocation->action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation->action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
+             invocation->action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("-emit-llvm emits binary bitcode and cannot be combined with -E, -S, or -fsyntax-only");
+        }
+        else if (invocation->verify_codegen && !(native_machine && native_codegen_action))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("-fverify-codegen requires native x86-64 or AArch64 code generation");
+        }
+        else if (invocation->sysv_bitfield_abi_explicit &&
+                 (invocation->has_gpu_target || invocation->emit_llvm_bitcode || invocation->target.cpu_arch != CPU_ARCH_X86_64 ||
+                  ir_abi_convention_for_target(invocation->target) != IR_ABI_CONVENTION_SYSTEMV_X86_64))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("-fsysv-unnamed-bitfields requires native System V x86-64 code generation");
+        }
+        else if (invocation->record_codegen_fallbacks && !(native_machine && native_codegen_action))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("-fcodegen-fallback-census requires native x86-64 or AArch64 code generation");
+        }
+        else if (invocation->reject_machine_fallback &&
+                 !(native_machine && native_codegen_action && invocation->register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("-fno-machine-fallback requires native code generation with mir-stack, fast, or quality allocation");
+        }
+    }
+}
+
+// The request-combination authority both public entry points share.
+// compiler_driver_parse_arguments runs each part at its own point in
+// finalization, the GPU part before the GPU target resolves, so argv
+// diagnostics keep their order. compiler_driver_execute_invocation runs it
+// whole on caller-built requests before any input is mapped, a temporary
+// directory is created or a tool is spawned. -mattr overrides exist only as
+// argv presence and stay parser-only; zero-valued API fields mean "not
+// requested", never a CLI default.
+BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, CompilerDriverInvocation* invocation)
+{
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->has_gpu_target)
+    {
+        compiler_driver_reject_gpu_native_options(arena, invocation, 0);
+    }
+    compiler_driver_validate_codegen_request(invocation);
 }
 
 // Folds the GPU architecture, shader stage, shader model, entry point and Metal
@@ -2052,45 +2113,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         invocation.target.plain_char_policy = invocation.plain_char_policy;
     }
-    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.emit_llvm_bitcode &&
-        (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
-         invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
-    {
-        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        invocation.diagnostic = S8("-emit-llvm emits binary bitcode and cannot be combined with -E, -S, or -fsyntax-only");
-    }
-    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.verify_codegen &&
-        (invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
-         (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.target.cpu_arch != CPU_ARCH_AARCH64) ||
-         invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
-    {
-        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        invocation.diagnostic = S8("-fverify-codegen requires native x86-64 or AArch64 code generation");
-    }
-    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.sysv_bitfield_abi_explicit &&
-        (invocation.has_gpu_target || invocation.emit_llvm_bitcode || invocation.target.cpu_arch != CPU_ARCH_X86_64 ||
-         ir_abi_convention_for_target(invocation.target) != IR_ABI_CONVENTION_SYSTEMV_X86_64))
-    {
-        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        invocation.diagnostic = S8("-fsysv-unnamed-bitfields requires native System V x86-64 code generation");
-    }
-    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.record_codegen_fallbacks &&
-        (invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
-         (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.target.cpu_arch != CPU_ARCH_AARCH64) ||
-         invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
-    {
-        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        invocation.diagnostic = S8("-fcodegen-fallback-census requires native x86-64 or AArch64 code generation");
-    }
-    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.reject_machine_fallback &&
-        (invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
-         (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.target.cpu_arch != CPU_ARCH_AARCH64) ||
-         invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_NONE || invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS ||
-         invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
-    {
-        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        invocation.diagnostic = S8("-fno-machine-fallback requires native code generation with mir-stack, fast, or quality allocation");
-    }
+    compiler_driver_validate_codegen_request(&invocation);
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.no_standard_includes && !invocation.has_gpu_target &&
         invocation.target.os != OPERATING_SYSTEM_UEFI && invocation.target.cpu_arch != CPU_ARCH_SPIRV_COMPUTE)
     {
@@ -4704,6 +4727,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         result.error = invocation.error;
         result.diagnostic = invocation.diagnostic.length ? invocation.diagnostic : S8("invalid compiler invocation");
+        goto finish;
+    }
+    compiler_driver_validate_request(arena, &invocation);
+    if (invocation.error != COMPILER_DRIVER_ERROR_NONE)
+    {
+        result.error = invocation.error;
+        result.diagnostic = invocation.diagnostic;
         goto finish;
     }
     // Count both explicit entries and the target's defaults before any source
