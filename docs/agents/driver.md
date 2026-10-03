@@ -442,6 +442,26 @@ It may bind to a member selected for a separate strong dependency, to a
 direct object input, or to an already included shared library. Keep archive
 selection separate from those later resolution rules (GitHub #226).
 
+Linux `-lNAME` static archives are searched in explicit `-L` directories first,
+then the same target roots used by ELF export discovery: `lib/<triple>`,
+`usr/lib/<triple>`, `lib64`, `usr/lib64`, `lib`, and `usr/lib` under a supplied
+sysroot. Without a sysroot, the absolute host roots also include
+`/usr/<triple>/lib` after the two multiarch roots. The sysroot replaces these
+default host paths; explicit `-L` directories retain their literal meaning.
+Each directory prefers `libNAME.so` to `libNAME.a`, so an earlier explicit
+archive wins over a later default shared library. `-l:FILE.a` searches the
+exact archive name without that shared-library probe and retains its existing
+bare-path fallback. Other target search policies are unchanged.
+
+`compiler_driver_archive_test_default_roots`, invoked by the registered lazy
+archive fixture, checks both ELF CPUs and all six literal sysroot roots,
+named/exact/direct image parity, distinct provider precedence, explicit `-L`,
+shared preference, exact archive bypass and output preservation on refusal.
+Its configured native Linux control builds a real archive with host compiler
+and archiver, links an independent host control, and runs both Buster's direct
+and sysroot-default named links. GNU linker-script interpretation and Apple's
+missing-library behavior remain separate #1285 work.
+
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized
 global may require alignment larger than a page or the fixed image base.
