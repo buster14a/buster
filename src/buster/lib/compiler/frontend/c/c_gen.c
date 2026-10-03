@@ -46261,22 +46261,53 @@ BUSTER_C_INTERNAL bool c_ir_constant_index(CIntegerIrBuilder* builder, CIrConsta
     return valid;
 }
 
+// Canonical scalar aliases may differ only in declared alignment. Reading
+// those preserves the value; changing width, kind, signedness or rank does not.
+BUSTER_C_INTERNAL bool c_ir_constant_access_type_matches(IrType const* access, IrType const* declared)
+{
+    bool matches = access && declared && access->id.value == declared->id.value;
+    if (!matches && access && declared && access->kind == declared->kind)
+    {
+        switch (access->kind)
+        {
+        case IR_TYPE_BOOLEAN:
+        case IR_TYPE_INTEGER:
+            matches = access->bit_width == declared->bit_width && access->is_signed == declared->is_signed &&
+                      access->integer_conversion_rank == declared->integer_conversion_rank;
+            break;
+        case IR_TYPE_FLOAT:
+            matches = access->bit_width == declared->bit_width && access->float_format == declared->float_format;
+            break;
+        case IR_TYPE_POINTER:
+            matches = access->element_type.value == declared->element_type.value && access->is_nullptr == declared->is_nullptr;
+            break;
+        default:
+            break;
+        }
+    }
+    return matches;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_normalize(CIntegerIrBuilder* builder, CIrConstantValue* value)
 {
-    if (value->kind != C_IR_CONSTANT_UNKNOWN)
+    bool valid = value->kind != C_IR_CONSTANT_INVALID;
+    if (value->kind == C_IR_CONSTANT_LVALUE)
     {
-        if (value->kind != C_IR_CONSTANT_LVALUE)
-        {
-            return value->kind != C_IR_CONSTANT_INVALID;
-        }
         IrType* access = ir_type_from_id(&builder->program->types, value->type);
-        if (!access || access->is_volatile || access->is_atomic || !c_ir_constant_from_global(builder, value->symbol, value))
+        CIrConstantValue stored = {0};
+        if (value->addend || !access || access->is_volatile || access->is_atomic ||
+            !c_ir_constant_from_global(builder, value->symbol, &stored) ||
+            !c_ir_constant_access_type_matches(access, ir_type_from_id(&builder->program->types, stored.type)))
         {
             value->kind = C_IR_CONSTANT_UNKNOWN;
         }
+        else
+        {
+            stored.type = value->type;
+            *value = stored;
+        }
     }
-
-    return true;
+    return valid;
 }
 
 // IEEE-754 binary16 -- the representation of `_Float16` -- as bits and back.
@@ -49054,7 +49085,7 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
                 return false;
             }
             CIrConstantValue converted = {0};
-            if (!c_ir_constant_cast(builder, &value, global->type, &converted))
+            if (!c_ir_constant_cast(builder, &value, global->type, &converted) || converted.kind != C_IR_CONSTANT_POINTER)
             {
                 return false;
             }
@@ -49075,7 +49106,8 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
             return true;
         }
         CIrConstantValue converted = {0};
-        if (c_ir_constant_cast(builder, &value, global->type, &converted))
+        if (c_ir_constant_cast(builder, &value, global->type, &converted) &&
+            (converted.kind == C_IR_CONSTANT_INTEGER || converted.kind == C_IR_CONSTANT_FLOAT))
         {
             if (type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && c_ir_binary128_static_target(builder->target, type))
             {
