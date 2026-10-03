@@ -55,6 +55,15 @@ snapshot/header or refresh external/SDK pins. The trusted rebinder subsequently
 publishes the temporary generated pair and checks it independently. The legacy
 monolithic descriptor retains exact byte verification against its frozen pins.
 
+The census evidence workflow follows this same order before compiling its build
+driver or materializing dependencies. Pull requests classify the exact head
+using the base revision's trusted implementation, prepare the pinned inputs,
+then reconstruct and check the temporary authority for the integration tree.
+The separate validation checkout receives that exact generated pair so its
+Python consumers and the census C consumer agree. Manual evidence runs check
+published state without refreshing it. Reconstruction receipts remain in the
+uploaded evidence; no generated identity is committed by this workflow.
+
 ## Ordinary feature PR ownership
 
 An ordinary feature PR changes substantive source, tests, and documentation

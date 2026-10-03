@@ -1345,6 +1345,37 @@ class ContractTests(unittest.TestCase):
                 "input_ledger_sha256": report["input_ledger_sha256"],
                 "environment": {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"}, "results": records}))
 
+    def make_failed_direct_reference_supplements(self):
+        """Supplements for direct compiles that failed as the frozen backend does.
+
+        Like the hosted census, each failed allocator-``none`` row exits
+        nonzero and writes no object, so it carries the execution, artifact
+        and telemetry defects together; its Clang control passes. Returns the
+        supplement-resolved rows.
+        """
+        self.make_reference_supplements()
+        resolved = []
+        for directory in self.shards:
+            fields, results = read_table(directory / "results.tsv")
+            for row in results:
+                if row["status"] == "1" and int(row["row"]) % len(contract.ALLOCATORS) == 0:
+                    row.update(object_bytes="0", object_hash="0", object_sha256="")
+                    (directory / "groups" / row["group"] / "none.o").unlink()
+                    resolved.append(int(row["row"]))
+            write_table(directory / "results.tsv", fields, results)
+        return sorted(resolved)
+
+    def test_failed_direct_reference_keeps_exactly_the_supplement_set_as_defects(self):
+        resolved = self.make_failed_direct_reference_supplements()
+        report = contract.validate_shards(self.shards, self.root / "supplement.json", True,
+                                          reference_supplements=True)
+        self.assertEqual(resolved, [0, 4])
+        for field in ("telemetry_defect_rows", "execution_defect_rows", "artifact_defect_rows"):
+            self.assertEqual(report[field], resolved)
+        self.assertEqual(report["fallback_defect_rows"], [])
+        self.assertEqual(report["reference_failure_rows"], [])
+        self.assertEqual(report["direct_reference_failure_rows"], list(range(8)))
+
     def test_reference_supplement_preserves_direct_failures_and_candidate_gate(self):
         self.make_reference_supplements()
         report = contract.validate_shards(self.shards, self.root / "supplement.json", reference_supplements=True)

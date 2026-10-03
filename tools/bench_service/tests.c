@@ -18,6 +18,8 @@
 #include <sys/prctl.h>
 #include <grp.h>
 #include <sys/wait.h>
+#include <sched.h>
+#include <sys/mount.h>
 #include "sgid_sandbox_test.h"
 #endif
 
@@ -379,7 +381,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
         BQ_CHECK(described && expected.length > 0 && profile && bytes && count == expected.length &&
                  !memcmp(bytes, expected.pointer, expected.length) &&
                  (recipes[index] == BQ_RECIPE_VALIDATE_BUSTER ? !strcmp(files.command, "bench_service_recipe") :
-                                                               !files.command[0]));
+                                                               !strcmp(files.command, "bench_service_retirement_recipe")));
         free(bytes);
         if (profile) fclose(profile);
     }
@@ -413,6 +415,34 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
                              S8("2222222222222222222222222222222222222222"), S8("/workspace/result")) == BQ_UNSUPPORTED);
 #else
     char boot_id[BQ_WORKER_BOOT_CAP];
+    char const* preparation_digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    BqWorkerLeaseMessage message;
+    u64 handoff_deadline_ns = bq_phase_clock() + UINT64_C(5000000000);
+    BQ_CHECK(bq_worker_preparation_matches_recipe(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, preparation_digest) &&
+             bq_worker_preparation_matches_recipe(BQ_RECIPE_VALIDATE_BUSTER, "") &&
+             !bq_worker_preparation_matches_recipe(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, "") &&
+             !bq_worker_preparation_matches_recipe(BQ_RECIPE_VALIDATE_BUSTER, preparation_digest) &&
+             !bq_worker_preparation_matches_recipe(BQ_RECIPE_UNKNOWN, ""));
+    BQ_CHECK(!bq_worker_preparation_digest_valid("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") &&
+             !bq_worker_preparation_digest_valid("abc") && !bq_worker_preparation_digest_valid(NULL) &&
+             bq_worker_lease_message_make(&message, BQ_WORKER_LEASE_RESPONSE, "/lease", 1, 2, 3, 4,
+                                          preparation_digest, handoff_deadline_ns) &&
+             bq_worker_lease_message_matches(&message, BQ_WORKER_LEASE_RESPONSE, "/lease", 1, 2, 3, 4,
+                                             preparation_digest, handoff_deadline_ns));
+    BQ_CHECK(!bq_worker_lease_message_matches(&message, BQ_WORKER_LEASE_RESPONSE, "/lease", 1, 2, 3, 4,
+                                              preparation_digest, handoff_deadline_ns + 1) &&
+             !bq_worker_lease_message_make(&message, BQ_WORKER_LEASE_RESPONSE, "/lease", 1, 2, 3, 4,
+                                           preparation_digest, 1));
+    BQ_CHECK(bq_worker_lease_message_make(&message, BQ_WORKER_LEASE_RESPONSE, "/lease", 1, 2, 3, 4,
+                                          preparation_digest, handoff_deadline_ns));
+    message.preparation_sha256[0] = 'b';
+    BQ_CHECK(!bq_worker_lease_message_matches(&message, BQ_WORKER_LEASE_RESPONSE,
+                                               "/lease", 1, 2, 3, 4, preparation_digest, handoff_deadline_ns));
+    BQ_CHECK(bq_worker_lease_message_make(&message, BQ_WORKER_LEASE_RESPONSE, "/lease", 1, 2, 3, 4, "",
+                                           handoff_deadline_ns));
+    message.preparation_sha256[1] = 'a';
+    BQ_CHECK(!bq_worker_lease_message_matches(&message, BQ_WORKER_LEASE_RESPONSE,
+                                               "/lease", 1, 2, 3, 4, "", handoff_deadline_ns));
     BQ_CHECK(bq_worker_read_regular("/proc/sys/kernel/random/boot_id", boot_id, sizeof(boot_id)) &&
              bq_worker_boot_valid(boot_id));
     BQ_CHECK(bq_worker_unit(S8("/unsupported"), S8("1"), S8("2"),
@@ -1724,7 +1754,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_old_replay(u8 const* image, u32 size, u32 maxim
             bq_digest(frame + BQ_HEADER_SIZE, length, digest);
             ok = !memcmp(frame + 96, digest, 64) &&
                  bq_apply(&state, bq_u32(frame + 8), (BqRecordKind)bq_u32(frame + 12), bq_u64(frame + 24),
-                          frame + BQ_HEADER_SIZE, length) == BQ_OK;
+                          frame + BQ_HEADER_SIZE, length, true) == BQ_OK;
         }
         if (ok)
         {
@@ -2478,11 +2508,14 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
 
 BUSTER_GLOBAL_LOCAL bool bq_test_worker_probe_locked(char const* path);
 
-BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
+BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(bool retirement)
 {
+    char const* preparation = retirement ?
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" : "";
     char root[] = "/tmp/buster-lease-handoff-XXXXXX";
     char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1];
     int result_directory = -1;
+    int phase_descriptor = -1;
     int ready_pipe[2] = {-1, -1}, release_pipe[2] = {-1, -1};
     pid_t child = -1;
     BqWorkerLease lease = {.descriptor = -1};
@@ -2511,14 +2544,22 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
         if (lease.descriptor >= 0) close(lease.descriptor);
         lease.descriptor = -1;
         BqWorkerLease transferred = {.descriptor = -1};
+        char received_preparation[SHA256_HEX_CAPACITY] = {0};
+        u64 received_deadline_ns = 0;
         BqError received = bq_worker_lease_handoff_receive(string_from_pointer(lease_path), string_from_pointer(result_root),
-                                                            S8("1"), S8("2"),
-                                                            &transferred);
-        u8 state = received == BQ_OK ? 1 : 0;
+                                                            S8("1"), S8("2"), retirement ?
+                                                            BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED : BQ_RECIPE_VALIDATE_BUSTER,
+                                                            &transferred, &phase_descriptor, received_preparation,
+                                                            &received_deadline_ns);
+        u8 state = received == BQ_OK && phase_descriptor >= 3 &&
+                   (fcntl(phase_descriptor, F_GETFD) & FD_CLOEXEC) &&
+                   received_deadline_ns > bq_phase_clock() &&
+                   !strcmp(received_preparation, preparation) ? 1 : 0;
         ssize_t written = write(ready_pipe[1], &state, sizeof(state));
         char release = 0;
         ssize_t released = written == sizeof(state) ? read(release_pipe[0], &release, sizeof(release)) : -1;
         if (released == sizeof(release)) bq_worker_lease_release(&transferred);
+        if (phase_descriptor >= 0) close(phase_descriptor);
         close(ready_pipe[1]);
         close(release_pipe[0]);
         _exit(received == BQ_OK && released == sizeof(release) ? 0 : 1);
@@ -2527,12 +2568,15 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
     {
         close(ready_pipe[1]);
         close(release_pipe[0]);
-        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2);
+        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2,
+                                                    preparation, bq_worker_deadline(bq_worker_monotonic_milliseconds(), 30000),
+                                                    &phase_descriptor);
         if (sent == BQ_OK) bq_worker_lease_release(&lease);
         u8 state = 0;
         ssize_t read_state = read(ready_pipe[0], &state, sizeof(state));
         BQ_CHECK(sent == BQ_OK && read_state == sizeof(state) && state == 1 && bq_test_worker_probe_locked(lease_path));
         BQ_CHECK(handoff.listener < 0 && handoff.parent < 0);
+        BQ_CHECK(phase_descriptor >= 3 && (fcntl(phase_descriptor, F_GETFD) & FD_CLOEXEC));
         struct stat missing = {0};
         BQ_CHECK(fstatat(result_directory, BQ_WORKER_LEASE_HANDOFF_NAME, &missing, AT_SYMLINK_NOFOLLOW) != 0 &&
                  errno == ENOENT);
@@ -2563,6 +2607,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
     if (release_pipe[1] >= 0) close(release_pipe[1]);
     bq_worker_lease_handoff_close(&handoff);
     bq_worker_lease_release(&lease);
+    if (phase_descriptor >= 0) close(phase_descriptor);
     if (result_directory >= 0) close(result_directory);
     unlink(lease_path);
     rmdir(result_root);
@@ -2571,6 +2616,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
 {
+    char const* preparation = mode == 3 ?
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" : "";
     char root[] = "/tmp/buster-lease-handoff-negative-XXXXXX";
     char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1], socket_path[BQ_PATH_CAP + 1];
     int result_directory = -1, ready_pipe[2] = {-1, -1}, hold_pipe[2] = {-1, -1};
@@ -2614,7 +2661,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
         int lease_probe = open(lease_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         received_ok = received_ok && lease_probe >= 0 && fstat(lease_probe, &lease_info) == 0;
         if (lease_probe >= 0) close(lease_probe);
-        received_ok = received_ok && bq_worker_lease_message_make(&request, BQ_WORKER_LEASE_REQUEST, lease_path, 1, 2, 0, 0) &&
+        received_ok = received_ok && bq_worker_lease_message_make(&request, BQ_WORKER_LEASE_REQUEST, lease_path, 1, 2, 0, 0, "", 0) &&
                       send(client, &request, sizeof(request), MSG_NOSIGNAL) == (ssize_t)sizeof(request);
         int received_fd = -1;
         if (received_ok)
@@ -2629,7 +2676,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
             ssize_t count = recvmsg(client, &message, MSG_CMSG_CLOEXEC);
             received_ok = count == (ssize_t)sizeof(response) && !(message.msg_flags & MSG_CTRUNC) &&
                           bq_worker_lease_message_matches(&response, BQ_WORKER_LEASE_RESPONSE, lease_path, 1, 2,
-                                                          (u64)lease_info.st_dev, (u64)lease_info.st_ino);
+                                                          (u64)lease_info.st_dev, (u64)lease_info.st_ino,
+                                                          preparation, response.execution_deadline_ns);
             for (struct cmsghdr* header = received_ok ? CMSG_FIRSTHDR(&message) : NULL; header;
                  header = CMSG_NXTHDR(&message, header))
             {
@@ -2640,11 +2688,13 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
             received_ok = received_ok && received_fd >= 3;
         }
         u8 state = received_ok ? 1 : 0;
-        if (received_ok && mode == 1)
+        if (received_ok && (mode == 1 || mode == 3 || mode == 4))
         {
             BqWorkerLeaseMessage invalid = response;
             invalid.phase = BQ_WORKER_LEASE_ACK;
-            invalid.inode += 1;
+            if (mode == 1) invalid.inode += 1;
+            else if (mode == 3) invalid.preparation_sha256[0] = 'b';
+            else invalid.execution_deadline_ns += 1;
             received_ok = send(client, &invalid, sizeof(invalid), MSG_NOSIGNAL) == (ssize_t)sizeof(invalid);
         }
         if (received_fd >= 0) close(received_fd);
@@ -2664,7 +2714,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
         close(ready_pipe[1]);
         close(hold_pipe[0]);
         hold_pipe[0] = -1;
-        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2);
+        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2,
+                                                    preparation, bq_worker_deadline(bq_worker_monotonic_milliseconds(), 30000),
+                                                    NULL);
         u8 state = 0;
         ssize_t read_state = read(ready_pipe[0], &state, sizeof(state));
         bool coordinator_valid = lease.descriptor >= 0 && fcntl(lease.descriptor, F_GETFD) >= 0;
@@ -2693,6 +2745,297 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
     if (result_directory >= 0) close(result_directory);
     unlink(lease_path);
     rmdir(result_root);
+    rmdir(root);
+}
+
+/* Run the recheck in a private mount namespace where an empty mode-0 file is
+ * bind-mounted over the lease pathname, as systemd's InaccessiblePaths does.
+ * Unlike a search-denied parent this hides the name from a privileged process
+ * too. Returns 0 when the name is verifiably hidden and the recheck passes, 1
+ * on failure, and 2 when unshare(CLONE_NEWNS) is unavailable (skipped). */
+BUSTER_GLOBAL_LOCAL u32 bq_test_lease_recheck_behind_inaccessible_mount(char const* root, char const* lease_path,
+                                                                        BqWorkerLease const* lease)
+{
+    char node[BQ_PATH_CAP + 1];
+    int node_length = snprintf(node, sizeof(node), "%s/inaccessible", root);
+    int created = node_length > 0 && (u32)node_length < sizeof(node) ?
+                  open(node, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0) : -1;
+    bool ready = created >= 0 && fchmod(created, 0) == 0;
+    if (created >= 0) close(created);
+    pid_t child = ready ? fork() : -1;
+    if (child == 0)
+    {
+        int result = 2;
+        if (unshare(CLONE_NEWNS) == 0)
+        {
+            struct stat named = {0}, held = {0};
+            bool hidden = mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0 &&
+                          mount(node, lease_path, NULL, MS_BIND, NULL) == 0 &&
+                          stat(lease_path, &named) == 0 && fstat(lease->descriptor, &held) == 0 &&
+                          (named.st_dev != held.st_dev || named.st_ino != held.st_ino);
+            result = hidden && bq_worker_lease_recheck_for_exec(lease_path, lease) ? 0 : 1;
+        }
+        _exit(result);
+    }
+    int status = 0;
+    pid_t waited = -1;
+    if (child > 0)
+    {
+        while ((waited = waitpid(child, &status, 0)) < 0 && errno == EINTR) {}
+    }
+    u32 result = waited == child && WIFEXITED(status) && WEXITSTATUS(status) <= 2 ? (u32)WEXITSTATUS(status) : 1;
+    if (created >= 0) unlink(node);
+    return result;
+}
+
+/* A new lease inode at the same path cannot substitute for the transferred
+ * lock. The checker must release each temporary descriptor on every path.
+ * Inside the outer unit the lease pathname is an InaccessiblePaths node, so
+ * the recheck must not traverse it: a search-denied parent (mode 0, effective
+ * when not privileged) and, where a mount namespace is available, an
+ * inaccessible bind mount over the name (effective as root too) model that
+ * here and must still pass. Every way the held file can stop being the
+ * named, single-link lock holder is refused: renamed away, a second link, its
+ * name unlinked (a path spelled "<name> (deleted)" included), replaced by a
+ * rename over it, and a second, unlocked description of the same file. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_recheck_before_exec(void)
+{
+    char root[] = "/tmp/buster-lease-recheck-XXXXXX";
+    char lease_path[BQ_PATH_CAP + 1], prior_path[BQ_PATH_CAP + 1], alias_path[BQ_PATH_CAP + 1];
+    char other_path[BQ_PATH_CAP + 1], deleted_path[BQ_PATH_CAP + 1];
+    BqWorkerLease lease = {.descriptor = -1};
+    bool ready = bq_test_mkdtemp_physical(root, sizeof(root));
+    int path_length = snprintf(lease_path, sizeof(lease_path), "%s/host.lock", root);
+    int prior_length = snprintf(prior_path, sizeof(prior_path), "%s/prior.lock", root);
+    int alias_length = snprintf(alias_path, sizeof(alias_path), "%s/alias.lock", root);
+    int other_length = snprintf(other_path, sizeof(other_path), "%s/other.lock", root);
+    int deleted_length = snprintf(deleted_path, sizeof(deleted_path), "%s/host.lock" BQ_WORKER_DELETED_SUFFIX, root);
+    ready = ready && path_length > 0 && (u32)path_length < sizeof(lease_path) &&
+            prior_length > 0 && (u32)prior_length < sizeof(prior_path) &&
+            alias_length > 0 && (u32)alias_length < sizeof(alias_path) &&
+            other_length > 0 && (u32)other_length < sizeof(other_path) &&
+            deleted_length > 0 && (u32)deleted_length < sizeof(deleted_path) &&
+            bq_worker_lease_acquire(lease_path, &lease) == 0;
+    BQ_CHECK(ready);
+    if (ready)
+    {
+        u32 before = 0, after = 0;
+        for (int fd = 3; fd < 256; ++fd) before += fcntl(fd, F_GETFD) >= 0;
+        BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
+        bool hidden = chmod(root, 0) == 0;
+        BQ_CHECK(hidden);
+        if (hidden)
+        {
+            BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            BQ_CHECK(chmod(root, 0700) == 0);
+        }
+        u32 mounted = bq_test_lease_recheck_behind_inaccessible_mount(root, lease_path, &lease);
+        if (mounted == 2) printf("BQ_TEST_SKIPPED lease-recheck-inaccessible-mount reason=unshare-unavailable\n");
+        else BQ_CHECK(mounted == 0);
+        bool moved = rename(lease_path, prior_path) == 0;
+        BQ_CHECK(moved);
+        if (moved)
+        {
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            int replacement = open(lease_path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            BQ_CHECK(replacement >= 3);
+            if (replacement >= 0) BQ_CHECK(close(replacement) == 0);
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            BQ_CHECK(unlink(lease_path) == 0 && rename(prior_path, lease_path) == 0);
+            BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
+        }
+        /* A second link is refused. Unlinking the lease name leaves one link,
+         * but the held entry now reads "<name> (deleted)": refused, including
+         * against a configured path spelled with that suffix. */
+        bool linked = link(lease_path, alias_path) == 0;
+        BQ_CHECK(linked);
+        if (linked)
+        {
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            BQ_CHECK(unlink(lease_path) == 0);
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(deleted_path, &lease));
+            BQ_CHECK(unlink(alias_path) == 0);
+        }
+        bq_worker_lease_release(&lease);
+        bool fresh = bq_worker_lease_acquire(lease_path, &lease) == 0;
+        BQ_CHECK(fresh);
+        if (fresh)
+        {
+            /* A second description of the same file, unlocked, while the
+             * locked one stays open: the upgrade fails, so it is refused. */
+            BqWorkerLease second = {.descriptor = open(lease_path, O_RDWR | O_CLOEXEC)};
+            BQ_CHECK(second.descriptor >= 3);
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &second));
+            BQ_CHECK(bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            bq_worker_lease_release(&second);
+            /* A replacement renamed over the live held name deletes it. */
+            int other = open(other_path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            BQ_CHECK(other >= 3);
+            if (other >= 0) BQ_CHECK(close(other) == 0);
+            BQ_CHECK(rename(other_path, lease_path) == 0);
+            BQ_CHECK(!bq_worker_lease_recheck_for_exec(lease_path, &lease));
+            for (int fd = 3; fd < 256; ++fd) after += fcntl(fd, F_GETFD) >= 0;
+            BQ_CHECK(before == after);
+            bq_worker_lease_release(&lease);
+        }
+        BQ_CHECK(unlink(lease_path) == 0);
+    }
+    if (ready) BQ_CHECK(rmdir(root) == 0);
+}
+
+/* Drive the installed unit entry, not just a message parser. Even after a
+ * valid response and SIGSTOP, an expired deadline or renamed/replaced lease
+ * must return before a recipe exec. Retirement remains publicly blocked; this
+ * fixture exercises the admitted smoke unit at its real exec boundary. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(u32 mode)
+{
+    char root[] = "/tmp/buster-lease-unit-negative-XXXXXX";
+    char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1], prior_path[BQ_PATH_CAP + 1];
+    char results[BQ_PATH_CAP + 1];
+    BqWorkerLease lease = {.descriptor = -1};
+    BqWorkerLeaseHandoff handoff = {.listener = -1, .parent = -1};
+    bool ready = bq_test_mkdtemp_physical(root, sizeof(root));
+    /* The unit's lease keeper (#881-C) binds under <workspace>/results. */
+    int results_length = snprintf(results, sizeof(results), "%s/results", root);
+    ready = ready && results_length > 0 && (u32)results_length < sizeof(results) && mkdir(results, 0700) == 0;
+    int result_length = snprintf(result_root, sizeof(result_root), "%s/result", root);
+    int lease_length = snprintf(lease_path, sizeof(lease_path), "%s/host.lock", root);
+    int prior_length = snprintf(prior_path, sizeof(prior_path), "%s/prior.lock", root);
+    int result_directory = -1;
+    ready = ready && result_length > 0 && (u32)result_length < sizeof(result_root) &&
+            lease_length > 0 && (u32)lease_length < sizeof(lease_path) &&
+            prior_length > 0 && (u32)prior_length < sizeof(prior_path) && mode < 5 &&
+            mkdir(result_root, 0700) == 0 &&
+            (result_directory = open(result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) >= 0 &&
+            bq_worker_lease_acquire(lease_path, &lease) == 0 &&
+            bq_worker_lease_handoff_open(result_root, result_directory, &handoff);
+    BQ_CHECK(ready);
+    pid_t child = ready ? fork() : -1;
+    if (child == 0)
+    {
+        if (handoff.listener >= 0) close(handoff.listener);
+        if (handoff.parent >= 0) close(handoff.parent);
+        if (result_directory >= 0) close(result_directory);
+        if (lease.descriptor >= 0) close(lease.descriptor);
+        u32 before = 0, after = 0;
+        for (int fd = 3; fd < 256; ++fd) before += fcntl(fd, F_GETFD) >= 0;
+        bq_worker_test_recipe_exec_count = 0;
+        BqError error = bq_worker_unit(string_from_pointer(lease_path), S8("1"), S8("2"),
+            S8("validate-buster-v1"), string_from_pointer(root),
+            S8("1111111111111111111111111111111111111111"),
+            S8("2222222222222222222222222222222222222222"), string_from_pointer(result_root));
+        for (int fd = 3; fd < 256; ++fd) after += fcntl(fd, F_GETFD) >= 0;
+        _exit(error == (mode == 2 ? BQ_WORKER_TIMEOUT : BQ_CONFIGURATION_MISMATCH) &&
+              !bq_worker_test_recipe_exec_count &&
+              before == after ? 0 : 1);
+    }
+    int connection = ready && child > 0 && bq_worker_lease_handoff_poll(handoff.listener, POLLIN,
+        bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000)) ?
+        accept4(handoff.listener, NULL, NULL, SOCK_CLOEXEC) : -1;
+    BqWorkerLeaseMessage request = {0};
+    ssize_t received = connection >= 0 ? recv(connection, &request, sizeof(request), 0) : -1;
+    struct stat info = {0};
+    ready = ready && received == (ssize_t)sizeof(request) &&
+            bq_worker_lease_message_matches(&request, BQ_WORKER_LEASE_REQUEST,
+                lease_path, 1, 2, 0, 0, "", 0) && fstat(lease.descriptor, &info) == 0;
+    BqWorkerLeaseMessage response = {0};
+    u64 future_ns = bq_phase_clock() + (mode == 2 ? UINT64_C(15000000000) :
+                                         mode >= 3 ? UINT64_C(30000000000) : UINT64_C(5000000000));
+    ready = ready && bq_worker_lease_message_make(&response, BQ_WORKER_LEASE_RESPONSE,
+        lease_path, 1, 2, (u64)info.st_dev, (u64)info.st_ino, "", future_ns);
+    if (mode == 0) response.execution_deadline_ns = 1;
+    if (mode == 1) response.attempt_token += 1;
+    char control[CMSG_SPACE(sizeof(lease.descriptor))] = {0};
+    struct iovec vector = {&response, sizeof(response)};
+    struct msghdr message = {0};
+    message.msg_iov = &vector;
+    message.msg_iovlen = 1;
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
+    struct cmsghdr* header = CMSG_FIRSTHDR(&message);
+    if (ready && header)
+    {
+        header->cmsg_level = SOL_SOCKET;
+        header->cmsg_type = SCM_RIGHTS;
+        header->cmsg_len = CMSG_LEN(sizeof(lease.descriptor));
+        memcpy(CMSG_DATA(header), &lease.descriptor, sizeof(lease.descriptor));
+        ready = sendmsg(connection, &message, MSG_NOSIGNAL) == (ssize_t)sizeof(response);
+    }
+    BQ_CHECK(ready);
+    bool moved = false;
+    if (ready && mode >= 2 && connection >= 0)
+    {
+        BqWorkerLeaseMessage acknowledgement = {0};
+        bool ack = bq_worker_lease_handoff_poll(connection, POLLIN,
+            bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000)) &&
+            recv(connection, &acknowledgement, sizeof(acknowledgement), 0) ==
+                (ssize_t)sizeof(acknowledgement) &&
+            acknowledgement.phase == BQ_WORKER_LEASE_ACK &&
+            acknowledgement.job_id == 1 && acknowledgement.attempt_token == 2 &&
+            acknowledgement.execution_deadline_ns == future_ns;
+        BQ_CHECK(ack);
+        int stopped = 0;
+        pid_t waited = 0;
+        u64 stop_deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000);
+        while (ack && !waited && bq_worker_monotonic_milliseconds() < stop_deadline)
+        {
+            waited = waitpid(child, &stopped, WUNTRACED | WNOHANG);
+            if (!waited) poll(NULL, 0, 5);
+        }
+        BQ_CHECK(waited == child && WIFSTOPPED(stopped) && WSTOPSIG(stopped) == SIGSTOP);
+        if (waited == child && WIFSTOPPED(stopped))
+        {
+            bool resume = true;
+            if (mode == 2)
+            {
+                u64 bound = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 20000);
+                while (bq_phase_clock() <= future_ns &&
+                       bq_worker_monotonic_milliseconds() < bound) poll(NULL, 0, 10);
+                resume = bq_phase_clock() > future_ns;
+                BQ_CHECK(resume);
+            }
+            else
+            {
+                moved = rename(lease_path, prior_path) == 0;
+                BQ_CHECK(moved);
+                if (moved && mode == 3)
+                {
+                    int replacement = open(lease_path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+                    BQ_CHECK(replacement >= 3);
+                    if (replacement >= 0) BQ_CHECK(close(replacement) == 0);
+                }
+            }
+            BQ_CHECK(kill(child, resume ? SIGCONT : SIGKILL) == 0);
+        }
+        else if (child > 0) kill(child, SIGKILL);
+    }
+    if (connection >= 0) close(connection);
+    if (child > 0)
+    {
+        int status = 0;
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+        if (moved)
+        {
+            if (mode == 3) BQ_CHECK(unlink(lease_path) == 0);
+            BQ_CHECK(rename(prior_path, lease_path) == 0);
+        }
+        BQ_CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0 && bq_test_worker_probe_locked(lease_path));
+    }
+    bq_worker_lease_handoff_close(&handoff);
+    bq_worker_lease_release(&lease);
+    if (result_directory >= 0) close(result_directory);
+    unlink(lease_path);
+    rmdir(result_root);
+    /* Empty: the refused unit stopped its keeper, which removed its socket
+     * from the keeper directory (created only when a keeper started). */
+    char keeper_directory[BQ_PATH_CAP + 32];
+    if (results_length > 0 && (u32)results_length < sizeof(results) &&
+        snprintf(keeper_directory, sizeof(keeper_directory), "%s/.lease-return", results) > 0)
+    {
+        BQ_CHECK(!ready || mode < 2 || rmdir(keeper_directory) == 0);
+        BQ_CHECK(!ready || rmdir(results) == 0);
+    }
     rmdir(root);
 }
 
@@ -2725,8 +3068,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_cleanup_failure(u32 mode)
         if (lease.descriptor >= 0) close(lease.descriptor);
         lease.descriptor = -1;
         BqWorkerLease transferred = {.descriptor = -1};
+        char received_preparation[SHA256_HEX_CAPACITY] = {0};
         BqError received = bq_worker_lease_handoff_receive(string_from_pointer(lease_path), string_from_pointer(result_root),
-                                                            S8("1"), S8("2"), &transferred);
+                                                            S8("1"), S8("2"), BQ_RECIPE_VALIDATE_BUSTER,
+                                                            &transferred, NULL, received_preparation, NULL);
         u8 state = received == BQ_OK ? 1 : 0;
         ssize_t written = write(ready_pipe[1], &state, sizeof(state));
         char hold = 0;
@@ -2746,7 +3091,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_cleanup_failure(u32 mode)
         bq_worker_test_handoff_fsync_failure = mode == 1;
         bq_worker_test_handoff_listener_close_failure = mode == 2;
         bq_worker_test_handoff_parent_close_failure = mode == 3;
-        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2);
+        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2, "",
+                                                    bq_worker_deadline(bq_worker_monotonic_milliseconds(), 30000), NULL);
         bq_worker_test_handoff_unlink_failure = false;
         bq_worker_test_handoff_fsync_failure = false;
         bq_worker_test_handoff_listener_close_failure = false;
@@ -2842,6 +3188,13 @@ typedef struct BqWorkerFake
     bool collect_on_join;
     bool replace_slice_on_cleanup_join;
     bool launcher_cleanup_failure;
+    /* #881-C: a stand-in unit holding the lease through a real keeper. The
+     * outer TERM kills it and its keeper, then a second coordinator contends
+     * for the lease before the fake unit is reaped. */
+    pid_t keeper_unit;
+    pid_t keeper;
+    int contender_error;
+    bool contender_checked;
 } BqWorkerFake;
 
 typedef struct BqWorkerFixture
@@ -3053,6 +3406,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_signal(BqWorkerBackend* backend, char
     else if (!strcmp(signal_name, "TERM"))
     {
         fake->terms += 1;
+        if (fake->keeper_unit > 0)
+        {
+            BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
+            BqWorkerLease contender = {.descriptor = -1};
+            BQ_CHECK(bq_test_worker_keeper_unit_kill(fake->keeper_unit, fake->keeper));
+            fake->contender_error = bq_worker_lease_acquire(fixture->lease, &contender);
+            fake->contender_checked = true;
+            fake->keeper_unit = 0;
+            bq_worker_lease_release(&contender);
+        }
         if (fake->term_clears) bq_test_worker_reap(fake);
     }
     else if (!strcmp(signal_name, "KILL"))
@@ -3388,6 +3751,8 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_make_success_result(BqWorkerFixture* fix
              bq_worker_result_validate(&fixture->config, job, finalization) == BQ_OK;
     return ok;
 }
+
+#include "phase_channel_tests.h"
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_success_and_tree_cleanup(void)
 {
@@ -4206,6 +4571,78 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_quarantine_and_recovery(void)
                  fixture.fake.detached == 0 && fixture.quarantine.descriptor < 0 &&
                  !bq_test_worker_probe_locked(fixture.lease));
         bq_test_worker_end(&fixture);
+    }
+}
+
+/* #881-C reverse lease handoff through the recovering coordinator. After a
+ * restart the only lease references belong to the live unit. bq_worker_stop
+ * reclaims one from the unit's keeper before TERM, so when TERM closes every
+ * unit reference a contending coordinator still cannot take the lease; the
+ * job then finishes interrupted and the lease is released only after
+ * reconciliation. A keeper socket that no longer answers leaves the unit
+ * unsignalled and the job quarantined; once the unit is gone on its own, the
+ * next recovery acquires, purges the stale socket and reconciles. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_keeper_recovery(void)
+{
+    for (u32 mode = 0; mode < 2; mode += 1)
+    {
+        BqWorkerFixture fixture;
+        if (bq_test_worker_begin(&fixture, BQ_WORKER_EXECUTION_FAILED, false))
+        {
+            BqQueue* queue = &fixture.material.queue.queue;
+            BqRequest request = bq_test_real_request(75 + mode);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                     bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id,
+                                    &token) == BQ_OK);
+            BqJob* job = bq_job(&queue->state, id);
+            BQ_CHECK(bq_test_worker_bind(&fixture, job));
+            char socket_path[BQ_WORKER_SUN_PATH_CAP];
+            pid_t keeper = -1;
+            pid_t unit = bq_test_worker_keeper_unit(fixture.lease, fixture.config.workspace_root, id, token, &keeper);
+            BQ_CHECK(unit > 0 && bq_worker_lease_keeper_path(fixture.config.workspace_root, id, token, socket_path) &&
+                     bq_test_worker_probe_locked(fixture.lease));
+            fixture.fake.term_clears = true;
+            bq_close(queue);
+            BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK && queue->needs_reconciliation &&
+                     fixture.quarantine.descriptor < 0);
+            struct stat info = {0};
+            if (mode == 0)
+            {
+                fixture.fake.keeper_unit = unit;
+                fixture.fake.keeper = keeper;
+                BQ_CHECK(bq_worker_run(queue, &fixture.config, &id) == BQ_OK);
+                BQ_CHECK(fixture.fake.contender_checked && fixture.fake.terms == 1 &&
+                         (fixture.fake.contender_error == EWOULDBLOCK || fixture.fake.contender_error == EAGAIN));
+                job = bq_job(&queue->state, id);
+                BQ_CHECK(job && job->outcome == BQ_INTERRUPTED &&
+                         bq_failure_evidence(queue, job) == BQ_WORKER_INTERRUPTED && !queue->state.active_id &&
+                         !queue->needs_reconciliation && !bq_test_worker_probe_locked(fixture.lease) &&
+                         lstat(socket_path, &info) != 0 && errno == ENOENT);
+            }
+            else
+            {
+                /* The keeper dies but the unit and its lease live on. */
+                BQ_CHECK(keeper > 0 && kill(keeper, SIGKILL) == 0 &&
+                         bq_test_worker_process_gone(keeper,
+                             bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000)) &&
+                         lstat(socket_path, &info) == 0 && S_ISSOCK(info.st_mode));
+                BQ_CHECK(bq_worker_run(queue, &fixture.config, &id) == BQ_CLEANUP_FAILED &&
+                         fixture.fake.terms == 0 && fixture.fake.kills == 0 && queue->state.active_id == id &&
+                         queue->needs_reconciliation && bq_test_worker_probe_locked(fixture.lease));
+                BQ_CHECK(bq_test_worker_keeper_unit_kill(unit, -1));
+                unit = -1;
+                bq_test_worker_reap(&fixture.fake);
+                BQ_CHECK(bq_worker_run(queue, &fixture.config, &id) == BQ_OK);
+                job = bq_job(&queue->state, id);
+                BQ_CHECK(job && job->outcome == BQ_INTERRUPTED && !queue->state.active_id &&
+                         !bq_test_worker_probe_locked(fixture.lease) && lstat(socket_path, &info) != 0 &&
+                         errno == ENOENT);
+            }
+            if (fixture.fake.keeper_unit > 0) bq_test_worker_keeper_unit_kill(fixture.fake.keeper_unit, keeper);
+            else if (mode == 1 && unit > 0) bq_test_worker_keeper_unit_kill(unit, keeper);
+            bq_test_worker_end(&fixture);
+        }
     }
 }
 
@@ -5678,7 +6115,289 @@ BUSTER_GLOBAL_LOCAL void bq_test_large_source_manifest(void)
 #endif
 #endif
 
+#ifdef __linux__
+/* #1020 PR 4 in the service's own build (BQ_SERVICE_INSTALLED, without
+ * BQ_RETIREMENT_CORRECTNESS_TEST_ONLY): the step 9 verifier refuses a
+ * well-formed seal over facts without the #509 check digests, and the ready
+ * writer refuses an issuer-marked gate it does not own before any attempt
+ * I/O. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_ready_refused(void)
+{
+#if !defined(BQ_SERVICE_INSTALLED) || defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+    BQ_CHECK(!"the service tests must build as the installed service");
+#endif
+    BqJob job = {.id = 1, .token = 2};
+    String8 fields[BQ_FIELD_COUNT] = {S8("test-principal"), S8("ready-refused"),
+        S8("fake-success-v1"), S8("1111111111111111111111111111111111111111"),
+        S8("2222222222222222222222222222222222222222")};
+    BQ_CHECK(bq_request_make(fields, &job.request) == BQ_OK);
+    bq_request_digest(&job.request, job.digest);
+    BqRetirementProjection projection = {.owned = 1, .job_id = 1, .attempt_token = 2};
+    BqRetirementUnitOracle oracle = {.owned = 1};
+    memset(projection.prepared.preparation_sha256, 'a', 64);
+    memset(projection.population_sha256, 'b', 64);
+    memset(oracle.authority.attempt_sha256, 'c', 64);
+    BqRetirementUnitReadyFacts facts = {.job = &job, .projection = &projection, .authority = &oracle.authority};
+    BqRetirementUnitGate gate = {.issuer = BQ_RETIREMENT_UNIT_GATE_ISSUED};
+    memset(gate.seal_sha256, 'd', 64);
+    BQ_CHECK(bq_retirement_unit_attempt_sha(&job, facts.attempt_sha256) &&
+             bq_retirement_hex(string_from_pointer(facts.attempt_sha256), 64) &&
+             !bq_retirement_unit_gate_sealed(gate.seal_sha256, &facts));
+    char root[] = "/tmp/bq-ready-refused-XXXXXX";
+    char attempt[64];
+    bool made = mkdtemp(root) != NULL;
+    BQ_CHECK(made && bq_workspace_name(attempt, job.id, job.token));
+    int workspaces = made ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_CHECK(workspaces >= 0 && mkdirat(workspaces, attempt, 0700) == 0);
+    BqRetirementUnitPrepared prepared = {.job = job, .owned = 1, .policy = {.clang = -1, .inventory = -1}};
+    BqRetirementUnitBuilt built = {.owned = 1};
+    char digest[SHA256_HEX_CAPACITY] = "unchanged";
+    struct stat info = {0};
+    char path[128];
+    snprintf(path, sizeof(path), "%s/" BQ_RETIREMENT_UNIT_READY_DIRECTORY, attempt);
+    BQ_CHECK(bq_retirement_unit_ready(&prepared, &built, &projection, &oracle, &gate, workspaces, digest) ==
+             BQ_RECIPE_MISMATCH && !digest[0] && fstatat(workspaces, path, &info, AT_SYMLINK_NOFOLLOW) != 0 &&
+             errno == ENOENT);
+    BQ_CHECK(workspaces < 0 || (unlinkat(workspaces, attempt, AT_REMOVEDIR) == 0 && close(workspaces) == 0));
+    BQ_CHECK(!made || rmdir(root) == 0);
+}
+#endif
+
+#include "retirement_admission_tests.h"
+#include "retirement_aa_admission_tests.h"
 #include "export_tests.c"
+
+#ifdef __linux__
+/* #881 recovery L2 poison guards, without the retirement producer. The
+ * retirement request is spelled field by field because the portable queue's
+ * gate refuses the blocked recipe; the hold reads only its recipe. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_job(BqJob* job, u64 id)
+{
+    String8 fields[BQ_FIELD_COUNT] = {
+        S8("test-principal"), S8("retirement-poison"), S8("native-retirement-performance-v1"),
+        S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
+    *job = (BqJob){.id = id, .token = id + 10u, .phase = BQ_MEASURING};
+    for (u32 index = 0; index < BQ_FIELD_COUNT; index += 1)
+    {
+        bq_put32(job->request.bytes + job->request.size, (u32)fields[index].length);
+        job->request.size += 4;
+        memcpy(job->request.bytes + job->request.size, fields[index].pointer, (size_t)fields[index].length);
+        job->request.size += (u32)fields[index].length;
+    }
+    memset(job->digest, 'c', 64);
+    job->digest[64] = 0;
+}
+
+/* The records one case leaves in the queue directory, removed. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_clean(BqQueue* queue, BqJob const* job)
+{
+    char name[48];
+    char const* const prefixes[] = {BQ_RETIREMENT_POISON_RECORD, "failure", "worker-phase-4"};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(prefixes); index += 1)
+        if (bq_record_name(name, prefixes[index], job->id)) unlinkat(queue->directory_fd, name, 0);
+}
+
+/* One hold, with its verdict and the failure record it left. */
+BUSTER_GLOBAL_LOCAL bool bq_test_retirement_hold(BqQueue* queue, BqJob const* job, BqError expected,
+                                                 bool expected_held, BqError reason)
+{
+    BqWorkerFinalization finalization = {.result_directory = -1};
+    bool held = !expected_held;
+    BqError error = bq_worker_retirement_handoff_hold(queue, job, &finalization, BQ_WORKER_INTERRUPTED, &held);
+    bool ok = error == expected && held == expected_held && finalization.retirement_held == expected_held &&
+              bq_failure_evidence(queue, job) == reason;
+    return ok;
+}
+
+/* The classifier and the hold over leftovers built in the queue directory:
+ * nothing (absent, never held); a `.pending` temporary alone (incomplete,
+ * never absent); a queue-private root that is not a directory (open fails
+ * other than ENOENT: something left); a malformed worker-phase-4 record
+ * (inconsistent); a failed poison write (held, BQ_IO, no record); a corrupt
+ * and an unreadable poison record (poisoned); a well-formed record whose class
+ * decides the failure reason after a crash before that record; a cancelled
+ * job (held, no failure record); a smoke job (never held); and
+ * bq_worker_finish on a failing held job (held before any transition). */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_hold(void)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqJob job;
+        bq_test_retirement_poison_job(&job, 500);
+        char pending[64], poison[48];
+        snprintf(pending, sizeof(pending), "authority-job-%" PRIu64 "-%" PRIu64 ".txt.pending", (uint64_t)job.id,
+                 (uint64_t)job.token);
+        BQ_CHECK(bq_record_name(poison, BQ_RETIREMENT_POISON_RECORD, job.id) &&
+                 mkdirat(queue->directory_fd, "retirement-authority", 0700) == 0);
+        int authority = openat(queue->directory_fd, "retirement-authority", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        BQ_CHECK(authority >= 0);
+        TpRetirementAuthorityState state = TP_RETIREMENT_AUTHORITY_INVALID;
+        /* Nothing left: absent, not held, nothing written. */
+        BQ_CHECK(bq_retirement_coordinator_handoff_class(-1, queue->directory_fd, job.id, job.token, false, "",
+                                                         &state) == BQ_RETIREMENT_HANDOFF_ABSENT &&
+                 state == TP_RETIREMENT_AUTHORITY_ABSENT);
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, false, BQ_NOT_FOUND) && !bq_retirement_poisoned(queue, &job));
+        /* A `.pending` temporary alone is incomplete, never absent. */
+        int file = openat(authority, pending, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400);
+        BQ_CHECK(file >= 0 && close(file) == 0);
+        BQ_CHECK(bq_retirement_coordinator_handoff_class(-1, queue->directory_fd, job.id, job.token, false, "",
+                                                         &state) == BQ_RETIREMENT_HANDOFF_INCOMPLETE &&
+                 state == TP_RETIREMENT_AUTHORITY_INVALID);
+        bool inconsistent = true;
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_INTERRUPTED) &&
+                 bq_retirement_poison_read(queue, &job, &inconsistent) == BQ_OK && !inconsistent);
+        /* A second hold finds the record and holds again. */
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_INTERRUPTED));
+        bq_test_retirement_poison_clean(queue, &job);
+        /* A failed poison write holds and reports BQ_IO, writing nothing. */
+        bq_test_poison_write_failure = true;
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_IO, true, BQ_NOT_FOUND) &&
+                 !bq_retirement_poisoned(queue, &job));
+        bq_test_poison_write_failure = false;
+        /* A cancelled job is held without a failure record. */
+        job.cancel_requested = true;
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_NOT_FOUND) && bq_retirement_poisoned(queue, &job));
+        job.cancel_requested = false;
+        bq_test_retirement_poison_clean(queue, &job);
+        /* A smoke job is never classified. */
+        BqJob smoke = job;
+        smoke.request = bq_test_real_request(500);
+        BQ_CHECK(bq_test_retirement_hold(queue, &smoke, BQ_OK, false, BQ_NOT_FOUND) &&
+                 !bq_retirement_poisoned(queue, &smoke));
+        /* bq_worker_finish holds a failing job before any journal transition
+         * (the job is not even in the queue). */
+        BqWorkerFinalization finishing = {.result_directory = -1};
+        queue->needs_reconciliation = false;
+        BQ_CHECK(bq_worker_finish(queue, &fixture.config, &job, BQ_FAILED, BQ_WORKER_FAILED, &finishing) ==
+                 BQ_RECONCILIATION_REQUIRED && finishing.retirement_held && queue->needs_reconciliation &&
+                 bq_retirement_poisoned(queue, &job) && bq_failure_evidence(queue, &job) == BQ_WORKER_FAILED);
+        queue->needs_reconciliation = false;
+        bq_test_retirement_poison_clean(queue, &job);
+        BQ_CHECK(unlinkat(authority, pending, 0) == 0);
+        /* A malformed worker-phase-4 record with nothing copied: inconsistent. */
+        char measured[48];
+        BQ_CHECK(bq_record_name(measured, "worker-phase-4", job.id) &&
+                 bq_record_write(queue, measured, (u8 const*)"malformed\n", 10, false) == BQ_OK);
+        BQ_CHECK(bq_retirement_coordinator_handoff_class(-1, queue->directory_fd, job.id, job.token, true, "",
+                                                         &state) == BQ_RETIREMENT_HANDOFF_INCONSISTENT &&
+                 state == TP_RETIREMENT_AUTHORITY_ABSENT);
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_MISMATCH) &&
+                 bq_retirement_poison_read(queue, &job, &inconsistent) == BQ_OK && inconsistent);
+        bq_test_retirement_poison_clean(queue, &job);
+        /* A queue-private root that is not a directory proves nothing absent. */
+        BQ_CHECK(renameat(queue->directory_fd, "retirement-authority", queue->directory_fd, "aside-authority") == 0);
+        file = openat(queue->directory_fd, "retirement-authority", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400);
+        BQ_CHECK(file >= 0 && close(file) == 0);
+        BQ_CHECK(bq_retirement_coordinator_handoff_class(-1, queue->directory_fd, job.id, job.token, false, "",
+                                                         &state) == BQ_RETIREMENT_HANDOFF_INCOMPLETE &&
+                 state == TP_RETIREMENT_AUTHORITY_INVALID);
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_INTERRUPTED));
+        bq_test_retirement_poison_clean(queue, &job);
+        BQ_CHECK(unlinkat(queue->directory_fd, "retirement-authority", 0) == 0 &&
+                 renameat(queue->directory_fd, "aside-authority", queue->directory_fd, "retirement-authority") == 0);
+        /* With nothing left, only the poison record holds. A corrupt record
+         * (writable) and an unreadable one (a symlink) poison and count as
+         * inconsistent; a well-formed record's class decides the reason. */
+        file = openat(queue->directory_fd, poison, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        BQ_CHECK(file >= 0 && write(file, "x\n", 2) == 2 && close(file) == 0);
+        BQ_CHECK(bq_retirement_poison_read(queue, &job, &inconsistent) == BQ_CORRUPT && inconsistent &&
+                 bq_retirement_poisoned(queue, &job));
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_MISMATCH));
+        bq_test_retirement_poison_clean(queue, &job);
+        BQ_CHECK(symlinkat("missing-target", queue->directory_fd, poison) == 0);
+        BQ_CHECK(bq_retirement_poison_read(queue, &job, &inconsistent) == BQ_IO && inconsistent &&
+                 bq_retirement_poisoned(queue, &job));
+        BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true, BQ_WORKER_MISMATCH));
+        bq_test_retirement_poison_clean(queue, &job);
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            BQ_CHECK(bq_retirement_poison_write(queue, &job, index == 1, false, "incomplete") == BQ_OK);
+            BQ_CHECK(bq_test_retirement_hold(queue, &job, BQ_OK, true,
+                                             index == 1 ? BQ_WORKER_MISMATCH : BQ_WORKER_INTERRUPTED));
+            bq_test_retirement_poison_clean(queue, &job);
+        }
+        BQ_CHECK(unlinkat(queue->directory_fd, "retirement-authority", AT_REMOVEDIR) == 0);
+        if (authority >= 0) close(authority);
+        bq_test_worker_end(&fixture);
+    }
+}
+
+/* The reviewer's probe through the admitted smoke recipe: a durable success
+ * left at FINALIZING or CLEANING normally reconciles FINISHED/SUCCEEDED
+ * without any finalization. With a poison record present it reconciles
+ * failed (FINALIZING, with a worker-mismatch failure record) or interrupted
+ * (CLEANING), never succeeded, and export refuses it. A poisoned failed job
+ * at CLEANING without its failure record stays corrupt: the poison never
+ * supplies the missing record. */
+BUSTER_GLOBAL_LOCAL void bq_test_retirement_poison_reconcile(void)
+{
+    for (u32 index = 0; index < 3; index += 1)
+    {
+        BqWorkerFixture fixture;
+        if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+        {
+            BqQueue* queue = &fixture.material.queue.queue;
+            BqRequest request = bq_test_real_request(501 + index);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                     bq_materialize(queue, fixture.config.installed_root, fixture.config.workspace_root, &id,
+                                    &token) == BQ_OK);
+            BqJob* job = bq_job(&queue->state, id);
+            BqPhase last = index == 1 ? BQ_CLEANING : index == 2 ? BQ_MEASURING : BQ_FINALIZING;
+            for (BqPhase phase = BQ_SETTLING; job && phase <= last; phase = (BqPhase)(phase + 1))
+            {
+                BQ_CHECK(bq_real_advance(queue, job, phase, phase >= BQ_FINALIZING ? BQ_SUCCEEDED : BQ_NO_OUTCOME) ==
+                         BQ_OK);
+                job = bq_job(&queue->state, id);
+            }
+            if (index == 2 && job)
+            {
+                BQ_CHECK(bq_real_advance(queue, job, BQ_CLEANING, BQ_FAILED) == BQ_OK);
+                job = bq_job(&queue->state, id);
+            }
+            BQ_CHECK(job && bq_retirement_poison_write(queue, job, true, true, "damaged") == BQ_OK);
+            bq_close(queue);
+            BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK && queue->needs_reconciliation);
+            if (index == 2)
+            {
+                job = bq_job(&queue->state, id);
+                BQ_CHECK(bq_workspace_reconcile(queue, fixture.config.workspace_root, id, token) == BQ_CORRUPT &&
+                         job && job->phase == BQ_CLEANING && job->outcome == BQ_FAILED &&
+                         bq_failure_evidence(queue, job) == BQ_CORRUPT && queue->needs_reconciliation);
+                char poison[48];
+                BQ_CHECK(bq_record_name(poison, BQ_RETIREMENT_POISON_RECORD, id) &&
+                         unlinkat(queue->directory_fd, poison, 0) == 0);
+                bq_test_worker_end(&fixture);
+                continue;
+            }
+            BQ_CHECK(bq_workspace_reconcile(queue, fixture.config.workspace_root, id, token) == BQ_OK);
+            job = bq_job(&queue->state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == (index ? BQ_INTERRUPTED : BQ_FAILED) &&
+                     bq_failure_evidence(queue, job) == BQ_WORKER_MISMATCH && !queue->needs_reconciliation);
+            /* The journal replays the same verdict. */
+            bq_close(queue);
+            BQ_CHECK(bq_open(queue, fixture.material.queue.path) == BQ_OK);
+            job = bq_job(&queue->state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome != BQ_SUCCEEDED);
+            BqPacket packet = {0};
+            BqJob* authorized = NULL;
+            if (job)
+            {
+                bq_test_export_request(&packet, job, 0, job->result_full_digest);
+                BQ_CHECK(bq_export_authorize(queue, packet.bytes + BQ_CONTROL_HEADER, S8("test-principal"),
+                                             &authorized) == BQ_EXPORT_INVALID && !authorized);
+            }
+            char poison[48];
+            BQ_CHECK(bq_record_name(poison, BQ_RETIREMENT_POISON_RECORD, id) &&
+                     unlinkat(queue->directory_fd, poison, 0) == 0);
+            bq_test_worker_end(&fixture);
+        }
+    }
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 {
@@ -5695,6 +6414,10 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #endif
     bq_test_codec();
     bq_test_typed_client();
+    bq_test_retirement_admission();
+#ifdef __linux__
+    bq_test_retirement_aa_admission();
+#endif
 #ifndef _WIN32
     bq_test_physical_temp_paths();
     bq_test_workspace_root_group_policy();
@@ -5730,15 +6453,26 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     printf("SGID_SANDBOX_TEST service status=unsupported-architecture\n");
 #endif
     bq_test_transport_boundaries();
+    bq_test_retirement_ready_refused();
     bq_test_worker_deadlines();
-    bq_test_worker_lease_handoff();
+    bq_test_worker_lease_handoff(false);
+    bq_test_worker_lease_handoff(true);
     bq_test_worker_lease_handoff_negative(0);
     bq_test_worker_lease_handoff_negative(1);
     bq_test_worker_lease_handoff_negative(2);
+    bq_test_worker_lease_handoff_negative(3);
+    bq_test_worker_lease_handoff_negative(4);
+    bq_test_worker_lease_recheck_before_exec();
+    for (u32 mode = 0; mode < 5; ++mode) bq_test_worker_unit_bad_lease_response(mode);
     bq_test_worker_lease_handoff_cleanup_failure(0);
     bq_test_worker_lease_handoff_cleanup_failure(1);
     bq_test_worker_lease_handoff_cleanup_failure(2);
     bq_test_worker_lease_handoff_cleanup_failure(3);
+    bq_test_phase_packets();
+    for (unsigned defect = 0; defect < 6; ++defect) bq_test_phase_run(defect, NULL);
+    if (argc > 2) bq_test_phase_run(6, argv[2]);
+    bq_test_phase_run(7, NULL);
+    bq_test_phase_run(8, NULL);
     bq_test_worker_success_and_tree_cleanup();
     bq_test_worker_drained_unit();
     bq_test_worker_term_grace();
@@ -5757,6 +6491,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_capability_admission();
     bq_test_worker_outcomes();
     bq_test_worker_quarantine_and_recovery();
+    bq_test_worker_keeper_recovery();
     bq_test_worker_ancestor_budget();
     bq_test_worker_boot_and_identity_recovery();
     bq_test_worker_fixed_recipe_sigkill_recovery();
@@ -5766,6 +6501,8 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_export_inventory();
     bq_test_export(true);
     bq_test_export(false);
+    bq_test_retirement_poison_hold();
+    bq_test_retirement_poison_reconcile();
     bq_test_worker_result_bundle_and_evidence();
     bq_test_worker_failure_bundle_replay();
     bq_test_worker_failure_bundle_coverage();

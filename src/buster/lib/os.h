@@ -676,6 +676,9 @@ BUSTER_F_DECL u32 os_get_logical_thread_count(void);
 BUSTER_F_DECL u64 os_get_page_size(void);
 BUSTER_F_DECL u64 os_get_physical_memory_size(void);
 BUSTER_F_DECL u64 os_get_resident_memory_size(void);
+// The process's resident high water in bytes: getrusage's ru_maxrss on Linux
+// and Apple, the peak working set on Windows; 0 where unavailable.
+BUSTER_F_DECL u64 os_get_peak_resident_memory_size(void);
 BUSTER_F_DECL u64 os_get_current_process_id(void);
 BUSTER_F_DECL OsProcessHandle* os_get_current_process_handle(void);
 BUSTER_F_DECL OsThreadHandle* os_get_current_thread_handle(void);

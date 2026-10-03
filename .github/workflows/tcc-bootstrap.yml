@@ -22,7 +22,7 @@ jobs:
     if: ${{ github.server_url == 'https://github.com' }}
     name: Canonical TCC bootstrap
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25 # #881 worker-unit fixtures: 10,340 launches at the contract minimums (60 pairs, 2 rounds, 2 warm-ups), plus the sanitized repeat
     env:
       LC_ALL: C
       # Hosted Ubuntu supplies a supplementary group; the SGID regression

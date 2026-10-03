@@ -94,6 +94,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_BENCH_SERVICE,
     BUILD_COMMAND_BENCH_SERVICE_BROKER,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE,
+    BUILD_COMMAND_BENCH_SERVICE_RETIREMENT_RECIPE,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
     BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE,
     BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE,
@@ -36919,8 +36920,21 @@ BUSTER_GLOBAL_LOCAL void native_foundation_tool_add(Arena* arena, SliceString8 a
     os_argument_builder_append(&builder, S8("-funsigned-char"));
     os_argument_builder_append(&builder, S8("-Isrc"));
     os_argument_builder_append(&builder, S8("-DBUSTER_SINGLE_THREADED=1"));
+    /* The service and its tests.c build as the installed service, which
+     * retirement_unit.c refuses to combine with its test-only gate issuer. */
+    if (service) os_argument_builder_append(&builder, S8("-DBQ_SERVICE_INSTALLED=1"));
     os_argument_builder_append(&builder, (service ? (self_test ? S8("tools/bench_service/tests.c") : S8("tools/bench_service/main.c")) : (self_test ? S8("tools/throughput/tests.c") : S8("tools/throughput/throughput.c"))));
     os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
+#if BUSTER_LINUX
+    /* #881-E: the durable result store and the result composer are separate
+     * translation units linked into the service (and its tests). */
+    if (service)
+    {
+        os_argument_builder_append(&builder, S8("tools/bench_service/retirement_result.c"));
+        os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose.c"));
+        os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose_json.c"));
+    }
+#endif
     if (sanitize)
     {
         os_argument_builder_append(&builder, S8("-g"));
@@ -36986,6 +37000,9 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
 #define BENCH_SERVICE_RECIPE_MANIFEST_CAP 32768u
 #define BENCH_SERVICE_RECIPE_BUNDLE_CAP (8u * 1024u * 1024u)
 #define BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP 4096u
+#include "tools/bench_service/phase_channel.h"
+#include "tools/bench_service/systemd_runtime.h"
+
 #define BENCH_SERVICE_RECIPE_BUNDLE_FILE_CAP (64ull * 1024 * 1024)
 #define BENCH_SERVICE_RECIPE_BUNDLE_TOTAL_CAP (512ull * 1024 * 1024)
 #define BENCH_SERVICE_RECIPE_BUNDLE_DEPTH_CAP 256u
@@ -37092,6 +37109,9 @@ typedef struct BenchServiceRecipeStage BenchServiceRecipeStage;
 
 struct BenchServiceRecipeManifest
 {
+#if BUSTER_LINUX
+    BqPhaseChannel phases;
+#endif
     String8 path;
     String8 job_id;
     String8 attempt_token;
@@ -37294,6 +37314,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_stage_cleanup(Arena* aren
      * manifest records only process-result=failed. */
     String8 failed_check = {0};
 #if BUSTER_LINUX
+    if (string_equal(stage->name, S8("throughput")) && stage->manifest->phases.descriptor >= 0 &&
+        !bq_phase_exchange(&stage->manifest->phases, BQ_PHASE_MEASURED)) result = PROCESS_RESULT_FAILED;
     if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("base-build")))
     {
         failed_check = !bench_service_recipe_binary_digest(stage->manifest->base_build_directory,
@@ -37356,6 +37378,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_stage_cleanup(Arena* aren
 #endif
     bool recorded = !simulated_crash && bench_service_recipe_manifest_write(arena, stage->manifest, stage->name, result);
     if (!recorded && !simulated_crash) result = PROCESS_RESULT_FAILED;
+#if BUSTER_LINUX
+    if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("candidate-build")) &&
+        stage->manifest->phases.descriptor >= 0 &&
+        (!bq_phase_exchange(&stage->manifest->phases, BQ_PHASE_SETTLING) ||
+         !bq_phase_exchange(&stage->manifest->phases, BQ_PHASE_MEASURING))) result = PROCESS_RESULT_FAILED;
+#endif
     return result;
 }
 
@@ -39345,7 +39373,8 @@ BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_candidate_process_add(Arena
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceString8 arguments)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (arguments.length != BENCH_SERVICE_RECIPE_ARGUMENT_COUNT)
+    if (arguments.length != BENCH_SERVICE_RECIPE_ARGUMENT_COUNT &&
+        arguments.length != BENCH_SERVICE_RECIPE_ARGUMENT_COUNT + 1)
     {
         string_print(S8("error: bench_service_recipe requires JOB_ID ATTEMPT_TOKEN WORKSPACE_ROOT BASE_REVISION CANDIDATE_REVISION RESULT_ROOT\n"));
     }
@@ -39396,6 +39425,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
             bool sources = path_exists(arena, result_root) && path_exists(arena, base_source) && path_exists(arena, candidate_source) &&
                            driver.length > 0;
 #if BUSTER_LINUX
+            manifest->phases.descriptor = -1;
+            if (arguments.length == BENCH_SERVICE_RECIPE_ARGUMENT_COUNT + 1)
+            {
+                IntegerParsingU64 descriptor = string8_parse_u64_decimal(arguments.pointer[6]);
+                IntegerParsingU64 job = string8_parse_u64_decimal(job_id);
+                IntegerParsingU64 attempt = string8_parse_u64_decimal(attempt_token);
+                bool channel = descriptor.status == INTEGER_PARSING_SUCCESS &&
+                               descriptor.length == arguments.pointer[6].length && descriptor.value >= 3 &&
+                               descriptor.value <= INT_MAX;
+                sources = sources && channel && bq_phase_init(&manifest->phases, (int)descriptor.value,
+                                                               job.value, attempt.value);
+            }
             bool stage_ok = bench_service_recipe_prepare_candidate_stage(candidate_subject, candidate_stage_build);
             bool output_ok = stage_ok && bench_service_recipe_prepare_throughput_output(arena, candidate_stage_build,
                                                                                           throughput_output);
@@ -39442,6 +39483,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
 #endif
             bool recorded = !published && sources &&
                             bench_service_recipe_manifest_write(arena, manifest, S8("prepare"), PROCESS_RESULT_RUNNING);
+#if BUSTER_LINUX
+            if (recorded && manifest->phases.descriptor >= 0)
+                recorded = bq_phase_exchange(&manifest->phases, BQ_PHASE_PREPARING) != 0;
+#endif
             if (!recorded && !recovered)
             {
                 string_print(S8("error: fixed recipe could not establish its durable running manifest\n"));
@@ -39572,6 +39617,57 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
         }
     }
     return result;
+}
+
+/* The fixed retirement command has a distinct private interface. The service
+ * supplies the A preparation identity, inherited phase socket, and absolute
+ * monotonic deadline in addition to the six smoke identities. No graph is
+ * constructed while B's complete independent oracle import and the C/D/E
+ * producer handoff remain unavailable. A malformed entry is rejected before
+ * any phase acknowledgement or timed child can begin. */
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_retirement_recipe_add(Arena* arena, SliceString8 arguments)
+{
+    bool valid = BUSTER_LINUX && arguments.length == BENCH_SERVICE_RECIPE_ARGUMENT_COUNT + 3;
+#if BUSTER_LINUX
+    if (valid)
+    {
+        String8 job_id = arguments.pointer[0], attempt_token = arguments.pointer[1];
+        String8 workspace_root = arguments.pointer[2], result_root = arguments.pointer[5];
+        String8 expected_result = path_join(arena, workspace_root,
+            string_format(arena, S8("results/job-{S8}-attempt-{S8}"), job_id, attempt_token));
+        String8 preparation = arguments.pointer[6];
+        IntegerParsingU64 job = string8_parse_u64_decimal(job_id);
+        IntegerParsingU64 attempt = string8_parse_u64_decimal(attempt_token);
+        IntegerParsingU64 descriptor = string8_parse_u64_decimal(arguments.pointer[7]);
+        IntegerParsingU64 deadline = string8_parse_u64_decimal(arguments.pointer[8]);
+        u64 now = bq_phase_clock();
+        valid = bench_service_recipe_decimal(job_id) && bench_service_recipe_decimal(attempt_token) &&
+                bench_service_recipe_path(workspace_root) &&
+                bench_service_recipe_revision(arguments.pointer[3]) &&
+                bench_service_recipe_revision(arguments.pointer[4]) &&
+                bench_service_recipe_path(result_root) && string_equal(result_root, expected_result) &&
+                preparation.length == 64 &&
+                job.status == INTEGER_PARSING_SUCCESS && job.length == job_id.length &&
+                attempt.status == INTEGER_PARSING_SUCCESS && attempt.length == attempt_token.length &&
+                descriptor.status == INTEGER_PARSING_SUCCESS &&
+                descriptor.length == arguments.pointer[7].length && descriptor.value >= 3 &&
+                descriptor.value <= INT_MAX && deadline.status == INTEGER_PARSING_SUCCESS &&
+                deadline.length == arguments.pointer[8].length && now &&
+                deadline.value > now && deadline.value - now <= BQ_SYSTEMD_RETIREMENT_DEADLINE_MAX_NS;
+        for (u64 index = 0; valid && index < preparation.length; index += 1)
+        {
+            u8 byte = preparation.pointer[index];
+            valid = (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+        }
+        BqPhaseChannel channel;
+        if (valid) valid = bq_phase_init(&channel, (int)descriptor.value, job.value, attempt.value) != 0;
+    }
+#else
+    BUSTER_UNUSED(arena);
+#endif
+    string_print(valid ? S8("error: fixed retirement recipe awaits complete B oracle and service result producer\n") :
+                         S8("error: invalid fixed retirement recipe identity, channel or deadline\n"));
+    return PROCESS_RESULT_FAILED;
 }
 
 #include "tools/bench_service/zen5_recipe.c"
@@ -40447,6 +40543,36 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
         cases += 1;
         bench_service_recipe_test_fixture_cleanup(arena, &fixture);
     }
+    if (ok)
+    {
+        int phase_pair[2] = {-1, -1};
+        bool paired = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, phase_pair) == 0;
+        char descriptor_text[32], deadline_text[32];
+        u64 now = bq_phase_clock();
+        int descriptor_length = paired ? snprintf(descriptor_text, sizeof(descriptor_text), "%d", phase_pair[0]) : -1;
+        int deadline_length = now ? snprintf(deadline_text, sizeof(deadline_text), "%llu",
+                                             (unsigned long long)(now + UINT64_C(5000000000))) : -1;
+        String8 private_arguments[] = {
+            S8("1"), S8("2"), S8("/tmp/buster-retirement-boundary"),
+            S8("1111111111111111111111111111111111111111"),
+            S8("2222222222222222222222222222222222222222"),
+            S8("/tmp/buster-retirement-boundary/results/job-1-attempt-2"),
+            S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            string_from_pointer(descriptor_text), string_from_pointer(deadline_text)};
+        program.build_graph = (BuildGraph){0};
+        ProcessResult guarded = paired && descriptor_length > 0 && deadline_length > 0 ?
+            bench_service_retirement_recipe_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(private_arguments)) :
+            PROCESS_RESULT_SUCCESS;
+        bool no_child = guarded == PROCESS_RESULT_FAILED && !program.build_graph.first_step;
+        private_arguments[8] = S8("1");
+        ProcessResult expired = no_child ?
+            bench_service_retirement_recipe_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(private_arguments)) :
+            PROCESS_RESULT_SUCCESS;
+        ok = ok && no_child && expired == PROCESS_RESULT_FAILED && !program.build_graph.first_step;
+        if (phase_pair[0] >= 0) close(phase_pair[0]);
+        if (phase_pair[1] >= 0) close(phase_pair[1]);
+        cases += 1;
+    }
     unlink(fail_marker);
     unlink(tamper_marker);
     unlink(candidate_tamper_marker);
@@ -40462,7 +40588,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Arena* arena, SliceString8 arguments)
 {
     char script_root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
-    bool ok = arguments.length == BENCH_SERVICE_RECIPE_ARGUMENT_COUNT &&
+    bool ok = (arguments.length == BENCH_SERVICE_RECIPE_ARGUMENT_COUNT ||
+               arguments.length == BENCH_SERVICE_RECIPE_ARGUMENT_COUNT + 1) &&
               bench_service_recipe_test_script_setup(arena, script_root);
     ProcessResult result = PROCESS_RESULT_FAILED;
     if (ok)
@@ -40511,6 +40638,133 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Ar
 BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
 {
     native_foundation_tool_add(arena, arguments, true);
+#if BUSTER_LINUX
+    bool sanitize = arguments.length == 2 && string_equal(arguments.pointer[0], S8("self-test")) &&
+                    string_equal(arguments.pointer[1], S8("--sanitize"));
+    bool self_test = sanitize || (arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test")));
+    if (self_test)
+    {
+        /* The retirement recipe remains blocked. Register its private
+         * preparation, correctness, validator projection, store, reference
+         * issuer, and replay fixtures beside the ordinary service suite. The
+         * reference issuer fixture links its producer privately; the service
+         * binary links it for its unit caller, which nothing admitted calls. */
+        String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
+        String8 sources[] = {S8("tools/bench_service/retirement_prepare_tests.c"),
+                             S8("tools/bench_service/retirement_correctness_tests.c"),
+                             S8("tools/bench_service/retirement_result_tests.c"),
+                             S8("tools/bench_service/retirement_validator_eligibility.c"),
+                             S8("tools/bench_service/retirement_reference_producer_tests.c"),
+                             S8("tools/bench_service/retirement_compose_tests.c")};
+        String8 names[] = {S8("retirement-prepare-tests"), S8("retirement-correctness-tests"),
+                           S8("retirement-store-tests"), S8("retirement-validator-eligibility"),
+                           S8("retirement-reference-producer-tests"), S8("retirement-compose-tests")};
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            String8 executable = string_format(arena, S8("build/bench-service-tools/{S8}{S8}"),
+                names[index], sanitize ? S8("-sanitized") : S8(""));
+            ProcessRun* compile = run_add(arena, step_add(arena));
+            OsArgumentBuilder builder = os_argument_builder_start(arena);
+            os_argument_builder_append(&builder, compiler);
+            os_argument_builder_append(&builder, S8("-std=c11"));
+            os_argument_builder_append(&builder, S8("-O2"));
+            os_argument_builder_append(&builder, S8("-Wall"));
+            os_argument_builder_append(&builder, S8("-Wextra"));
+            os_argument_builder_append(&builder, S8("-Wpedantic"));
+            os_argument_builder_append(&builder, S8("-Werror"));
+            os_argument_builder_append(&builder, S8("-fwrapv"));
+            os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
+            os_argument_builder_append(&builder, S8("-funsigned-char"));
+            os_argument_builder_append(&builder, S8("-Isrc"));
+            os_argument_builder_append(&builder, S8("-DBUSTER_SINGLE_THREADED=1"));
+            if (index == 2 || index == 5) os_argument_builder_append(&builder, S8("-DBUSTER_RETIREMENT_STORE_TEST"));
+            os_argument_builder_append(&builder, sources[index]);
+            /* shared.c provides the arenas (and hash.c) the store uses. */
+            if (index == 0 || index == 2 || index == 3 || index == 5)
+                os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
+            /* The service translation unit (main.c, which the preparation
+             * runner and the eligibility probe include) plans lane E's
+             * result store in the worker-unit campaign. */
+            if (index == 0 || index == 3 || index == 5)
+            {
+                os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose.c"));
+                os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose_json.c"));
+            }
+            /* The preparation and eligibility fixtures include the service,
+             * whose coordinator hands the retirement authority off through
+             * the store (#881). */
+            if (index == 0 || index == 2 || index == 3 || index == 5)
+                os_argument_builder_append(&builder, S8("tools/bench_service/retirement_result.c"));
+            if (sanitize)
+            {
+                os_argument_builder_append(&builder, S8("-g"));
+                os_argument_builder_append(&builder, S8("-DBUSTER_SANITIZE=1"));
+                os_argument_builder_append(&builder, S8("-fsanitize=address,undefined"));
+                os_argument_builder_append(&builder, S8("-fno-sanitize-recover=all"));
+            }
+            os_argument_builder_append(&builder, S8("-lm"));
+            os_argument_builder_append(&builder, S8("-o"));
+            os_argument_builder_append(&builder, executable);
+            *compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                                    .working_directory = S8("."),
+                                    .spawn_options = {.use_process_environment = 1}};
+            ProcessRun* run = run_add(arena, step_add(arena));
+            builder = os_argument_builder_start(arena);
+            if (index == 3)
+            {
+                os_argument_builder_append(&builder, S8("python3"));
+                os_argument_builder_append(&builder, S8("-W"));
+                os_argument_builder_append(&builder, S8("error"));
+                os_argument_builder_append(&builder,
+                    S8("tools/bench_service/retirement_validator_eligibility_test.py"));
+            }
+            os_argument_builder_append(&builder, executable);
+            *run = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                                .working_directory = S8("."),
+                                .spawn_options = {.use_process_environment = 1, .search_path = index == 3}};
+            if (index == 0)
+            {
+                /* The worker unit's composed result, which the preparation
+                 * runner exported beside itself, through lane F's replay CLI
+                 * path (#881 PR 3). */
+                ProcessRun* join = run_add(arena, step_add(arena));
+                builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, S8("python3"));
+                os_argument_builder_append(&builder, S8("-W"));
+                os_argument_builder_append(&builder, S8("error"));
+                os_argument_builder_append(&builder, S8("tools/bench_service/retirement_export_replay_real_test.py"));
+                os_argument_builder_append(&builder, S8("--worker-unit"));
+                os_argument_builder_append(&builder, S8("build/bench-service-tools/retirement-worker-unit-result"));
+                *join = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                                     .working_directory = S8("."),
+                                     .spawn_options = {.use_process_environment = 1, .search_path = 1}};
+            }
+            if (index == 5)
+            {
+                /* The composed sealed result through the #511 validator. */
+                ProcessRun* validate = run_add(arena, step_add(arena));
+                builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, S8("python3"));
+                os_argument_builder_append(&builder, S8("-W"));
+                os_argument_builder_append(&builder, S8("error"));
+                os_argument_builder_append(&builder, S8("tools/bench_service/retirement_compose_test.py"));
+                os_argument_builder_append(&builder, executable);
+                *validate = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                                         .working_directory = S8("."),
+                                         .spawn_options = {.use_process_environment = 1, .search_path = 1}};
+            }
+        }
+        ProcessRun* replay = run_add(arena, step_add(arena));
+        OsArgumentBuilder builder = os_argument_builder_start(arena);
+        os_argument_builder_append(&builder, S8("python3"));
+        os_argument_builder_append(&builder, S8("-W"));
+        os_argument_builder_append(&builder, S8("error"));
+        os_argument_builder_append(&builder, S8("tools/bench_service/retirement_export_replay_test.py"));
+        *replay = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                               .working_directory = S8("."),
+                               .spawn_options = {.use_process_environment = 1, .search_path = 1}};
+    }
+#endif
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceString8 arguments)
@@ -40792,6 +41046,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_BENCH_SERVICE] = S8_INITIALIZER("bench_service"),
         [BUILD_COMMAND_BENCH_SERVICE_BROKER] = S8_INITIALIZER("bench_service_broker"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE] = S8_INITIALIZER("bench_service_recipe"),
+        [BUILD_COMMAND_BENCH_SERVICE_RETIREMENT_RECIPE] = S8_INITIALIZER("bench_service_retirement_recipe"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
         [BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE] = S8_INITIALIZER("bench_service_zen5_recipe"),
         [BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE] = S8_INITIALIZER("bench_service_zen5_capture"),
@@ -40952,6 +41207,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         String8 argument = arguments.pointer[argument_i];
         if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_BROKER ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
+            command == BUILD_COMMAND_BENCH_SERVICE_RETIREMENT_RECIPE ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST || command == BUILD_COMMAND_BENCH_THROUGHPUT ||
             command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE || command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE ||
             command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST ||
@@ -41919,6 +42175,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_BENCH_SERVICE_RECIPE:
         {
             result = bench_service_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_RETIREMENT_RECIPE:
+        {
+            result = bench_service_retirement_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
         }
         break;
         case BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST:

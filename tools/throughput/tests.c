@@ -8,6 +8,8 @@
 #undef main
 #undef TP_WORKLOAD_TEST_ALLOCATIONS
 #include "retirement_stats.h"
+#include "retirement_execution.h"
+#include "retirement_samples.h"
 
 static unsigned test_assertions, test_failures;
 #define CHECK(c) do { ++test_assertions; if (!(c)) { ++test_failures; fprintf(stderr, "TEST failure %d: %s\n", __LINE__, #c); } } while (0)
@@ -55,6 +57,8 @@ static int test_text(char const* root, char const* name, char const* text)
     if (file && fclose(file) != 0) ok = 0;
     return ok;
 }
+
+#include "retirement_metrics_test.h"
 
 #ifdef __linux__
 static void test_service_output_share(char const* root)
@@ -1753,6 +1757,18 @@ static void test_retirement_statistics(void)
         series.family_index = 0;
         series.metric_index = TP_RETIREMENT_VARIABLE_METRICS;
         CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
+        /* A1 appended the batch process pair without moving existing indices. */
+        CHECK(TP_RETIREMENT_WALL_TIME == 0 && TP_RETIREMENT_PEAK_MEMORY == 1 &&
+              TP_RETIREMENT_GENERATED_RUNTIME == 2 && TP_RETIREMENT_BATCH_WALL_TIME == 3 &&
+              TP_RETIREMENT_BATCH_PEAK_RSS == 4 && TP_RETIREMENT_VARIABLE_METRICS == 5);
+        series.metric_index = TP_RETIREMENT_BATCH_WALL_TIME;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).valid);
+        series.metric_index = TP_RETIREMENT_BATCH_PEAK_RSS;
+        CHECK(tp_retirement_assess(&plan, &series, NULL, 0).valid);
+        for (unsigned metric = 0; metric < TP_RETIREMENT_VARIABLE_METRICS; ++metric)
+            for (unsigned other = metric + 1; other < TP_RETIREMENT_VARIABLE_METRICS; ++other)
+                CHECK(tp_retirement_seed(plan.seed, TP_RETIREMENT_SEED_DOMAIN_BOOTSTRAP, metric, 0, 0) !=
+                      tp_retirement_seed(plan.seed, TP_RETIREMENT_SEED_DOMAIN_BOOTSTRAP, other, 0, 0));
         series.metric_index = 0;
         plan.resamples = TP_RETIREMENT_MIN_RESAMPLES - 1;
         CHECK(tp_retirement_assess(&plan, &series, NULL, 0).outcome == TP_RETIREMENT_INVALID);
@@ -1795,13 +1811,1145 @@ static void test_retirement_statistics(void)
     }
 }
 
+/* One aggregate and one exact cell for each of the five variable metrics, in
+ * member order. first_metric is the index written for the first member, so a
+ * caller can present a batch member under another metric's index. The series
+ * text goes to `series` (at most `capacity` bytes); 0 on overflow. */
+static size_t test_retirement_series_text(char* series, size_t capacity, unsigned first_metric)
+{
+    static char const* const names[] = {"compiler_batch_peak_rss", "compiler_batch_wall_time",
+                                        "compiler_peak_memory", "compiler_wall_time",
+                                        "generated_runtime"};
+    static unsigned const metrics[] = {TP_RETIREMENT_BATCH_PEAK_RSS, TP_RETIREMENT_BATCH_WALL_TIME,
+                                       TP_RETIREMENT_PEAK_MEMORY, TP_RETIREMENT_WALL_TIME,
+                                       TP_RETIREMENT_GENERATED_RUNTIME};
+    static char const* const cells[] = {"group=0", "group=0", "row=0", "row=0", "row=0"};
+    static char const* const aggregate_limits[] = {"1.02", "1.02", "1.02", "1.02", "1.03"};
+    static char const* const cell_limits[] = {"1.05", "1.05", "1.05", "1.05", "1.03"};
+    int length = snprintf(series, capacity, "version=1 seed=20260913 bootstrap_members=5 cell_members=5 pairs=60 "
+                                            "resamples=100000 frozen=1 members=10\n");
+    size_t used = length > 0 ? (size_t)length : capacity;
+    for (unsigned index = 0; used < capacity && index < 5; ++index)
+    {
+        for (unsigned kind = 0; used < capacity && kind < 2; ++kind)
+        {
+            unsigned metric = index == 0 && kind == 0 ? first_metric : metrics[index];
+            length = kind ? snprintf(series + used, capacity - used,
+                                     "member=%s/cell/%s metric=%u kind=1 family=%u cells=1 pairs=60 resamples=0 limit=%s\n",
+                                     names[index], cells[index], metric, index, cell_limits[index]) :
+                            snprintf(series + used, capacity - used,
+                                     "member=%s/aggregate metric=%u kind=0 family=%u cells=1 pairs=60 resamples=100000 limit=%s\n",
+                                     names[index], metric, index, aggregate_limits[index]);
+            used = length > 0 ? used + (size_t)length : capacity;
+            for (unsigned ratio = 0; used < capacity && ratio < 2 * TP_RETIREMENT_MIN_PAIRS_PER_ROUND; ++ratio)
+            {
+                length = snprintf(series + used, capacity - used, "ratio=1\n");
+                used = length > 0 ? used + (size_t)length : capacity;
+            }
+            length = used < capacity ? snprintf(series + used, capacity - used, "end\n") : -1;
+            used = length > 0 ? used + (size_t)length : capacity;
+        }
+    }
+    return used < capacity ? used : 0;
+}
+
+/* #1880 series manifest defects: each breaks exactly one reader rule. */
+typedef enum TestSeriesDefect
+{
+    TEST_SERIES_CANONICAL,
+    TEST_SERIES_REORDERED_CONTENT,
+    TEST_SERIES_LISTED_SWAP,
+    TEST_SERIES_WRONG_INDEX,
+    TEST_SERIES_MISSING,
+    TEST_SERIES_DUPLICATED,
+    TEST_SERIES_GAP,
+    TEST_SERIES_EARLY_SPLIT,
+    TEST_SERIES_OVERSIZED,
+    TEST_SERIES_RANGE_LOW,
+    TEST_SERIES_RANGE_HIGH,
+    TEST_SERIES_COUNT_ZERO,
+    TEST_SERIES_COVERAGE_LONG,
+    TEST_SERIES_COVERAGE_SHORT,
+    TEST_SERIES_BAD_LEAF,
+    TEST_SERIES_PATH_LEAF,
+    TEST_SERIES_JOINED_DIGEST,
+    TEST_SERIES_REPLACED,
+    TEST_SERIES_SHARD_SHORT,
+    TEST_SERIES_SHARD_LONG,
+    TEST_SERIES_SHARD_NO_LF,
+    TEST_SERIES_ABSENT,
+    TEST_SERIES_TRAILING,
+    TEST_SERIES_MANIFEST_NO_LF,
+    TEST_SERIES_PLUS_OFFSET,
+    TEST_SERIES_ZERO_OFFSET,
+    TEST_SERIES_ZERO_COUNT_TEXT,
+    TEST_SERIES_BAD_HEADER,
+    TEST_SERIES_DEFECTS
+} TestSeriesDefect;
+
+/* The rule each defect breaks (NULL: accepted), in TestSeriesDefect order. */
+static char const* const test_series_rules[TEST_SERIES_DEFECTS] = {
+    NULL, "series-digest", "shard-index", "shard-index", "coverage", "shard-duplicate", "shard-offset",
+    "non-canonical-split", "shard-size", "shard-bytes-range", "shard-bytes-range", "shard-count", "coverage",
+    "coverage", "shard-leaf", "shard-leaf", "series-digest", "shard-digest", "shard-length", "shard-overrun",
+    "line-boundary", "shard-open", "manifest-trailing", "shard-line", "shard-line", "shard-line", "series-line",
+    "manifest-header"};
+
+#define TEST_SERIES_BYTES 32768u
+#define TEST_SERIES_SHARDS 16u
+#define TEST_SERIES_MANIFEST "series-manifest.txt"
+
+typedef struct TestSeriesEntry
+{
+    char const* content;
+    size_t length;
+    uint64_t bytes, offset;
+    unsigned index;
+    char sha256[65];
+    char leaf[64];
+} TestSeriesEntry;
+
+/* Insert `text` after the first `at` in the NUL-terminated `buffer` of
+ * `length` bytes; the new length, or 0 when absent or out of room. */
+static size_t test_series_insert(char* buffer, size_t length, size_t capacity, char const* at, char const* text)
+{
+    char* found = strstr(buffer, at);
+    size_t add = strlen(text), result = 0;
+    if (found && length + add < capacity)
+    {
+        size_t position = (size_t)(found - buffer) + strlen(at);
+        memmove(buffer + position + add, buffer + position, length - position + 1);
+        memcpy(buffer + position, text, add);
+        result = length + add;
+    }
+    return result;
+}
+
+/* Split `series` greedily over whole lines (TP_SERIES_SHARD_BYTES_MIN, the
+ * adapter's smallest shard size, so the small fixture spans several shards),
+ * write the canonical shard leaves and `series-manifest.txt` into
+ * `directory`, and apply `defect`. */
+static int test_series_write(char const* directory, char const* series, size_t length, TestSeriesDefect defect)
+{
+    static char modified[TEST_SERIES_BYTES];
+    size_t starts[TEST_SERIES_SHARDS + 1], shard_start = 0, cursor = 0;
+    size_t cap = defect == TEST_SERIES_OVERSIZED ? 2 * TP_SERIES_SHARD_BYTES_MIN : TP_SERIES_SHARD_BYTES_MIN;
+    unsigned count = 0;
+    int ok = tp_mkdirs(directory) && length > 0 && length < sizeof(modified) && series[length - 1] == '\n';
+    while (ok && cursor < length)
+    {
+        char const* newline = memchr(series + cursor, '\n', length - cursor);
+        size_t line = (size_t)(newline - (series + cursor)) + 1;
+        /* The early split closes shard 0 after its first line. */
+        int split = cursor > shard_start && (cursor + line - shard_start > cap ||
+                                             (defect == TEST_SERIES_EARLY_SPLIT && count == 0));
+        if (split)
+        {
+            ok = count < TEST_SERIES_SHARDS;
+            if (ok) starts[count++] = shard_start;
+            shard_start = cursor;
+        }
+        cursor += line;
+    }
+    ok = ok && count < TEST_SERIES_SHARDS;
+    if (ok)
+    {
+        starts[count++] = shard_start;
+        starts[count] = length;
+    }
+    ok = ok && count >= (defect == TEST_SERIES_OVERSIZED ? 2u : 3u);
+    TestSeriesEntry entries[TEST_SERIES_SHARDS + 1];
+    unsigned listed = 0;
+    for (unsigned i = 0; ok && i < count; ++i)
+    {
+        /* The reordered content swaps the first two files (their manifest
+         * lines follow them), so only the joined digest differs. */
+        unsigned source = defect == TEST_SERIES_REORDERED_CONTENT && i < 2 ? 1 - i : i;
+        if (defect != TEST_SERIES_MISSING || i != 1)
+        {
+            entries[listed] = (TestSeriesEntry){.content = series + starts[source],
+                                                .length = starts[source + 1] - starts[source]};
+            entries[listed].bytes = entries[listed].length;
+            ++listed;
+        }
+        if (defect == TEST_SERIES_DUPLICATED && i == 1)
+        {
+            entries[listed] = entries[listed - 1];
+            ++listed;
+        }
+    }
+    /* The manifest describes the files as listed; shard 1's file is then
+     * damaged (same size, shorter, longer or without its final LF). */
+    uint64_t offset = 0;
+    for (unsigned i = 0; ok && i < listed; ++i)
+    {
+        TestSeriesEntry* entry = entries + i;
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, entry->content, (u64)entry->bytes);
+        sha256_finish_hex(&hash, entry->sha256);
+        entry->index = i;
+        entry->offset = offset;
+        offset += entry->bytes;
+        ok = snprintf(entry->leaf, sizeof(entry->leaf), TP_SERIES_LEAF_FORMAT, i) > 0;
+    }
+    if (ok && (defect == TEST_SERIES_REPLACED || defect == TEST_SERIES_SHARD_SHORT ||
+               defect == TEST_SERIES_SHARD_LONG || defect == TEST_SERIES_SHARD_NO_LF))
+    {
+        TestSeriesEntry* entry = entries + 1;
+        memcpy(modified, entry->content, entry->length);
+        modified[entry->length] = 0;
+        if (defect == TEST_SERIES_REPLACED)
+        {
+            char* ratio = strstr(modified, "ratio=1\n");
+            ok = ratio != NULL;
+            if (ok) ratio[6] = '2';
+        }
+        else if (defect == TEST_SERIES_SHARD_SHORT)
+        {
+            size_t end = entry->length - 1;
+            while (end && modified[end - 1] != '\n') --end;
+            entry->length = end;
+        }
+        else if (defect == TEST_SERIES_SHARD_LONG)
+        {
+            memcpy(modified + entry->length, "end\n", 4);
+            entry->length += 4;
+        }
+        else entry->length -= 1;
+        entry->content = modified;
+    }
+    /* Files take their canonical leaves by position (one is absent). */
+    for (unsigned i = 0; ok && i < listed; ++i)
+    {
+        char path[TP_PATH_CAP];
+        if (defect != TEST_SERIES_ABSENT || i != 2)
+        {
+            FILE* file = tp_path(path, directory, entries[i].leaf) ? fopen(path, "wb") : NULL;
+            ok = file && fwrite(entries[i].content, 1, entries[i].length, file) == entries[i].length;
+            if (file && fclose(file) != 0) ok = 0;
+        }
+    }
+    /* Manifest-only defects. */
+    if (ok && defect == TEST_SERIES_DUPLICATED) strcpy(entries[2].leaf, entries[1].leaf);
+    if (ok && defect == TEST_SERIES_LISTED_SWAP)
+    {
+        TestSeriesEntry first = entries[0];
+        entries[0] = entries[1];
+        entries[1] = first;
+        entries[0].offset = 0;
+        entries[1].offset = entries[0].bytes;
+    }
+    if (ok && defect == TEST_SERIES_WRONG_INDEX) entries[1].index = 5;
+    if (ok && defect == TEST_SERIES_GAP) entries[1].offset += 1;
+    if (ok && defect == TEST_SERIES_BAD_LEAF) strcpy(entries[1].leaf, "retirement-statistics-series-0001.TXT");
+    if (ok && defect == TEST_SERIES_PATH_LEAF) strcpy(entries[1].leaf, "../retirement-statistics-series-0001.txt");
+    char manifest[TEST_SERIES_SHARDS * 256 + 512], total[65];
+    Sha256 hash;
+    sha256_init(&hash);
+    sha256_add(&hash, series, (u64)length);
+    sha256_finish_hex(&hash, total);
+    if (defect == TEST_SERIES_JOINED_DIGEST) memset(total, '0', 64);
+    uint64_t declared_total = (uint64_t)length + (defect == TEST_SERIES_COVERAGE_LONG) -
+                              (defect == TEST_SERIES_COVERAGE_SHORT);
+    uint64_t shard_bytes = defect == TEST_SERIES_RANGE_LOW ? TP_SERIES_SHARD_BYTES_MIN - 1 :
+                           defect == TEST_SERIES_RANGE_HIGH ? TP_SERIES_SHARD_BYTES_MAX + 1 : TP_SERIES_SHARD_BYTES_MIN;
+    int used = snprintf(manifest, sizeof(manifest),
+                        "%s%sseries bytes=%" PRIu64 " sha256=%s shards=%u shard_bytes=%" PRIu64 "\n",
+                        defect == TEST_SERIES_BAD_HEADER ? "#" : "", TP_SERIES_MANIFEST_HEADER, declared_total, total,
+                        defect == TEST_SERIES_COUNT_ZERO ? 0u : listed, shard_bytes);
+    size_t size = used > 0 ? (size_t)used : sizeof(manifest);
+    for (unsigned i = 0; ok && size < sizeof(manifest) && i < listed; ++i)
+    {
+        used = snprintf(manifest + size, sizeof(manifest) - size,
+                        "shard=%u offset=%" PRIu64 " bytes=%" PRIu64 " sha256=%s path=%s\n", entries[i].index,
+                        entries[i].offset, entries[i].bytes, entries[i].sha256, entries[i].leaf);
+        size = used > 0 ? size + (size_t)used : sizeof(manifest);
+    }
+    ok = ok && size + 1 < sizeof(manifest);
+    if (ok && defect == TEST_SERIES_TRAILING) manifest[size++] = '\n';
+    if (ok && defect == TEST_SERIES_MANIFEST_NO_LF) --size;
+    if (ok && defect == TEST_SERIES_PLUS_OFFSET)
+        size = test_series_insert(manifest, size, sizeof(manifest), "shard=1 offset=", "+");
+    if (ok && defect == TEST_SERIES_ZERO_OFFSET)
+        size = test_series_insert(manifest, size, sizeof(manifest), "shard=1 offset=", "0");
+    if (ok && defect == TEST_SERIES_ZERO_COUNT_TEXT)
+        size = test_series_insert(manifest, size, sizeof(manifest), " shards=", "0");
+    ok = ok && size > 0;
+    char manifest_path[TP_PATH_CAP];
+    FILE* file = ok && tp_path(manifest_path, directory, TEST_SERIES_MANIFEST) ? fopen(manifest_path, "wb") : NULL;
+    ok = file && fwrite(manifest, 1, size, file) == size;
+    if (file && fclose(file) != 0) ok = 0;
+    return ok;
+}
+
+/* Read the manifest in `directory` and every series line: NULL when the
+ * whole series is accepted, otherwise the rule the reader names. */
+static char const* test_series_read(char const* directory)
+{
+    char path[TP_PATH_CAP], line[TP_SERIES_LINE_BYTES];
+    TpSeriesReader reader = {0};
+    char const* refused = "path";
+    if (tp_path(path, directory, TEST_SERIES_MANIFEST))
+    {
+        int status = tp_series_open(&reader, path) ? 1 : -1;
+        while (status == 1) status = tp_series_line(&reader, line, sizeof(line));
+        tp_series_close(&reader);
+        refused = reader.refused ? reader.refused : status ? "unnamed" : NULL;
+    }
+    return refused;
+}
+
+static int test_retirement_series(char const* directory, unsigned first_metric)
+{
+    char series[TEST_SERIES_BYTES];
+    size_t length = test_retirement_series_text(series, sizeof(series), first_metric);
+    int ok = length && test_series_write(directory, series, length, TEST_SERIES_CANONICAL);
+    return ok;
+}
+
+/* The reviewed retirement-replay adapter consumes the A1 batch series. */
+static void test_retirement_replay(char const* root)
+{
+    char directory[TP_PATH_CAP], input[TP_PATH_CAP], output[TP_PATH_CAP], result[16384];
+    TpConfig config = {0};
+    CHECK(tp_path(directory, root, "retirement-replay-series") &&
+          tp_path(input, directory, TEST_SERIES_MANIFEST) &&
+          tp_path(output, root, "retirement-replay-result.json"));
+    config.command = "retirement-replay";
+    config.retirement_input = input;
+    config.output = output;
+    CHECK(test_retirement_series(directory, TP_RETIREMENT_BATCH_PEAK_RSS));
+    CHECK(tp_retirement_replay(&config) == 0);
+    FILE* file = fopen(output, "rb");
+    size_t count = file ? fread(result, 1, sizeof(result) - 1, file) : 0;
+    if (file) fclose(file);
+    result[count] = 0;
+    CHECK(count > 0 && count < sizeof(result) - 1);
+    CHECK(strstr(result, "{\"member\":\"compiler_batch_peak_rss/aggregate\",\"metric\":4,\"kind\":0,") != NULL);
+    CHECK(strstr(result, "{\"member\":\"compiler_batch_peak_rss/cell/group=0\",\"metric\":4,\"kind\":1,") != NULL);
+    CHECK(strstr(result, "{\"member\":\"compiler_batch_wall_time/aggregate\",\"metric\":3,\"kind\":0,") != NULL);
+    CHECK(strstr(result, "{\"member\":\"compiler_batch_wall_time/cell/group=0\",\"metric\":3,\"kind\":1,") != NULL);
+    CHECK(strstr(result, "{\"member\":\"compiler_peak_memory/cell/row=0\",\"metric\":1,\"kind\":1,") != NULL);
+    unsigned members = 0, passes = 0;
+    for (char const* cursor = strstr(result, "{\"member\":"); cursor; cursor = strstr(cursor + 1, "{\"member\":"))
+        ++members;
+    for (char const* cursor = strstr(result, "\"outcome\":\"pass\""); cursor; cursor = strstr(cursor + 1, "\"outcome\":\"pass\""))
+        ++passes;
+    CHECK(members == 10 && passes == 10);
+    /* A batch member under another metric's index, or an unknown index, is rejected. */
+    CHECK(test_retirement_series(directory, TP_RETIREMENT_WALL_TIME));
+    CHECK(tp_retirement_replay(&config) == 2);
+    CHECK(test_retirement_series(directory, TP_RETIREMENT_BATCH_WALL_TIME));
+    CHECK(tp_retirement_replay(&config) == 2);
+    CHECK(test_retirement_series(directory, TP_RETIREMENT_VARIABLE_METRICS));
+    CHECK(tp_retirement_replay(&config) == 2);
+    /* (#1880) Each manifest or shard defect is refused for its own rule, in
+     * a fresh directory; the canonical shards pass and replay. */
+    char series[TEST_SERIES_BYTES];
+    size_t length = test_retirement_series_text(series, sizeof(series), TP_RETIREMENT_BATCH_PEAK_RSS);
+    CHECK(length > 0);
+    for (unsigned defect = 0; length && defect < TEST_SERIES_DEFECTS; ++defect)
+    {
+        char leaf[64], case_directory[TP_PATH_CAP], manifest[TP_PATH_CAP];
+        int written = snprintf(leaf, sizeof(leaf), "retirement-series-defect-%02u", defect) > 0 &&
+                      tp_path(case_directory, root, leaf) &&
+                      test_series_write(case_directory, series, length, (TestSeriesDefect)defect) &&
+                      tp_path(manifest, case_directory, TEST_SERIES_MANIFEST);
+        CHECK(written);
+        char const* refused = written ? test_series_read(case_directory) : "unwritten";
+        char const* expected = test_series_rules[defect];
+        int matched = expected ? refused && !strcmp(refused, expected) : !refused;
+        CHECK(matched);
+        if (!matched)
+            fprintf(stderr, "TEST series defect=%u refused=%s expected=%s\n", defect, refused ? refused : "none",
+                    expected ? expected : "none");
+        TpConfig defect_config = config;
+        defect_config.retirement_input = manifest;
+        CHECK(written && tp_retirement_replay(&defect_config) == (expected ? 2 : 0));
+    }
+    /* An absent manifest is refused before anything is read. */
+    char absent[TP_PATH_CAP];
+    CHECK(tp_path(absent, root, "retirement-series-absent"));
+    CHECK(test_series_read(absent) && !strcmp(test_series_read(absent), "manifest-open"));
+}
+
+static void test_retirement_execution(void)
+{
+    TpRetirementExecution state;
+    TpRetirementInvocation invocation, repeated;
+    unsigned workspace[11], runtime[] = {0, 2};
+    CHECK(!tp_retirement_execution_init(&state, 0, 3, runtime, 2, 3, 60, workspace, 11));
+    CHECK(tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_INVALID);
+    CHECK(!tp_retirement_execution_init(&state, 1, 0, NULL, 0, 3, 60, workspace, 0));
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, runtime, 2, 3, 58, workspace, 11));
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, runtime, 2, 3, 61, workspace, 11));
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, runtime, 2, 3, 256, workspace, 11));
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, runtime, 2, 3, 60, workspace, 10));
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, NULL, 1, 3, 60, workspace, 10));
+    /* Every runtime row is a singleton group; the population holds each group. */
+    CHECK(!tp_retirement_execution_init(&state, 1, 1, runtime, 2, 3, 60, workspace, 5));
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, runtime, 2, 2, 60, workspace, 11));
+    runtime[1] = 0;
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, runtime, 2, 3, 60, workspace, 11));
+    runtime[1] = 3;
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, runtime, 2, 3, 60, workspace, 11));
+    runtime[1] = 2;
+    CHECK(!tp_retirement_execution_init(&state, 1, TP_RETIREMENT_MAX_CELLS + 1, runtime, 2,
+                                        TP_RETIREMENT_MAX_CELLS + 1, 60, workspace, 11));
+    uint64_t const seeds[] = {1, UINT64_MAX};
+    char const* const expected[] = {
+        "e909ce4a5980920899098162247f82cdfd9f40ce66f30c122696d3fee21f3c61",
+        "27b0478d9131e4dae6cd7e4d54c61d5f3004542ff4210b8c4ea5c3e5c323ecdc"};
+    /* Independently generated by #568's _execution_schedule, all 1,220
+     * compiler/runtime events including two warmups and both rounds, for three
+     * singleton groups whose rows 0 and 2 are runtime-eligible: each line's
+     * unit is the compiler group or the runtime row. */
+    for (unsigned fixture = 0; fixture < 2; ++fixture)
+    {
+        CHECK(tp_retirement_execution_init(&state, seeds[fixture], 3, runtime, 2, 3, 60, workspace, 11));
+        CHECK(!tp_retirement_execution_complete(&state));
+        unsigned counts[2][3][2] = {{{0}}};
+        uint64_t count = 0;
+        Sha256 hash;
+        sha256_init(&hash);
+        TpRetirementNext next;
+        while ((next = tp_retirement_execution_peek(&state, &invocation)) == TP_RETIREMENT_NEXT_READY)
+        {
+            CHECK(tp_retirement_execution_peek(&state, &repeated) == TP_RETIREMENT_NEXT_READY);
+            CHECK(invocation.sequence == repeated.sequence && invocation.group == repeated.group &&
+                  invocation.row == repeated.row &&
+                  invocation.kind == repeated.kind && invocation.phase == repeated.phase &&
+                  invocation.variant == repeated.variant && invocation.round == repeated.round &&
+                  invocation.pair == repeated.pair && invocation.warmup == repeated.warmup &&
+                  invocation.position == repeated.position);
+            unsigned unit = invocation.kind ? invocation.row : invocation.group;
+            CHECK(invocation.sequence == count && unit < 3 && invocation.kind < 2 && invocation.variant < 2 &&
+                  (invocation.kind ? invocation.group : invocation.row) == TP_RETIREMENT_NONE);
+            if (unit < 3 && invocation.kind < 2 && invocation.variant < 2)
+                ++counts[invocation.kind][unit][invocation.variant];
+            char line[128];
+            int length = snprintf(line, sizeof(line), "%" PRIu64 ",%u,%u,%u,%u,%d,%d,%d,%d\n",
+                invocation.sequence, unit, invocation.kind, invocation.phase, invocation.variant,
+                invocation.round, invocation.pair, invocation.warmup, invocation.position);
+            CHECK(length > 0 && (size_t)length < sizeof(line));
+            if (length > 0 && (size_t)length < sizeof(line)) sha256_add(&hash, line, (u64)length);
+            CHECK(tp_retirement_execution_commit(&state, 1));
+            ++count;
+        }
+        char digest[65];
+        sha256_finish_hex(&hash, digest);
+        CHECK(next == TP_RETIREMENT_NEXT_DONE && count == 1220 && state.expected == count);
+        CHECK(!strcmp(digest, expected[fixture]));
+        for (unsigned unit = 0; unit < 3; ++unit)
+            for (unsigned variant = 0; variant < 2; ++variant)
+            {
+                CHECK(counts[0][unit][variant] == 122);
+                CHECK(counts[1][unit][variant] == (unit == 1 ? 0 : 122));
+            }
+        CHECK(tp_retirement_execution_complete(&state));
+        CHECK(tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_DONE);
+        CHECK(!tp_retirement_execution_commit(&state, 1));
+        CHECK(!tp_retirement_execution_complete(&state));
+    }
+    CHECK(tp_retirement_execution_init(&state, 1, 3, runtime, 2, 3, 60, workspace, 11));
+    runtime[1] = 1;
+    CHECK(state.runtime_rows[1] == 2); /* Frozen map, not a borrowed mutable array. */
+    runtime[1] = 2;
+    CHECK(tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_READY);
+    CHECK(!tp_retirement_execution_complete(&state));
+    CHECK(!tp_retirement_execution_commit(&state, 0));
+    CHECK(tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_INVALID);
+    CHECK(!tp_retirement_execution_commit(&state, 1));
+    CHECK(!tp_retirement_execution_complete(&state));
+    CHECK(tp_retirement_execution_init(&state, 1, 3, NULL, 0, 3, 254, workspace, 9));
+    uint64_t count = 0;
+    while (tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_READY)
+    {
+        CHECK(!invocation.kind);
+        CHECK(tp_retirement_execution_commit(&state, 1));
+        ++count;
+    }
+    CHECK(count == 3060 && tp_retirement_execution_complete(&state));
+    /* Runtime rows are sparse census IDs; compiler cells are dense groups. */
+    unsigned sparse_workspace[11], sparse_runtime[] = {0, 10};
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, sparse_runtime, 2, 11, 60, sparse_workspace, 10));
+    sparse_runtime[1] = 0;
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, sparse_runtime, 2, 11, 60, sparse_workspace, 11));
+    sparse_runtime[1] = 11;
+    CHECK(!tp_retirement_execution_init(&state, 1, 3, sparse_runtime, 2, 11, 60, sparse_workspace, 11));
+    sparse_runtime[1] = 10;
+    CHECK(tp_retirement_execution_init(&state, 1, 3, sparse_runtime, 2, 11, 60, sparse_workspace, 11));
+    sparse_runtime[1] = 7;
+    count = 0;
+    unsigned sparse_counts[2][3] = {{0}};
+    while (tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_READY)
+    {
+        CHECK(invocation.kind ? invocation.dense < 2 && invocation.row == state.runtime_rows[invocation.dense] &&
+                  invocation.row != 7 && invocation.group == TP_RETIREMENT_NONE :
+              invocation.dense < 3 && invocation.group == invocation.dense && invocation.row == TP_RETIREMENT_NONE);
+        if (invocation.dense < 3 && invocation.kind < 2)
+            ++sparse_counts[invocation.kind][invocation.dense];
+        CHECK(tp_retirement_execution_commit(&state, 1));
+        ++count;
+    }
+    CHECK(count == 1220 && tp_retirement_execution_complete(&state));
+    CHECK(sparse_counts[0][0] == 244 && sparse_counts[0][1] == 244 && sparse_counts[0][2] == 244);
+    CHECK(sparse_counts[1][0] == 244 && sparse_counts[1][1] == 244 && sparse_counts[1][2] == 0);
+    CHECK(state.runtime_rows[0] == 0 && state.runtime_rows[1] == 10);
+    /* Exercise the real #929 population dimensions without running any
+     * benchmark processes. The layout is synthetic; the service must
+     * independently authenticate its actual applicability projection. */
+    unsigned const eligible = 72672, population = 78912;
+    unsigned* large_ids = malloc(sizeof(*large_ids) * eligible);
+    unsigned* large_workspace = malloc(sizeof(*large_workspace) * eligible * 4);
+    CHECK(large_ids && large_workspace);
+    if (large_ids && large_workspace)
+    {
+        for (unsigned index = 0; index < eligible; ++index) large_ids[index] = index + 6240;
+        CHECK(tp_retirement_execution_init(&state, 1, eligible, NULL, 0, population, 60,
+                                           large_workspace, (size_t)eligible * 3));
+        CHECK(state.expected == UINT64_C(17731968));
+        CHECK(tp_retirement_samples_count(eligible, 60) == UINT64_C(8720640));
+        CHECK(tp_retirement_execution_init(&state, 1, eligible, large_ids, eligible, population, 60,
+                                           large_workspace, (size_t)eligible * 4));
+        CHECK(state.expected == UINT64_C(35463936) && state.runtime_rows[0] == 6240 &&
+              state.runtime_rows[eligible - 1] == eligible - 1 + 6240);
+        CHECK(tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_READY &&
+              invocation.group == 0 && invocation.dense == 0 && !invocation.kind);
+    }
+    free(large_ids);
+    free(large_workspace);
+    char digest[65];
+    CHECK(tp_retirement_process_instance(digest, "job-1", 2, "boot-123", 4321, "987654"));
+    CHECK(!strcmp(digest, "feff1be0001f01e4348977e86b09ee13df0d29f6c4a76418bcd2b85282b5dd03"));
+    char other[65];
+    CHECK(tp_retirement_process_instance(other, "job-1", 2, "boot-123", 4321, "987655"));
+    CHECK(strcmp(other, digest) != 0); /* PID reuse does not reuse process identity. */
+    CHECK(!tp_retirement_process_instance(digest, "job\"1", 2, "boot-123", 4321, "987654"));
+    CHECK(!tp_retirement_process_instance(digest, "job-1", 0, "boot-123", 4321, "987654"));
+    CHECK(!tp_retirement_process_instance(digest, "job-1", 2, "boot-123", 0, "987654"));
+    CHECK(!tp_retirement_process_instance(digest, "job-1", 2, "boot-123", 4321, ""));
+    /* Metrics shards are named by writer tag and index, never by a process. */
+    char metrics_path[TP_RETIREMENT_METRICS_PATH_CAP];
+    CHECK(tp_retirement_metrics_shard_path(metrics_path, "ab", 7) &&
+          !strcmp(metrics_path, "retirement-metrics-ab-0007.txt") && tp_retirement_metrics_shard_leaf(metrics_path));
+    CHECK(tp_retirement_metrics_shard_path(metrics_path, "abcdefgh", TP_RETIREMENT_METRICS_SHARDS - 1) &&
+          strlen(metrics_path) == 36 && tp_retirement_metrics_shard_leaf(metrics_path));
+    CHECK(!tp_retirement_metrics_shard_path(metrics_path, "abcdefghi", 0) && !metrics_path[0]);
+    CHECK(!tp_retirement_metrics_shard_path(metrics_path, "AB", 0) && !metrics_path[0]);
+    CHECK(!tp_retirement_metrics_shard_path(metrics_path, "", 0) && !metrics_path[0]);
+    CHECK(!tp_retirement_metrics_shard_path(metrics_path, "ab", TP_RETIREMENT_METRICS_SHARDS) && !metrics_path[0]);
+    CHECK(!tp_retirement_metrics_shard_leaf("retirement-metrics-ab-2048.txt") &&
+          !tp_retirement_metrics_shard_leaf("retirement-metrics--0000.txt") &&
+          !tp_retirement_metrics_shard_leaf("retirement-metrics-ab-000.txt") &&
+          !tp_retirement_metrics_shard_leaf("retirement-metrics-a1-0000.txt") &&
+          !tp_retirement_metrics_shard_leaf("retirement-metrics-ab-0000.bin") &&
+          !tp_retirement_metrics_shard_leaf("retirement-metrics-feff1be0001f01e4348977e86b09ee13.txt"));
+}
+
+/* Persist a synthetic transcript for the independent Python replay reader.
+ * This fixture deliberately uses decimal/exponent boundaries, not host timing.
+ * Rows 0 and 10 are singleton link groups with native runtime; row 6 is a
+ * one-member object group whose every batch appends its per-input metrics
+ * artifact to the `rec` metrics shard. */
+static void test_retirement_records(char const* root)
+{
+    static uint64_t const intervals[] = {1, 9, 10, 99, 100, 999, 1000, 9999, 10000,
+        99999, 100000, 999999, 1000000, 1000001, 1000000000, 1000000001,
+        UINT64_C(3600000000000), UINT64_C(86400000000000)};
+    char path[TP_PATH_CAP], line[TP_RETIREMENT_EXECUTION_LINE_CAP];
+    CHECK(tp_path(path, root, "retirement-execution.jsonl"));
+    FILE* file = fopen(path, "wb");
+    CHECK(file != NULL);
+    unsigned workspace[11], runtime_rows[] = {0, 10};
+    TpRetirementExecution state;
+    CHECK(tp_retirement_execution_init(&state, 1, 3, runtime_rows, 2, 11, 60, workspace, 11));
+    TpRetirementInvocation invocation;
+    TpRetirementTranscript transcript;
+    CHECK(tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", 2, 1000));
+    CHECK(tp_retirement_transcript_begin_shard(&transcript, file));
+    FILE* spool = tmpfile();
+    TpRetirementSamples samples;
+    TpRetirementSampleRow row_workspace[3];
+    TpRetirementSampleGroup group_workspace[3];
+    unsigned member_workspace[3];
+    unsigned const row_ids[] = {0, 6, 10}, row_metrics[] = {TP_RETIREMENT_SAMPLE_RUNTIME, 0, TP_RETIREMENT_SAMPLE_RUNTIME};
+    unsigned const kinds[] = {TP_RETIREMENT_GROUP_SINGLETON, TP_RETIREMENT_GROUP_OBJECT, TP_RETIREMENT_GROUP_SINGLETON};
+    unsigned const offsets[] = {0, 1, 2, 3}, members[] = {0, 1, 2};
+    TpRetirementLayout layout = {3, 3, row_ids, row_metrics, kinds, offsets, members};
+    CHECK(spool && tp_retirement_samples_init(&samples, &transcript, spool, &layout, row_workspace,
+                                              group_workspace, member_workspace));
+    char executable[65], command[65], output[65], compiler_output[65];
+    memset(executable, 'a', 64); executable[64] = 0;
+    memset(command, 'b', 64); command[64] = 0;
+    memset(output, 'c', 64); output[64] = 0;
+    char const* objects[] = {output};
+    CHECK(tp_retirement_batch_output_digest(objects, 1, compiler_output));
+    TpRetirementBatchInput batch_input = {"tests/native-execution-1.c", "ok", "driver.none",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", output, "native-execution-1.o", 1, 6};
+    TpRetirementBatchContract contract = {"x86_64-linux", "none", "batch.metrics", &batch_input, 1, 0,
+        TP_RETIREMENT_METRICS_ARTIFACT_BYTES};
+    size_t metrics_capacity = 1u << 14;
+    char* metrics = (char*)malloc(metrics_capacity);
+    CHECK(metrics != NULL);
+    TpRetirementMetricsShards metrics_shards;
+    TpRetirementMetricsArtifact artifact;
+    TpRetirementShardFile metrics_shard;
+    CHECK(tp_path(path, root, "retirement-metrics-rec-0000.txt"));
+    FILE* metrics_file = fopen(path, "wb+");
+    CHECK(metrics_file && tp_retirement_metrics_shards_init(&metrics_shards, "rec", metrics_file));
+    CHECK(tp_path(path, root, "retirement-execution.jsonl"));
+    TpProcessObservation observed = {.pid = 4321, .start_token = 987654, .valid = 1, .finished_ns = 1000};
+    TpProcess process = {.peak_rss_bytes = 4096};
+    unsigned batches = 0;
+    while (file && metrics && tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_READY)
+    {
+        uint64_t interval = intervals[invocation.sequence % (sizeof(intervals) / sizeof(intervals[0]))];
+        observed.started_ns = observed.finished_ns + 1;
+        observed.finished_ns = observed.started_ns + interval;
+        observed.pid = 4321 + invocation.sequence;
+        process.wall_seconds = (double)interval / 1000000000.0;
+        TpRetirementOutput identities = {invocation.kind ? output : executable, command,
+            invocation.kind ? output : compiler_output, NULL, 0};
+        /* A distinct arena value per batch keeps every metrics artifact unique. */
+        TpRetirementMemberSample member = {interval, 65536 + invocation.sequence, 6};
+        char metrics_digest[65];
+        int batch = !invocation.kind && invocation.group == 1;
+        if (batch)
+        {
+            TestMetricsInput timing = {0, interval, 65536 + invocation.sequence};
+            size_t size = test_metrics_render(metrics, metrics_capacity, &contract, interval, &timing,
+                                              TEST_METRICS_VALID);
+            TpRetirementMemberSample checked;
+            CHECK(size && tp_retirement_metrics_check((unsigned char const*)metrics, size, &contract, interval,
+                                                      &checked, 1) && checked.interval_ns == interval &&
+                  checked.row == 6);
+            Sha256 hash;
+            sha256_init(&hash);
+            sha256_add(&hash, metrics, (u64)size);
+            sha256_finish_hex(&hash, metrics_digest);
+            uint64_t offset = metrics_shards.bytes;
+            CHECK(tp_retirement_metrics_shards_append(&metrics_shards, (unsigned char const*)metrics, size, &artifact) &&
+                  artifact.offset == offset && artifact.bytes == size && !strcmp(artifact.sha256, metrics_digest) &&
+                  !strcmp(artifact.path, "retirement-metrics-rec-0000.txt"));
+            identities.metrics = &artifact;
+            ++batches;
+        }
+        size_t count = tp_retirement_execution_record(line, sizeof(line), &invocation, &observed,
+            &process, &identities, "job-1", 2, "boot-123", 2);
+        CHECK(count > 0 && count < sizeof(line) && line[count - 1] == '\n');
+        CHECK(tp_retirement_samples_append(&samples, &observed, &process, &identities,
+                                           batch ? &member : NULL, batch ? 1 : 0));
+    }
+    CHECK(tp_retirement_execution_complete(&state) && batches == 244);
+    CHECK(tp_retirement_metrics_shards_finish(&metrics_shards, &metrics_shard) &&
+          metrics_shard.contents.records == 244 && metrics_shard.contents.bytes == metrics_shards.total_bytes &&
+          !strcmp(metrics_shard.path, "retirement-metrics-rec-0000.txt"));
+    if (metrics_file) CHECK(fclose(metrics_file) == 0);
+    TpRetirementShard shard;
+    CHECK(tp_retirement_transcript_end_shard(&transcript, &shard));
+    CHECK(tp_retirement_transcript_finish(&transcript, observed.finished_ns + 1));
+    CHECK(shard.records == 1220 && shard.bytes > 0 && transcript.total_records == 1220);
+    if (file) CHECK(fclose(file) == 0);
+    char digest[65];
+    uint64_t size = 0, lines = 0;
+    CHECK(tp_hash_file(path, digest, &size, &lines) && size == shard.bytes &&
+        lines == shard.records && !strcmp(digest, shard.sha256));
+
+    /* Rows first, then batches; one raw digest covers both populations. */
+    CHECK(tp_retirement_samples_begin_export(&samples));
+    TpRetirementShard sample_shard[2], manifest;
+    char const* const shard_names[] = {"retirement-samples-0000.jsonl", "retirement-batches-0000.jsonl"};
+    char const* const manifest_names[] = {"retirement-samples.manifest.json", "retirement-batches.manifest.json"};
+    Sha256 raw;
+    sha256_init(&raw);
+    for (unsigned population = 0; population < 2; ++population)
+    {
+        CHECK(tp_retirement_samples_population(&samples) == population);
+        CHECK(tp_path(path, root, shard_names[population]));
+        file = fopen(path, "wb+");
+        CHECK(file && tp_retirement_samples_write_shard(&samples, file, &sample_shard[population]));
+        if (file)
+        {
+            unsigned char buffer[4096];
+            size_t read;
+            CHECK(fseek(file, 0, SEEK_SET) == 0);
+            while ((read = fread(buffer, 1, sizeof(buffer), file)) != 0) sha256_add(&raw, buffer, (u64)read);
+            CHECK(fclose(file) == 0);
+        }
+        CHECK(tp_hash_file(path, digest, &size, &lines) && size == sample_shard[population].bytes &&
+            lines == sample_shard[population].records && !strcmp(digest, sample_shard[population].sha256));
+    }
+    CHECK(sample_shard[0].records == 360 && sample_shard[1].records == 120 && samples.exported == 480);
+    CHECK(tp_retirement_samples_finish(&samples));
+    sha256_finish_hex(&raw, digest);
+    CHECK(!strcmp(digest, samples.raw_sha256));
+    for (unsigned population = 0; population < 2; ++population)
+    {
+        CHECK(tp_path(path, root, manifest_names[population]));
+        file = fopen(path, "wb");
+        CHECK(file && tp_retirement_samples_manifest(&samples, population, &sample_shard[population], 1, 0, file,
+                                                     &manifest));
+        if (file) CHECK(fclose(file) == 0);
+        CHECK(tp_hash_file(path, digest, &size, &lines) && size == manifest.bytes &&
+            lines == 1 && !strcmp(digest, manifest.sha256));
+    }
+    if (spool) CHECK(fclose(spool) == 0);
+
+    /* The actual transcript format's maximum-width producer fields are
+     * bounded by the schedule/token/digest domains: sequence 0..134217727,
+     * group or row 0..99999, pair 0..253, round 0..1, uint64 timestamps/PID/
+     * start token/attempt, INT_MAX CPU, exit status 255, exact-integer RSS up
+     * to 2^53-1, a metrics artifact with 8-digit offset and length (their sum
+     * is at most the 64 MiB shard) at the longest 36-byte shard leaf, and at
+     * most 15 characters for the one-day seconds format. Job/boot tokens
+     * are at most 128 safe ASCII characters and only their fixed-width
+     * process digest is emitted. A compiler-only 100000-group schedule can
+     * reach sequence 101999999 with RSS and a metrics artifact. That sampled
+     * object batch is 1017 bytes. The final compiler warmup has only six
+     * sequence digits, but its three null schedule fields make it one byte
+     * longer (1018 bytes). Across all legal even pair counts, the largest
+     * complete schedule under the 2048*65536 transcript cap has 134217720
+     * invocations, so sequence 134217719 belongs to a runtime record whose
+     * compiler fields are null. */
+    uint64_t max_elapsed = UINT64_C(86399999999999);
+    char max_job[129], max_boot[129], max_hash[65];
+    memset(max_job, 'a', sizeof(max_job) - 1); max_job[sizeof(max_job) - 1] = 0;
+    memset(max_boot, 'b', sizeof(max_boot) - 1); max_boot[sizeof(max_boot) - 1] = 0;
+    memset(max_hash, 'e', 64); max_hash[64] = 0;
+    TpRetirementInvocation max_invocation = {
+        .sequence = UINT64_C(101999999), .group = TP_RETIREMENT_MAX_CELLS - 1, .row = TP_RETIREMENT_NONE,
+        .kind = 0, .phase = 1, .variant = 1,
+        .round = TP_RETIREMENT_ROUNDS - 1, .pair = TP_RETIREMENT_EXECUTION_MAX_PAIRS - 1,
+        .warmup = -1, .position = 1};
+    TpProcessObservation max_observed = {.pid = UINT64_MAX, .start_token = UINT64_MAX,
+        .started_ns = UINT64_MAX - max_elapsed, .finished_ns = UINT64_MAX, .valid = 1};
+    TpProcess max_process = {.wall_seconds = (double)max_elapsed / 1000000000.0,
+        .peak_rss_bytes = 9007199254740991.0, .exit_code = 255};
+    TpRetirementMetricsArtifact max_artifact = {"retirement-metrics-abcdefgh-2047.txt", UINT64_C(33554432),
+        UINT64_C(33554432), {0}};
+    memcpy(max_artifact.sha256, max_hash, sizeof(max_hash));
+    TpRetirementOutput max_identities = {max_hash, max_hash, max_hash, &max_artifact, 255};
+    size_t max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation,
+        &max_observed, &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
+    CHECK(max_count == 1017 && line[max_count - 1] == '\n');
+    CHECK(tp_retirement_execution_record(line, max_count, &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_count = tp_retirement_execution_record(line, 1018, &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
+    CHECK(max_count == 1017 && line[max_count - 1] == '\n');
+    /* An artifact beyond its cap or its shard, or a malformed leaf, rejects. */
+    max_artifact.bytes = TP_RETIREMENT_METRICS_ARTIFACT_BYTES + 1;
+    max_artifact.offset = 0;
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_artifact.bytes = UINT64_C(33554432);
+    max_artifact.offset = UINT64_C(33554433);
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_artifact.offset = UINT64_C(33554432);
+    max_artifact.path[19] = 'A';
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_artifact.path[19] = 'a';
+    max_process.peak_rss_bytes = 9007199254740992.0;
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_process.peak_rss_bytes = 9007199254740991.0;
+    max_invocation.group = TP_RETIREMENT_MAX_CELLS;
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_invocation.group = TP_RETIREMENT_MAX_CELLS - 1;
+    char overlong_job[130];
+    memset(overlong_job, 'a', sizeof(overlong_job) - 1); overlong_job[sizeof(overlong_job) - 1] = 0;
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, overlong_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_job[127] = '"';
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_job[127] = 'a';
+    max_boot[127] = '\\';
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_boot[127] = 'b';
+    max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
+    CHECK(max_count == 1017 && tp_path(path, root, "retirement-execution-max.jsonl"));
+    file = fopen(path, "wb");
+    CHECK(file && fwrite(line, 1, max_count, file) == max_count);
+    if (file) CHECK(fclose(file) == 0);
+
+    max_invocation.sequence = (uint64_t)TP_RETIREMENT_MAX_CELLS * 2 * TP_RETIREMENT_WARMUPS - 1;
+    max_invocation.phase = 0;
+    max_invocation.round = max_invocation.pair = max_invocation.position = -1;
+    max_invocation.warmup = TP_RETIREMENT_WARMUPS - 1;
+    max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation,
+        &max_observed, &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
+    CHECK(max_count == TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX && line[max_count - 1] == '\n');
+    CHECK(tp_retirement_execution_record(line, max_count, &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_count = tp_retirement_execution_record(line, TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX + 1, &max_invocation,
+        &max_observed, &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
+    CHECK(max_count == TP_RETIREMENT_TRANSCRIPT_RECORD_BYTES_MAX &&
+          tp_path(path, root, "retirement-execution-max-warmup.jsonl"));
+    file = fopen(path, "wb");
+    CHECK(file && fwrite(line, 1, max_count, file) == max_count);
+    if (file) CHECK(fclose(file) == 0);
+
+    max_invocation.sequence = (uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARDS *
+        TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS - 9;
+    max_invocation.kind = 1;
+    max_invocation.group = TP_RETIREMENT_NONE;
+    max_invocation.row = TP_RETIREMENT_MAX_CELLS - 1;
+    max_invocation.phase = 1;
+    max_invocation.round = TP_RETIREMENT_ROUNDS - 1;
+    max_invocation.pair = TP_RETIREMENT_EXECUTION_MAX_PAIRS - 1;
+    max_invocation.position = 1;
+    max_invocation.warmup = -1;
+    max_process.exit_code = 0;
+    max_identities.exit_status = 0;
+    /* A runtime process never carries a metrics artifact. */
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &max_invocation, &max_observed,
+        &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX) == 0 && !line[0]);
+    max_identities.metrics = NULL;
+    max_count = tp_retirement_execution_record(line, sizeof(line), &max_invocation,
+        &max_observed, &max_process, &max_identities, max_job, UINT64_MAX, max_boot, INT_MAX);
+    CHECK(max_count > 0 && max_count < 1017 && line[max_count - 1] == '\n');
+    CHECK(tp_path(path, root, "retirement-execution-max-runtime.jsonl"));
+    file = fopen(path, "wb");
+    CHECK(file && fwrite(line, 1, max_count, file) == max_count);
+    if (file) CHECK(fclose(file) == 0);
+
+    /* Every missing required observation and every failed child is invalid. */
+    unsigned identity_runtime[] = {0, 2}, identity_workspace[11];
+    CHECK(tp_retirement_execution_init(&state, 1, 3, identity_runtime, 2, 3, 60, identity_workspace, 11));
+    CHECK(tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_READY);
+    TpRetirementMetricsArtifact record_artifact = {"retirement-metrics-aa-0000.txt", 0, 4096, {0}};
+    memset(record_artifact.sha256, 'd', 64);
+    TpRetirementOutput identities = {executable, command, compiler_output, &record_artifact, 1};
+    process = (TpProcess){.wall_seconds = process.wall_seconds, .peak_rss_bytes = 4096, .exit_code = 1};
+#define TEST_RETIREMENT_RECORD() tp_retirement_execution_record(line, sizeof(line), &invocation, &observed, &process, &identities, "job-1", 2, "boot-123", 2)
+    CHECK(TEST_RETIREMENT_RECORD() > 0 && strstr(line, "\"exit_code\":1,") &&
+          strstr(line, "\"metrics_artifact\":{\"bytes\":4096,\"offset\":0,\"path\":\"retirement-metrics-aa-0000.txt\"") &&
+          strstr(line, "\"group\":0,") && strstr(line, "\"row\":null,"));
+    observed.valid = 0; CHECK(TEST_RETIREMENT_RECORD() == 0); observed.valid = 1;
+    observed.start_token = 0; CHECK(TEST_RETIREMENT_RECORD() == 0); observed.start_token = 987654;
+    process.exit_code = 0; CHECK(TEST_RETIREMENT_RECORD() == 0); /* Not the frozen exit status. */
+    process.exit_code = 1;
+    identities.exit_status = 256; process.exit_code = 256; CHECK(TEST_RETIREMENT_RECORD() == 0);
+    identities.exit_status = 1; process.exit_code = 1;
+    process.signal_number = 9; CHECK(TEST_RETIREMENT_RECORD() == 0); process.signal_number = 0;
+    process.launch_error = 5; CHECK(TEST_RETIREMENT_RECORD() == 0); process.launch_error = 0;
+    process.timed_out = 1; CHECK(TEST_RETIREMENT_RECORD() == 0); process.timed_out = 0;
+    process.wall_seconds += 1.0; CHECK(TEST_RETIREMENT_RECORD() == 0); process.wall_seconds -= 1.0;
+    double wall = process.wall_seconds;
+    process.wall_seconds = NAN; CHECK(TEST_RETIREMENT_RECORD() == 0); process.wall_seconds = wall;
+    process.peak_rss_bytes = NAN; CHECK(TEST_RETIREMENT_RECORD() == 0);
+    process.peak_rss_bytes = 0; CHECK(TEST_RETIREMENT_RECORD() == 0);
+    process.peak_rss_bytes = 1.5; CHECK(TEST_RETIREMENT_RECORD() == 0);
+    process.peak_rss_bytes = 4096;
+    record_artifact.bytes = 0; CHECK(TEST_RETIREMENT_RECORD() == 0);
+    record_artifact.bytes = 4096;
+    record_artifact.sha256[0] = 'D'; CHECK(TEST_RETIREMENT_RECORD() == 0); record_artifact.sha256[0] = 'd';
+    record_artifact.path[19] = 'A'; CHECK(TEST_RETIREMENT_RECORD() == 0); record_artifact.path[19] = 'a';
+    command[0] = 'A'; CHECK(TEST_RETIREMENT_RECORD() == 0); command[0] = 'b';
+    invocation.warmup = 2; CHECK(TEST_RETIREMENT_RECORD() == 0); invocation.warmup = 0;
+    invocation.row = 0; CHECK(TEST_RETIREMENT_RECORD() == 0); invocation.row = TP_RETIREMENT_NONE;
+    CHECK(tp_retirement_execution_record(line, 10, &invocation, &observed,
+        &process, &identities, "job-1", 2, "boot-123", 2) == 0 && line[0] == 0);
+    CHECK(tp_retirement_execution_record(line, sizeof(line), &invocation, &observed,
+        &process, &identities, "job-1", 2, "boot-123", -1) == 0);
+    identities.metrics = NULL;
+    identities.exit_status = process.exit_code = 0;
+    CHECK(TEST_RETIREMENT_RECORD() > 0 && strstr(line, "\"metrics_artifact\":null,"));
+    invocation.kind = 1;
+    invocation.row = 0;
+    invocation.group = TP_RETIREMENT_NONE;
+    process.peak_rss_bytes = NAN;
+    CHECK(TEST_RETIREMENT_RECORD() > 0 && strstr(line, "\"group\":null,") && strstr(line, "\"row\":0,"));
+    identities.exit_status = process.exit_code = 1;
+    CHECK(TEST_RETIREMENT_RECORD() == 0); /* Runtime always exits zero. */
+    identities.exit_status = process.exit_code = 0;
+    identities.metrics = &record_artifact;
+    CHECK(TEST_RETIREMENT_RECORD() == 0);
+    identities.metrics = NULL;
+    CHECK(TEST_RETIREMENT_RECORD() > 0); /* Runtime RSS is explicitly null. */
+#undef TEST_RETIREMENT_RECORD
+    char seconds[32];
+    CHECK(!tp_retirement_seconds(seconds, 0));
+    CHECK(!tp_retirement_seconds(seconds, UINT64_C(86400000000001)));
+    CHECK(tp_path(path, root, "retirement-seconds.tsv"));
+    file = fopen(path, "wb");
+    CHECK(file != NULL);
+    for (uint64_t i = 1; file && i <= 100001; ++i)
+    {
+        CHECK(tp_retirement_seconds(seconds, i));
+        CHECK(fprintf(file, "%" PRIu64 "\t%s\n", i, seconds) > 0);
+    }
+    for (uint64_t i = 1; file && i <= 10000; ++i)
+    {
+        uint64_t interval = tp_retirement_mix64(i) % UINT64_C(86400000000000) + 1;
+        CHECK(tp_retirement_seconds(seconds, interval));
+        CHECK(fprintf(file, "%" PRIu64 "\t%s\n", interval, seconds) > 0);
+    }
+    if (file) CHECK(fclose(file) == 0);
+
+    /* A partial final shard, overlap, duplicate append, poisoned child or
+     * failed flush must never produce a descriptor or complete collection. */
+    for (unsigned failure = 0; failure < 6; ++failure)
+    {
+        CHECK(tp_retirement_execution_init(&state, 1, 3, identity_runtime, 2, 3, 60, identity_workspace, 11));
+        CHECK(tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", 2, 1000));
+        CHECK(tp_path(path, root, "retirement-partial.jsonl"));
+        file = fopen(path, "wb");
+        CHECK(file && tp_retirement_transcript_begin_shard(&transcript, file));
+        observed = (TpProcessObservation){.valid = 1, .pid = 4321, .start_token = 987654,
+            .started_ns = 1001, .finished_ns = 1001001};
+        process = (TpProcess){.wall_seconds = .001, .peak_rss_bytes = 4096};
+        identities = (TpRetirementOutput){executable, command, compiler_output, NULL, 0};
+        if (failure == 0) CHECK(!tp_retirement_transcript_finish(&transcript, 2000000));
+        if (failure == 1) observed.started_ns = 1000;
+        if (failure == 2) process.signal_number = 9;
+        if (failure == 3) transcript.bytes = TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES;
+        if (failure == 4)
+        {
+            CHECK(tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+            CHECK(!tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+        }
+        else if (failure == 5)
+            CHECK(tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+        else CHECK(!tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+        CHECK(!tp_retirement_transcript_end_shard(&transcript, &shard));
+        CHECK(!shard.bytes && !shard.records && !shard.sha256[0]);
+        CHECK(!tp_retirement_transcript_finish(&transcript, 2000000));
+        CHECK(transcript.failed && !tp_retirement_execution_complete(&state));
+        if (file) CHECK(fclose(file) == 0);
+    }
+    CHECK(tp_retirement_execution_init(&state, 1, 3, identity_runtime, 2, 3, 60, identity_workspace, 11));
+    CHECK(!tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", 2, 0));
+    CHECK(!tp_retirement_transcript_init(&transcript, &state, "job-1", 0, "boot-123", 2, 1000));
+    CHECK(!tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", -1, 1000));
+#ifndef _WIN32
+    /* An actual write error must poison the cursor as well as the stream. */
+    CHECK(tp_path(path, root, "retirement-readonly.jsonl"));
+    CHECK(test_text(root, "retirement-readonly.jsonl", ""));
+    file = fopen(path, "rb");
+    CHECK(file && tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", 2, 1000));
+    CHECK(tp_retirement_transcript_begin_shard(&transcript, file));
+    CHECK(!tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+    CHECK(!tp_retirement_transcript_finish(&transcript, 2000000));
+    if (file) CHECK(fclose(file) == 0);
+#endif
+    free(metrics);
+}
+
+static void test_retirement_shards(char const* root)
+{
+    unsigned workspace[816];
+    TpRetirementExecution execution;
+    TpRetirementTranscript transcript;
+    CHECK(tp_retirement_execution_init(&execution, 1, 272, NULL, 0, 272, 60, workspace, 816));
+    CHECK(tp_retirement_transcript_init(&transcript, &execution, "job-1", 2, "boot-123", 2, 1000));
+    char digest[65];
+    memset(digest, 'a', 64); digest[64] = 0;
+    TpRetirementOutput output = {digest, digest, digest, NULL, 0};
+    TpProcess process = {.wall_seconds = 1.0, .peak_rss_bytes = 4096};
+    TpProcessObservation observed = {.valid = 1, .start_token = 1234, .finished_ns = 1000};
+    TpRetirementShardFile shards[2] = {0};
+    for (unsigned part = 0; part < 2; ++part)
+    {
+        char path[TP_PATH_CAP], leaf[64];
+        snprintf(leaf, sizeof(leaf), "retirement-shard-%u.jsonl", part);
+        CHECK(tp_path(path, root, leaf));
+        FILE* file = fopen(path, "wb");
+        CHECK(file && tp_retirement_transcript_begin_shard(&transcript, file));
+        unsigned count = part ? 832 : TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS;
+        for (unsigned i = 0; file && i < count; ++i)
+        {
+            observed.pid = execution.sequence + 4321;
+            observed.started_ns = observed.finished_ns + 1;
+            observed.finished_ns = observed.started_ns + 1000000000;
+            CHECK(tp_retirement_transcript_append(&transcript, &observed, &process, &output));
+        }
+        TpRetirementShard shard;
+CHECK(tp_retirement_transcript_end_shard(&transcript, &shard) && shard.records == count);
+        shards[part] = (TpRetirementShardFile){part ? "retirement-shard-1.jsonl" : "retirement-shard-0.jsonl", shard};
+        if (file) CHECK(fclose(file) == 0);
+        char hash[65];
+        uint64_t bytes = 0, lines = 0;
+        CHECK(tp_hash_file(path, hash, &bytes, &lines) && lines == count &&
+            bytes == shard.bytes && !strcmp(hash, shard.sha256));
+    }
+    CHECK(tp_retirement_transcript_finish(&transcript, observed.finished_ns + 1));
+    CHECK(transcript.shards == 2 && transcript.total_records == 66368 && transcript.finished);
+    char receipt_path[TP_PATH_CAP];
+    CHECK(tp_path(receipt_path, root, "retirement-invocation-receipt.json"));
+    FILE* receipt_file = fopen(receipt_path, "wb+");
+    TpRetirementShard receipt;
+    char context[65];
+    memset(context, 'b', 64); context[64] = 0;
+    CHECK(receipt_file && tp_retirement_transcript_receipt(&transcript, digest, context,
+                                                           shards, 2, receipt_file, &receipt));
+    if (receipt_file) CHECK(fclose(receipt_file) == 0);
+    char receipt_digest[65];
+    uint64_t receipt_bytes = 0, receipt_lines = 0;
+    CHECK(tp_hash_file(receipt_path, receipt_digest, &receipt_bytes, &receipt_lines) &&
+          receipt_bytes == receipt.bytes && receipt_lines == 1 &&
+          !strcmp(receipt_digest, receipt.sha256));
+    CHECK(transcript.receipt_written);
+    for (unsigned failure = 0; failure < 7; ++failure)
+    {
+        TpRetirementTranscript bad = transcript;
+        TpRetirementExecution bad_execution = execution;
+        bad.execution = &bad_execution;
+        if (failure != 6) bad.receipt_written = 0;
+        TpRetirementShardFile cases[2] = {shards[0], shards[1]};
+        if (failure == 0) cases[1].path = cases[0].path;
+        if (failure == 1) cases[1].path = "../escape.jsonl";
+        if (failure == 2) --cases[1].contents.records;
+        if (failure == 3) cases[1].contents.sha256[0] = 'g';
+        FILE* rejected = tmpfile();
+        CHECK(rejected != NULL);
+        if (failure == 4) CHECK(rejected && fputs("old receipt", rejected) >= 0);
+        CHECK(!tp_retirement_transcript_receipt(&bad, failure == 5 ? "unbound" : digest,
+            context, cases, 2, rejected, &receipt));
+        CHECK(bad.failed && !bad.finished && bad_execution.failed && !receipt.bytes && !receipt.sha256[0]);
+        if (rejected) CHECK(fclose(rejected) == 0);
+    }
+    CHECK(!tp_retirement_transcript_finish(&transcript, observed.finished_ns + 2));
+
+#ifdef __linux__
+    /* /dev/full fails only on flush here: the caller-supplied buffer holds the
+     * complete 244-invocation campaign. Successful fwrite is not a seal. */
+    CHECK(tp_retirement_execution_init(&execution, 1, 1, NULL, 0, 1, 60, workspace, 3));
+    CHECK(tp_retirement_transcript_init(&transcript, &execution, "job-1", 2, "boot-123", 2, 1000));
+    FILE* file = fopen("/dev/full", "wb");
+    size_t capacity = 1024 * 1024;
+    char* buffer = (char*)malloc(capacity);
+    CHECK(file && buffer && setvbuf(file, buffer, _IOFBF, capacity) == 0);
+    CHECK(tp_retirement_transcript_begin_shard(&transcript, file));
+    observed.finished_ns = 1000;
+    for (unsigned i = 0; file && buffer && i < 244; ++i)
+    {
+        observed.pid = i + 4321;
+        observed.started_ns = observed.finished_ns + 1;
+        observed.finished_ns = observed.started_ns + 1000000000;
+        CHECK(tp_retirement_transcript_append(&transcript, &observed, &process, &output));
+    }
+    CHECK(tp_retirement_execution_complete(&execution));
+    TpRetirementShard shard;
+    CHECK(!tp_retirement_transcript_end_shard(&transcript, &shard));
+    CHECK(!shard.bytes && !shard.records && !shard.sha256[0]);
+    CHECK(transcript.failed && !tp_retirement_execution_complete(&execution));
+    CHECK(!tp_retirement_transcript_finish(&transcript, observed.finished_ns + 1));
+    if (file) (void)fclose(file);
+    free(buffer);
+#endif
+}
+
+#ifdef __linux__
+static void test_process_observations(char const* executable, char const* root)
+{
+    char stat_record[256];
+    int length = snprintf(stat_record, sizeof(stat_record),
+        "4321 (unusual ) comm) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20\n");
+    uint64_t token = 0;
+    CHECK(length > 0 && (size_t)length < sizeof(stat_record));
+    CHECK(tp_process_start_token(stat_record, (size_t)length, 4321, &token) && token == 987654);
+    CHECK(!tp_process_start_token(stat_record, (size_t)length, 4322, &token) && token == 0);
+    CHECK(!tp_process_start_token(stat_record, 12, 4321, &token));
+    char* number = strstr(stat_record, "987654");
+    CHECK(number != NULL);
+    if (number)
+    {
+        number[0] = '-';
+        CHECK(!tp_process_start_token(stat_record, (size_t)length, 4321, &token));
+        number[0] = '9';
+    }
+    CHECK(tp_process_identity(getpid(), &token) && token > 0);
+    CHECK(!tp_process_identity((pid_t)-1, &token) && token == 0);
+    char log[TP_PATH_CAP];
+    CHECK(tp_path(log, root, "observed-child.log"));
+    char* args[] = {(char*)executable, "child", "fail", NULL};
+    TpProcessObservation first, second;
+    TpProcess result = tp_process_observe(args, NULL, log, 2, tp_first_allowed_cpu(), 0, &first);
+    CHECK(first.valid && first.pid > 0 && first.start_token > 0 && first.finished_ns > first.started_ns);
+    CHECK(result.exit_code == 7 && !result.launch_error && !result.timed_out);
+    CHECK(fabs(result.wall_seconds * 1e9 - (double)(first.finished_ns - first.started_ns)) <= 1.0);
+    result = tp_process_observe(args, NULL, log, 2, tp_first_allowed_cpu(), 0, &second);
+    CHECK(second.valid && second.started_ns > first.finished_ns);
+    CHECK(first.pid != second.pid || first.start_token != second.start_token);
+    result = tp_process_observe(args, NULL, root, 2, -1, 0, &second);
+    CHECK(result.launch_error && !second.valid && !second.pid);
+    args[0] = "/definitely/missing/buster-retirement-compiler";
+    result = tp_process_observe(args, NULL, log, 2, -1, 0, &second);
+    CHECK(second.valid && result.exit_code != 0); /* Execution evidence preserves failures. */
+    args[0] = (char*)executable;
+    args[2] = "sleep";
+    result = tp_process_observe(args, NULL, log, 1, -1, 0, &second);
+    CHECK(second.valid && result.timed_out && result.signal_number != 0 && result.wall_seconds < 4.0);
+}
+
+/* The per-launch descendant check reads this process's thread child lists
+ * (tp_process_children_listed); they must agree with the host scan
+ * (tp_process_children_scanned) on a paused child and an exited, unreaped
+ * one (waitid WNOWAIT), with and without the paused one allowed. With no
+ * other child, the sweep then reaps the zombie and spares the allowed one. */
+static void test_process_children(void)
+{
+    pid_t found[4] = {0};
+    uint32_t base = tp_process_children_scanned(0, NULL, 0);
+    CHECK(base != UINT32_MAX && tp_process_children_listed(0, NULL, 0) == base);
+    pid_t allowed = fork();
+    if (allowed == 0)
+    {
+        pause();
+        _exit(0);
+    }
+    pid_t zombie = allowed > 0 ? fork() : -1;
+    if (zombie == 0) _exit(0);
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    CHECK(allowed > 0 && zombie > 0 && waitid(P_PID, (id_t)zombie, &info, WEXITED | WNOWAIT) == 0);
+    uint32_t listed = tp_process_children_listed(allowed, found, 4);
+    CHECK(listed == base + 1 && tp_process_children_scanned(allowed, NULL, 0) == listed &&
+          tp_process_children_listed(0, NULL, 0) == base + 2 && tp_process_children(0, NULL, 0) == base + 2);
+    if (!base)
+    {
+        CHECK(found[0] == zombie && tp_process_children_sweep(allowed) &&
+              tp_process_children(allowed, NULL, 0) == 0 && kill(allowed, 0) == 0);
+    }
+    else if (zombie > 0) CHECK(waitpid(zombie, NULL, 0) == zombie);
+    if (allowed > 0)
+    {
+        kill(allowed, SIGKILL);
+        CHECK(waitpid(allowed, NULL, 0) == allowed);
+    }
+}
+#endif
+
 #include "qualification_test.h"
+
+#include "retirement_samples_test.h"
+#include "retirement_artifact_test.h"
+#include "retirement_measurement_test.h"
+#include "retirement_budget_tool.h"
+#include "retirement_budget_tool_test.h"
+#ifdef __linux__
+#include "retirement_campaign_test.h"
+#include "retirement_unit_campaign_test.h"
+#endif
 
 int main(int argc, char** argv)
 {
     ThreadContext* context = thread_context_allocate();
     thread_context_select(context);
     int result = 2;
+#ifdef __linux__
+    if (argc >= 2 && !strcmp(argv[1], "retirement-child")) result = test_retirement_measurement_child(argc, argv);
+    else
+#endif
     if (argc >= 2 && !strcmp(argv[1], "cc")) result = test_compiler_child(argc, argv);
     else if (argc >= 2 && !strcmp(argv[1], "child")) result = test_child(argc, argv);
     else if (argc == 2)
@@ -1862,6 +3010,23 @@ int main(int argc, char** argv)
         test_launch_errors(executable, root);
 #endif
         test_retirement_statistics();
+        test_retirement_replay(root);
+        test_retirement_metrics(root);
+        test_retirement_execution();
+        test_retirement_records(root);
+        test_retirement_samples(root);
+        test_retirement_budget_tool(root);
+        test_retirement_artifact(executable, root);
+#ifdef __linux__
+        test_retirement_measurement(executable, root);
+        test_retirement_campaign(executable, root);
+        test_retirement_unit_campaign(executable, root);
+#endif
+        test_retirement_shards(root);
+#ifdef __linux__
+        test_process_observations(executable, root);
+        test_process_children();
+#endif
         printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu job=%zu max_jobs=%u run_heap=%zu replay_heap=%zu\n",
                sizeof(TpProcess), sizeof(TpRow), sizeof(TpJob), (unsigned)TP_MAX_JOBS,
                TP_MAX_JOBS * (sizeof(TpJob) + 2 * sizeof(TpRow)),

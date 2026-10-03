@@ -18,13 +18,20 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_download(char const* socket_path, BqPacket
         memcpy(receipt, body + BQ_EXPORT_REPLY_HEADER, sizeof(receipt));
         memcpy(receipt_digest, body + 48, 64);
         total = bq_u64(body + 36);
+#ifdef __linux__
+        if (!bq_export_receipt_valid(receipt) || total != bq_u64(receipt + 24)) error = BQ_EXPORT_CORRUPT;
+#endif
+    }
+    if (error == BQ_OK)
+    {
         if (fwrite(receipt, 1, sizeof(receipt), output) != sizeof(receipt)) error = BQ_IO;
         memcpy(request->bytes + BQ_CONTROL_HEADER + 88, receipt_digest, 64);
     }
     Sha256 archive;
     sha256_init(&archive);
 #ifdef __linux__
-    u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_EXPORT_PREPARE_MILLISECONDS);
+    u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(),
+                                      bq_export_prepare_milliseconds(bq_export_receipt_recipe(receipt)));
 #endif
     for (u64 cursor = 0; error == BQ_OK && cursor < total;)
     {
@@ -79,6 +86,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_unpack(char const* archive_path, char cons
         if (memcmp(digest, expected_receipt, 64) || !bq_export_receipt_valid(receipt) ||
             before.st_size < 0 || (u64)before.st_size != sizeof(receipt) + total) error = BQ_EXPORT_CORRUPT;
     }
+    if (error == BQ_OK)
+        deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(),
+                                     bq_export_prepare_milliseconds(bq_export_receipt_recipe(receipt)));
     Sha256 archive;
     sha256_init(&archive);
     for (u64 cursor = 0; error == BQ_OK && cursor < total;)

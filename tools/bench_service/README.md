@@ -78,6 +78,9 @@ Each fixed recipe stage helper uses a deterministic unit name linked with
 transient unit is placed in `buster-bench.slice` and
 repeats the admitted CPU, memory, swap, task and runtime limits; the
 coordinator observes the same properties on the outer unit before continuing.
+A retirement stage takes its runtime limit from the outer unit's effective
+value, which the broker reads back; no stage request names one (see
+[SYSTEMD_BROKER.md](deploy/SYSTEMD_BROKER.md#unit-runtime-limits-881-c)).
 
 For a fresh real job the server acquires the cooperative host lease before FIFO
 reservation and materialization. It transfers the descriptor over a private,
@@ -93,11 +96,49 @@ failure evidence becomes durable, while TERM/KILL escalation runs, until
 the queue job. Uncertain cleanup transfers its reference to quarantine. No
 later queue job can reserve while any of those steps is uncertain.
 
+A coordinator that restarts loses its own reference, so the live unit's
+references are the only ones left holding the lease. Right after it adopts the
+lease, `worker-unit` forks a lease keeper. The keeper holds a reference to the
+same open-file description for the unit's whole life and serves a reverse
+handoff on `<workspace>/results/.lease-return/<job>-<attempt>`, outside the
+result root. Every stage unit has that directory in `InaccessiblePaths`, so a
+stage running as `buster-bench` cannot reach a keeper and receive (and unlock)
+the lease description. The keeper also refuses any peer whose cgroup lies under
+`buster-bench.slice`, read from `/proc/<pid>/cgroup`, and, where the kernel
+provides `SO_PEERPIDFD`, re-checked against the peer's pidfd so a reused PID
+cannot stand in. A recovering coordinator reclaims that reference before it
+sends any signal (`bq_worker_lease_reclaim`), with a connect bounded by the
+five-second handoff deadline. The keeper answers only a same-credential peer
+whose request names the exact lease path, job and attempt, and the coordinator
+adopts the descriptor only if it is the reference holding the lock. The keeper
+calls `listen` itself, so the coordinator's peer credentials name the keeper;
+in production the coordinator requires that peer to be inside the outer unit's
+exact cgroup. So when TERM closes every unit reference, the coordinator still
+holds the lease and no other coordinator can take it. If the keeper socket
+exists but cannot hand the lease back, the unit is left unsignalled and the job
+stays quarantined. Only a unit that bound no keeper, or one that was already
+empty before recovery started (its references closed while no coordinator
+ran), keeps the old path: acquire once the unit is empty, where contention is
+`busy`. A leftover keeper socket is removed once the unit is proven empty or
+the boot has changed.
+
+A keeper that died while its unit is alive leaves a socket that refuses
+connections. That is deliberately not treated as "no keeper": the recipe
+still holds the lease through its inherited reference, so signalling the unit
+would reopen the gap. The job stays quarantined until the unit ends, which its
+`RuntimeMax` bounds. An operator may end it sooner by stopping it through the
+broker as the service account
+(`buster-bench-systemd-broker signal buster-bench-<job>-<attempt>.service KILL`). The next recovery then sees it empty, acquires once
+empty, purges the stale socket and reconciles. The lease is released at the
+unit's exit in that case, so do not admit other host work until reconciliation
+is recorded.
+
 Cleanup sends TERM, polls descriptor-validated recursive population every
 100 ms for the configured 10-second grace, then sends KILL and polls for at
 most another 10 seconds. Once the outer unit can no longer launch work, the
-coordinator retains the host lease (or reacquires it when recovering without
-an existing descriptor), enumerates every deterministic stage name, validates
+coordinator retains the host lease (reclaimed from the keeper before TERM, or
+reacquired only on the fallback path above), enumerates every deterministic
+stage name, validates
 any surviving stage's boot, invocation, relationship and
 cgroup identity, directly applies the same TERM/KILL escalation, and proves all
 five stage units and cgroups absent. It reaps the service helper only after
@@ -119,13 +160,15 @@ returns without dereferencing or reserving one.
 
 A successful result is not committed across an unchecked signal window.
 Cancellation is sampled after each durable success-phase transition and after
-physical workspace removal. TERM/INT are masked at a checked boundary
-immediately before the final journal append; that boundary is the completion
-linearization point. A cancellation ordered before it makes the terminal
-outcome `cancelled` on replay. If the success bundle was already published,
-the terminal cancellation retains and binds that exact success bundle/digest
-and publishes a separate cancellation outcome record; replay never replaces
-or loses the durable artifact.
+physical workspace removal. The supervisor validates and binds the retained
+result bundle while TERM/INT are masked, then checks for pending signals at
+the terminal journal boundary, consumes and records any pending cancellation,
+and keeps them masked through the terminal append. A cancellation ordered
+before that checked boundary makes the terminal outcome `cancelled` on replay.
+If the success bundle was already published, the terminal cancellation
+retains and binds that exact success bundle/digest and publishes a separate
+cancellation outcome record; replay never replaces or loses the durable
+artifact.
 
 ## Result bundle and retained evidence
 
@@ -133,8 +176,11 @@ The trusted recipe writes a `BQ-BUNDLE-V1` index beside the final manifest.
 Every non-control result file is listed as `sha256 size relative/path`; the
 worker reopens and hashes every listed file, rejects unlisted regular files,
 symlinks, traversal components and non-private directories, and enforces
-4,096 entries, 512 MiB total bytes, 64 MiB per file, 256 directory levels and
-192-byte relative paths. The index itself is bounded to 8 MiB. The final
+4,096 entries, 512 MiB total bytes for the admitted smoke recipe, 64 MiB per
+file, 256 directory levels and 192-byte relative paths. A separate 128 GiB
+ceiling is reserved for the still-blocked retirement recipe's full population;
+it grants no execution or performance admission. The index itself is bounded
+to 8 MiB. The final
 manifest, bundle and failure/cancellation outcome record are separately bound
 control records, so later retrieval does not change the measured bundle. A
 failed, cancelled, or interrupted recipe publishes a digest-bound
@@ -196,6 +242,88 @@ populated-descendant cleanup leaves the active job reconciliation-required.
 OOM, runtime timeout, ordinary execution failure and cancellation retain
 distinct evidence/outcomes.
 
+The real systemd worker retains the authenticated lease-handoff socket as a
+private phase channel (`phase_channel.h`). The build driver marks it CLOEXEC
+before constructing any child and waits for four ordered acknowledgements:
+preparing, settling, measuring, and measurement finished. The supervisor also binds
+the absolute monotonic execution deadline to its lease response and the
+recipient's acknowledgement. It rejects a missing, expired, or altered deadline;
+the unit checks it again after resuming from `SIGSTOP`, then verifies that the
+held lease still has the lease pathname and holds the lock before executing
+the installed recipe. The outer unit has that pathname in `InaccessiblePaths`,
+so the check goes through the held descriptor rather than the path:
+`/proc/self/fd/<n>` must name exactly the lease pathname (a rename away or a
+replacement over it does not), and a fresh description reopened through it
+must conflict with the lock that the held one still holds. A missing, renamed
+or replaced lease, or a deadline that expires during the pause, prevents
+recipe exec. The forked unit-entry
+fixture counts zero attempted execs on those cases as well as malformed lease
+responses; it uses the admitted smoke entry, not a timed retirement campaign.
+The still-blocked retirement path receives that deadline as
+a private recipe argument for its future bounded phase exchanges. The admitted
+smoke recipe retains its six-value interface.
+The supervisor binds
+each message to the job/attempt and an increasing monotonic timestamp, writes
+an exclusive durable queue record and a read-only `worker-phase-N` result
+receipt, and advances the settling/measuring journal boundary before replying.
+Final validation compares the exported receipts with the queue's authoritative
+copies. Unknown, duplicate, oversized, stale, descriptor-bearing or partial
+messages cannot advance the protocol. The smoke recipe's messages are the
+48-byte `BQPHASE1` packets. The retirement recipe's channel is the 80-byte
+`BQPHASE2`, which also carries the ready record's, the attested A/A rows'
+(AA_MEASURED, between A/A and A/B, #1021) and the receipt authority's
+digests (see
+[the coordinator side](RETIREMENT_PREPARATION.md#coordinator-side-881-pr-4)).
+
+While waiting between phase messages, the production supervisor blocks on the
+private channel and the launcher's Linux pidfd. It performs no periodic waitpid
+polling or manager queries. Operator signals and the fixed deadline still
+interrupt this wait; the existing unit/cgroup cleanup and lease reconciliation
+remain mandatory. A missing final acknowledgement or restart from measuring
+cannot produce success or permit another reservation. Linux pidfd support is
+required for this path. Receipt publication and journal errors are fatal before
+acknowledgement, and partial evidence is retained.
+
+The smoke recipe exercises these boundaries around its existing throughput
+stage. It does not settle or qualify the machine for retirement acceptance;
+the retirement descriptor remains blocked pending its full correctness,
+sampling, host-qualification and replay integration. The six-argument direct
+recipe test seam remains available; the installed worker supplies the seventh,
+private channel descriptor itself. No public request selects a descriptor.
+
+The fixed worker budget is one hour and starts before materialization. The
+historical 60-pair arithmetic capacity model in [EXPORT.md](EXPORT.md) has
+35,463,936 compiler invocations before its separately modeled runtime
+invocations; it is not the current support population or a measured host-rate
+bound. Those compiler calls alone would have to average under 101.5
+microseconds across the whole job, leaving no budget for preparation,
+validation, cleanup or manager overhead. Amendment A1 therefore replaces that
+budget, for the retirement recipe only, with a reviewed budget bound into the
+admitted recipe: the record in `tools/throughput/retirement_budget.h`
+(fixed-phase bounds, measured compiler bounds keyed by group kind and stage,
+separate untimed bounds measured on the slowest untimed target, a runtime
+bound and the reviewed metrics bound, plus its derivation), pinned by the
+profile key `campaign-budget-sha256=`. Campaign freeze rejects a job that the
+reviewed ceiling cannot hold before any timing. The smoke unit keeps its
+one-hour limit. For a retirement job, once the reserved job is known and
+before preparation or launch, the coordinator reads the installed budget
+record (`BqWorkerConfig.retirement_budget`). It authenticates the exact bytes
+against the pin and takes the reviewed ceiling, rounded down to whole
+seconds, as both the outer unit's `RuntimeMaxSec` and the absolute execution
+deadline counted from lease acquisition (`bq_worker_retirement_runtime`). The
+ceiling already includes the record's fixed-phase bounds, so those bounds are
+a floor it must cover, not an addition to it. The value must lie in the
+broker's one-minute to 72-hour range. The recipe entry (`build.c`), the oracle
+adapter and the reference producer accept a deadline at most
+`BQ_SYSTEMD_RETIREMENT_DEADLINE_MAX_NS` (that 72-hour maximum) away, so the
+derived deadline is never refused downstream. The effective configuration carries it
+to the outer unit's readback and broker request, and each retirement stage
+inherits it. A missing record, the blocked profile's missing pin, a digest
+mismatch or an out-of-range ceiling fails the job before launch. The recipe
+therefore stays blocked, and it is not admitted on a capacity assumption.
+Integration still has to install the record, pin it in the admitted profile
+and set `retirement_budget`.
+
 The production systemd path is Linux-only. Windows and macOS return
 `unsupported`; those builds still compile the bounded codec and portable
 manifest record. Injected tests cover fixed argv/resource/sandbox propagation,
@@ -250,6 +378,174 @@ throughput, sanitizer and workflow gates are retained. `shared.c` is the same
 foundation linkage used by the throughput tool. There is no new dependency,
 measurement loop or general-purpose testing framework.
 
+On Linux, both service self-test commands also build and run the private
+retirement preparation, correctness, durable-store and result-composer
+fixtures, the composer's end-to-end binding-validator test and the offline
+export/replay Python test. The throughput self-test registers the
+fixed-campaign child fixture. These tests check the combined adapters; they do
+not replace a complete service-owned producer, authenticated receipt handoff,
+physical A/A qualification or an admitted retirement recipe.
+
+### Retirement result composition (#881-E)
+
+`retirement_result.c` (the durable store), `retirement_compose.c` (the result
+composer, `retirement_compose.h`) and `retirement_compose_json.c` (its strict
+JSON reader and Python-exact canonical writer, `retirement_compose_json.h`)
+are separate translation units linked into the service. The service order is:
+
+1. Before any timing, `tp_retirement_compose_plan` derives the statistical
+   family from the frozen timed layout, bounds every composer output and
+   reserves both campaign stages, the composer outputs, the unreserved
+   retained kinds of the caller's `TpRetirementComposeDeclaration` and, as
+   external entries, the prior closure. It marks the upper-bounded kinds
+   (every metrics shard, each retained group and the #619 series shards
+   beyond the first) as the only slack settle may
+   release (`tp_retirement_store_bound`) and binds the declaration's digest
+   into the store (`tp_retirement_store_retain`). A declaration names each
+   retained file kind: an exact path (the A/A transcript and sample shards,
+   whose counts the campaign capacity fixes; lifecycle records) or a
+   `<prefix>NNNN<suffix>` group numbered from 0000 with a file cap (the A/A
+   metrics shards; failure logs). Lane D keeps only failure logs (successful
+   per-launch logs are deleted under its 4096-entry cap), so the log group is
+   bounded, not exact. The #619 adapter input is sharded (#1880; its format
+   is described below), so the series' shard count is bounded here; a family
+   that would need more than `TP_RETIREMENT_COMPOSE_SERIES_SHARDS` shards, or
+   any other output above the 64 MiB store file cap, is refused before
+   timing.
+2. Lane D publishes its A/A stage, A/B transcript shards, row/batch numeric
+   shards, per-batch metrics shards, untimed batch records and retained files
+   into that store.
+3. `tp_retirement_compose` requires the declaration digest to be the one bound
+   at plan time, every store file to be a declared sealed input or to match
+   exactly one declaration entry, every exact retained file to exist and every
+   group to be contiguous within its cap. It rehashes each input through its
+   sealed inode, replays the frozen #619 schedule with D's cursor, checks
+   process-instance bindings, interval windows, metrics-shard tiling and
+   untimed reproduction coverage, and joins every numeric sample to the
+   observation that produced it: a singleton or batch sample is D's encoding of
+   the supervised interval and RSS, an object member's sample is its metrics
+   input's interval and arena high-water (members are a batch's first inputs,
+   in census order). The A/A stage's retained metrics shards (its writer tag)
+   must be tiled, in order and completely, by its retained transcripts'
+   metrics artifacts, so a trailing unreferenced A/A shard is refused. It
+   rehashes the prior closure below the store root (the
+   evidence root is the store root; entry count and bytes are exactly those
+   reserved) and derives the post-sample `_execution_context` in C from the
+   authenticated post-A/A binding document with the streamed numeric digest.
+   It plans the canonical series shards from the joined ratios
+   (`tp_compose_series_plan`), then settles the reservation
+   (`tp_retirement_store_settle` releases only bounded slack, keeping exactly
+   the shards it will write) and publishes the #615 manifests, the code record
+   set, the statistics input (its shards, then their manifest), the output of
+   the reviewed `bench_throughput
+   retirement-replay` adapter (executed from the descriptor whose digest the
+   request authenticates, under a wall-clock limit, its JSON checked member by
+   member), the post-sample execution receipt, the retained manifest (every
+   unsealed file's kind, digest, size and path), the result bundle and the
+   `workflow.phases.sealed_result` record. Any refusal poisons the store and
+   names the failing stage; nothing is repaired or overwritten.
+4. The producer issues `tp_retirement_store_receipt_authority` for the composed
+   context; the authority binds the retained manifest's digest (the sealed
+   record's schema is fixed, so the unsealed A/A evidence is bound there).
+   After the private phase handoff is authenticated, the worker calls
+   `tp_retirement_store_authority_handoff` with the handoff's numeric job and
+   attempt; it refuses if any earlier record or temporary exists, copies the
+   authority to the queue-private root, publishes and reopens a journal record
+   (reopening every retained file), and only its success permits the final ACK
+   and lease release. `tp_retirement_store_authority_state` classifies a
+   restart as complete, incomplete (a crash prefix, including a `.pending`
+   temporary beside a final name), damaged (both records present but no longer
+   reopening) or absent; incomplete and damaged attempts are poisoned with
+   their evidence kept. The coordinator does this on restart recovery and
+   before any failed outcome (`bq_worker_retirement_handoff_hold`): it also
+   requires the MEASURED `worker-phase-4` record to agree with a complete
+   state, and otherwise writes a `retirement-poison-<id>` record and holds the
+   queue. A poisoned job never finalizes, reconciles succeeded or exports; no
+   operator path releases a held retirement job while the recipe is blocked
+   (RETIREMENT_PREPARATION.md, "Recovery classification (L2)").
+
+The composer consumes, per timed row, its census id, batch group, runtime
+eligibility and the six frozen dimension values (target, cpu, allocator,
+frontend_lowering, PIC, artifact_stage); per code-observed row, each variant's
+artifact, reproduction and code-section digests and code-section bytes; the
+plan-v3 execution-plan digest and partitions; and the retained declaration.
+Lane D's driver does not emit these yet: its unit must pass them from the
+frozen layout, execution plan and result-input plan it already authenticates
+(no adapter derives them from the binding here).
+
+`retirement_compose_test.py` composes the bounded A1 binding fixture and runs
+the unchanged validator end to end, with the receipt trust root read from the
+producer's authority file; it compares the C canonical writer with
+`json.dumps` and the validator's `_execution_context`, and checks that a
+halved sample, a dropped retained file and a changed binding are refused.
+It composes and validates twice: at the production 64 MiB shard size (one
+series shard) and at a fixture-only 4 KiB size (`series-shard-bytes`, with the
+validator's size patched to match) that spans several shards; tampering with
+the manifest or a shard is refused.
+Given the throughput self-test directory it also composes lane D's own
+C-encoded full-invocation fixture (CI runs this after `bench_throughput
+self-test` on Linux). After `bench_service self-test`, whose preparation
+runner drives the worker unit's job 82 to MEASURED and exports its result
+beside itself, it reads that result (#881 PR 3): the binding the producer
+wrote passes the validator structurally and mutations of it are refused, the
+receipt's context is the validator's `_execution_context` over the bundle's
+raw digest, and the authority, context chain, manifest and bundle index bind
+the result root's files. None of this is service admission or performance
+evidence, and the recipe stays blocked.
+
+**The #619 statistics adapter input (#1880).**
+`sealed_result_bundle.adapter_input` names the series manifest
+(`retirement-statistics-series.txt`), not the series itself: at A1 scale the
+single series stream (header line, then per family member a member line, its
+ratio lines and `end`) is about 407 MB at 60 pairs and 1.7 GB at 254 pairs,
+above the 64 MiB per-file cap that neither the store nor the bundle raises.
+The stream, the statistics, the family and the thresholds are unchanged; only
+its storage is sharded, in the way the transcripts and metrics already are.
+
+- **Shards.** `retirement-statistics-series-NNNN.txt`, beside the manifest,
+  from 0000. The canonical split is greedy over whole LF lines: each shard is
+  at most 64 MiB (`TP_RETIREMENT_COMPOSE_SERIES_SHARD_BYTES`, one store file),
+  a shard ends only where the next line would not fit, and no line is split.
+  The header line therefore opens shard 0 (it is not in the manifest), and
+  the shards' concatenation is byte for byte the former single file.
+- **Manifest.** ASCII, one LF-terminated line each:
+
+  ```text
+  BQ-RETIREMENT-STATISTICS-SERIES-V1
+  series bytes=<total> sha256=<hex> shards=<count> shard_bytes=67108864
+  shard=<index> offset=<offset> bytes=<bytes> sha256=<hex> path=<leaf>
+  ```
+
+  one shard line per shard in series order: indexes from 0, offsets
+  contiguous from 0 with no gap or overlap, every shard nonempty and within
+  `shard_bytes`, each leaf the canonical `retirement-statistics-series-NNNN.txt`
+  of its index, and shard bytes summing to the series. Numbers have one
+  spelling (no sign or leading zero) and nothing follows the last line.
+- **Store.** Each shard and the manifest are store entries with their own
+  path, bytes and SHA-256, and sealed-closure members
+  (`workflow.adapter_input` for the manifest,
+  `workflow.adapter_input.shard.<index>` for each shard). The plan reserves
+  `1 + (series_bound - 1) / (64 MiB - 255)` shards (every shard but the last
+  holds more than 64 MiB less the 256-byte longest line); the A1 family
+  (6,482 timed rows, 80 object groups, 13,126 cells) needs at most 7 at 60
+  pairs and 26 at 254 pairs.
+- **Readers.** The binding validator (`_adapter_series_manifest`,
+  `_AdapterSeriesStream`, `_check_adapter_series`) requires the approved
+  64 MiB shard size, streams every shard in order, rehashes each shard and
+  the joined series from the bytes it parses, and refuses a reordered,
+  missing, duplicated or truncated shard, an offset gap, a line split across
+  shards or a non-maximal (non-canonical) split. `bench_throughput
+  retirement-replay --input` takes the manifest and applies the same checks,
+  naming the broken rule in its refusal (it accepts any shard size from
+  4 KiB to 64 MiB, so its own tests and the fixture-only composer size can
+  span several small shards; the validator alone pins 64 MiB, so a smaller
+  size cannot pass validation). Each rule has a test that fails when the rule
+  is removed.
+- **Composer scratch.** The adapter reads scratch copies; after it exits the
+  composer rehashes the manifest and every shard copy against the sealed
+  store files and refuses any difference. It removes the scratch copies it
+  created on success and on every refusal after the series began.
+
 Linux supervisor deadline coverage lives in `worker_deadline_tests.c`. Timed
 commands use explicit `exec` so the test retains an owned direct child rather
 than depending on PID 1 to reap an orphaned shell descendant. The observed
@@ -260,6 +556,12 @@ diagnostics retain individual results, elapsed time, PID/group identity and
 process state before bounded cleanup. The 20 ms command deadline, 1,000 ms
 test bound and production cleanup policy are unchanged, including treating
 unreaped zombies as present group members.
+
+`phase_channel_tests.h` exercises the production protocol with real socketpairs
+and child pidfds, including a materialized build-driver round trip, durable
+receipt visibility before acknowledgement, malformed/duplicate messages,
+ancillary-fd disposal, publication collisions, interruption, deadline,
+cancellation, receipt replacement and journal-reopen admission fencing.
 
 The normal native executable is `build/bench-service-tools/service` (`.exe` on
 Windows). The fixed-recipe self-test is a Linux build-driver command; it uses
@@ -374,6 +676,19 @@ they are not authentication or tamper-proof evidence. Replay also checks event
 sizes, installed recipes, unique keys, FIFO order, ownership tokens and legal
 state transitions, not merely checksums.
 
+A retirement SUBMIT record is valid only in schema 3. Replay accepts it
+whatever the build admits, and journalled jobs of either service recipe follow
+the real transitions (`bq_recipe_real_journal`). So a journal written while the
+retirement profile was admitted still opens under a blocked build. Its
+retirement jobs are then inert, because `bq_recipe_real` refuses them: they are
+never materialized, dispatched or reconciled, `serve` refuses to start while
+one is unfinished, and schema-1 clients see them as unsupported. `status` and
+`result` of a finished, bound retirement job fail with
+`configuration-mismatch`, because the public result-binding check admits a
+retirement result only through a complete profile.
+Queued work can still be cancelled locally. An active attempt stays
+`reconciliation-required` until an admitting build reconciles it.
+
 An incomplete **final** record is a short header, or a complete valid header
 with the expected sequence and an incomplete payload. Recovery truncates only
 that final incomplete record to its starting offset, syncs the truncation, and
@@ -425,10 +740,54 @@ journal and control schema numbers.
 registry entry. `profiles/native-retirement-performance-v1.blocked` pins the
 landed performance contract, support declaration, binding validator and
 statistics implementation by SHA-256 and records the remaining execution
-requirements. It has no executable command, is not an installed `.recipe`, and
-is rejected by request validation and `worker-unit`. This prevents the one-pair
+requirements. It has no admitted executable command or installed `.recipe`, and
+is rejected by request validation and `worker-unit`. One portable predicate,
+`bq_recipe_retirement_admitted` (`queue.c`), decides admission: it is true
+only when the compiled profile has exactly one line, `status=admitted`
+(`bq_recipe_profile_admitted`). `bq_recipe_admitted`, `bq_recipe_service`,
+`bq_recipe_real` and `bq_request_valid` all use it, so submission, transport,
+exclusive admission, materialization, dispatch, reconciliation and export open
+together when the compiled profile is admitted, and stay closed while it is
+blocked. The Linux coordinator's gates still require the seams'
+profile to pass `bq_retirement_profile_complete` (every pin), whatever the
+predicate says. The portable predicate cannot see the pins, so the Linux
+service fails closed on an admitted but incomplete compiled profile
+(`bq_retirement_compiled_servable`): `serve` refuses to start
+(`recipe-mismatch`), the transport refuses a retirement submission before
+it is sent or accepted, and the worker refuses the queued head job before
+taking the lease or reserving it. `recipe-identity` reports such a profile as
+`status=incomplete`. Only the test builds (`BUSTER_BENCH_SERVICE_TEST`,
+`BQ_RETIREMENT_CORRECTNESS_TEST_ONLY`) can substitute an admitted stand-in
+profile (`bq_retirement_profile_test_override`); the installed service has no
+override. An installed profile may be up to `BQ_RECIPE_PROFILE_CAP` (4352)
+bytes, enough for an admitted profile with every worker-unit pin. Its private build-driver
+parser accepts the lease-bound preparation digest, phase descriptor and deadline
+but deliberately builds no timed-child graph. This prevents the one-pair
 smoke recipe from being relabelled as a retirement result while preserving a
-machine-visible identity for the future admitted implementation.
+machine-visible identity for the future admitted implementation. Because the
+unit cannot reach the queue, the supervisor exports the verified preparation
+record and the request into a sealed `retirement/` directory of the attempt
+workspace. The unit-side importer, matched-build runner, census projection,
+oracle/reference-producer caller, correctness gate and ready record in
+`retirement_unit.c` are reached only through the forked worker-unit producer
+in `retirement_worker_unit.c`, which `worker-unit` admits only with a complete
+profile (`bq_retirement_profile_complete`); the compiled blocked profile is
+refused before the lease handoff. After the ready record the producer runs the
+in-unit campaign (`retirement_worker_campaign.c`) through lane D's READY
+(runtime rows run lane B's `./{{output}}` program, retained from the stage's
+own compile and copied into a fresh step directory), but the job still fails
+closed because
+composition and MEASURED are not wired (see
+[the producer](RETIREMENT_PREPARATION.md#worker-unit-producer-881)). The runner
+sends both subjects' build stages through typed broker `start-stage`
+requests. The broker
+source now defines those four stages (see
+[SYSTEMD_BROKER.md](deploy/SYSTEMD_BROKER.md#retirement-matched-build-stages-1020)),
+but the installed broker does not accept them until LOCAL installs the
+reviewed binaries; see
+[RETIREMENT_PREPARATION.md](RETIREMENT_PREPARATION.md#worker-unit-handoff-1020)
+[unit-side matched builds](RETIREMENT_PREPARATION.md#unit-side-matched-builds-1020)
+and [unit-side projection and oracle](RETIREMENT_PREPARATION.md#unit-side-projection-and-oracle-1020).
 
 `zen5-calibration-v1` (#426) is a served recipe with a real executable
 profile, `profiles/zen5-calibration-v1.recipe`, and the fixed build-driver
@@ -701,6 +1060,7 @@ cannot produce a performance qualification or #512 acceptance result.
 ```sh
 ./build.sh bench_service serve STATE SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU
 ./build.sh bench_service client SOCKET capabilities
+./build.sh bench_service client SOCKET recipe-identity
 ./build.sh bench_service client SOCKET submit PRINCIPAL KEY validate-buster-v1 BASE_SHA CANDIDATE_SHA
 ./build.sh bench_service client SOCKET status JOB
 ./build.sh bench_service client SOCKET result JOB
@@ -724,7 +1084,9 @@ The installed executable also provides a fixed smoke request encoder:
 
 ```sh
 /usr/local/libexec/buster-bench-service gateway capabilities
+/usr/local/libexec/buster-bench-service gateway recipe-identity
 /usr/local/libexec/buster-bench-service gateway submit KEY BASE_SHA CANDIDATE_SHA
+/usr/local/libexec/buster-bench-service gateway submit-retirement KEY BASE_SHA CANDIDATE_SHA
 /usr/local/libexec/buster-bench-service gateway submit-recipe RECIPE KEY BASE_SHA CANDIDATE_SHA
 /usr/local/libexec/buster-bench-service gateway status JOB
 /usr/local/libexec/buster-bench-service gateway result JOB
@@ -733,13 +1095,23 @@ The installed executable also provides a fixed smoke request encoder:
 ```
 
 `gateway` fixes `/run/buster-bench/control.sock` and principal
-`github-actions`. `submit` fixes recipe `validate-buster-v1`; `submit-recipe`
+`github-actions`. `submit` fixes recipe `validate-buster-v1`;
+`submit-retirement` fixes `native-retirement-performance-v1` and is refused
+before transport while the compiled profile is blocked; `submit-recipe`
 names one recipe, which must pass the same compiled-registry
 `bq_recipe_service` check as every other submission, so unknown, blocked, fake
 and supervisor-internal names are refused before transport and again by the
-service. Both encode identical request bytes for `validate-buster-v1`. The
-gateway accepts full lowercase immutable source identities and bounded keys,
-never a path, command, flag or environment override. It shares `client`'s typed transport and reply validator;
+service. `submit` and `submit-recipe validate-buster-v1` encode identical
+request bytes. The gateway accepts full lowercase immutable source identities
+and bounded keys, never a path, command, flag, sample count, threshold,
+workload or environment override. A retirement job needs an idle host, so the
+transport accepts the retirement recipe only through the gateway's exclusive
+(idle-only) submit; `client SOCKET submit` of the retirement recipe is refused
+before transport with `unsupported`.
+`recipe-identity` is read-only: it prints the retirement recipe's
+`status=blocked`, `status=admitted` or `status=incomplete` (admitted but
+missing pins, which the service refuses to serve) and the SHA-256 of its
+compiled profile, contract and support declaration. It shares `client`'s typed transport and reply validator;
 it never opens the queue. Installed-source allowlisting and all materialization
 checks remain service-owned under the host lease.
 
@@ -817,7 +1189,15 @@ path length u32, workspace path length u32, then both paths), and
 workspace-reconcile (job u64, token u64, workspace path length u32, path).
 Operation 11 is worker-run (installed/workspace/lease path lengths and CPU u32,
 then the three paths). Paths are absolute and at most 192 bytes; their combined
-worker payload must also fit the fixed 512-byte body.
+worker payload must also fit the fixed 512-byte body. Operation 12 is the
+gateway's exclusive submit, operation 13 is export ([EXPORT.md](EXPORT.md)).
+Operation 14 is recipe-identity (schema 2, empty request). Its reply is fixed
+text after the error code:
+`schema=1 recipe=native-retirement-performance-v1 status=blocked|admitted|incomplete`,
+then `profile-sha256=`, `contract-sha256=` and `support-declaration-sha256=`
+lines, each with 64 lowercase hex digits. Capabilities v2 is unchanged byte for
+byte (the dispatch workflow greps it, and it has no room for digests); it still
+lists the recipe under `blocked-recipes=`.
 
 Schema 2 status-like replies have 124-byte bodies: error at 0; job/token/journal-sequence
 u64 at 4/12/20; phase/outcome/validity/cancel-intent/reconciliation/pending/retained

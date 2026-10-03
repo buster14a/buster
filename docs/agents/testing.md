@@ -329,7 +329,9 @@ Linux lease-handoff and result-evidence suites; see
 retain and hash existing result evidence into the published `BQ-BUNDLE-V1`
 index, a bundle-only crash prefix completes idempotently, and invalid
 published controls are never repaired. The coordinator removes the
-`.lease-handoff` socket before the worker is continued. On Linux the suite
+`.lease-handoff` socket before the worker is continued. The lease-keeper
+fixtures race a contending coordinator against the reverse handoff that a
+restarted coordinator uses to reclaim a live unit's lease. On Linux the suite
 also runs a materializer-to-recipe bridge: a real `bq_materialize` fixture
 feeds the real `bench_service_recipe` build graph through
 `bench_service_recipe_self_test JOB TOKEN WORKSPACE BASE CANDIDATE RESULT`,
@@ -548,8 +550,11 @@ compiler-global metadata and persistent lane contexts keep their existing owners
 `test_arena_self_test` runs as a fail-closed harness check without changing
 registered assertion/module counts. It covers nested and empty scopes, retained
 scopes, an internal rewind, decommit, dirty-byte zeroing, quiet mode, and buffered
-failure diagnostics surviving a rewind and overwrite. Observation uses separate
-arena header storage in test-enabled builds and adds no allocation-path work.
+failure diagnostics surviving a rewind and overwrite. Observation uses the
+scoped `Arena.high_water` header field, separate from `dirty_position`, and adds
+no allocation-path work; rewinds fold the cursor into it in every build, and
+the driver's per-input metrics save and restore it around a unit in the same
+way.
 
 
 Fatal-output regressions in `os_tests` run raw and formatted reporters in

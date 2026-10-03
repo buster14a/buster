@@ -1,5 +1,14 @@
 #pragma once
 
+// Public compiler-driver API behind `ide cc`: compiler_driver_parse_arguments
+// turns argv into a CompilerDriverInvocation, compiler_driver_execute_invocation
+// runs it into a CompilerDriverResult (aggregate statistics, diagnostics and
+// artifacts), and compiler_driver_metrics_format renders the opt-in per-input
+// records (CompilerDriverInputResult, requested by collect_input_metrics /
+// -fmetrics-out) that a batched multi-input invocation publishes in input
+// order. compiler_prewarm / compiler_parallel_prewarm prepare shared tables
+// before lanes run. driver.c owns the implementation and its layout map.
+
 #include <buster/lib/compiler/diagnostic.h>
 #include <buster/lib/compiler/assembly/assembly_unit.h>
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -205,6 +214,127 @@ struct CompilerDriverInvocation
     bool record_codegen_fallbacks;
     bool c_dialect_explicit;
     bool debug_info_explicit;
+    // Per-input records for batched compiles; docs/agents/driver.md
+    // ("Per-input records and continue-on-failure") is the contract and the
+    // -fmetrics-out schema. collect_input_metrics (-fmetrics-out) measures
+    // each input; collect_function_sizes (-fmetrics-functions) requires it
+    // and adds function sizes; keep_going (-fkeep-going) continues past a
+    // failed translation unit. Without them no clock is read and nothing is
+    // allocated. Metrics reject suppress_diagnostic_records.
+    bool collect_input_metrics;
+    bool collect_function_sizes;
+    bool keep_going;
+    // The clock origin of every per-input start/end offset and of the
+    // process wall time. `ide cc` sets it right after argument parsing; the
+    // driver takes its own at entry when has_metrics_origin is false.
+    bool has_metrics_origin;
+    TimeDataType metrics_origin;
+    // Where `ide cc` writes the records; the driver never writes it.
+    String8 metrics_output_path;
+};
+
+// Contiguous intervals of compiler_driver_execute_c_single, named after the
+// CompilerDriverError stage that fails inside each (see driver.md).
+typedef enum CompilerDriverPhase
+{
+    COMPILER_DRIVER_PHASE_READ,
+    COMPILER_DRIVER_PHASE_PREPROCESS,
+    COMPILER_DRIVER_PHASE_PARSE,
+    COMPILER_DRIVER_PHASE_ANALYSIS,
+    COMPILER_DRIVER_PHASE_IR,
+    COMPILER_DRIVER_PHASE_CODEGEN,
+    COMPILER_DRIVER_PHASE_OBJECT,
+    COMPILER_DRIVER_PHASE_EMIT,
+    COMPILER_DRIVER_PHASE_COUNT,
+} CompilerDriverPhase;
+
+typedef enum CompilerDriverInputStatus
+{
+    COMPILER_DRIVER_INPUT_STATUS_NOT_RUN,
+    COMPILER_DRIVER_INPUT_STATUS_OK,
+    // Refused with source diagnostics: TOKENIZE, PARSE, ANALYSIS, INVALID_INPUT.
+    COMPILER_DRIVER_INPUT_STATUS_REJECTED,
+    // Any other failure, including an unreadable prebuilt input.
+    COMPILER_DRIVER_INPUT_STATUS_FAILED,
+    // An object or archive link input that was read, not compiled.
+    COMPILER_DRIVER_INPUT_STATUS_PREBUILT,
+    COMPILER_DRIVER_INPUT_STATUS_COUNT,
+} CompilerDriverInputStatus;
+
+// Object-model section bytes grouped by ObjectSectionKind (driver.md).
+typedef enum CompilerDriverSectionClass
+{
+    COMPILER_DRIVER_SECTION_CLASS_TEXT,
+    COMPILER_DRIVER_SECTION_CLASS_READ_ONLY_DATA,
+    COMPILER_DRIVER_SECTION_CLASS_DATA,
+    COMPILER_DRIVER_SECTION_CLASS_ZERO,
+    COMPILER_DRIVER_SECTION_CLASS_THREAD_LOCAL_DATA,
+    COMPILER_DRIVER_SECTION_CLASS_THREAD_LOCAL_ZERO,
+    COMPILER_DRIVER_SECTION_CLASS_INITIALIZER,
+    COMPILER_DRIVER_SECTION_CLASS_UNWIND,
+    COMPILER_DRIVER_SECTION_CLASS_DEBUG,
+    COMPILER_DRIVER_SECTION_CLASS_COUNT,
+} CompilerDriverSectionClass;
+
+// Function records kept per input. The record text truncates only messages
+// and function names, at COMPILER_DRIVER_METRICS_TEXT_LIMIT bytes, and then
+// carries their full length and a truncation flag; paths and diagnostic codes
+// are written whole.
+#define COMPILER_DRIVER_INPUT_FUNCTION_LIMIT 65536u
+#define COMPILER_DRIVER_METRICS_TEXT_LIMIT 1024u
+#define COMPILER_DRIVER_METRICS_VERSION 1u
+
+typedef struct CompilerDriverFunctionSize CompilerDriverFunctionSize;
+struct CompilerDriverFunctionSize
+{
+    String8 name;
+    u64 code_bytes;
+};
+
+// One record per input, in input order, owned by the result arena; present
+// only with collect_input_metrics or keep_going. driver.md defines every field.
+typedef struct CompilerDriverInputResult CompilerDriverInputResult;
+struct CompilerDriverInputResult
+{
+    String8 path;
+    String8 message;
+    String8 diagnostic_code;
+    String8 diagnostic_path;
+    // Lowercase hex SHA-256 over this input's diagnostic records.
+    String8 diagnostic_digest;
+    CompilerDriverFunctionSize* functions;
+    CodegenStatistics codegen;
+    // Offsets from metrics_origin; the phases partition end - start.
+    u64 start_nanoseconds;
+    u64 end_nanoseconds;
+    u64 phase_nanoseconds[COMPILER_DRIVER_PHASE_COUNT];
+    u64 arena_peak_bytes;
+    u64 arena_retained_bytes;
+    u64 object_file_bytes;
+    u64 section_bytes[COMPILER_DRIVER_SECTION_CLASS_COUNT];
+    u64 source_bytes;
+    u64 preprocessed_tokens;
+    u32 index;
+    u32 diagnostic_line;
+    u32 diagnostic_column;
+    u32 diagnostic_record_count;
+    u32 error_count;
+    u32 warning_count;
+    u32 function_count;
+    u32 functions_omitted;
+    u32 fallback_record_count;
+    CompilerDriverError error;
+    CompilerDriverInputStatus status;
+    bool measured;
+};
+
+// What only the process knows, for the header record.
+typedef struct CompilerDriverProcessMetrics CompilerDriverProcessMetrics;
+struct CompilerDriverProcessMetrics
+{
+    u64 wall_nanoseconds;
+    u64 peak_resident_bytes;
+    u32 exit_status;
 };
 
 typedef struct CompilerDriverFallbackRecord CompilerDriverFallbackRecord;
@@ -246,6 +376,12 @@ struct CompilerDriverResult
     CodegenStatistics codegen_statistics;
     CompilerDriverFallbackRecord* fallback_records;
     u32 fallback_record_count;
+    // Per-input records (see CompilerDriverInputResult); null unless
+    // collect_input_metrics or keep_going was requested.
+    CompilerDriverInputResult* inputs;
+    u32 input_result_count;
+    // Inputs whose status is REJECTED or FAILED.
+    u32 failed_input_count;
     // What the C frontend consumed, per inclusion and per distinct file, and
     // what preprocessing made of it. `lexed_files` attributes the difference
     // between the two aggregates: across several inputs it keeps only the
@@ -287,3 +423,6 @@ BUSTER_F_DECL void compiler_prewarm(void);
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);
+// The -fmetrics-out record text; docs/agents/driver.md is the schema.
+BUSTER_F_DECL String8 compiler_driver_metrics_format(Arena* arena, CompilerDriverInvocation const* invocation, CompilerDriverResult const* result,
+                                                     CompilerDriverProcessMetrics process);

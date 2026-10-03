@@ -1839,20 +1839,239 @@ static char const* tp_retirement_outcome_name(TpRetirementOutcome outcome)
     return result;
 }
 
+/* Member identities begin with their metric token (binding validator
+ * STATISTICAL_METRICS). Binding the token to its index keeps a member of one
+ * metric, including the A1 batch process pair, from being replayed with
+ * another metric's bootstrap seed domain. */
+static char const* const tp_retirement_metric_tokens[TP_RETIREMENT_VARIABLE_METRICS] = {
+    [TP_RETIREMENT_WALL_TIME] = "compiler_wall_time",
+    [TP_RETIREMENT_PEAK_MEMORY] = "compiler_peak_memory",
+    [TP_RETIREMENT_GENERATED_RUNTIME] = "generated_runtime",
+    [TP_RETIREMENT_BATCH_WALL_TIME] = "compiler_batch_wall_time",
+    [TP_RETIREMENT_BATCH_PEAK_RSS] = "compiler_batch_peak_rss",
+};
+
+static int tp_retirement_member_metric(char const* member, unsigned metric)
+{
+    char const* token = metric < TP_RETIREMENT_VARIABLE_METRICS ? tp_retirement_metric_tokens[metric] : NULL;
+    size_t length = token ? strlen(token) : 0;
+    int result = token && !strncmp(member, token, length) && member[length] == '/';
+    return result;
+}
+
+/* (#1880) The adapter input is a manifest over ordered series shards; the
+ * series stream itself is unchanged. The binding validator
+ * (ADAPTER_SERIES_* in tools/native_retirement_performance_binding.py)
+ * documents the format:
+ *   BQ-RETIREMENT-STATISTICS-SERIES-V1
+ *   series bytes=<total> sha256=<hex> shards=<count> shard_bytes=<cap>
+ *   shard=<index> offset=<offset> bytes=<bytes> sha256=<hex> path=<leaf>
+ * Shard i is the leaf retirement-statistics-series-<i as four digits>.txt
+ * in the manifest's directory. The shards split the series greedily over
+ * whole lines (the header line opens shard 0, and a shard ends only where the
+ * next line would exceed shard_bytes), offsets are contiguous from 0, and
+ * every shard and the joined series are rehashed as they are read. Each
+ * refusal names its rule in TpSeriesReader.refused. The validator
+ * additionally requires the approved 64 MiB shard size. */
+#define TP_SERIES_MANIFEST_HEADER "BQ-RETIREMENT-STATISTICS-SERIES-V1\n"
+#define TP_SERIES_LEAF_FORMAT "retirement-statistics-series-%04u.txt"
+#define TP_SERIES_SHARDS 1024u
+#define TP_SERIES_SHARD_BYTES_MIN 4096u
+#define TP_SERIES_SHARD_BYTES_MAX UINT64_C(67108864)
+#define TP_SERIES_LEAF_BYTES 128u
+#define TP_SERIES_LINE_BYTES 4096u
+
+typedef struct TpSeriesShard
+{
+    uint64_t offset, bytes;
+    char sha256[65];
+    char leaf[TP_SERIES_LEAF_BYTES + 1];
+} TpSeriesShard;
+
+typedef struct TpSeriesReader
+{
+    TpSeriesShard* shards;
+    FILE* stream;
+    Sha256 shard_hash, total_hash;
+    uint64_t total_bytes, shard_bytes, used;
+    unsigned count, index, first_line;
+    size_t directory_length;
+    char directory[TP_PATH_CAP];
+    char total_sha256[65];
+    /* The first rule the input broke (a static name), or NULL. */
+    char const* refused;
+} TpSeriesReader;
+
+/* Record the first broken rule; later checks keep it. */
+static void tp_series_refuse(TpSeriesReader* reader, int ok, char const* rule)
+{
+    if (!ok && !reader->refused) reader->refused = rule;
+}
+
+/* Parse the canonical manifest: every line is re-rendered and must match
+ * (no sign, no leading zero), so each field has one spelling. */
+static int tp_series_open(TpSeriesReader* reader, char const* manifest_path)
+{
+    *reader = (TpSeriesReader){0};
+    FILE* manifest = fopen(manifest_path, "rb");
+    char line[TP_SERIES_LINE_BYTES], expected[TP_SERIES_LINE_BYTES], sha256[65] = {0};
+    char const* slash = strrchr(manifest_path, '/');
+#ifdef _WIN32
+    char const* backslash = strrchr(manifest_path, '\\');
+    if (backslash && (!slash || backslash > slash)) slash = backslash;
+#endif
+    tp_series_refuse(reader, manifest != NULL, "manifest-open");
+    reader->directory_length = slash ? (size_t)(slash - manifest_path) + 1 : 0;
+    tp_series_refuse(reader, reader->directory_length < sizeof(reader->directory), "manifest-path");
+    if (!reader->refused) memcpy(reader->directory, manifest_path, reader->directory_length);
+    if (!reader->refused)
+        tp_series_refuse(reader, fgets(line, sizeof(line), manifest) && !strcmp(line, TP_SERIES_MANIFEST_HEADER),
+                         "manifest-header");
+    if (!reader->refused)
+        tp_series_refuse(reader, fgets(line, sizeof(line), manifest) &&
+            sscanf(line, "series bytes=%" SCNu64 " sha256=%64[0-9a-f] shards=%u shard_bytes=%" SCNu64,
+                   &reader->total_bytes, reader->total_sha256, &reader->count, &reader->shard_bytes) == 4 &&
+            snprintf(expected, sizeof(expected), "series bytes=%" PRIu64 " sha256=%s shards=%u shard_bytes=%" PRIu64 "\n",
+                     reader->total_bytes, reader->total_sha256, reader->count, reader->shard_bytes) > 0 &&
+            !strcmp(line, expected) && strlen(reader->total_sha256) == 64 && reader->total_bytes, "series-line");
+    if (!reader->refused)
+        tp_series_refuse(reader, reader->shard_bytes >= TP_SERIES_SHARD_BYTES_MIN &&
+                         reader->shard_bytes <= TP_SERIES_SHARD_BYTES_MAX, "shard-bytes-range");
+    if (!reader->refused)
+        tp_series_refuse(reader, reader->count && reader->count <= TP_SERIES_SHARDS, "shard-count");
+    reader->shards = !reader->refused ? (TpSeriesShard*)calloc(reader->count, sizeof(*reader->shards)) : NULL;
+    if (!reader->refused) tp_series_refuse(reader, reader->shards != NULL, "memory");
+    uint64_t offset = 0;
+    for (unsigned i = 0; !reader->refused && i < reader->count; ++i)
+    {
+        TpSeriesShard* shard = reader->shards + i;
+        unsigned index = 0;
+        char leaf[TP_SERIES_LEAF_BYTES + 1];
+        tp_series_refuse(reader, fgets(line, sizeof(line), manifest) &&
+            sscanf(line, "shard=%u offset=%" SCNu64 " bytes=%" SCNu64 " sha256=%64[0-9a-f] path=%128s", &index,
+                   &shard->offset, &shard->bytes, sha256, shard->leaf) == 5 &&
+            snprintf(expected, sizeof(expected), "shard=%u offset=%" PRIu64 " bytes=%" PRIu64 " sha256=%s path=%s\n",
+                     index, shard->offset, shard->bytes, sha256, shard->leaf) > 0 &&
+            !strcmp(line, expected) && strlen(sha256) == 64, "shard-line");
+        if (!reader->refused) tp_series_refuse(reader, index == i, "shard-index");
+        if (!reader->refused) tp_series_refuse(reader, shard->offset == offset, "shard-offset");
+        if (!reader->refused)
+            tp_series_refuse(reader, shard->bytes && shard->bytes <= reader->shard_bytes, "shard-size");
+        for (unsigned j = 0; !reader->refused && j < i; ++j)
+            tp_series_refuse(reader, strcmp(reader->shards[j].leaf, shard->leaf) != 0, "shard-duplicate");
+        if (!reader->refused)
+            tp_series_refuse(reader, snprintf(leaf, sizeof(leaf), TP_SERIES_LEAF_FORMAT, i) > 0 &&
+                             !strcmp(leaf, shard->leaf), "shard-leaf");
+        if (!reader->refused)
+        {
+            memcpy(shard->sha256, sha256, sizeof(shard->sha256));
+            offset += shard->bytes;
+        }
+    }
+    if (!reader->refused) tp_series_refuse(reader, offset == reader->total_bytes, "coverage");
+    if (!reader->refused) tp_series_refuse(reader, !fgets(line, sizeof(line), manifest), "manifest-trailing");
+    if (manifest && fclose(manifest) != 0) tp_series_refuse(reader, 0, "manifest-close");
+    sha256_init(&reader->total_hash);
+    return !reader->refused;
+}
+
+/* Close the current shard, which must be exactly its manifest bytes. */
+static void tp_series_shard_end(TpSeriesReader* reader)
+{
+    char digest[65];
+    TpSeriesShard const* shard = reader->shards + reader->index;
+    sha256_finish_hex(&reader->shard_hash, digest);
+    tp_series_refuse(reader, !ferror(reader->stream), "shard-read");
+    tp_series_refuse(reader, reader->used == shard->bytes, "shard-length");
+    tp_series_refuse(reader, !strcmp(digest, shard->sha256), "shard-digest");
+    if (fclose(reader->stream) != 0) tp_series_refuse(reader, 0, "shard-close");
+    reader->stream = NULL;
+    ++reader->index;
+}
+
+/* The next LF-terminated series line (1), the end of the joined series (0) or
+ * a refusal (-1). Lines never straddle shards. */
+static int tp_series_line(TpSeriesReader* reader, char* line, size_t capacity)
+{
+    int result = -1, done = reader->refused != NULL;
+    while (!done)
+    {
+        if (!reader->stream && reader->index == reader->count)
+        {
+            char digest[65];
+            /* The joined length already holds: the shards cover exactly the
+             * series bytes ("coverage") and each is exactly its manifest
+             * bytes ("shard-length"). */
+            sha256_finish_hex(&reader->total_hash, digest);
+            tp_series_refuse(reader, !strcmp(digest, reader->total_sha256), "series-digest");
+            result = 0;
+            done = 1;
+        }
+        else if (!reader->stream)
+        {
+            char path[TP_PATH_CAP];
+            int length = snprintf(path, sizeof(path), "%.*s%s", (int)reader->directory_length, reader->directory,
+                                  reader->shards[reader->index].leaf);
+            reader->stream = length > 0 && (size_t)length < sizeof(path) ? fopen(path, "rb") : NULL;
+            tp_series_refuse(reader, reader->stream != NULL, "shard-open");
+            reader->used = 0;
+            reader->first_line = 1;
+            sha256_init(&reader->shard_hash);
+            done = reader->refused != NULL;
+        }
+        else if (!fgets(line, (int)capacity, reader->stream)) tp_series_shard_end(reader);
+        else
+        {
+            size_t length = strlen(line);
+            TpSeriesShard const* shard = reader->shards + reader->index;
+            tp_series_refuse(reader, length && line[length - 1] == '\n', "line-boundary");
+            if (!reader->refused) tp_series_refuse(reader, length <= shard->bytes - reader->used, "shard-overrun");
+            if (!reader->refused)
+                tp_series_refuse(reader, !reader->first_line || !reader->index ||
+                                 reader->shards[reader->index - 1].bytes + length > reader->shard_bytes,
+                                 "non-canonical-split");
+            if (!reader->refused)
+            {
+                sha256_add(&reader->shard_hash, line, (u64)length);
+                sha256_add(&reader->total_hash, line, (u64)length);
+                reader->used += length;
+                reader->first_line = 0;
+                result = 1;
+            }
+            done = 1;
+        }
+        if (reader->refused)
+        {
+            result = -1;
+            done = 1;
+        }
+    }
+    return result;
+}
+
+static int tp_series_close(TpSeriesReader* reader)
+{
+    if (reader->stream && fclose(reader->stream) != 0) tp_series_refuse(reader, 0, "shard-close");
+    reader->stream = NULL;
+    free(reader->shards);
+    reader->shards = NULL;
+    return !reader->refused;
+}
+
 static int tp_retirement_replay(TpConfig const* config)
 {
-    FILE* input = fopen(config->retirement_input, "rb");
+    TpSeriesReader input;
     FILE* output = NULL;
     double* workspace = NULL;
-    int ok = input != NULL;
+    int ok = tp_series_open(&input, config->retirement_input);
     unsigned version = 0, bootstrap_members = 0, cell_members = 0, pairs = 0;
     unsigned resamples = 0, frozen = 0, members = 0;
     uint64_t seed = 0;
-    char line[4096];
-    if (!ok) tp_error("cannot open retirement series input %s", config->retirement_input);
+    char line[TP_SERIES_LINE_BYTES];
+    if (!ok) tp_error("invalid retirement series manifest %s (%s)", config->retirement_input, input.refused);
     if (ok)
     {
-        ok = fgets(line, sizeof(line), input) != NULL &&
+        ok = tp_series_line(&input, line, sizeof(line)) == 1 &&
              sscanf(line, "version=%u seed=%" SCNu64 " bootstrap_members=%u cell_members=%u pairs=%u resamples=%u frozen=%u members=%u",
                     &version, &seed, &bootstrap_members, &cell_members, &pairs,
                     &resamples, &frozen, &members) == 8;
@@ -1896,7 +2115,7 @@ static int tp_retirement_replay(TpConfig const* config)
         unsigned metric = 0, kind = 0, family_index = 0, cells = 0;
         unsigned member_pairs = 0, member_resamples = 0;
         double limit = 0.0;
-        ok = fgets(line, sizeof(line), input) != NULL &&
+        ok = tp_series_line(&input, line, sizeof(line)) == 1 &&
              sscanf(line, "member=%127s metric=%u kind=%u family=%u cells=%u pairs=%u resamples=%u limit=%lf",
                     member, &metric, &kind, &family_index, &cells, &member_pairs,
                     &member_resamples, &limit) == 8;
@@ -1910,7 +2129,7 @@ static int tp_retirement_replay(TpConfig const* config)
             previous_metric = metric;
         }
         size_t ratio_count = 0;
-        if (ok) ok = metric < TP_RETIREMENT_VARIABLE_METRICS &&
+        if (ok) ok = metric < TP_RETIREMENT_VARIABLE_METRICS && tp_retirement_member_metric(member, metric) &&
                     kind < TP_RETIREMENT_MEMBER_KINDS && cells > 0 &&
                     cells <= TP_RETIREMENT_MAX_CELLS && member_pairs == pairs &&
                     member_resamples == (kind == TP_RETIREMENT_BOOTSTRAP_MEMBER ? resamples : 0) &&
@@ -1923,12 +2142,12 @@ static int tp_retirement_replay(TpConfig const* config)
         {
             double ratio = 0.0;
             char extra = 0;
-            ok = fgets(line, sizeof(line), input) != NULL &&
+            ok = tp_series_line(&input, line, sizeof(line)) == 1 &&
                  sscanf(line, "ratio=%lf %c", &ratio, &extra) == 1 &&
                  isfinite(ratio) && ratio > 0.0;
             if (ok) ratios[ratio_index] = ratio;
         }
-        if (ok) ok = fgets(line, sizeof(line), input) != NULL && !strcmp(line, "end\n");
+        if (ok) ok = tp_series_line(&input, line, sizeof(line)) == 1 && !strcmp(line, "end\n");
         TpRetirementSeries series = {
             .ratios = ratios,
             .ratio_count = ratio_count,
@@ -1968,16 +2187,18 @@ static int tp_retirement_replay(TpConfig const* config)
         }
         free(ratios);
     }
+    /* The joined series ends exactly after the last member. */
     if (ok)
     {
-        char extra = 0;
-        ok = !fgets(line, sizeof(line), input) || (sscanf(line, " %c", &extra) != 1);
+        ok = tp_series_line(&input, line, sizeof(line)) == 0;
         if (ok) fputs("]}\n", output);
     }
     if (output && fclose(output) != 0) ok = 0;
-    if (input && fclose(input) != 0) ok = 0;
+    if (!tp_series_close(&input)) ok = 0;
     free(workspace);
-    if (!ok) tp_error("invalid #619 retirement statistics replay input or result");
+    if (!ok)
+        tp_error("invalid #619 retirement statistics replay input or result (%s)",
+                 input.refused ? input.refused : "statistics");
     return ok ? 0 : 2;
 }
 

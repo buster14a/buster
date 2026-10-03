@@ -4,6 +4,11 @@
 result, including the original manifest, `BQ-BUNDLE-V1` index, outcome record
 when present, every indexed file and empty directories. `FULL_SHA` is the
 `full-result-sha256` from `gateway result JOB`; `ATTEMPT` is its token.
+The optional fourth argument `EXPECTED_RECIPE` must exactly match the job's
+fixed service recipe. It selects the client's preparation wait; a mismatch is
+rejected before the daemon prepares an archive. The admitted smoke recipe
+continues to use the three-argument command. A future retirement export must
+specify `native-retirement-performance-v1`.
 No filename, root, glob, command, environment, URL or branch crosses this
 protocol. The daemon derives the root from `BQ_RESULT_BIND` in its durable
 queue. A raw local `protocol` call cannot invoke export.
@@ -52,6 +57,299 @@ The currently admitted `validate-buster-v1` receipt still means smoke validation
 not a #512 performance verdict. Failed/cancelled/interrupted terminal bundles
 remain downloadable evidence; their recorded outcomes do not become success.
 
+### Retirement test publication and independent replay
+
+The blocked retirement recipe has a separate offline handoff, exercised only
+after its service-owned producer supplies a complete finalized bundle and the
+authenticated control service supplies **two independent values**: the export
+receipt digest printed after a successful gateway download, and the execution
+receipt digest for the exact job and attempt. Neither digest is read from the
+download as its own authority. The binding path is relative to the reconstructed
+service result; obtain its fixed location from the reviewed producer contract.
+Use a reviewed local service executable and an immutable checkout containing
+the referenced Git objects:
+
+```sh
+bench_service gateway export JOB ATTEMPT FULL_SHA native-retirement-performance-v1 > /private/download.bqexport
+python3 tools/bench_service/retirement_export_replay.py \
+    /private/download.bqexport \
+    --test-publication /private/test-publication \
+    --publish-only \
+    --bench-service /usr/local/libexec/buster-bench-service \
+    --repository-root /private/pinned-checkout \
+    --binding PATH_WITHIN_RESULT --job JOB --attempt ATTEMPT \
+    --full-result-sha256 FULL_SHA \
+    --export-receipt-sha256 AUTHENTICATED_EXPORT_SHA \
+    --trusted-execution-receipt-sha256 AUTHENTICATED_EXECUTION_SHA
+```
+
+Check the gateway exit status and capture its stderr receipt before running the
+publication command. The test publication directory must exist, be private and
+owned by the caller. The command exclusively creates
+`retirement-JOB-ATTEMPT.bqexport`, syncs it and its parent, reads back all
+bytes, and reports only a published test copy, not a successful replay. An interrupted
+copy leaves `.pending` evidence; an existing pending or published name is a
+collision and is never overwritten. The original archive and result remain
+untouched. Real durable #510 publication is a separate operator action with
+its own approved destination and receipt. This local test copy is not a #512
+acceptance artifact.
+
+In a separate clean consumer workspace with no producer working directory,
+result tree or environment inherited, obtain the published test object and
+the export and execution receipt digests through the authenticated control
+channel independently of that object. Use a reviewed service executable and an
+immutable checkout containing all referenced Git objects. Run the same script
+with the published object as input and a new private retrieval directory:
+
+```sh
+python3 tools/bench_service/retirement_export_replay.py \
+    /private/test-publication/retirement-JOB-ATTEMPT.bqexport /private/new-result \
+    --consume-published --retrieval /private/clean-retrieval \
+    --bench-service /usr/local/libexec/buster-bench-service \
+    --repository-root /private/pinned-checkout \
+    --binding PATH_WITHIN_RESULT --job JOB --attempt ATTEMPT \
+    --full-result-sha256 FULL_SHA \
+    --export-receipt-sha256 AUTHENTICATED_EXPORT_SHA \
+    --trusted-execution-receipt-sha256 AUTHENTICATED_EXECUTION_SHA
+```
+
+The consumer makes a new exclusive byte copy in a different private directory,
+syncs and reads it back, then runs native unpack and production binding replay
+against that retrieved copy. A duplicate retrieval or interrupted copy retains
+its evidence and cannot be reported as a replay. `--publish-only` never reports
+`verified-without-admission`; only the separate consumer can do so. For a test
+across machines, transfer the immutable publication through an approved test
+destination, then run the consumer there with independently captured receipt
+authority. This command does not implement or attest durable #510 publication.
+Both invocations report actual copied bytes and receipt-declared archive,
+indexed-file, entry, chunk and reserved spool sizes separately. These describe
+transported evidence; they do not count executed workloads or physical samples.
+They also report `receipt_derived_capacity.copies` for retained service-result
+regular files, the sealed spool including its fixed reserved chunk index,
+gateway download, immutable test publication, fresh retrieval and extracted
+clean replay. `logical_six_copy_file_bytes` sums these six logical file-byte
+counts. The 1,024-byte export receipt is included in the spool and each of
+the three exported copies. The result and extraction each use receipt offset
+32, which includes every regular result file, including control files. Before
+creating a pending publication, the utility checks that the externally pinned
+receipt reports a positive file inventory, no more than 4,096 entries,
+regular-file bytes within the 128 GiB payload limit and no larger than the
+archive. A matching digest for an internally inconsistent receipt cannot
+authorize publication. Receipt-derived capacity remains a model until the
+same-attempt service producer, gateway transfer and clean replay run; it is
+not a filesystem quota or a proof of actual retained copies.
+
+The native unpacker checks every archived byte, canonical inventory and worker
+result binding. The production Python validator then reconstructs the entire
+population, eligibility/census and transcript-to-sample joins, statistics and
+the publication/replay closure using the external execution receipt digest and
+immutable Git identities. The handoff additionally joins the export's numeric
+job and attempt to the validated execution receipt (`authenticated_attempt_join`):
+the receipt names the service's job label `job-JOB`
+(`bq_retirement_campaign_job_label`) and the attempt token, and it must hash
+to the independently supplied execution-receipt digest, so a self-consistent
+forged receipt with recomputed in-bundle descriptors is rejected. The binding
+record's location inside the result is owned by E's result composer: the
+worker-unit producer writes it at the result root as `retirement-binding.json`
+(#881 PR 3), `COMPOSER_BINDING_PATH` in the script fixes that path, and any
+other `--binding` is refused. Every evidence file that record names, besides
+the composer's and lane F's workflow phases, is a result-root entry too: the
+producer publishes the binding context's evidence (support files, closures,
+subjects' snapshots, binaries and build receipts, producer toolchain, harness
+and statistics implementation, service, host-profile, qualification and lease
+receipts, provenance receipts, contract source and admission record) beside
+`retirement-aa-admission.json`, each at the size and digest the record binds
+and under the name the replay's layout maps its binding path to
+(`retirement-evidence-` and the path's segments joined by `--`), and the composer
+seals them under their binding paths; they are ordinary regular files of
+the bundle index and the export. That record carries its sealed-result and
+independent-replay phases as pending descriptors (the sealed result binds the
+record's digest), so it never passes a replay itself. Lane F's final binding
+is produced after the export, so it lives outside the service result: the
+operator passes lane F's directory with `--lane-f`, holding
+`retirement-final-binding.json` (`FINAL_BINDING_NAME`) and the evidence it
+names. The replay copies that directory's single-link regular files into the
+clean replay destination, refusing any name the unpacked result already has
+(`lane_f_import`), requires the final binding to be the composed record with
+only its sealed-result phase set to the composed sealed result and its
+independent-replay phase set to a non-pending descriptor at the composed path
+(`final_binding_check`), lays out the flat evidence entries at the paths that
+binding names with lane F's own `evidence_layout` and `lay_out_evidence`
+(see **Flat evidence** below), and then runs the validator and the join over
+it.
+`retirement_export_replay_real_test.py`, run after `bench_throughput self-test`
+with its output directory, drives real A1 output (metrics shards, untimed
+batches, the two-shard execution receipt and numeric samples) through these
+readers and the publication path, including reordered, missing, truncated and
+forged inputs. With the real binding validator the CLI chain stops there,
+because its minimal join record is no complete binding; the CLI reports the
+validator's own diagnostic as the refusal. With a validator test double, the
+CLI's `authenticated_attempt_join` accepts the genuine receipt and refuses a
+wrong attempt or a forged receipt. `--worker-unit DIRECTORY`, which
+`bench_service self-test` runs right after the preparation runner, reads the
+worker unit's composed job-82 result and runs lane F's production writer and
+the real validator over it, with no validator double (see below); the whole
+CLI (publication, separate retrieval, unpack stand-in, lane F import and
+final-binding check, flat-evidence layout, validator) reaches the verdict of
+lane F's `replay` (the validator refuses the fixture's unapproved #508
+support declaration), refuses a result missing a mapped flat evidence entry
+as missing, and refuses a final binding that changes anything else before the
+validator; the join accepts the producer authority's receipt digest and
+refuses another job, attempt or trust root and a tampered receipt. The
+archive and the unpacker in that test are Python stand-ins. The native `unpack-export` needs a receipt the service
+itself sealed for a finalized service result, and the worker's full-result
+binding; the blocked retirement recipe cannot finalize such a result. A failed, interrupted or
+invalid exported attempt can be unpacked and retained but exits before the
+performance replay. A verified replay reports
+`verified-without-admission`; it cannot admit the recipe or invent a performance
+pass.
+
+### Lane F: final binding and independent replay
+
+`tools/bench_service/retirement_lane_f.py` is lane F's production writer. Its
+input is the unpacked, sealed and composed service result; it writes the
+lane F directory that `--lane-f` names and never edits the result. The
+composed record's two late phases are the composer's pending descriptors;
+lane F fills them from the unpacked bytes only:
+
+```sh
+python3 tools/bench_service/retirement_lane_f.py bundle /private/new-result \
+    /private/replay-bundle.tar --publication-id PUBLICATION_ID
+# publish replay-bundle.tar, then fetch a fresh copy and the publisher's digest
+python3 tools/bench_service/retirement_lane_f.py bind /private/new-result /private/lane-f \
+    --downloaded-bundle /private/fresh/replay-bundle.tar \
+    --published-bundle-sha256 PUBLISHED_SHA --publication-id PUBLICATION_ID \
+    --release RELEASE --run-id RUN_ID --repository-root /private/pinned-checkout \
+    --harness-commit REVIEWED_HARNESS_COMMIT --harness-tree REVIEWED_HARNESS_TREE
+# once per reviewed checkout: the validator closure digest to pin
+python3 tools/bench_service/retirement_lane_f.py validator-closure \
+    --repository-root /private/pinned-checkout
+python3 tools/bench_service/retirement_lane_f.py replay /private/new-result /private/lane-f \
+    /private/clean-replay --repository-root /private/pinned-checkout \
+    --validator-closure-sha256 REVIEWED_CLOSURE_SHA \
+    --trusted-execution-receipt-sha256 AUTHENTICATED_EXECUTION_SHA \
+    --verdict /private/lane-f-verdict.json
+```
+
+- **Flat evidence.** The producer publishes the evidence the binding context
+  names as flat result-root entries (#1998). Lane F reads a binding-named
+  path `P` that is not in the result from `retirement-evidence-` followed by
+  `P`'s segments joined by `--` (`evidence_name`), and `replay` moves it
+  back to `P` in its clean copy for the validator (`evidence_layout`). A
+  single-segment `P` is only read where it is, and a `P` with an empty, `.`
+  or `..` segment, a segment containing `--` or beginning or ending with
+  `-`, a byte outside `[A-Za-z0-9._-]`, or a name over 128 bytes has no flat
+  name, so the mapping is injective; the producer's
+  `bq_retirement_worker_evidence_map` is the same rule, held to it by a
+  shared table test. The
+  mapping is derived from the record's `{path, bytes, sha256}` descriptors
+  only. A path present both at `P` and flat, a flat name claimed twice
+  (by `P` and by a descriptor naming the flat file itself), or a
+  `retirement-evidence-*` entry that no descriptor names is refused. A
+  descriptor with neither is left for the validator to refuse.
+- `bundle` checks every file the sealed result's seal enumerates against its
+  descriptor and the seal root, then writes the independent-replay archive:
+  a tar whose first member is `bundle-manifest.json`
+  (`buster-native-retirement-independent-bundle-manifest-v1`), followed by
+  the sealed closure and the sealed result in bytewise path order, under the
+  paths the seal names, with fixed member metadata. The archive depends only
+  on the result bytes and the publication ID, so two runs produce identical
+  bytes. It is written to `OUTPUT.partial` and hard-linked to `OUTPUT`, which
+  is never replaced; a failure, or an archive beyond the validator's bound
+  (the closure bytes plus 64 MiB), leaves no file. Durable publication (#510)
+  of that archive is the operator's separate step.
+- `bind` requires the downloaded copy to equal the publisher's digest (an
+  operator input, never read from the file) and the archive it re-derives
+  from the result. `--harness-commit` and `--harness-tree` are the reviewed
+  harness identity from a trusted source; the record's
+  `measurement.harness_source_commit` and `harness_source_tree` must equal
+  them before anything is compiled. `bind` extracts the downloaded copy with
+  the validator's own reader, rebuilds the reviewed
+  `bench_throughput retirement-replay` adapter from the pinned checkout at
+  that commit and tree (a dirty checkout or another commit is refused), runs
+  it over the downloaded adapter input with a minimal environment in a
+  private directory, and requires the sealed adapter result byte for byte.
+  It then writes, in a `LANE_F.pending` directory, the downloaded archive
+  (`retirement-downloaded-independent.bundle.tar`), the publication receipt
+  (`retirement-performance-publication.json`), the replay bundle
+  (`retirement-independent-replay.bundle`), the
+  `buster-native-retirement-independent-replay-v1` phase record at the path
+  the composer fixed (`retirement-independent-replay.json`) and
+  `retirement-final-binding.json`: the composed record with the sealed-result
+  phase set to the sealed result's own descriptor and the independent-replay
+  phase to the phase record's. It checks the final binding with
+  `final_binding_check`, then renames the directory to `LANE_F` with a rename
+  that never replaces a target, even an empty directory (`renameat2` with
+  `RENAME_NOREPLACE`, or `renamex_np` with `RENAME_EXCL`; elsewhere it
+  refuses). A failure leaves the pending directory as evidence. A later
+  attempt refuses while that directory exists ("previous pending attempt
+  exists; inspect or remove it"), and an existing lane F directory is never
+  replaced. The replay bundle's measurement, family and code-byte fields
+  restate the sealed result bundle; the validator recomputes each of them
+  from the evidence.
+- `replay` pins the validator's whole closure before creating anything. The
+  entry file is pinned by SHA-256, by default the profile's
+  `binding-validator` and `binding-validator-sha256`; the profile is read
+  only when `--validator` or `--validator-sha256` is missing. The closure is
+  pinned by `--validator-closure-sha256`: the entry, every repository-local
+  module it imports (transitively, including the #508 validator it runs as a
+  subprocess), and the data files those modules read beside themselves.
+  `validator_closure` derives the module list from the verified bytes (every
+  `import` and every sibling `NAME.py` string) and refuses one that differs
+  from the reviewed `VALIDATOR_MODULES`. The `validator-closure` subcommand
+  prints the list and digest of a reviewed checkout.
+  - The verified bytes are written into a private directory with no bytecode
+    cache. The validator runs from there with `python -I -B`, an empty
+    private `-X pycache_prefix`, `PYTHONDONTWRITEBYTECODE` and a minimal
+    environment. The environment also sets `PYTHONNOUSERSITE`, because the
+    #508 validator subprocess inherits it without `-I`; no user-site
+    `usercustomize` or `.pth` file runs there. An edited sibling module or a
+    planted `__pycache__` file in the checkout therefore cannot run.
+  - `replay` then copies the result into a new clean directory (links and
+    special files are refused), imports the lane F directory there
+    (`lane_f_import`), checks the final binding, lays out the flat evidence
+    and runs the validator.
+  - It writes a verdict record (`buster-native-retirement-lane-f-replay-verdict-v1`)
+    with the validator's path, digest, closure digest and closure files, the
+    evidence layout's entry count and digest, the final binding and
+    phase-record descriptors, the trusted execution-receipt digest, and
+    either the validator's result or the refusal. A refusal by lane F's own
+    import, final-binding check or layout is recorded the same way, prefixed
+    `lane F:`. Machine-specific paths in a refusal are written as
+    `EVIDENCE_ROOT`, `VALIDATOR_ROOT`, `CLEAN_ROOT`, `REPOSITORY_ROOT`,
+    `LANE_F_ROOT`, `RESULT_ROOT` or `TMPDIR`.
+  - It exits 0 only for `independent-evidence-and-receipts-checked` with
+    every check performed. The phase record's fields are fixed by the
+    validator, so the validator identity and verdict are this separate
+    record.
+
+`retirement_compose_test.py`'s `LaneFWriterEndToEndTests` runs `bundle`,
+`bind` (with the real adapter replay) and `lane_f_import` over the composer's
+sealed result in place of the test's own independent-replay phase. The
+unchanged validator accepts the final binding (`bundle_checked`) on both
+series shard sizes, and every tamper case still fails.
+
+The worker unit's job-82 result is not yet a replayable retirement result.
+Its sealed adapter result comes from the preparation runner's stand-in
+adapter (`bq_prep_worker_unit_adapter`) and its harness commit is a
+placeholder, so `bind` refuses it. Over a lane F directory written with the
+adapter replay replaced, the context evidence the binding names is in the
+result as flat entries (#1998), which both lane F's `replay` and the export
+CLI lay out (#2065); the real validator then refuses the final binding
+because the fixture's support declaration is not the approved #508 input.
+The `--worker-unit` tests assert each refusal. The validator fixes two of its
+paths (`docs/native-retirement-support-v1.tsv` and
+`tools/throughput/retirement_stats.h`), so the context's descriptors must
+name the original paths while the files are published under the flat names
+above.
+
+The native `unpack-export` still refuses the retirement recipe: its receipt
+check in `export.c` (`bq_export_receipt_valid`) admits only recipes
+`bq_recipe_service` accepts. Retirement export and native
+unpack follow the separate change that admits the recipe; until then the
+unpacker in these tests is a Python stand-in, and lane F needs no
+unpack-specific path of its own.
+
 ## Immutability, persistence and retention
 
 The initial request requires a terminal job with a durably bound result and
@@ -65,7 +363,10 @@ exhaustion fail closed. Directory entries count toward the same bounded
 inventory, including empty directories.
 
 A fixed service-owned child constructs `export-JOB-ATTEMPT.pending` in the
-private queue directory. The parent enforces a five-minute deadline, then a
+private queue directory. The parent enforces a five-minute deadline for the
+admitted smoke recipe; the blocked retirement recipe has a separate 24-hour
+capacity budget for future admission. This is not a host execution deadline.
+After the deadline there is a
 one-second kill/reap allowance. An unreapable child keeps the inherited queue
 lock and poisons the daemon; it cannot admit another worker. The snapshot is
 synced and made mode `0400`, published without replacement by `linkat`, and
@@ -77,9 +378,14 @@ remove only that uncommitted pending artifact before retrying. A corrupt sealed
 receipt is never replaced automatically.
 
 The sealed file contains a durable receipt, a digest-bound chunk index, and
-original archive bytes. Every chunk rechecks the receipt against durable job
-state, the receipt's chunk-index digest, the selected chunk hash, and the
-opened/named inode and timestamps before replying. The client independently
+original archive bytes. The first read verifies the complete index digest
+and keeps one SHA-256 per 64 KiB index page in memory. Subsequent reads reuse
+that check only while the exact receipt, inode, size, owner, mode and
+nanosecond timestamps remain unchanged, and even then reread the cursor's
+whole index page and require its verified page digest, so a rewrite that
+leaves the timestamps unchanged still fails. Every chunk checks its own
+indexed digest and the opened/named inode before replying. A service restart
+verifies the complete index again. The client independently
 hashes the complete archive. A modified snapshot or partial transfer cannot
 be reported as success. An identical retry, including after daemon restart,
 returns the same receipt and bytes. No cursor, queue event or journal record is
@@ -108,22 +414,179 @@ operation 13 (`EXPORT`). Existing request and ordinary reply limits stay fixed.
 | Chunk and cursor quantum | 65,536 bytes |
 | Entries, including directories and control files | 4,096 |
 | Individual file | 64 MiB |
-| Existing indexed non-control payload | 512 MiB |
+| Existing indexed non-control payload | 512 MiB for smoke; 128 GiB reserved for blocked retirement recipe |
 | Existing bundle index | 8 MiB |
-| Total archive, including controls and entry headers | 546,177,024 bytes |
+| Total archive, including controls and entry headers | 546,177,024 bytes for smoke; 137,448,259,584 bytes reserved for retirement |
 | Relative path | 192 bytes |
 | Depth | Fewer than 256 components; path bound also applies |
 | Receipt | 1,024 bytes |
-| Preparation / chunk operation / client transfer budget | 300 / 30 / 300 seconds |
-| Socket send/receive wait | 1 second; initial client receipt wait 305 seconds |
+| Preparation / chunk operation / client transfer budget | 300 / 30 / 300 seconds for smoke; 86,400 / 30 / 86,400 seconds reserved for retirement |
+| Socket send/receive wait | 1 second; initial receipt wait 305 seconds for smoke, 86,405 seconds for an explicit matched retirement recipe |
 
 The inventory is one fixed-capacity mapping; payload buffers are 64 KiB.
-The durable chunk index has at most 8,334 fixed 64-byte hashes. No allocation
+The smoke chunk index has at most 8,334 fixed 64-byte hashes; the reserved
+retirement offset allows at most 2,097,294 hashes. No allocation
 or response size is proportional to an unchecked request value. Index and
 payload hashing stream in fixed buffers. Capacity exhaustion fails rather
 than truncating a successful archive. Filesystem syscalls still depend on a
 responsive local filesystem; the preparation child provides the outer deadline
 for exhaustive validation and file reads.
+
+### Retirement capacity ledger (A1)
+
+The larger limits only remove a transport ceiling; the recipe remains blocked
+until its complete producer, validators and service tests are reviewed. An
+operator must provision space for every retained copy below. All figures in
+this section are **arithmetic over the checked-in sources, not a trusted
+support/census population, a transferred archive or an executed retirement
+run**. Recompute them from the trusted support/census inputs and the frozen
+plan at the exact attempt before sizing or admission.
+
+(A1, M4) The amended campaign times native-host batch groups instead of rows.
+`tools/throughput/retirement_capacity.py` derives, from the support
+declaration and the fixture recipe table, 80 object groups (16 configurations
+of a compiler-default group of up to 416 inputs, a 4-input c23 group and three
+single-fixture groups), 880 untimed cross-target object groups, and stage
+singletons counted from canonical #508 rows when supplied, otherwise at the
+validator's declaration minimum of 2 (one native link, one native self-host;
+6,482 timed rows at most). Per-batch metrics artifacts are byte ranges of
+64 MiB metrics shards (at most `2 * ceil(bytes / 64 MiB)` shards per writer),
+so they no longer need one store entry each. The untimed code-artifact
+batches (two variants times production and reproduction, 3,520 batches) add
+their own metrics shards and one sealed batch-record file. Worst-case store
+payload, excluding the caller's external entries and bytes, with a reviewed
+4 KiB header per artifact:
+
+| Pairs | Per-input metrics bound | Invocations per stage | Metrics artifacts per stage | Payload entries | Payload bytes | Verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 60 | 4 KiB | 20,496 | 19,520 | 461 | 15,433,221,440 | fits |
+| 60 | 16 KiB | 20,496 | 19,520 | 1,777 | 59,521,385,792 | fits |
+| 254 | 4 KiB | 85,680 | 81,600 | 1,803 | 60,775,041,120 | fits |
+| 254 | 8 KiB | 85,680 | 81,600 | 3,523 | 118,495,217,760 | fits |
+| 254 | 16 KiB | 85,680 | 81,600 | 6,963 | 233,935,571,040 | rejected before timing |
+
+Both stage singletons are counted as runtime rows. The declaration bounds the
+stage rows only from above (both stages on every declared object identity), so
+the report also gives how many further runtime-eligible stage singletons fit
+at 254 pairs (17,079 at 4 KiB, 4,220 at 8 KiB), and states the largest
+fitting per-input bound (9,472 bytes at 254 pairs) as an assumption the
+measured metrics sizes must satisfy. The same campaign with one store entry
+per metrics artifact would need 166,779 entries at 254 pairs. The
+per-input metrics bound and every time bound are reviewed pins of the campaign
+budget; nothing here admits the recipe.
+`tp_retirement_campaign_store_preflight` then adds, before any timing, the
+store-owned control files (at least the execution receipt at its 1 MiB bound,
+plus any manifest the store publishes) and the caller's exact external entries
+and byte reservation; `tp_retirement_store_plan` enforces the resulting
+owned-file and owned-byte budget, shards plus controls, at publication.
+
+**Export-side ledger.** `python3 tools/bench_service/retirement_export_replay.py
+a1-capacity` (functions `a1_export_ledger`, `composer_bounds`) maps every
+scenario of that model onto the export and worker limits. It adds:
+- the lane-E composer's outputs, mirroring `tp_retirement_compose_bounds`
+  (#1879): the #615 result-input manifests, the code-record set (at most
+  78,914 rows × 649 bytes), the #619 adapter input (#1880: its series shards
+  of at most 64 MiB each, bounded as `1 + (series - 1) / (64 MiB - 255)`
+  files, and their manifest of 512 + 256 bytes per shard) and output
+  (replay), the result bundle, the execution receipt, the retained manifest
+  (27 + 4,096 × 320 bytes) and the sealed-result record;
+- the prior sealed-closure files (at least 40, derived from the validator's
+  `_all_artifacts` plus `contract.source` and the execution plan; census
+  projections add more);
+- the worker's three control entries (manifest, `BQ-BUNDLE-V1` index,
+  outcome).
+
+It checks each file kind against the 64 MiB per-file cap and reports what is
+left for census projections, retained logs and every directory. The family's
+aggregate and slice members are taken at the #619 cap of 80, which can only
+enlarge the adapter bounds. With the declaration's two runtime stage
+singletons:
+
+| Pairs | Per-input metrics bound | Owned files | Entries left | Owned bytes | Bytes left | Adapter series | Series shards | Verdict |
+|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 60 | 4 KiB | 477 | 3,576 | 15,909,125,253 | 121,529,828,219 | 406,664,536 | 7 | fits |
+| 60 | 8 KiB | 917 | 3,136 | 30,605,180,037 | 106,833,773,435 | 406,664,536 | 7 | fits |
+| 60 | 16 KiB | 1,793 | 2,260 | 59,997,289,605 | 77,441,663,867 | 406,664,536 | 7 | fits |
+| 254 | 4 KiB | 1,838 | 2,215 | 62,554,736,805 | 74,884,216,667 | 1,710,443,864 | 26 | fits |
+| 254 | 8 KiB | 3,558 | 495 | 120,274,913,445 | 17,164,040,027 | 1,710,443,864 | 26 | fits |
+| 254 | 16 KiB | 6,998 | -2,945 | 235,715,266,725 | -98,276,313,253 | 1,710,443,864 | 26 | refused (entries, bytes) |
+
+**The #619 adapter input is sharded (#1880).** At A1 scale its series of
+about `8 × cells × 2P` 32-byte ratio lines is far above the 64 MiB per-file
+cap as one file, so the composer stores it as greedy whole-line shards of at
+most one store file (7 at 60 pairs, 26 at 254 pairs) beside a manifest, and
+neither cap is raised. Every two-runtime scenario except 254 pairs at 16 KiB
+fits; that one exceeds the entry and byte caps with its metrics shards alone.
+A scenario with no runtime-eligible row is refused, because generated
+runtime would have no #619 cell. The format is described in
+`tools/bench_service/README.md` under the composer.
+
+A full metrics or transcript shard is exactly 67,108,864 bytes, the per-file
+cap; the worker and `bq_export_inventory` reject only a larger file, and
+`bq_test_export_inventory` pins that boundary. The untimed batch-record file
+is at most 3,520 × 747 = 2,629,440 bytes and a numeric shard at most
+131,072 × 330 = 43,253,760 bytes. The export envelope never binds before the
+store: the 128 GiB store ceiling plus a 208-byte header and path for all 4,096
+entries is 137,439,805,440 bytes, below the 137,448,259,584-byte archive cap.
+At 254 pairs and an 8 KiB per-input bound only 522 entries and about 16.0 GiB
+remain for census projections, logs and every directory. A real layout must
+be checked against this ledger before that bound is pinned.
+
+At maximum capacity, reserve six independent copies: retained service result,
+sealed service spool (including its chunk index), gateway download, immutable
+test publication, fresh retrieval and extracted clean replay. The
+128 GiB indexed-payload ceiling yields **824,805,176,192 logical file/transport
+bytes** when both file and archive fields reach their respective ceilings.
+The ledger also reports each scenario's owned-file six-copy floor, before the
+prior closure, logs and controls: 721,778,744,380 bytes at 254 pairs and 8 KiB.
+These are simultaneous upper bounds, not measured storage requirements or
+proof that any producer can fill both ceilings. They exclude directory
+metadata, filesystem allocation, validator temporary space and any separate
+#510 publication copy. At the archive ceiling of 137,448,259,584 bytes, the
+sealed spool reserves 137,582,487,424 bytes including the 1,024-byte receipt
+and 2,097,294 64-byte chunk digests. These are reservations, not transferred
+bytes. The reviewed whole-job deadline must also accommodate both stages; the
+current 3,600-second smoke-unit limit does not prove this population fits.
+Export preparation, native unpack and independent binding replay have separate
+24-hour budgets; bound the full end-to-end operator window as the sum of their
+observed times, not the per-operation receipt wait alone. The actual producer
+must still inventory **every** retained file and directory and respect the
+64 MiB per-file, 192-byte path, 8 MiB index and 1 MiB execution-receipt
+bounds. The existing service tests transfer small smoke archives; no full
+retirement export or clean replay has been completed at this point.
+
+#### Superseded: pre-A1 per-row capacity (kept for the record)
+
+**Superseded by Amendment A1** (the #36 decision of 2026-09-29). This model
+timed one process per canonical row on all twelve targets, gave each
+per-invocation metrics artifact no store entry and had no untimed code-byte
+batches. Do not size or admit a campaign from it; use the A1 ledger above.
+
+For the proposed 60-pair retirement population, 17,441,280 paired numeric
+records across A/A and A/B alone require at least 3,139,430,400 bytes at
+180 bytes per record, before transcripts, manifests, binaries or logs.
+
+Arithmetic capacity for the historical 78,912-row census and 72,672
+compiler-eligible rows:
+
+| Component | Modeled two-stage maximum at 60 pairs | Relevant ceiling |
+|---|---:|---:|
+| Compiler invocations, including warmups | 35,463,936 (17,731,968 per stage) | Transcript: 65,536 records and 64 MiB per shard; at most 902 bytes per line |
+| Additional runtime invocations if every compiler row is runtime eligible | 35,463,936 | Same transcript ceilings |
+| Transcript shards for compiler and runtime at that upper bound | 1,084 (542 per stage) | 2,048 transcript shards per stage; 4,096 bundle entries shared with all files/directories |
+| Paired numeric records | 17,441,280 (8,720,640 per stage) | 16,777,216 records per partition; 16 GiB total #615 input per manifest |
+| Numeric shards at 131,072 records each | 134 (67 per stage) | 64 MiB per published file; at most 415 bytes per line; 2,878 bundle entries remain for controls, binaries, logs and directories |
+| Worst-case transcript plus numeric shard bytes at the proven line widths | 71,215,071,744 bytes (63,976,940,544 transcript, 7,238,131,200 numeric) | Within the 128 GiB indexed-payload ceiling, leaving 66,223,881,728 bytes for all other files |
+
+The line widths were the maxima of the pre-A1 serializers, so a full
+65,536-record transcript shard was at most 59,113,472 bytes and a full
+131,072-record numeric shard at most 54,394,880 bytes. At that time
+`tp_retirement_campaign_capacity` admitted at most 198 pairs with no runtime
+rows and 108 pairs when every row of the 77,762-row envelope was runtime
+eligible; 254 pairs needed 175,875,870,640 and 318,964,171,600 bytes
+respectively.
+
+### Export wire format
 
 Export request body:
 
@@ -132,7 +595,7 @@ Export request body:
 | 0 / 8 | Job ID / attempt token, u64 |
 | 16 | Expected full-result digest, 64 lowercase hex bytes |
 | 80 | Cursor, u64; `UINT64_MAX` requests the initial receipt |
-| 88 | Expected export-receipt digest, 64 hex bytes; all zero for initial receipt |
+| 88 | Chunk: expected export-receipt digest, 64 hex bytes. Initial receipt: optional expected recipe ID (u32; 0 unspecified, 3 smoke, 4 retirement), then 60 zero bytes |
 
 Successful reply body:
 

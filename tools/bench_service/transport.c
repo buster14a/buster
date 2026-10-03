@@ -7,6 +7,13 @@
  * client protocol.  A real recipe is started only from that fixed
  * configuration and remains fail-closed until the build-driver handoff adds
  * its reviewed executor.
+ *
+ * Public operations: capabilities, submit, exclusive submit, status, result,
+ * cancel, logs, export and recipe-identity (operation 14, read-only text that
+ * is not redacted like the status receipts). The retirement recipe is
+ * accepted only through the exclusive (idle-only) submit, and only while the
+ * compiled profile is servable (bq_retirement_compiled_servable); `serve`
+ * refuses to start otherwise (#881 P1).
  */
 #ifdef __linux__
 #include <stddef.h>
@@ -169,7 +176,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_operation(u32 operation)
 {
     bool public_operation = operation == BQ_OP_CAPABILITIES || operation == BQ_OP_SUBMIT ||
                             operation == BQ_OP_SUBMIT_EXCLUSIVE || operation == BQ_OP_STATUS ||
-                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS || operation == BQ_OP_EXPORT;
+                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS || operation == BQ_OP_EXPORT ||
+                            operation == BQ_OP_RECIPE_IDENTITY;
     BqError error = public_operation ? BQ_OK : BQ_BAD_REQUEST;
     return error;
 }
@@ -185,6 +193,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
     {
         error = BQ_BAD_REQUEST;
     }
+    if (error == BQ_OK && operation == BQ_OP_RECIPE_IDENTITY && length)
+    {
+        error = BQ_BAD_REQUEST;
+    }
     if (error == BQ_OK && (operation == BQ_OP_SUBMIT || operation == BQ_OP_SUBMIT_EXCLUSIVE))
     {
         BqRequest request = {.size = length};
@@ -195,7 +207,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
         else
         {
             memcpy(request.bytes, input + BQ_CONTROL_HEADER, length);
+            bool retirement = bq_request_recipe(&request) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
             error = !bq_request_valid(&request) ? BQ_BAD_REQUEST : !bq_recipe_real(&request) ? BQ_UNSUPPORTED :
+                    retirement && !bq_retirement_compiled_servable() ? BQ_RECIPE_MISMATCH :
+                    retirement && operation != BQ_OP_SUBMIT_EXCLUSIVE ? BQ_UNSUPPORTED :
                     !string_equal(bq_field(&request, 0), S8(BQ_EXPORT_PRINCIPAL)) ? BQ_EXPORT_UNAUTHORIZED : BQ_OK;
         }
     }
@@ -206,7 +221,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
                      bq_result_digest_valid(arguments + 16);
         if (valid && bq_u64(arguments + 80) == UINT64_MAX)
         {
-            for (u32 i = 88; valid && i < BQ_EXPORT_REQUEST_CAP; i += 1) valid = arguments[i] == 0;
+            u32 recipe = bq_u32(arguments + 88);
+            valid = recipe == BQ_RECIPE_UNKNOWN || recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+                    recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+            for (u32 i = 92; valid && i < BQ_EXPORT_REQUEST_CAP; i += 1) valid = arguments[i] == 0;
         }
         else if (valid) valid = bq_result_digest_valid(arguments + 88);
         if (!valid) error = BQ_BAD_REQUEST;
@@ -326,6 +344,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_worker_once(BqQueue* queue, BqWorkerCon
     return error;
 }
 
+BUSTER_GLOBAL_LOCAL int bq_transport_response_wait(u8 const* request, u32 request_size)
+{
+    int result = BQ_TRANSPORT_CLIENT_MILLISECONDS;
+    if (request_size == BQ_CONTROL_HEADER + BQ_EXPORT_REQUEST_CAP &&
+        bq_u32(request + 8) == BQ_OP_EXPORT && bq_u64(request + BQ_CONTROL_HEADER + 80) == UINT64_MAX)
+    {
+        BqRecipe recipe = (BqRecipe)bq_u32(request + BQ_CONTROL_HEADER + 88);
+        result = (int)bq_export_prepare_milliseconds(recipe) + 5000;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 const* request, u32 request_size,
                                                      BqPacket* response)
 {
@@ -350,9 +380,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 
             {
                 u32 received = 0;
                 BqError receive_error = bq_transport_receive_timeout(client, response->bytes, &received,
-                                                                      bq_u32(request + 8) == BQ_OP_EXPORT && request_size == BQ_CONTROL_HEADER + BQ_EXPORT_REQUEST_CAP &&
-                                                                      bq_u64(request + BQ_CONTROL_HEADER + 80) == UINT64_MAX ?
-                                                                      BQ_EXPORT_PREPARE_MILLISECONDS + 5000 : BQ_TRANSPORT_CLIENT_MILLISECONDS,
+                                                                      bq_transport_response_wait(request, request_size),
                                                                       BQ_PACKET_CAP);
                 bool response_valid = receive_error == BQ_OK && received >= BQ_CONTROL_HEADER + 4 &&
                                       !memcmp(response->bytes, "BQP1", 4) &&
@@ -491,6 +519,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_dispatch(BqQueue* queue, u8 const* requ
         error = queue->poisoned || queue->journal_fd < 0 ? BQ_IO :
                 bq_export_authorize(queue, body, S8(BQ_EXPORT_PRINCIPAL), &job);
         u64 cursor = bq_u64(body + 80);
+        if (error == BQ_OK && cursor == UINT64_MAX)
+        {
+            BqRecipe expected = (BqRecipe)bq_u32(body + 88);
+            BqRecipe actual = bq_request_recipe(&job->request);
+            if ((expected != BQ_RECIPE_UNKNOWN && expected != actual) ||
+                (actual == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && expected != actual)) error = BQ_CONFLICT;
+        }
         if (error == BQ_OK && cursor == UINT64_MAX) error = bq_export_prepare(queue, job);
         if (error == BQ_OK)
         {
@@ -503,7 +538,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_dispatch(BqQueue* queue, u8 const* requ
     else if (error == BQ_OK)
     {
         error = bq_dispatch(queue, request, size, response);
-        if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_LOGS)
+        if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_LOGS &&
+            operation != BQ_OP_RECIPE_IDENTITY)
         {
             /* Public receipts do not reveal global queue occupancy/sequence. */
             memset(response->bytes + BQ_CONTROL_HEADER + 20, 0, 8);
@@ -519,7 +555,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_serve(char const* state_path, char cons
 {
     BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
     BqTransportEndpoint endpoint = {.listener = -1, .parent = -1};
-    BqError error = bq_open(&queue, state_path);
+    BqError error = bq_retirement_compiled_servable() ? bq_open(&queue, state_path) : BQ_RECIPE_MISMATCH;
     if (error == BQ_OK && !bq_transport_queue_admissible(&queue))
     {
         error = BQ_UNSUPPORTED;

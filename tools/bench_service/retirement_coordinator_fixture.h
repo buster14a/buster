@@ -1,0 +1,109 @@
+/* #881 PR 4 test fixture, shared by tests.c (phase_channel_tests.h) and the
+ * preparation runner (retirement_worker_unit_tests.h): a receipt authority
+ * and its context chain, published as the producer publishes them.
+ *
+ * bq_coordinator_fixture_authority publishes a one-shard execution receipt
+ * (its shard named as the A/A stage's sample shard, so the AA_MEASURED
+ * attestation finds it, #1021) into the result directory (the store root),
+ * issues the authority into the
+ * attempt's retirement-authority/ and writes the chain
+ * (bq_retirement_context_chain_format, BQ-RETIREMENT-CONTEXT-CHAIN-V2)
+ * naming the given A, ready and row-plan digests with the authority's plan
+ * and context and the carried values (the fixed bq_coordinator_fixture_carried
+ * when `carried` is NULL). A test forges a self-consistent authority by
+ * passing digests the coordinator does not hold. Its plan and context are
+ * fixed fixture digests, so the chain passes the handoff's structural check
+ * but never the finalization's derivation (bq_retirement_coordinator_derive).
+ */
+#ifndef BUSTER_BENCH_SERVICE_RETIREMENT_COORDINATOR_FIXTURE_H
+#define BUSTER_BENCH_SERVICE_RETIREMENT_COORDINATOR_FIXTURE_H
+
+#define BQ_COORDINATOR_FIXTURE_PLAN "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#define BQ_COORDINATOR_FIXTURE_CONTEXT "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+/* (#1021) The one shard the fixture publishes is the A/A stage's only sample
+ * shard (bq_retirement_coordinator_aa_attest reads it), and its digest, the
+ * SHA-256 of "{}\n", is the AA_MEASURED digest and the carried A/A raw
+ * digest. */
+#define BQ_COORDINATOR_FIXTURE_AA_SHARD "retirement-samples-aa-0000.jsonl"
+#define BQ_COORDINATOR_FIXTURE_AA_SHA256 "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+
+/* Well-formed carried values that no campaign produced. */
+BUSTER_GLOBAL_LOCAL BqRetirementContextChainCarried bq_coordinator_fixture_carried(void)
+{
+    BqRetirementContextChainCarried carried = {.bound_at_ns = 1000};
+    for (u32 stage = 0; stage < TP_RETIREMENT_CAMPAIGN_STAGES; stage += 1)
+        carried.stages[stage] = (BqRetirementUnitCampaignStageFacts){.invocations = 4u + stage,
+            .completed_at_ns = 2000u + stage, .samples = 2, .metrics_artifacts = 1, .metrics_bytes = 64};
+    char* digests[] = {carried.pre_sample, carried.post_sample, carried.binding, carried.logs[0], carried.logs[1],
+                       carried.logs[2], carried.stages[0].transcript_shards, carried.stages[0].raw,
+                       carried.stages[0].row_shards, carried.stages[0].batch_shards,
+                       carried.stages[1].transcript_shards, carried.stages[1].raw, carried.stages[1].row_shards,
+                       carried.stages[1].batch_shards};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(digests); index += 1)
+    {
+        memset(digests[index], "0123456789abcdef"[index % 16u], 64);
+        digests[index][64] = 0;
+    }
+    memcpy(carried.stages[0].raw, BQ_COORDINATOR_FIXTURE_AA_SHA256, 65);
+    return carried;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_coordinator_fixture_authority(int result_directory, int attempt, u64 job, u64 token,
+    char const* preparation_sha256, char const* ready_sha256, char const* row_plan_sha256, bool with_chain,
+    BqRetirementContextChainCarried const* carried, char authority_sha256[SHA256_HEX_CAPACITY])
+{
+    char label[TP_RETIREMENT_STORE_TOKEN_CAPACITY], shard_digest[SHA256_HEX_CAPACITY];
+    char receipt_digest[SHA256_HEX_CAPACITY], receipt[1024], chain[BQ_RETIREMENT_CONTEXT_CHAIN_CAP];
+    char chain_name[TP_RETIREMENT_STORE_PATH_BYTES + 1];
+    TpRetirementStore store;
+    TpRetirementStoredFile files[4];
+    TpRetirementReceiptAuthority issued = {0};
+    BqRetirementContextChainCarried fixed = bq_coordinator_fixture_carried();
+    bool ok = tp_retirement_store_job_label(label, job) &&
+              (mkdirat(attempt, BQ_RETIREMENT_UNIT_AUTHORITY_DIRECTORY, 0700) == 0 || errno == EEXIST);
+    int authority = ok ? openat(attempt, BQ_RETIREMENT_UNIT_AUTHORITY_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC) :
+                    -1;
+    bool opened = authority >= 0 && tp_retirement_store_open(&store, result_directory, files, 4);
+    ok = opened && tp_retirement_store_plan(&store, 2, 2048, 3, 1024);
+    char const* bodies[2] = {"{}\n", receipt};
+    char const* paths[2] = {BQ_COORDINATOR_FIXTURE_AA_SHARD, TP_RETIREMENT_EXECUTION_RECEIPT_PATH};
+    for (u32 index = 0; ok && index < 2; index += 1)
+    {
+        if (index == 1)
+        {
+            int length = snprintf(receipt, sizeof(receipt),
+                "{\"attempt\":%" PRIu64 ",\"boot_id\":\"boot-1\",\"bound_at_ns\":1000,\"completed_at_ns\":2000,"
+                "\"context_sha256\":\"%s\",\"execution_plan_sha256\":\"%s\",\"invocations\":1,"
+                "\"job_id\":\"%s\",\"schema\":\"buster-native-retirement-execution-receipt-v1\","
+                "\"shards\":[{\"bytes\":3,\"path\":\"" BQ_COORDINATOR_FIXTURE_AA_SHARD "\",\"records\":1,"
+                "\"sha256\":\"%s\"}],\"version\":1}\n",
+                (uint64_t)token, BQ_COORDINATOR_FIXTURE_CONTEXT, BQ_COORDINATOR_FIXTURE_PLAN, label, shard_digest);
+            ok = length > 0 && (size_t)length < sizeof(receipt);
+        }
+        TpRetirementPending pending = {0};
+        size_t length = strlen(bodies[index]);
+        char* digest = index ? receipt_digest : shard_digest;
+        ok = ok && tp_retirement_store_begin(&store, paths[index], 1024, &pending) &&
+             fwrite(bodies[index], 1, length, pending.stream) == length;
+        if (ok) bq_digest(bodies[index], (u32)length, (char8*)digest);
+        if (ok) ok = tp_retirement_store_publish(&store, &pending, length, digest);
+        else if (pending.stream) tp_retirement_store_abort(&store, &pending);
+    }
+    ok = ok && tp_retirement_store_receipt_authority(&store, authority, TP_RETIREMENT_EXECUTION_RECEIPT_PATH, label,
+                                                     token, BQ_COORDINATOR_FIXTURE_PLAN, BQ_COORDINATOR_FIXTURE_CONTEXT,
+                                                     &issued);
+    if (opened) tp_retirement_store_close(&store);
+    u32 chain_length = ok ? bq_retirement_context_chain_format(chain, job, token, preparation_sha256, ready_sha256,
+                                                               row_plan_sha256, issued.plan_sha256,
+                                                               issued.context_sha256, carried ? carried : &fixed) : 0;
+    bool named = bq_retirement_context_chain_name(chain_name, job, token);
+    int file = ok && with_chain && chain_length && named ?
+               openat(authority, chain_name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400) : -1;
+    if (with_chain) ok = ok && file >= 0 && write(file, chain, chain_length) == (ssize_t)chain_length;
+    if (file >= 0 && close(file) != 0) ok = false;
+    if (authority >= 0) close(authority);
+    if (ok) memcpy(authority_sha256, issued.authority_sha256, SHA256_HEX_CAPACITY);
+    return ok;
+}
+
+#endif

@@ -1,7 +1,8 @@
 /* Service and control entry points. No caller-selected commands or shell execution.
  * bq_client_arguments owns typed requests; gateway fixes socket/principal and
- * either fixes validate-buster-v1 (submit) or names one registry service recipe
- * (submit-recipe), which bq_recipe_service admits exactly as for the client.
+ * selects between the fixed service recipes (submit, submit-retirement) or names
+ * one registry service recipe (submit-recipe), which bq_recipe_service admits
+ * exactly as for the client.
  * bq_cli owns dispatch and diagnostics; bq_response_write prints bounded receipts.
  * Tests include this entry point, as the existing throughput tests do.
  */
@@ -14,6 +15,56 @@
 #include "queue.c"
 #include "exclusive_admission.c"
 #include "workspace.c"
+#ifdef __linux__
+/* Keep the private B adapters in the installed service translation unit.
+ * The in-unit lane-B caller (retirement_unit.c: project, oracle authority and
+ * reference producer, #1020 PR 3) is linked here, so the oracle adapter
+ * accepts only live tokens this unit's reference producer issued. The
+ * correctness gate runs the installed #509 required checks
+ * (retirement_check_runner.c) and the pinned row plan
+ * (retirement_row_plan.c, retirement_row_producer.c) but refuses while the
+ * profile pins neither authority, so the ready record (#1020 PR 4) has no
+ * issued gate to write for; this unit must never define
+ * BQ_RETIREMENT_CORRECTNESS_TEST_ONLY. bq_worker_unit reaches the worker-unit
+ * B steps only through the forked producer in retirement_worker_unit.c (#881),
+ * which it admits only with a complete profile; the compiled profile is
+ * blocked, so the job is still rejected before any directory or child. The
+ * producer's in-unit campaign (retirement_worker_campaign.c) runs lane D's
+ * driver through READY and then composes, issues the receipt authority and
+ * sends MEASURED (retirement_worker_compose.c); its A/A admission decides
+ * from this job's in-job A/A (retirement_aa_admission.c) over the rows the
+ * coordinator attested as AA_MEASURED (#1021). The
+ * coordinator's side (retirement_coordinator.c: request gate, budget loader,
+ * authority handoff before MEASURED, replay at finalization) is refused the
+ * same way. */
+#include "retirement_correctness.c"
+#include "retirement_correctness_service.c"
+#include "retirement_artifact_service.c"
+#include "retirement_correctness_oracle.c"
+#define BQ_RETIREMENT_REFERENCE_PRODUCER_LINKED 1
+#include "retirement_oracle_authority.c"
+#include "retirement_reference_producer.c"
+#include "retirement_reference_template.c"
+#include "retirement_check_runner.c"
+#include "retirement_row_plan.c"
+#include "retirement_row_producer.c"
+#include "retirement_unit.c"
+/* The in-unit campaign (#881 PRs 2 and 3): lane D's store-based seams, then
+ * the producer's campaign, composition and production A/A admission, then
+ * the producer. */
+#include "retirement_campaign_service.h"
+#include "retirement_worker_campaign.c"
+#include "retirement_worker_compose.c"
+#include "retirement_aa_admission.c"
+#include "retirement_worker_unit.c"
+#include "retirement_coordinator.c"
+/* The offline record generators (`retirement-records`): the row plan, the
+ * untimed-command contract and the budget's frozen counts from the staged
+ * census, reusing the importers above to check their own output, and lane
+ * D's budget writer. */
+#include "../throughput/retirement_budget_tool.h"
+#include "retirement_records.c"
+#endif
 #include "worker_linux.c"
 #include "export.c"
 #include "protocol.c"
@@ -43,18 +94,24 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
     bool valid = false;
     *request = (BqPacket){0};
     *operation = 0;
-    if (argc == 1 && !strcmp(argv[0], "capabilities"))
+    if (argc == 1 && (!strcmp(argv[0], "capabilities") || !strcmp(argv[0], "recipe-identity")))
     {
-        *operation = BQ_OP_CAPABILITIES;
+        *operation = !strcmp(argv[0], "capabilities") ? BQ_OP_CAPABILITIES : BQ_OP_RECIPE_IDENTITY;
         valid = true;
     }
     else if ((argc == (gateway ? 4 : 6) && !strcmp(argv[0], "submit")) ||
+             (gateway && argc == 4 && !strcmp(argv[0], "submit-retirement")) ||
              (gateway && argc == 5 && !strcmp(argv[0], "submit-recipe")))
     {
-        /* submit-recipe only names the recipe. It passes the same
-         * bq_recipe_service registry check as every other submission, so an
-         * unknown, blocked, fake or supervisor-internal name is refused here
-         * and again by the service; no command, flag or path is accepted. */
+        /* The gateway's submissions: submit fixes validate-buster-v1,
+         * submit-retirement fixes the retirement recipe (which
+         * bq_recipe_service refuses until the compiled profile is admitted),
+         * and submit-recipe only names the recipe. Every name passes the same
+         * bq_recipe_service registry check, so an unknown, blocked, fake or
+         * supervisor-internal name is refused here and again by the service.
+         * Every other execution input is the installed recipe's; nothing here
+         * names a command, flag, path, sample, threshold, workload or
+         * environment. */
         BqRequest submission;
         String8 fields[BQ_FIELD_COUNT];
         if (gateway)
@@ -62,7 +119,8 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
             u32 selected = argc == 5 ? 1u : 0u;
             fields[0] = S8("github-actions");
             fields[1] = string_from_pointer(argv[1 + selected]);
-            fields[2] = selected ? string_from_pointer(argv[1]) : S8("validate-buster-v1");
+            fields[2] = selected ? string_from_pointer(argv[1]) :
+                (!strcmp(argv[0], "submit-retirement") ? S8("native-retirement-performance-v1") : S8("validate-buster-v1"));
             fields[3] = string_from_pointer(argv[2 + selected]);
             fields[4] = string_from_pointer(argv[3 + selected]);
         }
@@ -79,12 +137,16 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
             memcpy(body, submission.bytes, size);
         }
     }
-    else if ((argc == 4 || argc == 6) &&
-             ((!strcmp(argv[0], "export") && argc == 4) || (!strcmp(argv[0], "export-chunk") && argc == 6)))
+    else if ((argc == 4 || argc == 5 || argc == 6) &&
+             ((!strcmp(argv[0], "export") && (argc == 4 || argc == 5)) ||
+              (!strcmp(argv[0], "export-chunk") && argc == 6)))
     {
         u64 token = 0, cursor = UINT64_MAX;
+        BqRecipe expected_recipe = argc == 5 ? bq_recipe_from_name(string_from_pointer(argv[4])) : BQ_RECIPE_UNKNOWN;
         valid = bq_decimal(argv[1], true, &id) && bq_decimal(argv[2], true, &token) && strlen(argv[3]) == 64 &&
-                bq_result_digest_valid((u8 const*)argv[3]);
+                bq_result_digest_valid((u8 const*)argv[3]) &&
+                (argc != 5 || expected_recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+                 expected_recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
         if (valid && argc == 6) valid = bq_decimal(argv[4], false, &cursor) && cursor != UINT64_MAX &&
                                      cursor % BQ_EXPORT_CHUNK_CAP == 0 && strlen(argv[5]) == 64 &&
                                      bq_result_digest_valid((u8 const*)argv[5]);
@@ -96,6 +158,7 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
             memcpy(body + 16, argv[3], 64);
             bq_put64(body + 80, cursor);
             if (argc == 6) memcpy(body + 88, argv[5], 64);
+            if (argc == 5) bq_put32(body + 88, (u32)expected_recipe);
             size = BQ_EXPORT_REQUEST_CAP;
         }
     }
@@ -137,7 +200,7 @@ BUSTER_GLOBAL_LOCAL bool bq_response_write(u32 operation, BqPacket const* respon
 {
     bool written = true;
     u8 const* data = response->bytes + BQ_CONTROL_HEADER;
-    if (operation == BQ_OP_CAPABILITIES)
+    if (operation == BQ_OP_CAPABILITIES || operation == BQ_OP_RECIPE_IDENTITY)
     {
         written = fwrite(data + 4, 1, response->size - BQ_CONTROL_HEADER - 4, output) == response->size - BQ_CONTROL_HEADER - 4;
     }
@@ -206,6 +269,15 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         handled = true;
         simple_diagnostic = true;
     }
+#ifdef __linux__
+    else if (argc >= 2 && !strcmp(argv[1], "retirement-records"))
+    {
+        valid = true;
+        error = bq_retirement_records_cli(argc - 2, argv + 2, output, diagnostics);
+        handled = true;
+        simple_diagnostic = true;
+    }
+#endif
     else if (argc == 10 && !strcmp(argv[1], "worker-unit"))
     {
         valid = bq_decimal(argv[3], true, &argument) && bq_decimal(argv[4], true, &attempt);
@@ -216,9 +288,9 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         handled = true;
         simple_diagnostic = true;
     }
-    else if (argc == 2 && !strcmp(argv[1], "capabilities"))
+    else if (argc == 2 && (!strcmp(argv[1], "capabilities") || !strcmp(argv[1], "recipe-identity")))
     {
-        operation = BQ_OP_CAPABILITIES;
+        operation = !strcmp(argv[1], "capabilities") ? BQ_OP_CAPABILITIES : BQ_OP_RECIPE_IDENTITY;
         valid = true;
     }
     else if (argc == 3 && !strcmp(argv[1], "rpc"))
@@ -400,7 +472,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     }
     if (!handled && valid)
     {
-        error = operation == BQ_OP_CAPABILITIES ? BQ_OK : bq_open(&queue, argv[2]);
+        error = operation == BQ_OP_CAPABILITIES || operation == BQ_OP_RECIPE_IDENTITY ? BQ_OK : bq_open(&queue, argv[2]);
         if (error == BQ_OK)
         {
             if (raw)
@@ -444,18 +516,20 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         fprintf(diagnostics, "bench_service: %s; io-uncertain requires retry/reopen, never rollback\n", bq_error_name(error));
         if (!valid)
         {
-            fprintf(diagnostics, "commands: capabilities | submit DIR PRINCIPAL KEY RECIPE BASE_SHA CANDIDATE_SHA | "
+            fprintf(diagnostics, "commands: capabilities | recipe-identity | submit DIR PRINCIPAL KEY RECIPE BASE_SHA CANDIDATE_SHA | "
                     "status/result/cancel DIR JOB | logs DIR JOB [AFTER_SEQUENCE] | fake-run DIR | "
                     "fake-reconcile DIR JOB TOKEN | materialize DIR INSTALLED_ROOT WORKSPACE_ROOT | "
                     "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | "
                     "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR | rpc SOCKET | "
-                    "client SOCKET capabilities/submit/status/result/cancel/logs ... | "
-                    "gateway capabilities | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
+                    "client SOCKET capabilities/recipe-identity/submit/status/result/cancel/logs ... | "
+                    "gateway capabilities | gateway recipe-identity | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
+                    "gateway submit-retirement KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway submit-recipe RECIPE KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway status/result/cancel JOB | gateway logs JOB [AFTER_SEQUENCE] | "
-                    "gateway export JOB TOKEN FULL_SHA | gateway export-chunk JOB TOKEN FULL_SHA CURSOR RECEIPT_SHA | "
+                    "gateway export JOB TOKEN FULL_SHA [EXPECTED_RECIPE] | gateway export-chunk JOB TOKEN FULL_SHA CURSOR RECEIPT_SHA | "
                     "unpack-export ARCHIVE NEW_ABSOLUTE_DIRECTORY RECEIPT_SHA | "
-                    "serve DIR SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU\n");
+                    "serve DIR SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | "
+                    "retirement-records row-plan|untimed-commands|budget-counts|budget-encode|budget-preflight ...\n");
         }
     }
     bq_close(&queue);

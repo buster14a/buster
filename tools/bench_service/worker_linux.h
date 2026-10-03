@@ -17,8 +17,21 @@
 #define BQ_WORKER_ARG_CAP 32u
 #define BQ_WORKER_BUNDLE_CAP (8u * 1024u * 1024u)
 #define BQ_WORKER_BUNDLE_ENTRY_CAP 4096u
+/* The result root's control files (the recipe's manifest, bundle and
+ * outcome, bq_worker_bundle_reserved) count against the entry cap beside the
+ * bundle's objects; the retirement producer reserves them in its store plan. */
+#define BQ_WORKER_BUNDLE_CONTROL_ENTRIES 3u
+/* The worker-phase-N receipts a retirement job's BQPHASE2 channel leaves in
+ * the result root (bq_worker_phase_accept publishes one per acknowledged
+ * phase: PREPARING, RETIREMENT_READY, SETTLING, MEASURING, AA_MEASURED and
+ * MEASURED). They are bundle objects, so the retirement store plan reserves
+ * them too. */
+#define BQ_WORKER_RETIREMENT_PHASE_RECEIPTS 6u
 #define BQ_WORKER_BUNDLE_FILE_CAP (64ull * 1024 * 1024)
 #define BQ_WORKER_BUNDLE_TOTAL_CAP (512ull * 1024 * 1024)
+/* The fixed retirement population needs millions of paired records. This is
+ * a separate bounded ceiling; the installed smoke recipe keeps its limit. */
+#define BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP (128ull * 1024 * 1024 * 1024)
 #define BQ_WORKER_BUNDLE_DEPTH_CAP 256u
 #define BQ_WORKER_BUNDLE_PATH_CAP BQ_PATH_CAP
 #define BQ_WORKER_BUNDLE_LINE_CAP 320u
@@ -144,6 +157,14 @@ typedef struct BqWorkerConfig
      * satisfy every observed security property; it only replaces process
      * control in tests. */
     bool production_path;
+    /* Retirement only (#881 A1): the installed canonical campaign-budget
+     * record (tools/throughput/retirement_budget.h). The worker authenticates
+     * it against the job recipe profile's campaign-budget-sha256= pin and
+     * derives the job's unit limit and execution deadline from its reviewed
+     * ceiling (bq_worker_retirement_runtime). Empty, like the blocked
+     * profile's missing pin, refuses a retirement job before launch; the
+     * smoke recipe ignores it and keeps limits.runtime_max_usec. */
+    String8 retirement_budget;
 } BqWorkerConfig;
 
 BUSTER_F_DECL BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id);

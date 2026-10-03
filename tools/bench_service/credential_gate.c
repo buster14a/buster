@@ -4,8 +4,10 @@
  *
  * The installation must use a static binary with no ELF interpreter.  This
  * source performs no NSS lookup and never attempts to gain or drop privilege.
- * Stages 0..5 are the smoke recipe's; 16..28 are the zen5-calibration-v1
- * stages of zen5_stage.h (#426), which keep the smoke environment.
+ * Stages 0..5 are the smoke recipe's; 6..9 are the #1020 retirement stages of
+ * retirement_stage.h, whose environment bq_gate_environment fixes exactly;
+ * 16..28 are the zen5-calibration-v1 stages of zen5_stage.h (#426), which
+ * keep the smoke environment.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -23,13 +25,17 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include "retirement_stage.h"
 #include "zen5_stage.h"
 
 #define BQ_GATE_SERVICE "/usr/local/libexec/buster-bench-service"
 #define BQ_GATE_BUILD "/usr/local/libexec/buster-bench-build"
 #define BQ_GATE_THROUGHPUT "/usr/local/libexec/buster-bench-throughput"
 #define BQ_GATE_MAX_GROUPS 32
-/* Stages 0..5 are the smoke recipe's; 16..28 are the zen5 stages. */
+/* Stages 0..5 are the smoke recipe's; 6..9 are the #1020 retirement stages
+ * of retirement_stage.h, which run the same fixed build driver; 16..28 are
+ * the zen5 stages. */
+#define BQ_GATE_RETIREMENT_LAST_STAGE (BQ_RETIREMENT_STAGE_FIRST_NUMBER + BQ_RETIREMENT_STAGE_COUNT - 1u)
 #define BQ_GATE_LAST_STAGE (BQ_ZEN5_STAGE_FIRST_NUMBER + BQ_ZEN5_STAGE_COUNT - 1u)
 
 static bool bq_gate_decimal(char const* text, unsigned long* output)
@@ -140,6 +146,12 @@ static bool bq_gate_privileges(void)
     return ok && end_seen;
 }
 
+static bool bq_gate_retirement(unsigned long stage)
+{
+    bool retirement = stage >= BQ_RETIREMENT_STAGE_FIRST_NUMBER && stage <= BQ_GATE_RETIREMENT_LAST_STAGE;
+    return retirement;
+}
+
 /* Zen5 stage: builds run the fixed driver's generate/build, oracle and
  * captures its capture verb, and pmu the fixed interpreter's -B mode. */
 static bool bq_gate_zen5(unsigned long stage, char const* program, char const* first_argument)
@@ -157,17 +169,36 @@ static bool bq_gate_zen5(unsigned long stage, char const* program, char const* f
 
 static bool bq_gate_program(unsigned long stage, char const* program, char const* first_argument)
 {
-    bool ok = program && first_argument && (stage <= 5 || (stage >= BQ_ZEN5_STAGE_FIRST_NUMBER &&
-                                                          stage <= BQ_GATE_LAST_STAGE));
+    bool ok = program && first_argument && (stage <= BQ_GATE_RETIREMENT_LAST_STAGE ||
+                                            (stage >= BQ_ZEN5_STAGE_FIRST_NUMBER && stage <= BQ_GATE_LAST_STAGE));
     if (ok && stage == 0)
         ok = !strcmp(program, BQ_GATE_SERVICE) && !strcmp(first_argument, "worker-unit");
     else if (ok && stage == 5)
         ok = !strcmp(program, BQ_GATE_THROUGHPUT) && !strcmp(first_argument, "run");
+    else if (ok && bq_gate_retirement(stage))
+        ok = !strcmp(program, BQ_RETIREMENT_STAGE_DRIVER) &&
+             !strcmp(first_argument, (stage - BQ_RETIREMENT_STAGE_FIRST_NUMBER) % 2u == 0 ? "generate" : "build");
     else if (ok && stage >= BQ_ZEN5_STAGE_FIRST_NUMBER)
         ok = bq_gate_zen5(stage, program, first_argument);
     else if (ok)
         ok = !strcmp(program, BQ_GATE_BUILD) &&
              !strcmp(first_argument, stage == 1 || stage == 3 ? "generate" : "build");
+    return ok;
+}
+
+/* Replace the whole inherited environment. Smoke stages keep the fixed system
+ * PATH; retirement stages get exactly the matched-build helper's four values,
+ * whose command digest binds them, with the installed toolchain on PATH. */
+static bool bq_gate_environment(unsigned long stage)
+{
+    bool ok = clearenv() == 0;
+    if (ok && bq_gate_retirement(stage))
+        ok = setenv("PATH", BQ_RETIREMENT_STAGE_PATH_VALUE, 1) == 0 &&
+             setenv("LC_ALL", BQ_RETIREMENT_STAGE_LC_ALL_VALUE, 1) == 0 &&
+             setenv("TZ", BQ_RETIREMENT_STAGE_TZ_VALUE, 1) == 0 &&
+             setenv("HOME", BQ_RETIREMENT_STAGE_HOME_VALUE, 1) == 0;
+    else if (ok)
+        ok = setenv("PATH", "/usr/bin:/bin", 1) == 0 && setenv("LC_ALL", "C", 1) == 0;
     return ok;
 }
 
@@ -192,6 +223,11 @@ static int bq_gate_self_test(void)
                   !bq_gate_program(3, BQ_GATE_BUILD, "build"));
     BQ_GATE_CHECK(bq_gate_program(5, BQ_GATE_THROUGHPUT, "run") &&
                   !bq_gate_program(5, BQ_GATE_SERVICE, "run"));
+    BQ_GATE_CHECK(bq_gate_program(6, BQ_GATE_BUILD, "generate") && bq_gate_program(7, BQ_GATE_BUILD, "build") &&
+                  bq_gate_program(8, BQ_GATE_BUILD, "generate") && bq_gate_program(9, BQ_GATE_BUILD, "build"));
+    BQ_GATE_CHECK(!bq_gate_program(6, BQ_GATE_BUILD, "build") && !bq_gate_program(9, BQ_GATE_BUILD, "generate") &&
+                  !bq_gate_program(8, BQ_GATE_SERVICE, "generate") &&
+                  !bq_gate_program(10, BQ_GATE_BUILD, "generate") && !bq_gate_program(10, BQ_GATE_BUILD, "build"));
     BQ_GATE_CHECK(bq_gate_program(16, BQ_GATE_BUILD, "generate") && bq_gate_program(17, BQ_GATE_BUILD, "build") &&
                   bq_gate_program(24, BQ_GATE_BUILD, "generate") && bq_gate_program(25, BQ_GATE_BUILD, "build"));
     BQ_GATE_CHECK(!bq_gate_program(16, BQ_GATE_BUILD, "build") && !bq_gate_program(25, BQ_GATE_BUILD, "generate") &&
@@ -201,7 +237,7 @@ static int bq_gate_self_test(void)
                   !bq_gate_program(26, BQ_GATE_BUILD, "build") && !bq_gate_program(28, BQ_ZEN5_STAGE_PYTHON, "-B"));
     BQ_GATE_CHECK(bq_gate_program(27, BQ_ZEN5_STAGE_PYTHON, "-B") && !bq_gate_program(27, BQ_ZEN5_STAGE_PYTHON, "-c") &&
                   !bq_gate_program(27, BQ_GATE_BUILD, BQ_ZEN5_STAGE_CAPTURE_VERB));
-    BQ_GATE_CHECK(!bq_gate_program(6, BQ_GATE_BUILD, "generate") && !bq_gate_program(15, BQ_GATE_BUILD, "build") &&
+    BQ_GATE_CHECK(!bq_gate_program(10, BQ_GATE_BUILD, "generate") && !bq_gate_program(15, BQ_GATE_BUILD, "build") &&
                   !bq_gate_program(29, BQ_GATE_BUILD, "generate") && !bq_gate_program(29, BQ_GATE_BUILD, "build"));
     /* Every argv the broker builds from the shared contract passes here. */
     for (unsigned index = 0; index < BQ_ZEN5_STAGE_COUNT; index += 1)
@@ -230,8 +266,7 @@ int main(int argc, char** argv)
               bq_gate_program(stage, argv[6], argv[7]);
     if (ok) ok = bq_gate_identity((uid_t)uid_number, (gid_t)gid_number, expected, group_count) &&
                  bq_gate_privileges();
-    if (ok) ok = clearenv() == 0 && setenv("PATH", "/usr/bin:/bin", 1) == 0 &&
-                 setenv("LC_ALL", "C", 1) == 0;
+    if (ok) ok = bq_gate_environment(stage);
     if (ok) execv(argv[6], argv + 6);
     return self_test ? bq_gate_self_test() : 126;
 }

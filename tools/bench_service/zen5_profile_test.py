@@ -25,6 +25,7 @@ QUEUE_HEADER = SERVICE / "queue.h"
 RECIPE = SERVICE / "zen5_recipe.c"
 DISPATCH = ROOT / ".github" / "workflows" / "9700x-service-dispatch.yml"
 BROKER = SERVICE / "systemd_broker.c"
+RUNTIME = SERVICE / "systemd_runtime.h"
 STAGE = SERVICE / "zen5_stage.h"
 
 
@@ -114,9 +115,15 @@ class Zen5ProfileTest(unittest.TestCase):
         # unit; the dispatch wait is the broker's RuntimeMaxSec (review S1).
         dispatch = DISPATCH.read_text(encoding="utf-8")
         arm = re.findall(r"(?m)^ +zen5-calibration-v1\) runtime_budget=([0-9]+) ;;$", dispatch)
-        runtime = re.findall(r'"--property=RuntimeMaxSec=([1-9][0-9]*)us"', BROKER.read_text(encoding="utf-8"))
+        # Every non-retirement unit (zen5 included) gets the fixed smoke hour
+        # of systemd_runtime.h; only a retirement request carries its own.
+        broker = BROKER.read_text(encoding="utf-8")
+        self.assertIn('bq_broker_add_format(command, "--property=RuntimeMaxSec=%" PRIu64 "us", runtime_usec);', broker)
+        self.assertIn("request->runtime_max_usec : BQ_SYSTEMD_SMOKE_RUNTIME_USEC;", broker)
+        runtime = re.findall(r"(?m)^#define BQ_SYSTEMD_SMOKE_RUNTIME_USEC \(UINT64_C\(([1-9][0-9]*)\) \* "
+                             r"BQ_SYSTEMD_USEC_PER_SECOND\)$", RUNTIME.read_text(encoding="utf-8"))
         self.assertEqual(len(runtime), 1)
-        self.assertEqual(arm, [str(int(runtime[0]) // 1000000)])
+        self.assertEqual(arm, runtime)
         self.assertLess(int(profile_fields()["budget-seconds"]), int(arm[0]))
         recipe = RECIPE.read_text(encoding="utf-8")
         self.assertIn('bench_service_zen5_profile_u64("budget-seconds", &recipe->budget_seconds)', recipe)

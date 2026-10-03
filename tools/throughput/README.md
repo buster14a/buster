@@ -83,6 +83,14 @@ reports a launch error; a program that successfully starts and exits 125 remains
 a normal child result. The native self-test checks all four refusals, the valid
 exit 125 control and repeated descriptor cleanup. This diagnoses a refusal; it
 does not explain an unreproduced transient OS error or retry the invocation.
+The retirement launches report stages too: a bound-input launch names its
+stdin and descriptor sealing, and a canonical-layout child parks the error
+pipe above the slots with its handshake ends and reports a refusal's stage
+(handshake parking, CPU affinity, normalization, slots, work slot, sandbox
+or program identity) with its errno over the ready report, as
+`TpProcess.refused`. The error pipe is read only for a child the parent
+released, so a refusal, cancellation or parent-side error keeps its own
+result. The unit-campaign layout tests check each refusal's stage.
 
 The POSIX summary-write fixture keeps its real one-byte `RLIMIT_FSIZE` failure
 and three-second child deadline. It restores the saved limit only after
@@ -705,8 +713,31 @@ provided inside every block statistic, before the predeclared median operation;
 the evidence must publish that block-statistic median for each round and pooled
 scope rather than silently substituting the other nonlinear ordering.
 
-The complete declared family contains all wall-time, RSS and generated-runtime
-overall aggregates, required slices and cells. It is split before measurement
+Amendment A1 of the contract makes five variable metrics, in
+`TpRetirementMetric` index order: per-input compiler wall time (0), per-input
+peak memory (1, formerly process peak RSS at the same index), generated runtime
+(2), and the gated batch process pair appended as batch compiler wall time (3)
+and batch compiler peak RSS (4). Indices are stable because they select the
+bootstrap seed domain. Wall-time and memory cells are timed native-host fixture
+rows; the batch pair's cells are object batch groups; the estimator is the same
+for both. `retirement-replay` binds each member's metric token prefix
+(`compiler_wall_time`, `compiler_peak_memory`, `generated_runtime`,
+`compiler_batch_wall_time`, `compiler_batch_peak_rss`) to its index and rejects
+a member presented under another metric's index.
+Its `--input` is the (#1880) series manifest, not the series: the unchanged
+series stream is split greedily over whole lines into shards
+`retirement-statistics-series-NNNN.txt` beside the manifest, which binds
+their order, offsets, bytes and SHA-256 and the joined series' bytes and
+SHA-256. The adapter rehashes every shard and the joined series as it parses
+them and refuses, naming the rule (`TpSeriesReader.refused`), a reordered,
+missing, duplicated, oversized or truncated shard, an offset gap, a count or
+leaf that is not canonical, a non-canonical number, a trailing manifest
+line, a line split across shards and a non-canonical split (`tp_series_open`,
+`tp_series_line`); the format is
+described in `tools/bench_service/README.md` under the composer.
+
+The complete declared family contains all overall aggregates, required slices
+and cells of those five metrics. It is split before measurement
 into an aggregate/slice bootstrap partition and an exact-cell partition. Each
 partition receives half of family alpha 0.05. Within a partition of `N` members,
 each upper or lower bound in each of the three scopes uses one-sided tail alpha
@@ -718,15 +749,17 @@ bounded bootstrap partition. Resampled statistics use at least 100,000 draws,
 are sorted, and use inverse empirical CDF/type 1: quantile `p` is
 `sorted[ceil(p * resamples) - 1]`, clamped to the available ranks. The bootstrap
 partition is capped at 80 members per scope, which leaves at least 5.208 expected
-draws in each corrected tail at 100,000 resamples. The frozen binding axes have
-at most 25 explicit members per metric (one aggregate, 12 targets, one
-`baseline` CPU, four allocators, two frontends, two PIC modes, and three
-artifact stages), hence at most 75 across the three variable metrics.
+draws in each corrected tail at 100,000 resamples. Under A1 the family is
+derived over the native-host timed projection, so the target dimension has one
+value. The frozen binding axes then have at most 16 explicit members per row
+metric (one aggregate, one target, three CPU profiles, four allocators, two
+frontends, two PIC modes, and three artifact stages) and at most 14 per batch
+metric (object stage only), hence at most 76 across the five variable metrics.
 
 Both `N` values are per-scope cardinalities derived without producer totals.
 For each named scope, bootstrap `N` is the count of that scope's aggregate and
 slice entries in `statistical_family.members`; exact-cell `N` is the sum of that
-scope's three variable-metric `cell_counts`. The immutable binding repeats the
+scope's five variable-metric `cell_counts`. The immutable binding repeats the
 same member identities across all three scopes. If independently derived scope
 counts differ, or either plan count differs from them, version-1 replay is
 invalid. This makes the extra factor of two in `12 * N` unambiguously the two
@@ -743,11 +776,11 @@ intervals. An equal-mixture median lies between its component medians, so this
 inner union bound is distribution-free and costs no more than the declared
 pooled tail allocation. An unattainable finite endpoint is honestly reported as
 zero or infinity. The exact partition supports 300,000 metric cells per scope.
-The binding currently fixes 19,296 support groups, 77,184 required object
-rows, and at least 77,186 rows after the required link and self-host stages. The
-100,000-cell cap therefore leaves explicit room for admitted real-workload rows,
-and the 300,000-member cap is exactly three variable metrics for that maximum
-population in each scope. These caps do not reduce resamples or authorize excluding a
+The current full census replay retains 78,912 canonical rows, of which 72,672
+are compiler eligible and 6,240 are untimed. Under A1 only the native-host
+projection (at most 6,576 object rows plus stage rows, and 80 object batch
+groups) enters the family, so the 100,000-cell cap and the 300,000-member cap
+leave wide room for five variable metrics. These caps do not reduce resamples or authorize excluding a
 required cell. The caller derives the bootstrap count from one scope's explicit
 aggregate/slice members and the cell count by summing that scope's
 variable-metric `cell_counts`; a mismatch or a larger final manifest is invalid
@@ -772,6 +805,419 @@ quantile answers and exercises unchanged data, true regressions, broad
 intervals, disagreeing rounds, both family corrections, aggregates, malformed
 declarations, fixed sample counts, and supported caps. This software test is not
 dedicated-host A/A admission and issues no #36 performance verdict.
+
+### Native-retirement invocation evidence
+
+`retirement_execution.h` supplies the native cursor and bounded invocation
+encoder for the existing performance binding's execution transcript. Under
+contract amendment A1 the compiler campaign runs over the `G` frozen batch
+groups of the native-host timed projection (dense group ordinals, ascending
+smallest member row); the native-runtime campaign runs over the
+runtime-eligible timed rows, identified by their census IDs. The cursor uses
+`tp_retirement_block_schedule` directly, includes two warmups per variant and
+unit, and exhausts both rounds of compiler batches before the runtime campaign.
+It copies the runtime-row map at initialization; an unsorted or out-of-range ID
+is rejected. A failed commit permanently invalidates the attempt; there is no
+skip or resume operation. The complete population's result-input capacity
+permits at most 254 pairs per round, so this collection boundary rejects 256
+even though the statistics kernel can analyze that count for a smaller
+population. It does not change statistical limits, family construction, or
+decisions.
+
+Linux `tp_process_observe` captures a fresh child's PID and `/proc/PID/stat`
+start token while that child is waiting for launch permission. It records the
+same monotonic interval used for wall time, and retains ordinary wait status,
+timeout and RSS evidence. Other Unix platforms reject requested process
+observations as unsupported. The existing `tp_process` entry point retains its
+ordinary throughput behavior and does not read process identity. Diagnostic PMU
+collection remains separate.
+
+`retirement_measurement.h` provides the Linux observation boundary for an
+already verified service plan. It hashes a read-only executable once before
+timing, retains its open descriptor and metadata identity, and launches that
+descriptor with `fexecve`. The command digest covers canonical ASCII JSON with
+the keys `argv`, `cwd`, and `environment`; arguments and sorted, unique
+`NAME=value` entries have a combined 64 KiB bound. There are at most 256
+arguments and 128 environment entries. The inherited environment is excluded.
+The supplied cwd descriptor must match the named working directory; its source
+tree still requires the service's independent immutable-closure verification.
+
+The optional `TpProcessInputs` path uses the existing process observer with PMU
+disabled, an empty service-owned log, explicit environment and null stdin.
+Linux `close_range(CLOSE_RANGE_CLOEXEC)` prevents unrelated supervisor handles
+from reaching the child, including handles the caller forgot to mark CLOEXEC.
+A kernel that cannot perform that operation fails the invocation. This does
+not install the service sandbox or acquire its lease.
+
+A compiler invocation is one batch process of one frozen group. An object
+group's command carries its frozen batch contract: the ordered inputs (timed
+members, then status-checked controls), each input's fixture, oracle status,
+error and diagnostic digest, its frozen object digest and output leaf, the
+`-fmetrics-out` leaf, the metrics target and allocator, the frozen exit
+status (nonzero only when a control fails), and the group's reviewed
+per-artifact metrics bound (`metrics_bytes_max`, from the pinned campaign
+budget; a larger artifact rejects the batch). Every output must be absent from
+the service-opened private output directory before launch. Afterwards the
+producer opens each object relative to that descriptor without following
+links and hashes it; each must equal its frozen artifact byte for byte, in
+every warmup and sample batch, or the attempt is invalid for nondeterminism.
+Each member input also names its census row; members appear in ascending row
+order and must equal the group's layout rows, and a control names no row
+(`TP_RETIREMENT_BATCH_NO_ROW`) or a row outside the timed projection.
+
+Batch output digest schema (version 1, used by the frozen command's
+`output_sha256` and the transcript's `output_sha256` for a compiler batch): the
+lowercase hex SHA-256 of the UTF-8 bytes of a JSON array with one entry per
+frozen batch input, in contract order. The entry is that input's object digest
+as a 64-character lowercase hex string, or JSON `null` when the input is a
+control that writes no object. The array is written without whitespace
+(`json.dumps(list, separators=(",", ":"))`), so a member/control pair encodes as
+`["<64 hex>",null]`. A singleton link or self-host group writes its one
+artifact, so its array has exactly one string entry. Any other encoding,
+ordering or entry count is a different digest and fails the oracle.
+Runtime output is read from the actual child's log descriptor. All paths hash a
+regular, single-link file, bounded to 1 GiB, with identity/size/metadata checks
+around the read.
+
+A batch passes its inputs as one digest-bound `@file` response file (A1's
+recorded Q10 default; `docs/agents/driver.md`, "Response files"), so a batch of
+any size keeps its argv inside the unchanged 256-argument / 64 KiB command
+caps. `tp_retirement_batch_input_list` writes the canonical list: one line per
+frozen input in contract order, inside double quotes, with a backslash before
+every `"` and `\`; the driver's tokenizer returns exactly that order. An input
+beginning with `@` (nesting, which the driver refuses) or `-` (an option) is
+not a valid contract input, and the list stays within the driver's 4 MiB and
+65,536-argument bounds. The file is named `retirement-inputs-<sha256>.rsp` by
+its own digest, so the batch command digest, which covers the `@<leaf>`
+argument, binds the list bytes; the contract digest (v2) also covers it.
+`tp_retirement_batch_input_list_write` creates the read-only file without
+replacement in the service directory, which must be the batch's cwd (objects
+are `cwd/basename.o`). Before launch and again after the child exits, the
+measurement requires exactly one `@<leaf>` argument, no fixture path on the
+argv, and a read-only, service-owned file whose bytes equal the canonical
+list; after the child it also requires the device, inode and change time
+recorded before launch, so a child that renames the list away and back or
+rewrites it with identical bytes fails the batch. The validator recomputes the canonical list from the frozen member order
+and controls, tokenizes it with the driver's grammar, and requires the plan's
+`input_list_sha256` to be its digest.
+
+(M4) Per-batch metrics artifacts are packed into metrics shards, the way the
+transcript and numeric samples are sharded, so a full campaign fits the
+4,096-entry store. `TpRetirementMetricsShards` owns one writer tag (`aa`, `ab`,
+`untimed`, ...) and appends each accepted artifact to the current shard
+`retirement-metrics-<tag>-<NNNN>.txt`, returning its shard, offset, length and
+SHA-256; every artifact therefore stays individually addressable and
+authenticated. A shard is one store entry of at most 64 MiB (the store's file
+cap), so the 1 MiB line and 64 MiB artifact bounds are unchanged. Rotation is
+greedy and internal: an artifact that does not fit the remaining bytes starts
+the next shard on the service-supplied spare stream, and the completed shard's
+descriptor must be taken before the next rotation. Any two consecutive shards
+then exceed one shard's capacity, so a writer of `T` bytes has at most
+`2 * ceil(T / 64 MiB)` shards, which is the store preflight's entry bound. A
+stage with object groups attaches its writer to its collector before freeze,
+and a batch whose reviewed bound exceeds the remaining room needs a spare
+stream before it may launch. The untimed writer's tag is always `untimed`
+(`TP_RETIREMENT_UNTIMED_METRICS_TAG`), and freeze requires the two timed
+writers' tags to differ from it and from each other. The validator streams
+each artifact's range from its shard and hashes the shard from those same
+bytes (no second read), requires artifacts to tile each shard contiguously in
+record order (a shard starts at offset 0, is never revisited, and holds no
+trailing bytes; timed and untimed batches never share one), requires one tag
+per writer with shard indexes equal to their position and at most 2,048
+shards per writer (`TP_RETIREMENT_METRICS_SHARDS`), and seals the shards, not
+one entry per batch.
+
+(M4) Amendment A1 replaces the fixed one-hour worker budget with a reviewed
+budget bound into the admitted service recipe. `retirement_budget.h` holds the
+record (schema v3): the reviewed whole-job ceiling, the authenticated
+fixed-phase bounds, compiler-process bounds keyed by group kind and artifact
+stage, a measured bound per runtime process, the reviewed metrics bound (a
+header plus a per-input bound) and (v3, #426 plan step 6 / #1021)
+`aa-attestation-ns-per-mib`, a measured upper bound on the coordinator's
+AA_MEASURED re-read per MiB of A/A sample shard. The timed table holds object batch classes
+(ascending input counts with nondecreasing bounds) and one bound per
+singleton stage (`link`, `self-host-stage1`; the table has room for later
+stages, whose slots stay zero until a named stage, and so a new schema and
+pin, is added). A link or self-host singleton costs its stage's bound, never a
+one-input batch. The untimed table has the same shape and is measured as the
+maximum over every untimed target (the slowest target); untimed batches never
+use the native timed bounds. Its canonical text names the derivation formula,
+and its SHA-256 is the recipe profile's `campaign-budget-sha256=` pin; a strict
+decoder admits only the canonical bytes. `tp_retirement_budget_preflight`
+derives
+`fixed + stages * (settling + export) + sum over groups of stages * 2 * (W + R * P) * timed(kind, stage, inputs)
++ U * stages * 2 * (W + R * P) * runtime + sum over untimed groups of 4 * untimed(kind, stage, inputs)
++ ceil(R * P * (330 * sum of timed inputs + 266 * object groups) * attest / 2^20)` and
+rejects, before timing, a job the reviewed ceiling cannot hold, a group larger
+than every class, a kind/stage pair without a bound, a missing bound or
+overflow. `tp_retirement_campaign_freeze` takes the budget, each timed group's
+stage and the recipe pin as a separate argument, requires the budget's digest
+to equal that pin and every object contract to carry the budget's metrics
+bound for its input count, sizes the metrics shards from those bounds, and
+runs the budget preflight; the numeric bounds are integration-time pins, and
+the blocked profile has no pin, so the queue-aware bind fails closed. The
+validator binds the same record into the execution plan (`campaign_budget`:
+record and digest) and requires every object group's `metrics_bytes_max` to
+equal header + inputs * per-input from it.
+
+**Writing the record.** `retirement_budget_tool.h` holds the production
+writer and checker, `tp_retirement_budget_evaluate`, which works over bytes.
+`tp_retirement_budget_cli`, over files and streams, is only the self-test's
+seam: it has neither the exclusive `OUTPUT` nor preflight's stale-counts
+check. The service binary runs the checker as
+`retirement-records budget-encode|budget-preflight`,
+beside the other authority generators
+([RETIREMENT_PREPARATION.md](../bench_service/RETIREMENT_PREPARATION.md#generating-the-campaign-authorities-881)).
+That entry publishes the record to a new `OUTPUT` file exclusively and
+checks the counts against the census. It needs no `build.c` change.
+
+The tool is deliberately not a `throughput` subcommand. `throughput.c`'s
+include closure is the trusted #619 adapter that the binding validator
+compiles and pins. That closure must not grow the budget writer, and it may
+not contain a `..` include, which `systemd_runtime.h` would need.
+
+```sh
+service retirement-records budget-encode REVIEWED_INPUT COUNTS OUTPUT
+service retirement-records budget-preflight INSTALLED PROFILE DECLARATION BUDGET COUNTS
+```
+
+The reviewed input starts with `schema=tp-retirement-campaign-budget-input-v1`.
+It then gives each of the 17 scalar keys exactly once, in any order, and the
+table lines: `batch=<max_inputs>:<ns>` classes in ascending order,
+`singleton=link:<ns>`, `singleton=self-host-stage1:<ns>`, and the same lines
+prefixed with `untimed-`. Blank lines and `#` comments may appear anywhere
+after the schema, for example to record which measurement or policy each value
+came from. The comments never reach the record.
+
+`COUNTS` holds the frozen counts in the strict
+`tp-retirement-budget-counts-v1` form, which the service's
+`retirement-records budget-counts` writes from the pinned census:
+
+```text
+schema=tp-retirement-budget-counts-v1
+population=<census population seal>
+declaration=<SHA-256 of the row-plan declaration>
+pairs=<P>                                         (the profile's campaign-pairs=)
+runtime-rows=<U>
+timed-groups=<n>
+timed=<object|link|self-host-stage1> <inputs>     (n lines, in campaign order)
+untimed-groups=<m>
+untimed=<object|link|self-host-stage1> <inputs>   (m lines, in untimed-partition order)
+```
+
+An object group's inputs are its members plus its controls; a singleton has
+exactly one input. No profile pin binds the counts, since production
+recomputes them from the sealed gate. `budget-preflight` regenerates them
+from `INSTALLED`, `PROFILE` and `DECLARATION` and refuses a `COUNTS` file
+that differs, so stale counts cannot pass it.
+
+`encode` accepts the record only when every rule holds:
+
+- every bound is nonzero;
+- the classes ascend by input count, with bounds that never decrease;
+- there are 1 to 16 classes, and none holds more than 1,024 inputs;
+- both singleton stages have a bound in both tables;
+- the metrics header plus one input fits the 64 MiB artifact cap;
+- `reviewed-ns`, floored to whole seconds as the coordinator and systemd
+  enforce it (`bq_worker_retirement_runtime`), lies within
+  `systemd_runtime.h`'s [60 s, 72 h];
+- the fixed phases, with settling and export counted per stage, fit within
+  that floor;
+- every counted group is covered by a class of its table (so the largest
+  timed and untimed object groups are covered) and by the metrics cap;
+- the derivation's required time fits within the same whole-second floor,
+  not merely within `reviewed-ns`.
+
+`preflight` strictly decodes an existing record and applies the same rules.
+It then prints `budget-sha256=` (the value to pin as
+`campaign-budget-sha256=`), `fits=`, `required-ns=`, `remaining-ns=`
+(measured from the enforced floor) and every term of
+`TpRetirementBudgetPreflight`. On any failure both commands print one
+diagnostic line (`retirement-budget: ...` or `retirement-records: ...`),
+write nothing to stdout or `OUTPUT`, and exit nonzero.
+
+The tool chooses no value. The production bounds still need these inputs:
+
+- **9700X measurements (#422):** every `*-ns` phase bound, both tables'
+  batch classes and singleton bounds (the untimed table measured on the
+  slowest untimed target), `runtime-process-ns` and
+  `aa-attestation-ns-per-mib`. Each includes launcher and collector work.
+- **Reviewed policy values:** `reviewed-ns` (the whole-job ceiling),
+  `metrics-header-bytes`, `metrics-input-bytes`, and the pair count.
+
+The `bench_throughput` self-test (`retirement_budget_tool_test.h`) covers
+every rule with fixture values only, each case isolating its rule and
+asserting its diagnostic. That includes the ceiling floor boundary:
+62.801452027 s required (62.8 s plus the tiny campaign's 1.45 ms re-read) with
+`reviewed-ns` 62.999999999 s is refused, and the re-read term alone refusing
+a 63 s ceiling at 1.2 s/MiB. The preparation
+fixture covers the service entry.
+
+(A1) Untimed code-artifact batches: `retirement_untimed.h` runs, per untimed
+group and variant, at most one production batch and exactly one reproduction
+batch, in (group, variant, purpose) order, each a fresh process on the admitted
+CPU inside the job reservation but outside the timed collection window. It
+writes the sealed records the validator checks (command, executable, exit
+status, supervisor-bound process instance, PID, start token, interval, batch
+output digest and the metrics artifact in the `untimed` shards) and requires
+both reproductions for every group before it finishes.
+
+The campaign remains fail-closed: the correctness gate now freezes object
+batch contracts (see `tools/bench_service/retirement_correctness.md`), but the
+recipe stays blocked until #509 supplies correctness authority, the reviewed
+budget pin is set at integration time, and the service integration lands.
+
+`tp_retirement_campaign_capacity` and `tools/throughput/retirement_capacity.py`
+(an arithmetic mirror over the checked-in sources, with
+`retirement_capacity_test.py`) size an A1 campaign: `(G + U) * 2 * (2 + 2P)`
+invocations per stage, both result populations, the metrics shards of both
+stages and the untimed batches with their shards and record file. From the
+support declaration, the 16 native-host configurations give 80 object groups
+(compiler-default of up to 416 inputs with every registered control appended,
+c23 of 4, and three single-fixture recipes) and 880 untimed cross-target
+object groups. Stage singletons are counted, not assumed: from canonical #508
+performance rows with `--performance-rows` (the validator's own partition),
+and otherwise at the validator's declaration minimum (one native link and one
+native self-host singleton, no cross-target stage row), beside the
+declaration's upper envelope (both stages on every declared object identity:
+12,960 timed and 144,864 untimed stage rows) and the number of further
+runtime-eligible stage singletons that still fit at 254 pairs. With a reviewed
+per-input metrics bound of 4 KiB
+the whole campaign at the 254-pair maximum needs at most 1,803 store entries
+and 60.8 GB (of 4,093 and 128 GiB); 8 KiB needs 3,523 entries and 118.5 GB;
+the largest bound that fits at 254 pairs is 9,472 bytes per input (37,888 at
+60 pairs), which the report states as an explicit assumption the measured
+metrics sizes must satisfy. Without sharding the same campaign would need
+166,779 entries. The model also mirrors the result composer's bounds
+(`composer_model`, `tp_compose_bounds_of`): the source-derived family of
+6,482 timed rows, 80 object groups and 13,126 #619 cells has a statistics
+series of at most 406,664,536 bytes at 60 pairs and 1,710,443,864 at 254
+(above the 64 MiB per-file cap as one file), stored (#1880) as at most 7 and
+26 series shards; with the composer's outputs the whole store needs at most
+477 entries and 15.9 GB at 60 pairs and 1,838 entries and 62.6 GB at 254
+pairs (4 KiB per input). `retirement_capacity_test.py` runs in the Compiler throughput
+workflow beside `retirement_execution_test.py`.
+These are envelopes, not an admitted size or a host rate:
+
+```sh
+python3 tools/throughput/retirement_capacity.py
+python3 tools/throughput/retirement_capacity_test.py
+```
+
+`retirement_metrics.h` reads the compiler's own per-input metrics text
+(`docs/agents/driver.md`, #1823) without trusting the compiler: a tagged
+header, one input line per frozen input in order, and each input's function
+lines, with every key in the pinned order. An unknown, missing or reordered
+key, a second version, a non-canonical number, uppercase hex, a truncation flag
+that contradicts its length, a count that disagrees with the lines, a status,
+error or diagnostic digest that differs from the frozen oracle, an object that
+contradicts the oracle, overlapping or out-of-process intervals, a `total_ns`
+that is not the interval, phase timings that exceed it, or a header that is not
+one serial (`intervals=serial`, one worker, one job) continue-on-failure object
+batch rejects the whole batch. The artifact is bounded by its group's reviewed
+bound, at most 64 MiB, and each line to 1 MiB. Each member's interval and arena
+high-water bytes become its wall time and peak-memory samples; the process's
+own wall time and RSS are the batch metric pair. The transcript binds the
+metrics bytes by shard, offset, length and digest; the caller publishes each
+completed shard without replacement.
+
+Code sections are deterministic, so `tp_retirement_code_observe` parses one
+frozen artifact per (variant, code-eligible row) outside timing with the
+independent reader in `retirement_artifact.h` and requires a byte-identical
+reproduction compile. `retirement_samples.h` encodes those facts as the
+canonical per-row code record set. No invocation re-reports code bytes.
+
+The reader handles little-endian x86-64/AArch64 ELF64 objects and executables,
+COFF objects, PE32+ images and Mach-O64 objects and images. It counts ELF
+`SHF_EXECINSTR`, COFF/PE code or executable sections, and Mach-O instruction or
+symbol-stub sections. Code digests concatenate payloads in ascending file-offset
+order. PE file-alignment padding beyond a nonzero virtual size is excluded;
+headers, relocations and data sections are excluded in every format. Zero code
+bytes remain an explicit empty-code fact. Unsupported formats, missing section
+tables, truncated/overflowing ranges, overlapping payloads or metadata, and
+executable zero-fill sections fail closed. Parsing has a 1 GiB artifact limit
+and 65,535-section limit, uses bounded iteration without recursion, and reads
+descriptor input into owned memory so truncation cannot fault a mapping. Census
+validation uses the same reader and additionally checks object format and CPU
+against the declared target before accepting a supported row.
+
+Only successful execution and output verification advance the attached sample
+collector. `TpRetirementMeasurementResult` retains the process identity, wait
+status, timeout, observed output digest/size, the metrics artifact's shard,
+offset, length and digest, and the failure stage for the service's failure recorder. A
+failure poisons the attempt. The helper does not delete logs or artifacts; the
+service must retain failures, retire successful scratch files before reuse,
+and seal evidence durably. It also owns cancellation, descendant absence proof
+and quiet-phase scheduling; these local observations are not authenticated
+service receipts.
+
+The native regression runs a complete one-row singleton fixture through 488
+fresh compiler/runtime child processes (two warmups and two 60-pair rounds per
+variant) and writes 120 numeric records, plus a complete object-group fixture
+of 244 fresh batch processes (two members and a rejection control per batch,
+named only through the response file) that writes 240 row and 120 batch
+records and packs every metrics artifact into one metrics shard, and four
+untimed production/reproduction batches with their sealed records.
+These deterministic fixture programs are functional tests, not
+compiler-performance measurements. Python independently checks canonical
+command hashes, every output identity, the schedule, process instances, every
+metrics artifact's shard range through the production validator, the response
+file's digest and tokenized order, the untimed records, and all numeric joins. Failure
+controls cover nonzero or unexpected exit status, timeout, wrong/missing
+compiler and runtime output, stale output, symlinks/hard links, changed
+binaries, command/cwd mismatch, inherited handles, ambient environment, retry
+after failure, a nondeterministic object, a status mismatch, malformed or
+missing metrics, overlapping intervals, a contract that does not match the
+frozen group, a fixture path on the argv, a forged, writable or second
+response file, a missing metrics shard writer or spare, metrics above the
+reviewed bound, an output directory that is not the cwd, and untimed batches
+out of order, without reproduction, inside the timed window or before the
+reservation. Code observation rejects a reproduction that differs from its
+artifact and keeps a parsed zero-byte section as the empty SHA-256. Format
+tests cover both architectures, every truncated fixture prefix, reversed
+section order, overlap, empty code, PE padding and the actual host test
+executable. Independent Python checks decode the saved fixtures without this C
+reader.
+
+The encoder emits the A1 canonical JSONL invocation schema in at most 8,192
+bytes: `group` for a compiler batch or `row` for a runtime process (the other
+is `null`), the frozen `exit_code`, the `metrics_artifact` descriptor
+`{bytes, offset, path, sha256}` of an object batch (otherwise `null`), and
+explicitly `null` code-section fields. It
+checks the child's status against the frozen exit status, required hashes,
+exact interval agreement and compiler RSS before emitting bytes. Nanosecond
+serialization uses integer operations and a bounded decimal domain; missing
+runtime RSS is `null`. The native regression fixture is read unchanged by the
+production Python transcript validator, including the sample join:
+
+```sh
+./build.sh bench_throughput self-test
+python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests
+./build.sh bench_throughput self-test --sanitize
+python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests-sanitized
+```
+
+`TpRetirementTranscript` couples a successful checked write to advancement of
+that cursor. Shards contain 65,536 records, except for the last shard, and are
+bounded to 64 MiB each and 2,048 shards overall; the 134,217,728-record total
+keeps the nine-digit sequence bound behind the 1,018-byte maximal line, and a
+wider line is rejected. A shortened intermediate shard,
+overlapping interval, duplicate observation, write/flush error, or premature
+completion permanently invalidates the transcript. A descriptor is returned
+only after the shard's stream flush succeeds. The caller owns file creation,
+fsync, no-replace publication and final immutable revalidation; a returned
+SHA-256 descriptor establishes local byte integrity, not receipt authority.
+After complete collection, `tp_retirement_transcript_receipt` writes the
+canonical bounded invocation receipt once, joining the frozen plan and context
+digests to every published shard descriptor. A failed or repeated write poisons
+the attempt. Its returned digest needs separate, authenticated publication by
+the service; the result bundle cannot supply its own trust anchor.
+
+These primitives are not an admitted service recipe or an authenticated receipt.
+The service must still own the immutable plan, launch isolation, independent
+output checks, shard publication, lifecycle and receipt authority. The
+`native-retirement-performance-v1` descriptor remains blocked until that complete
+producer is integrated; `validate-buster-v1` continues to produce smoke evidence.
 
 ## Result bundle
 
@@ -876,6 +1322,79 @@ identity, physical isolation, instruction throughput or a compiler speedup.
 nonregression. #346's optional macro/aggregate workloads remain separate; no
 preprocessing/debug-specific case or default corpus expansion is added here.
 
+
+### Native-retirement paired numeric samples
+
+`retirement_samples.h` extends the invocation writer with an explicitly attached
+`TpRetirementSamples` collector. Initialize it with a fresh exclusive seekable
+spool, per-row, per-group and member workspaces, and the frozen A1 layout of
+the timed projection: timed rows in census order with their runtime
+applicability, and the batch-group partition (each group's kind and ascending
+members, groups ordered by smallest member, every runtime row a singleton).
+The collector copies and checks the layout's shape; the service derives the
+partition itself from the frozen rows. All invocations, including warmups,
+must advance through its append operation; advancing the transcript
+independently invalidates collection. Caller flags are not an admission
+surface: the eventual installed recipe must derive these facts from the
+independently verified full support population.
+
+One object batch fans out: each member row receives its per-input interval and
+arena high-water bytes (`compiler_wall_time`, `compiler_peak_memory`), and the
+group receives the process wall time and peak RSS (`compiler_batch_wall_time`,
+`compiler_batch_peak_rss`). A singleton group's process is that row's wall time
+and peak memory. Runtime processes supply `generated_runtime`. Collection
+preserves the approved execution order, but replay requires numeric samples in
+unit/round/pair order. A private 56-byte-per-pair spool bridges these orders
+without allocating the entire experiment. It stores exact nanoseconds, memory
+bytes, runtime and variant order as little-endian integers. It is scratch
+storage, **not a second published result schema**. Per-row and per-group
+in-memory hash states bind observed values to the actual exported bytes;
+positive-value mutation, including a mutation after a shard boundary within the
+same unit, prevents successful completion. RAM is proportional to rows, while
+the bounded spool is proportional to units times rounds times pairs.
+
+Export begins only after the complete invocation transcript finishes. It emits
+the `row-round-pair` population first and then the `group-round-pair`
+population of object groups; a shard never mixes them, and one raw digest
+covers both in that order. Each numeric shard contains 131,072 canonical
+records (`TP_RETIREMENT_SAMPLE_SHARD_RECORDS`, independent of the transcript
+shard size), except for each population's final short shard; 128 shards fill
+each full manifest partition, and a line wider than the proven 330-byte row or
+266-byte batch maximum is rejected. Code bytes never enter a pair. Optional
+runtime is omitted exactly when inapplicable; unavailable mandatory
+observations never become zero. Descriptors are emitted only after a
+successful flush, and an ordered descriptor digest per population binds its
+complete shard inventory. The writer emits full-cap 16,777,216-record manifest
+partitions per population (`samples-NNNN` / `batches-NNNN` shards), with only
+each final partition shortened. Each partition retains the result reader's
+16 GiB bound; the union of both populations may not exceed 39,518,208 records
+or three partitions. No statistical threshold or pinned statistics source
+changes.
+
+The code record set holds one canonical record per code-observed row, in
+ascending row order, with each variant's frozen artifact digest, code-section
+bytes and digest, and its reproduction digest, which must equal the artifact.
+
+The native tests write transcript, numeric sample, metrics and code-record
+fixtures. The Python replay imports the C-written numeric records through the
+production sample consumers, joins them to every authenticated invocation and
+per-input metrics file, and verifies both manifests through the production
+no-follow result reader on POSIX. A real 131,072-record boundary, deterministic
+second collection, copied layout, partial collection, bypass, stale state,
+missing or unexpected metrics, member-count and interval errors, malformed
+layouts, spool mutation, truncation, nonempty destinations, descriptor
+replacement and buffered disk-full failures are covered. The commands above run
+this coverage in the existing native/sanitized harness lanes; Windows does not
+claim the POSIX-only result reader gate.
+
+These are collection primitives, not service admission. The caller still owns
+exclusive file identities, correctness and output-oracle gates, live quiet-phase
+coordination, cancellation, durable publication and independent rehash/replay.
+Ordinary throughput does not use this collector. In particular, its spool and
+transcript writes are not proof of a quiet-phase retention policy: the installed
+recipe must implement and validate that integration before admission. The
+performance descriptor remains blocked; neither synthetic fixtures nor an
+integrity-only manifest establishes a performance verdict.
 
 ### QUALITY scratch/work census
 

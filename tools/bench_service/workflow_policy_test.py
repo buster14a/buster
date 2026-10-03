@@ -27,6 +27,7 @@ MAIN_QUEUE_GATE = ROOT / "tools" / "merge_queue_admission.py"
 ADMISSION_GUIDE = SERVICE / "deploy" / "GITHUB_ADMISSION.md"
 OPERATOR_PACKET = SERVICE / "deploy" / "ISSUE_880_OPERATOR_PACKET.md"
 BROKER = SERVICE / "systemd_broker.c"
+BROKER_RUNTIME = SERVICE / "systemd_runtime.h"
 RECIPE_TEST = SERVICE / "dispatch_recipe_test.py"
 
 # The reviewed dispatch allowlist (#2071): recipe -> service runtime budget in
@@ -458,11 +459,25 @@ def check_recipe_selection(dispatch: str, submit: list[str], errors: list[str]) 
         errors.append(f"recipe input must be a required choice of exactly the allowlist: {recipe_input}")
 
     broker = BROKER.read_text(encoding="utf-8") if BROKER.is_file() else ""
-    runtime = re.findall(r'"--property=RuntimeMaxSec=([1-9][0-9]*)us"', broker)
-    if len(runtime) != 1 or int(runtime[0]) % 1000000:
+    runtime_header = BROKER_RUNTIME.read_text(encoding="utf-8") if BROKER_RUNTIME.is_file() else ""
+    # The broker either adds one fixed RuntimeMaxSec for every dispatched job,
+    # or (with the retirement stages) gives every non-retirement job the one
+    # BQ_SYSTEMD_SMOKE_RUNTIME_USEC; the retirement runtime is request-bound
+    # and never reachable from this dispatch path.
+    fixed = re.findall(r'bq_broker_add\(command, "--property=RuntimeMaxSec=([1-9][0-9]*)us"\);', broker)
+    derived = re.findall(r"#define BQ_SYSTEMD_SMOKE_RUNTIME_USEC \(UINT64_C\(([1-9][0-9]*)\) \* BQ_SYSTEMD_USEC_PER_SECOND\)",
+                         runtime_header)
+    smoke_selected = re.search(r"request->recipe == BQ_BROKER_RECIPE_RETIREMENT \?\s*request->runtime_max_usec : "
+                               r"BQ_SYSTEMD_SMOKE_RUNTIME_USEC;", broker) is not None
+    runtime_seconds = None
+    if len(fixed) == 1 and not derived and not int(fixed[0]) % 1000000:
+        runtime_seconds = int(fixed[0]) // 1000000
+    elif not fixed and len(derived) == 1 and smoke_selected:
+        runtime_seconds = int(derived[0])
+    if runtime_seconds is None:
         errors.append("the broker must define one whole-second RuntimeMaxSec")
     else:
-        broker_seconds = int(runtime[0]) // 1000000
+        broker_seconds = runtime_seconds
         profile = ZEN5_PROFILE.read_text(encoding="utf-8") if ZEN5_PROFILE.is_file() else ""
         enforced = re.findall(r"(?m)^budget-seconds=([1-9][0-9]*)$", profile)
         for name, budget in REVIEWED_RECIPES:

@@ -3,6 +3,9 @@
  * size. Authenticated export replies alone allow one fixed 64 KiB chunk.
  * Both human CLI commands and raw protocol requests enter bq_dispatch.
  * bq_public_response_valid checks successful typed replies before rendering.
+ * bq_recipe_identity formats the read-only recipe-identity reply (operation
+ * 14); capabilities v2 stays byte-identical because the dispatch workflow
+ * greps it and has no room for digests.
  */
 #include "queue.h"
 #define BQ_CONTROL_HEADER 24u
@@ -18,7 +21,7 @@ typedef enum BqOperation
     BQ_OP_CAPABILITIES = 1, BQ_OP_SUBMIT, BQ_OP_STATUS, BQ_OP_RESULT,
     BQ_OP_CANCEL, BQ_OP_LOGS, BQ_OP_FAKE_RUN, BQ_OP_FAKE_RECONCILE,
     BQ_OP_MATERIALIZE, BQ_OP_WORKSPACE_RECONCILE, BQ_OP_WORKER_RUN,
-    BQ_OP_SUBMIT_EXCLUSIVE, BQ_OP_EXPORT
+    BQ_OP_SUBMIT_EXCLUSIVE, BQ_OP_EXPORT, BQ_OP_RECIPE_IDENTITY
 } BqOperation;
 
 typedef struct BqPacket
@@ -55,6 +58,104 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
 #else
     "storage=private-local-posix-directory\n";
 #endif
+
+/* The recipe-identity reply (#881 N3), after the error code: the retirement
+ * recipe's admission status and the SHA-256 of its compiled profile, then the
+ * contract and support-declaration digests that profile pins. */
+#define BQ_RECIPE_IDENTITY_HEADER "schema=1 recipe=native-retirement-performance-v1 status="
+#define BQ_RECIPE_IDENTITY_PROFILE "profile-sha256="
+#define BQ_RECIPE_IDENTITY_CONTRACT "contract-sha256="
+#define BQ_RECIPE_IDENTITY_SUPPORT "support-declaration-sha256="
+
+/* The one newline-terminated `key<64 lowercase hex>` line of profile. */
+BUSTER_GLOBAL_LOCAL bool bq_recipe_identity_pin(String8 profile, String8 key, char value[SHA256_HEX_CAPACITY])
+{
+    u32 matches = 0;
+    u64 start = 0;
+    bool ok = true;
+    for (u64 index = 0; ok && index < profile.length; index += 1)
+    {
+        if (profile.pointer[index] == '\n')
+        {
+            String8 line = {profile.pointer + start, index - start};
+            if (line.length >= key.length && !memcmp(line.pointer, key.pointer, (size_t)key.length))
+            {
+                matches += 1;
+                ok = line.length == key.length + SHA256_HEX_CAPACITY - 1 &&
+                     bq_result_digest_valid((u8 const*)line.pointer + key.length);
+                if (ok)
+                {
+                    memcpy(value, line.pointer + key.length, SHA256_HEX_CAPACITY - 1);
+                    value[SHA256_HEX_CAPACITY - 1] = 0;
+                }
+            }
+            start = index + 1;
+        }
+    }
+    ok = ok && matches == 1;
+    return ok;
+}
+
+/* The status the reply reports: blocked, admitted, or, on Linux where the
+ * completeness gate exists, incomplete for an admitted profile the service
+ * refuses to serve (bq_retirement_compiled_servable). */
+BUSTER_GLOBAL_LOCAL char const* bq_recipe_identity_status(void)
+{
+    char const* status = bq_recipe_retirement_admitted() ? "admitted" : "blocked";
+#ifdef __linux__
+    if (!bq_retirement_compiled_servable()) status = "incomplete";
+#endif
+    return status;
+}
+
+/* Returns the reply text's length, or zero when the compiled profile lacks
+ * either pin or the text does not fit. */
+BUSTER_GLOBAL_LOCAL u32 bq_recipe_identity(u8* output, u32 capacity)
+{
+    String8 profile = bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+    char profile_digest[SHA256_HEX_CAPACITY], contract[SHA256_HEX_CAPACITY], support[SHA256_HEX_CAPACITY];
+    bq_digest(profile.pointer, (u32)profile.length, profile_digest);
+    bool pinned = bq_recipe_identity_pin(profile, S8(BQ_RECIPE_IDENTITY_CONTRACT), contract) &&
+                  bq_recipe_identity_pin(profile, S8(BQ_RECIPE_IDENTITY_SUPPORT), support);
+    int length = pinned ? snprintf((char*)output, capacity,
+                                   BQ_RECIPE_IDENTITY_HEADER "%s\n" BQ_RECIPE_IDENTITY_PROFILE "%s\n"
+                                   BQ_RECIPE_IDENTITY_CONTRACT "%s\n" BQ_RECIPE_IDENTITY_SUPPORT "%s\n",
+                                   bq_recipe_identity_status(),
+                                   profile_digest, contract, support) : -1;
+    u32 result = length > 0 && (u32)length < capacity ? (u32)length : 0;
+    return result;
+}
+
+/* A recipe-identity reply text of exactly the shape bq_recipe_identity writes. */
+BUSTER_GLOBAL_LOCAL bool bq_recipe_identity_valid(u8 const* text, u32 length)
+{
+    String8 const header = S8(BQ_RECIPE_IDENTITY_HEADER);
+    String8 const keys[] = {S8(BQ_RECIPE_IDENTITY_PROFILE), S8(BQ_RECIPE_IDENTITY_CONTRACT),
+                            S8(BQ_RECIPE_IDENTITY_SUPPORT)};
+    u32 offset = (u32)header.length;
+    bool ok = length > header.length && !memcmp(text, header.pointer, (size_t)header.length);
+    if (ok)
+    {
+        char const* const statuses[] = {"blocked\n", "admitted\n", "incomplete\n"};
+        u32 matched = 0;
+        for (u32 index = 0; !matched && index < BUSTER_ARRAY_LENGTH(statuses); index += 1)
+        {
+            u32 size = (u32)strlen(statuses[index]);
+            matched = length - offset >= size && !memcmp(text + offset, statuses[index], size) ? size : 0;
+        }
+        ok = matched != 0;
+        offset += matched;
+    }
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(keys); index += 1)
+    {
+        u32 line = (u32)keys[index].length + SHA256_HEX_CAPACITY;
+        ok = length - offset >= line && !memcmp(text + offset, keys[index].pointer, (size_t)keys[index].length) &&
+             bq_result_digest_valid(text + offset + keys[index].length) && text[offset + line - 1] == '\n';
+        offset += ok ? line : 0;
+    }
+    ok = ok && offset == length;
+    return ok;
+}
 
 BUSTER_GLOBAL_LOCAL void bq_packet_schema(BqPacket* packet, u32 schema, u32 operation, u64 correlation, u8 const* body, u32 size)
 {
@@ -107,7 +208,7 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
                 u64 cursor = bq_u64(arguments + 80), next = bq_u64(data + 28), total = bq_u64(data + 36);
                 u32 count = bq_u32(data + 44);
                 valid = bq_u64(data + 4) == bq_u64(arguments) && bq_u64(data + 12) == bq_u64(arguments + 8) &&
-                        bq_u64(data + 20) == cursor && total && total <= BQ_EXPORT_TOTAL_CAP &&
+                        bq_u64(data + 20) == cursor && total && total <= BQ_EXPORT_RETIREMENT_TOTAL_CAP &&
                         bq_result_digest_valid(data + 48) && length == BQ_EXPORT_REPLY_HEADER + count;
                 if (valid && cursor == UINT64_MAX)
                 {
@@ -120,7 +221,9 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
                             !memcmp(arguments + 16, data + BQ_EXPORT_REPLY_HEADER + 240, 64) &&
                             bq_u64(data + BQ_EXPORT_REPLY_HEADER + 8) == bq_u64(arguments) &&
                             bq_u64(data + BQ_EXPORT_REPLY_HEADER + 16) == bq_u64(arguments + 8) &&
-                            bq_u64(data + BQ_EXPORT_REPLY_HEADER + 24) == total;
+                            bq_u64(data + BQ_EXPORT_REPLY_HEADER + 24) == total &&
+                            (bq_u32(arguments + 88) == BQ_RECIPE_UNKNOWN ||
+                             bq_u32(arguments + 88) == bq_export_receipt_recipe(data + BQ_EXPORT_REPLY_HEADER));
 #endif
                 }
                 else if (valid)
@@ -140,6 +243,10 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
             valid = request->size == BQ_CONTROL_HEADER && length > 4;
             for (u32 i = 4; valid && i < length; i += 1)
                 valid = data[i] == '\n' || (data[i] >= 0x20 && data[i] <= 0x7e);
+        }
+        else if (operation == BQ_OP_RECIPE_IDENTITY)
+        {
+            valid = request->size == BQ_CONTROL_HEADER && length > 4 && bq_recipe_identity_valid(data + 4, length - 4);
         }
         else if (operation == BQ_OP_LOGS)
         {
@@ -225,6 +332,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
                 memcpy(output + 4, capabilities, capabilities_size);
             }
         }
+        else if (schema == BQ_CONTROL_SCHEMA && operation == BQ_OP_RECIPE_IDENTITY && !length)
+        {
+            u32 identity_size = bq_recipe_identity(output + 4, BQ_CONTROL_BODY - 4);
+            if (identity_size)
+            {
+                error = BQ_OK;
+                output_size = 4 + identity_size;
+            }
+        }
         else if (queue->poisoned || queue->journal_fd < 0)
         {
             error = BQ_IO;
@@ -233,7 +349,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         {
             BqRequest request = {.size = length};
             memcpy(request.bytes, body, length);
-            if (schema == 1 && bq_recipe_real(&request))
+            if (schema == 1 && bq_recipe_real_journal(&request))
             {
                 error = BQ_BAD_REQUEST;
             }
@@ -247,7 +363,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         {
             id = bq_u64(body);
             BqJob* job = bq_job(&queue->state, id);
-            error = !job ? BQ_NOT_FOUND : schema == 1 && bq_recipe_real(&job->request) ? BQ_UNSUPPORTED : BQ_OK;
+            error = !job ? BQ_NOT_FOUND : schema == 1 && bq_recipe_real_journal(&job->request) ? BQ_UNSUPPORTED : BQ_OK;
             if (error == BQ_OK && job && job->result_bound && (operation == BQ_OP_STATUS || operation == BQ_OP_RESULT))
             {
                 error = bq_worker_result_binding_validate(job);
@@ -319,7 +435,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
             id = bq_u64(body);
             u64 after = bq_u64(body + 8);
             BqJob* job = bq_job(&queue->state, id);
-            error = !job ? BQ_NOT_FOUND : schema == 1 && bq_recipe_real(&job->request) ? BQ_UNSUPPORTED :
+            error = !job ? BQ_NOT_FOUND : schema == 1 && bq_recipe_real_journal(&job->request) ? BQ_UNSUPPORTED :
                     after > queue->state.sequence ? BQ_BAD_REQUEST : BQ_OK;
             if (error == BQ_OK)
             {

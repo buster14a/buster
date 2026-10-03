@@ -92,11 +92,31 @@ int bq_test_getgroups(int count, gid_t* groups)
     return result;
 }
 
+/* The environment the payload would inherit, captured at the exec. */
+static char test_environment[4][160];
+static int test_environment_count;
+
 int bq_test_execv(char const* path, char* const argv[])
 {
+    extern char** environ;
     if (!strcmp(path, argv[0])) test_execs += 1;
+    test_environment_count = 0;
+    for (char** entry = environ; entry && *entry; entry += 1)
+    {
+        if (test_environment_count < 4)
+            snprintf(test_environment[test_environment_count], sizeof(test_environment[0]), "%s", *entry);
+        test_environment_count += 1;
+    }
     errno = ENOENT;
     return -1;
+}
+
+static bool test_environment_has(char const* entry)
+{
+    bool found = false;
+    for (int index = 0; index < test_environment_count && index < 4; index += 1)
+        found = found || !strcmp(test_environment[index], entry);
+    return found;
 }
 
 static bool run_case(char const* label, int argc, char** argv, uid_t uid,
@@ -131,6 +151,45 @@ int main(void)
     ok &= run_case("service", 9, service, 65000, 65000, service_groups, 2, true);
     ok &= run_case("candidate", 9, candidate, 65001, 65001, candidate_groups, 1, true);
     ok &= run_case("throughput", 9, throughput, 65001, 65001, candidate_groups, 1, true);
+    /* Smoke stages keep exactly the fixed system PATH and locale. */
+    setenv("BQ_GATE_TEST_INHERITED", "leak", 1);
+    ok &= run_case("candidate_environment", 9, candidate, 65001, 65001, candidate_groups, 1, true) &&
+          test_environment_count == 2 && test_environment_has("PATH=/usr/bin:/bin") &&
+          test_environment_has("LC_ALL=C");
+    /* #1020 retirement stages: the same driver, exactly the matched-build
+     * environment with the installed toolchain on PATH, nothing inherited. */
+    char* retirement_base[] = {"gate", "6", "65000", "65000", "65000,65001", "--",
+                               BQ_GATE_BUILD, "generate", "fixed", NULL};
+    char* retirement_candidate[] = {"gate", "9", "65001", "65001", "65001", "--",
+                                    BQ_GATE_BUILD, "build", "fixed", NULL};
+    char const* retirement_environment[] = {
+        "PATH=/opt/buster-bench/installed/toolchain/native-retirement-performance-v1/bin",
+        "LC_ALL=C", "TZ=UTC", "HOME=/nonexistent"};
+    setenv("BQ_GATE_TEST_INHERITED", "leak", 1);
+    setenv("HOME", "/root", 1);
+    bool retirement_ok = run_case("retirement_base", 9, retirement_base, 65000, 65000, service_groups, 2, true) &&
+                         test_environment_count == 4;
+    for (int index = 0; index < 4; index += 1)
+        retirement_ok = retirement_ok && test_environment_has(retirement_environment[index]);
+    setenv("BQ_GATE_TEST_INHERITED", "leak", 1);
+    retirement_ok = retirement_ok &&
+                    run_case("retirement_candidate", 9, retirement_candidate, 65001, 65001, candidate_groups, 1,
+                             true) && test_environment_count == 4;
+    for (int index = 0; index < 4; index += 1)
+        retirement_ok = retirement_ok && test_environment_has(retirement_environment[index]);
+    ok &= retirement_ok;
+    ok &= run_case("retirement_candidate_as_service", 9, retirement_candidate, 65001, 65001, contaminated, 2,
+                   false);
+    retirement_candidate[7] = "generate";
+    ok &= run_case("retirement_wrong_operation", 9, retirement_candidate, 65001, 65001, candidate_groups, 1,
+                   false);
+    retirement_candidate[7] = "build";
+    retirement_candidate[6] = BQ_GATE_THROUGHPUT;
+    ok &= run_case("retirement_wrong_program", 9, retirement_candidate, 65001, 65001, candidate_groups, 1, false);
+    retirement_candidate[6] = BQ_GATE_BUILD;
+    retirement_candidate[1] = "10";
+    ok &= run_case("retirement_unknown_stage", 9, retirement_candidate, 65001, 65001, candidate_groups, 1, false);
+    retirement_candidate[1] = "9";
     ok &= run_case("pid1_added_service", 9, candidate, 65001, 65001, contaminated, 2, false);
     ok &= run_case("pid1_omitted_group", 9, service, 65000, 65000, candidate_groups, 1, false);
     ok &= run_case("pid1_oversized_set", 9, candidate, 65001, 65001, oversize,

@@ -23,20 +23,34 @@ BUSTER_GLOBAL_LOCAL char const bq_native_retirement_blocked_profile[] =
     "repository=buster14a/buster\n"
     "status=blocked\n"
     "contract=docs/native-retirement-performance-contract.md\n"
-    "contract-sha256=67fff9a8b53764792046ba1c1ec104a24cc6e525c4322a6206b218b188a431b0\n"
+    "contract-sha256=efe76e1cea6ab535586781dec8fcb7bdc1f3b0faf1471bc5e4a690b993872e83\n"
     "support-declaration=docs/native-retirement-support-v1.tsv\n"
     "support-declaration-sha256=5834270ef2b01798b25547751fd91631295a84ccb23116bf1502d8bae0c0b115\n"
     "binding-validator=tools/native_retirement_performance_binding.py\n"
-    "binding-validator-sha256=c08c0877a395ae20d1ba29534bde0946ce8dc38811f8f4e5fa5239d8e5a187d6\n"
+    "binding-validator-sha256=f506f39f02319ef53482c604b94ff1fbda7d33e7560569183750349cd9d07950\n"
     "binding-schema=tools/native_retirement_performance_schema.py\n"
     "binding-schema-sha256=e19a5cf1114997ddf4a71cf47f8da4125777b49441d1a48d012bab7f2bb8e6a3\n"
     "statistics=tools/throughput/retirement_stats.h\n"
-    "statistics-sha256=72a7c6aa80c46bb4246865a2991b34e2dfbc4ce2db9547d5b69143712383e6c8\n"
+    "statistics-sha256=b95349118f14456abb9d85191615c6e0b9cd595e7761081c6bc0dacddb8a34dd\n"
     "requires=qualified-9700x-service,predeclared-execution-plan,bound-subjects,durable-replay\n";
 
+/* Every build reads the compiled profile, including its admitted successor
+ * with every worker-unit pin, into a buffer of this cap (bq_installed_recipe). */
+BUSTER_CT_CHECK(sizeof(bq_native_retirement_blocked_profile) - 1 <= BQ_RECIPE_PROFILE_CAP);
+BUSTER_CT_CHECK(sizeof(bq_validate_buster_profile) - 1 <= BQ_RECIPE_PROFILE_CAP);
+
+#if defined(BUSTER_BENCH_SERVICE_TEST) || defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+/* Test-only seam: when nonempty, this profile stands in for the compiled
+ * retirement profile everywhere (bq_recipe_profile and the admission
+ * predicate), so an admitted test profile can exercise submission, journal
+ * replay, FINALIZING, cancel and cleanup. Neither macro is defined in the
+ * installed service (main.c), which has no override. */
+BUSTER_GLOBAL_LOCAL String8 bq_retirement_profile_test_override;
+#endif
 /* Served (#426): the systemd broker's version-2 recipe selector starts its
  * outer unit and the thirteen typed stages of zen5_stage.h. */
 BUSTER_GLOBAL_LOCAL char const bq_zen5_calibration_profile[] = BQ_ZEN5_CALIBRATION_PROFILE;
+BUSTER_CT_CHECK(sizeof(bq_zen5_calibration_profile) - 1 <= BQ_RECIPE_PROFILE_CAP);
 
 u32 bq_u32(u8 const* bytes)
 {
@@ -171,6 +185,10 @@ String8 bq_recipe_profile(BqRecipe recipe)
                            sizeof(bq_native_retirement_blocked_profile) - 1};
     else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION)
         result = (String8){(char8*)bq_zen5_calibration_profile, sizeof(bq_zen5_calibration_profile) - 1};
+#if defined(BUSTER_BENCH_SERVICE_TEST) || defined(BQ_RETIREMENT_CORRECTNESS_TEST_ONLY)
+    if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && bq_retirement_profile_test_override.length)
+        result = bq_retirement_profile_test_override;
+#endif
     return result;
 }
 
@@ -179,6 +197,7 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
     String8 name = bq_recipe_name(recipe);
     char const* profile_suffix = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? ".blocked" : ".recipe";
     char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" :
+                          recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? "bench_service_retirement_recipe" :
                           recipe == BQ_RECIPE_ZEN5_CALIBRATION ? "bench_service_zen5_recipe" : "";
     bool described = files && (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
                                recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ||
@@ -205,22 +224,65 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
     return result;
 }
 
+/* A newline-terminated profile with exactly one line starting with
+ * `status=`, and it is BQ_RECIPE_PROFILE_ADMITTED_STATUS byte for byte:
+ * blocked, a blocked- prefix, a trailing space or carriage return, a second
+ * status line, none, or an unterminated final line refuses. The Linux
+ * completeness gate (bq_retirement_profile_complete) applies this same test
+ * after its pins. This portable predicate cannot see the pins; the Linux
+ * service entry points refuse an admitted but incomplete profile
+ * (bq_retirement_compiled_servable, retirement_coordinator.c). */
+bool bq_recipe_profile_admitted(String8 profile)
+{
+    String8 const status = S8("status=");
+    String8 const admitting = S8(BQ_RECIPE_PROFILE_ADMITTED_STATUS);
+    u32 statuses = 0;
+    u64 start = 0;
+    bool admitted = profile.pointer != NULL && profile.length > 0;
+    for (u64 index = 0; admitted && index < profile.length; index += 1)
+    {
+        if (profile.pointer[index] == '\n')
+        {
+            String8 line = {profile.pointer + start, index - start};
+            if (line.length >= status.length && !memcmp(line.pointer, status.pointer, (size_t)status.length))
+            {
+                statuses += 1;
+                admitted = string_equal(line, admitting);
+            }
+            start = index + 1;
+        }
+    }
+    admitted = admitted && statuses == 1 && profile.pointer[profile.length - 1] == '\n';
+    return admitted;
+}
+
+/* The one admission test of the retirement recipe, shared by every build of
+ * this queue (including the portable one without the Linux retirement
+ * units): the compiled profile, or the test seam's stand-in, is admitted. */
+bool bq_recipe_retirement_admitted(void)
+{
+    bool result = bq_recipe_profile_admitted(bq_recipe_profile(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED));
+    return result;
+}
+
 bool bq_recipe_admitted(BqRecipe recipe)
 {
     bool result = recipe == BQ_RECIPE_FAKE_SUCCESS || recipe == BQ_RECIPE_FAKE_FAILURE ||
-                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
+                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
+                  (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && bq_recipe_retirement_admitted());
     return result;
 }
 
 bool bq_recipe_service(BqRecipe recipe)
 {
-    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
+    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
+                  (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && bq_recipe_retirement_admitted());
     return result;
 }
 
 bool bq_recipe_blocked(BqRecipe recipe)
 {
-    bool result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+    bool result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && !bq_recipe_retirement_admitted();
     return result;
 }
 
@@ -231,25 +293,55 @@ bool bq_recipe_fake(BqRequest const* request)
     return result;
 }
 
+/* Execution paths (materialization, dispatch, reconciliation, export) run a
+ * job only while its recipe is an admitted service recipe. */
 bool bq_recipe_real(BqRequest const* request)
 {
     bool result = bq_recipe_service(bq_request_recipe(request));
     return result;
 }
 
-bool bq_request_valid(BqRequest const* request)
+/* The journal's transition model: a job of any service recipe follows the
+ * real (worker-owned) transitions whatever this build admits, so a journal
+ * appended while the retirement profile was admitted still replays under a
+ * blocked build. Its jobs then stay inert: bq_recipe_real refuses them. The
+ * served zen5 recipe (#426) is always real, as bq_recipe_real is on main. */
+bool bq_recipe_real_journal(BqRequest const* request)
+{
+    BqRecipe recipe = bq_request_recipe(request);
+    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ||
+                  recipe == BQ_RECIPE_ZEN5_CALIBRATION;
+    return result;
+}
+
+/* retirement_admitted decides the retirement recipe alone: the portable
+ * predicate (bq_request_valid), the Linux coordinator's completeness gate on
+ * a seam's profile (bq_retirement_request_valid_pinned) or, for replay of an
+ * already journalled record, true. Every other recipe needs bq_recipe_admitted. */
+bool bq_request_valid_admitting(BqRequest const* request, bool retirement_admitted)
 {
     String8 principal = bq_field(request, 0);
     String8 key = bq_field(request, 1);
     String8 recipe = bq_field(request, 2);
     String8 base = bq_field(request, 3);
     String8 candidate = bq_field(request, 4);
-    bool ok = bq_name(principal, 32) && bq_name(key, 64) && bq_recipe_admitted(bq_recipe_from_name(recipe)) &&
+    BqRecipe selected = bq_recipe_from_name(recipe);
+    bool admitted = selected == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? retirement_admitted : bq_recipe_admitted(selected);
+    bool ok = bq_name(principal, 32) && bq_name(key, 64) && admitted &&
               bq_source_identity(base) && bq_source_identity(candidate) && base.length == candidate.length &&
               /* zen5-calibration-v1 measures one immutable source named twice. */
-              (bq_recipe_from_name(recipe) != BQ_RECIPE_ZEN5_CALIBRATION ||
+              (selected != BQ_RECIPE_ZEN5_CALIBRATION ||
                (base.length == 40 && string_equal(base, candidate))) &&
               principal.length + key.length + recipe.length + base.length + candidate.length + 20 == request->size;
+    return ok;
+}
+
+/* Submission, transport and exclusive admission. The retirement recipe is
+ * admitted exactly when the compiled profile is (bq_recipe_retirement_admitted);
+ * it is blocked today, so a retirement request is still refused. */
+bool bq_request_valid(BqRequest const* request)
+{
+    bool ok = bq_request_valid_admitting(request, bq_recipe_retirement_admitted());
     return ok;
 }
 
@@ -349,8 +441,14 @@ BUSTER_GLOBAL_LOCAL bool bq_result_digest_valid(u8 const* bytes)
 }
 
 /* Event validation is shared by tentative append and replay. No in-memory
- * mutation becomes visible to a caller until the corresponding fsync succeeds. */
-BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind kind, u64 sequence, u8 const* body, u32 size)
+ * mutation becomes visible to a caller until the corresponding fsync succeeds.
+ * A live submission needs this build's admission (bq_request_valid); replay
+ * accepts a schema-3 retirement submission whatever this build admits, and
+ * every journalled job follows bq_recipe_real_journal's transition model, so
+ * a journal written under an admitted profile stays replayable under a
+ * blocked build while its retirement jobs stay inert (bq_recipe_real). */
+BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind kind, u64 sequence, u8 const* body, u32 size,
+                                     bool replay)
 {
     BqError error = BQ_OK;
     BqJob* job = NULL;
@@ -370,7 +468,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
         {
             request.size = size;
             memcpy(request.bytes, body, size);
-            if (!bq_request_valid(&request) || (schema == BQ_SCHEMA_LEGACY && bq_recipe_real(&request)))
+            bool retirement = bq_request_recipe(&request) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+            bool admitted = replay ? bq_request_valid_admitting(&request, true) : bq_request_valid(&request);
+            if (!admitted || (schema == BQ_SCHEMA_LEGACY && bq_recipe_real_journal(&request)) ||
+                (schema < BQ_SCHEMA && retirement))
             {
                 error = BQ_BAD_REQUEST;
             }
@@ -437,7 +538,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                  * boundary while FINALIZING/CLEANING remains active. */
                 bool cancellable = job->phase < BQ_FINALIZING ||
                                    ((job->phase == BQ_FINALIZING || job->phase == BQ_CLEANING) &&
-                                    bq_recipe_real(&job->request));
+                                    bq_recipe_real_journal(&job->request));
                 if (!cancellable || job->cancel_requested)
                 {
                     error = BQ_INVALID_TRANSITION;
@@ -498,12 +599,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                 bool cancel_cleanup = job->cancel_requested && job->phase < BQ_CLEANING && next == BQ_CLEANING;
                 bool failure_outcome = outcome == (u32)(job->cancel_requested ? BQ_CANCELLED : BQ_FAILED) ||
                                        (schema == BQ_SCHEMA && !job->cancel_requested && outcome == BQ_INTERRUPTED);
-                bool failure_cleanup = schema >= BQ_SCHEMA_MATERIALIZATION && bq_recipe_real(&job->request) &&
+                bool failure_cleanup = schema >= BQ_SCHEMA_MATERIALIZATION && bq_recipe_real_journal(&job->request) &&
                                        job->phase < BQ_CLEANING && next == BQ_CLEANING &&
                                        failure_outcome;
                 if (next == BQ_FINALIZING)
                 {
-                    bool worker_terminal = schema == BQ_SCHEMA && bq_recipe_real(&job->request) &&
+                    bool worker_terminal = schema == BQ_SCHEMA && bq_recipe_real_journal(&job->request) &&
                                            outcome == BQ_SUCCEEDED;
                     expected = worker_terminal ? (BqOutcome)outcome :
                                string_equal(bq_field(&job->request, 2), S8("fake-success-v1")) ? BQ_SUCCEEDED : BQ_FAILED;
@@ -512,7 +613,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                 {
                     expected = BQ_CANCELLED;
                 }
-                if (schema == BQ_SCHEMA && !job->cancel_requested && bq_recipe_real(&job->request) && job->phase == BQ_CLEANING &&
+                if (schema == BQ_SCHEMA && !job->cancel_requested && bq_recipe_real_journal(&job->request) && job->phase == BQ_CLEANING &&
                     next == BQ_FINISHED && outcome == BQ_INTERRUPTED)
                 {
                     expected = BQ_INTERRUPTED;
@@ -701,7 +802,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_replay(BqQueue* queue)
             {
                 bq_digest(frame + BQ_HEADER_SIZE, length, digest);
                 if (memcmp(frame + 96, digest, 64) ||
-                    bq_apply(&queue->state, schema, (BqRecordKind)kind, sequence, frame + BQ_HEADER_SIZE, length) != BQ_OK)
+                    bq_apply(&queue->state, schema, (BqRecordKind)kind, sequence, frame + BQ_HEADER_SIZE, length,
+                             true) != BQ_OK)
                 {
                     error = BQ_CORRUPT;
                 }
@@ -816,7 +918,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_append(BqQueue* queue, BqRecordKind kind, u8 cons
     BqState next = queue->state;
     if (error == BQ_OK)
     {
-        error = bq_apply(&next, BQ_SCHEMA, kind, next.sequence + 1, body, size);
+        error = bq_apply(&next, BQ_SCHEMA, kind, next.sequence + 1, body, size, false);
     }
     if (error == BQ_OK)
     {
@@ -906,7 +1008,7 @@ BqError bq_cancel(BqQueue* queue, u64 id)
     BqError error = queue->poisoned ? BQ_IO : !job ? BQ_NOT_FOUND : BQ_OK;
     bool cancellable = job && (job->phase < BQ_FINALIZING ||
                        ((job->phase == BQ_FINALIZING || job->phase == BQ_CLEANING) &&
-                        bq_recipe_real(&job->request)));
+                        bq_recipe_real_journal(&job->request)));
     if (error == BQ_OK && cancellable && !job->cancel_requested)
     {
         u8 body[8];

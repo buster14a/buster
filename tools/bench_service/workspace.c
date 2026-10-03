@@ -3,6 +3,9 @@
  * Entry points: bq_materialize reserves the existing FIFO authority before it
  * validates/copies an installed source snapshot; bq_workspace_reconcile removes
  * only a seal-matched attempt before allowing that authority to finish.
+ * bq_retirement_poison_write, bq_retirement_poison_read and
+ * bq_retirement_poisoned keep the #881 recovery L2 poison record; the
+ * reconciliation never finishes a poisoned job succeeded.
  *
  * Layout: installed recipe/source validation, bounded manifest copying,
  * sealed workspace identity, mode-read-only evidence, and fail-closed cleanup. This
@@ -22,6 +25,10 @@
 #define BQ_WORKSPACE_TRAVERSE_MODE 02710
 #define BQ_WORKSPACE_PRIVATE_BUILD_MODE 02700
 #define BQ_SOURCE_MANIFEST_CAP (64u * 1024u)
+/* #1018: the tracked #923 tree has 2,842 entries and a 341,377-byte
+ * manifest. Retirement gets a separately pinned inventory and a bounded
+ * preflight before this larger buffer can be used. Smoke retains 64 KiB. */
+#define BQ_RETIREMENT_SOURCE_MANIFEST_CAP (512u * 1024u)
 #define BQ_SOURCE_FILE_CAP (64u * 1024u * 1024u)
 #define BQ_SOURCE_TOTAL_CAP (512u * 1024u * 1024u)
 #define BQ_SOURCE_COUNT_CAP 4096u
@@ -29,6 +36,9 @@
 #define BQ_DIRECTORY_CAP 1024u
 #define BQ_CLEANUP_ENTRY_CAP 16384u
 #define BQ_CLEANUP_DEPTH_CAP 256u
+#include "retirement_prepare.h"
+#include <stdlib.h>
+#include "retirement_binaries.h"
 
 #ifdef BUSTER_BENCH_SERVICE_TEST
 /* Deterministic test-only seam: a successful mkdir whose mode changes before
@@ -469,7 +479,7 @@ BUSTER_GLOBAL_LOCAL bool bq_manifest_header(String8 manifest, String8 revision, 
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String8 revision)
+BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String8 revision, u32 manifest_cap)
 {
     char name[80];
     u32 name_size = 0;
@@ -481,11 +491,14 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
     int manifest_fd = source_root >= 0 ?
                       openat(source_root, "source.manifest", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat info;
-    u8 manifest_bytes[BQ_SOURCE_MANIFEST_CAP];
+    /* The retirement manifest cap is 512 KiB; keep it off the stack, whose
+     * frame would otherwise overflow sanitized builds' default 8 MiB stack. */
+    u8* manifest_bytes = manifest_cap && manifest_cap <= BQ_RETIREMENT_SOURCE_MANIFEST_CAP ?
+                         malloc(manifest_cap) : NULL;
     u32 manifest_size = 0;
-    bool ok = source_root >= 0 && bq_owned_directory(source_root, false, true) && manifest_fd >= 0 &&
+    bool ok = manifest_bytes && source_root >= 0 && bq_owned_directory(source_root, false, true) && manifest_fd >= 0 &&
               fstat(manifest_fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 && (info.st_mode & 0222) == 0 &&
-              bq_read_file(manifest_fd, manifest_bytes, sizeof(manifest_bytes), &manifest_size);
+              bq_read_file(manifest_fd, manifest_bytes, manifest_cap, &manifest_size);
     String8 manifest = {(char8*)manifest_bytes, manifest_size};
     u64 offset = 0;
     if (ok)
@@ -547,6 +560,7 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
     {
         close(source_root);
     }
+    free(manifest_bytes);
     return ok;
 }
 
@@ -850,9 +864,12 @@ BUSTER_GLOBAL_LOCAL bool bq_record_name(char result[48], char const* prefix, u64
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_record_read(BqQueue* queue, char const* name, u8* bytes, u32 capacity, u32* size)
+/* Records live in a directory, not necessarily the queue: the retirement
+ * preparation store (retirement_prepare.h) reads the same format from an
+ * exported per-attempt directory that the worker unit can reach. */
+BUSTER_GLOBAL_LOCAL BqError bq_record_read_at(int directory, char const* name, u8* bytes, u32 capacity, u32* size)
 {
-    int fd = openat(queue->directory_fd, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    int fd = openat(directory, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     BqError error = BQ_NOT_FOUND;
     if (fd >= 0)
     {
@@ -869,15 +886,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_record_read(BqQueue* queue, char const* name, u8*
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode(BqQueue* queue, char const* name, u8 const* bytes,
-                                                  u32 size, bool existing_ok, mode_t mode)
+BUSTER_GLOBAL_LOCAL BqError bq_record_read(BqQueue* queue, char const* name, u8* bytes, u32 capacity, u32* size)
 {
-    int fd = openat(queue->directory_fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
+    BqError error = bq_record_read_at(queue->directory_fd, name, bytes, capacity, size);
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode_at(int directory, char const* name, u8 const* bytes,
+                                                     u32 size, bool existing_ok, mode_t mode)
+{
+    int fd = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
     BqError error = BQ_IO;
     if (fd >= 0)
     {
         if (bq_write_all(fd, bytes, size) && fchmod(fd, mode) == 0 &&
-            fsync(fd) == 0 && fsync(queue->directory_fd) == 0)
+            fsync(fd) == 0 && fsync(directory) == 0)
         {
             error = BQ_OK;
         }
@@ -887,16 +910,23 @@ BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode(BqQueue* queue, char const* nam
     {
         u8 actual[640];
         u32 actual_size = 0;
-        error = bq_record_read(queue, name, actual, sizeof(actual), &actual_size);
+        error = bq_record_read_at(directory, name, actual, sizeof(actual), &actual_size);
         struct stat info = {0};
         if (error == BQ_OK &&
-            (fstatat(queue->directory_fd, name, &info, AT_SYMLINK_NOFOLLOW) != 0 ||
+            (fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) != 0 ||
              (info.st_mode & 07777) != mode)) error = BQ_CORRUPT;
         if (error == BQ_OK && (actual_size != size || memcmp(actual, bytes, size)))
         {
             error = BQ_CORRUPT;
         }
     }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode(BqQueue* queue, char const* name, u8 const* bytes,
+                                                  u32 size, bool existing_ok, mode_t mode)
+{
+    BqError error = bq_record_write_mode_at(queue->directory_fd, name, bytes, size, existing_ok, mode);
     return error;
 }
 
@@ -1108,11 +1138,73 @@ BqError bq_failure_evidence(BqQueue* queue, BqJob const* job)
     {
         result = bq_failure_record(queue, job, "failure", BQ_RECIPE_MISMATCH, BQ_BOOT_INTERRUPTED);
     }
-    if (result == BQ_NOT_FOUND && job && bq_recipe_real(&job->request) && job->outcome == BQ_FAILED)
+    if (result == BQ_NOT_FOUND && job && bq_recipe_real_journal(&job->request) && job->outcome == BQ_FAILED)
     {
         result = BQ_CORRUPT;
     }
     return result;
+}
+
+/* #881 recovery L2 poison record (queue.h). Its body is the magic, the job,
+ * the token, the handoff class and what the classification observed. */
+#define BQ_RETIREMENT_POISON_MAGIC "BQ-RETIREMENT-POISON-V1"
+#define BQ_RETIREMENT_POISON_CAP 384u
+
+#ifdef BUSTER_BENCH_SERVICE_TEST
+/* Test-only seam: the next poison write fails as a full disk would. */
+BUSTER_GLOBAL_LOCAL bool bq_test_poison_write_failure;
+#endif
+
+BqError bq_retirement_poison_read(BqQueue* queue, BqJob const* job, bool* inconsistent)
+{
+    char name[48], prefix[128];
+    u8 bytes[BQ_RETIREMENT_POISON_CAP];
+    u32 size = 0;
+    int length = job ? snprintf(prefix, sizeof(prefix), BQ_RETIREMENT_POISON_MAGIC "\njob=%" PRIu64 "\ntoken=%" PRIu64
+                                "\nhandoff=", (uint64_t)job->id, (uint64_t)job->token) : -1;
+    BqError error = queue && length > 0 && (size_t)length < sizeof(prefix) &&
+                    bq_record_name(name, BQ_RETIREMENT_POISON_RECORD, job->id) ?
+                    bq_record_read(queue, name, bytes, sizeof(bytes), &size) : BQ_IO;
+    bool prefixed = error == BQ_OK && size > (u32)length && !memcmp(bytes, prefix, (size_t)length);
+    u32 left = prefixed ? size - (u32)length : 0;
+    bool incomplete = left >= 11 && !memcmp(bytes + length, "incomplete\n", 11);
+    bool contradicted = left >= 13 && !memcmp(bytes + length, "inconsistent\n", 13);
+    if (error == BQ_OK && !incomplete && !contradicted)
+    {
+        error = BQ_CORRUPT;
+    }
+    if (inconsistent)
+    {
+        *inconsistent = error != BQ_NOT_FOUND && (error != BQ_OK || contradicted);
+    }
+    return error;
+}
+
+bool bq_retirement_poisoned(BqQueue* queue, BqJob const* job)
+{
+    bool poisoned = bq_retirement_poison_read(queue, job, NULL) != BQ_NOT_FOUND;
+    return poisoned;
+}
+
+BqError bq_retirement_poison_write(BqQueue* queue, BqJob const* job, bool inconsistent, bool measured,
+                                   char const* state)
+{
+    char name[48], body[BQ_RETIREMENT_POISON_CAP];
+    int length = job && state ? snprintf(body, sizeof(body), BQ_RETIREMENT_POISON_MAGIC "\njob=%" PRIu64 "\ntoken=%"
+                                         PRIu64 "\nhandoff=%s\nmeasured-record=%s\nauthority-state=%s\n",
+                                         (uint64_t)job->id, (uint64_t)job->token,
+                                         inconsistent ? "inconsistent" : "incomplete", measured ? "present" : "absent",
+                                         state) : -1;
+    bool named = length > 0 && (u32)length < sizeof(body) && bq_record_name(name, BQ_RETIREMENT_POISON_RECORD, job->id);
+#ifdef BUSTER_BENCH_SERVICE_TEST
+    if (bq_test_poison_write_failure)
+    {
+        named = false;
+        bq_test_poison_write_failure = false;
+    }
+#endif
+    BqError error = named && queue ? bq_record_write(queue, name, (u8 const*)body, (u32)length, false) : BQ_IO;
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_real_advance(BqQueue* queue, BqJob const* job, BqPhase phase, BqOutcome outcome)
@@ -1211,6 +1303,10 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
         error = bq_reserve(queue, id, token);
     }
     BqJob* job = error == BQ_OK ? bq_job(&queue->state, *id) : NULL;
+    bool retirement = job && string_equal(bq_field(&job->request, 2), S8("native-retirement-performance-v1"));
+    bool retirement_started = false;
+    u32 completed_subjects = 0;
+    BqRetirementPreparation preparation = {0};
     int installed = error == BQ_OK ? bq_open_absolute_directory(installed_root) : -1;
     int workspaces = error == BQ_OK ? bq_open_absolute_directory(workspace_root) : -1;
     struct stat installed_info = {0}, workspaces_info = {0}, workspace_info = {0};
@@ -1230,6 +1326,11 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
     if (error == BQ_OK && !bq_installed_recipe(installed, bq_request_recipe(&job->request)))
     {
         error = BQ_RECIPE_MISMATCH;
+    }
+    if (error == BQ_OK && retirement)
+    {
+        retirement_started = true;
+        error = bq_retirement_preflight(installed, workspaces, &job->request, &preparation);
     }
     int workspace = -1;
     if (error == BQ_OK)
@@ -1262,7 +1363,11 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
         if (made)
         {
             String8 revision = bq_field(&job->request, 3 + subject);
-            made = bq_copy_manifest(installed, source, revision) && bq_make_sources_read_only(source) && fsync(subject_fd) == 0;
+            made = bq_copy_manifest(installed, source, revision,
+                                    retirement ? BQ_RETIREMENT_SOURCE_MANIFEST_CAP : BQ_SOURCE_MANIFEST_CAP) &&
+                   bq_make_sources_read_only(source) &&
+                   (!retirement || bq_retirement_verify_subject(installed, subject_fd, source, revision,
+                                                                &preparation.subjects[subject])) && fsync(subject_fd) == 0;
         }
         if (source >= 0)
         {
@@ -1280,17 +1385,27 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
         {
             error = BQ_SOURCE_MISMATCH;
         }
+        else
+        {
+            completed_subjects += 1;
+        }
     }
     if (error == BQ_OK && fsync(workspace) != 0)
     {
         error = BQ_WORKSPACE_MISMATCH;
+    }
+    if (retirement_started && !bq_retirement_preparation_record(bq_retirement_queue_store(queue), job,
+                                                                &preparation, error, completed_subjects))
+    {
+        error = BQ_CONFIGURATION_MISMATCH;
     }
     if (error == BQ_OK)
     {
         error = bq_real_advance(queue, job, BQ_PREPARING, BQ_NO_OUTCOME);
     }
     BqError reported = error;
-    if (error >= BQ_RECIPE_MISMATCH && error <= BQ_CONFIGURATION_MISMATCH && !collision)
+    if (((error >= BQ_RECIPE_MISMATCH && error <= BQ_CONFIGURATION_MISMATCH) || error == BQ_RESOURCE_MISMATCH) &&
+        !collision)
     {
         if (!created || workspace >= 0)
         {
@@ -1372,6 +1487,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_controlled(BqQueue* queue, St
     {
         error = failure;
     }
+    /* #881 recovery L2: a poisoned job never finishes succeeded. A durable
+     * success is failed (FINALIZING) or interrupted (CLEANING) with a
+     * worker-mismatch failure record; earlier phases reconcile interrupted. */
+    bool poisoned = error == BQ_OK && bq_retirement_poisoned(queue, job);
     BqError attempt = error == BQ_OK ? bq_attempt_presence(queue, job) : BQ_NOT_FOUND;
     bool has_attempt = attempt == BQ_OK;
     if (error == BQ_OK && attempt != BQ_OK && attempt != BQ_NOT_FOUND)
@@ -1444,6 +1563,20 @@ BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_controlled(BqQueue* queue, St
         error = bq_cleanup_record(queue, job, &workspaces_info, &workspace_info, true);
         cleanup = error == BQ_OK ? BQ_OK : cleanup;
     }
+    /* A failed job without its failure record stays corrupt (above); only a
+     * durable success gains the poison's failure record. */
+    if (error == BQ_OK && poisoned && !job->cancel_requested && failure == BQ_NOT_FOUND &&
+        job->outcome == BQ_SUCCEEDED && (job->phase == BQ_FINALIZING || job->phase == BQ_CLEANING))
+    {
+        error = bq_failure_write(queue, job, BQ_WORKER_MISMATCH);
+        failure = error == BQ_OK ? BQ_WORKER_MISMATCH : failure;
+    }
+    if (error == BQ_OK && poisoned && job->phase == BQ_FINALIZING)
+    {
+        error = bq_real_advance(queue, job, BQ_CLEANING, job->cancel_requested ? BQ_CANCELLED : BQ_FAILED);
+        job = bq_job(&queue->state, id);
+        if (!job) error = BQ_CORRUPT;
+    }
     if (error == BQ_OK && job->phase == BQ_RESERVED && failure != BQ_NOT_FOUND)
     {
         BqOutcome outcome = job->cancel_requested ? BQ_CANCELLED : BQ_FAILED;
@@ -1473,6 +1606,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_controlled(BqQueue* queue, St
     {
         BqOutcome final_outcome = job->cancel_requested ? BQ_CANCELLED :
                                   terminal_outcome != BQ_NO_OUTCOME ? terminal_outcome : job->outcome;
+        if (poisoned && final_outcome == BQ_SUCCEEDED)
+        {
+            final_outcome = BQ_INTERRUPTED;
+        }
         error = job->outcome == BQ_FAILED && failure == BQ_NOT_FOUND ? BQ_CORRUPT :
                 bq_real_advance(queue, job, BQ_FINISHED, final_outcome);
     }
@@ -1512,6 +1649,11 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
     BqError error = bq_workspace_reconcile_outcome(queue, workspace_root, id, token, BQ_NO_OUTCOME);
     return error;
 }
+
+#include "retirement_prepare.c"
+#include "retirement_binaries.c"
+#include "retirement_toolchain.c"
+#include "retirement_matched_build.c"
 
 #else
 bool bq_workspace_name(char result[64], u64 id, u64 token)

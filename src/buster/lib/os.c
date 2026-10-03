@@ -6158,17 +6158,28 @@ u64 os_get_page_size(void)
     return page_size;
 }
 
-// Resident set size of this process, right now. Used to budget a memory limit
-// against what a process has *already* used rather than from zero; returns 0
-// where the platform does not report it, which every caller has to treat as
-// "no information" rather than "no memory".
-u64 os_get_resident_memory_size(void)
+// Resident set size of this process: the current value, or the process
+// peak when `peak` is set. Apple reports only the peak through this path, so
+// both queries answer the peak there. Returns 0 where the platform does not
+// report it, which every caller has to treat as "no information" rather than
+// "no memory".
+BUSTER_GLOBAL_LOCAL u64 os_resident_memory(bool peak)
 {
     u64 result = 0;
 #if defined(__linux__)
+    if (peak)
+    {
+        // ru_maxrss is the process high water, in kilobytes on Linux.
+        struct rusage usage;
+        memset(&usage, 0, sizeof(usage));
+        if (getrusage(RUSAGE_SELF, &usage) == 0)
+        {
+            result = (u64)usage.ru_maxrss * 1024;
+        }
+    }
     // /proc/self/statm is "size resident shared ..." in pages. The second
     // field is what /proc/self/status calls VmRSS, without the string parse.
-    int statm_fd = open("/proc/self/statm", O_RDONLY);
+    int statm_fd = peak ? -1 : open("/proc/self/statm", O_RDONLY);
     if (statm_fd >= 0)
     {
         char statm_buffer[128];
@@ -6209,6 +6220,7 @@ u64 os_get_resident_memory_size(void)
 #elif defined(__APPLE__)
     // ru_maxrss is a peak rather than the current value, and is in bytes on
     // Apple where Linux reports kilobytes.
+    BUSTER_UNUSED(peak);
     struct rusage usage;
     memset(&usage, 0, sizeof(usage));
     if (getrusage(RUSAGE_SELF, &usage) == 0)
@@ -6220,10 +6232,22 @@ u64 os_get_resident_memory_size(void)
     OsError error = {0};
     if (os_windows_process_memory_counters(GetCurrentProcess(), &counters, &error) == PROCESS_RESOURCE_OBSERVED)
     {
-        result = (u64)counters.working_set_size;
+        result = (u64)(peak ? counters.peak_working_set_size : counters.working_set_size);
     }
 #endif
     return result;
+}
+
+// Used to budget a memory limit against what a process has *already* used
+// rather than from zero.
+u64 os_get_resident_memory_size(void)
+{
+    return os_resident_memory(false);
+}
+
+u64 os_get_peak_resident_memory_size(void)
+{
+    return os_resident_memory(true);
 }
 
 u64 os_get_physical_memory_size(void)

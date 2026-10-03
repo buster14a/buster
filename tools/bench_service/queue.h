@@ -1,6 +1,10 @@
 /* Queue/materializer/supervisor software for #437. No recipe execution,
  * transport or benchmark qualification lives here. queue.c owns persistence and all state changes;
  * protocol.c is the bounded control boundary. See README.md before extending.
+ * Recipe admission: bq_recipe_retirement_admitted is the one portable test of
+ * the compiled retirement profile (exactly one status=admitted line); the
+ * admitted, service and real predicates all use it. bq_recipe_real_journal
+ * classifies journalled jobs for replay independent of that admission.
  */
 #ifndef BUSTER_BENCH_SERVICE_QUEUE_H
 #define BUSTER_BENCH_SERVICE_QUEUE_H
@@ -33,7 +37,23 @@
 #define BQ_RECIPE_NAME_CAP 48u
 #define BQ_RECIPE_FILE_CAP 80u
 #define BQ_RECIPE_COMMAND_CAP 48u
-#define BQ_RECIPE_PROFILE_CAP 1024u
+/* An installed recipe profile, sized for an admitted retirement profile: the
+ * compiled profile's descriptive lines (at most BQ_RECIPE_PROFILE_BASE_CAP),
+ * one `key=<64 hex>` line per worker-unit pin (BQ_RETIREMENT_PROFILE_PINS,
+ * retirement_worker_unit.c: bq_retirement_worker_unit_pins), lane D's four
+ * campaign lines and the status line, each at most BQ_RECIPE_PROFILE_LINE_CAP
+ * bytes. That is about 2.7 KB today; the cap is 4352 bytes. retirement_worker_unit.c
+ * checks the pin count against BQ_RETIREMENT_PROFILE_PINS; queue.c checks the
+ * compiled profiles against the cap. */
+#define BQ_RECIPE_PROFILE_BASE_CAP 1024u
+#define BQ_RECIPE_PROFILE_LINE_CAP 128u
+#define BQ_RETIREMENT_PROFILE_PINS 21u
+#define BQ_RETIREMENT_PROFILE_CAMPAIGN_LINES 4u
+#define BQ_RECIPE_PROFILE_CAP (BQ_RECIPE_PROFILE_BASE_CAP + \
+    (BQ_RETIREMENT_PROFILE_PINS + BQ_RETIREMENT_PROFILE_CAMPAIGN_LINES + 1u) * BQ_RECIPE_PROFILE_LINE_CAP)
+/* The only admitting status line of a recipe profile. The compiled
+ * retirement profile says status=blocked. */
+#define BQ_RECIPE_PROFILE_ADMITTED_STATUS "status=admitted"
 
 typedef enum BqError
 {
@@ -169,6 +189,7 @@ BUSTER_F_DECL void bq_put32(u8* bytes, u32 value);
 BUSTER_F_DECL void bq_put64(u8* bytes, u64 value);
 BUSTER_F_DECL String8 bq_field(BqRequest const* request, u32 index);
 BUSTER_F_DECL bool bq_request_valid(BqRequest const* request);
+BUSTER_F_DECL bool bq_request_valid_admitting(BqRequest const* request, bool retirement_complete);
 BUSTER_F_DECL BqError bq_request_make(String8 const fields[BQ_FIELD_COUNT], BqRequest* request);
 BUSTER_F_DECL BqJob* bq_job(BqState* state, u64 id);
 BUSTER_F_DECL u32 bq_pending(BqState const* state);
@@ -185,15 +206,31 @@ BUSTER_F_DECL BqRecipe bq_request_recipe(BqRequest const* request);
 BUSTER_F_DECL String8 bq_recipe_name(BqRecipe recipe);
 BUSTER_F_DECL String8 bq_recipe_profile(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files);
+BUSTER_F_DECL bool bq_recipe_profile_admitted(String8 profile);
+BUSTER_F_DECL bool bq_recipe_retirement_admitted(void);
 BUSTER_F_DECL bool bq_recipe_admitted(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_service(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_blocked(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_fake(BqRequest const* request);
 BUSTER_F_DECL bool bq_recipe_real(BqRequest const* request);
+BUSTER_F_DECL bool bq_recipe_real_journal(BqRequest const* request);
 BUSTER_F_DECL BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token);
 BUSTER_F_DECL BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u64 token);
 BUSTER_F_DECL bool bq_workspace_name(char result[64], u64 id, u64 token);
 BUSTER_F_DECL BqError bq_failure_evidence(BqQueue* queue, BqJob const* job);
+/* #881 recovery L2 (workspace.c): the immutable queue record
+ * retirement-poison-<id> that marks a job whose retirement handoff recovery
+ * or a failed run could not classify complete. bq_retirement_poison_read is
+ * BQ_NOT_FOUND without one and BQ_OK for a well-formed one; a malformed or
+ * unreadable record is BQ_CORRUPT or BQ_IO and still poisons (fail closed).
+ * *inconsistent is true for an inconsistent or unreadable record.
+ * bq_retirement_poisoned is any answer but BQ_NOT_FOUND. Reconciliation
+ * never finishes a poisoned job succeeded, and export refuses it. */
+#define BQ_RETIREMENT_POISON_RECORD "retirement-poison"
+BUSTER_F_DECL BqError bq_retirement_poison_read(BqQueue* queue, BqJob const* job, bool* inconsistent);
+BUSTER_F_DECL bool bq_retirement_poisoned(BqQueue* queue, BqJob const* job);
+BUSTER_F_DECL BqError bq_retirement_poison_write(BqQueue* queue, BqJob const* job, bool inconsistent, bool measured,
+                                                 char const* state);
 BUSTER_F_DECL BqError bq_result_bind(BqQueue* queue, BqJob const* job, String8 result_root,
                                      char const manifest_digest[SHA256_HEX_CAPACITY],
                                      char const bundle_digest[SHA256_HEX_CAPACITY],
