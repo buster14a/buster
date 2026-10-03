@@ -5513,6 +5513,23 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 // A single token cannot contain a cast or an operator. Keep
                 // its existing leaf policy without another machine frame.
                 last = c_parse_expression_leaf_without_cast(arena, preprocess, result, scope, task->start, task->end);
+                if (machine->validate_expression_constraints && !machine->expression_constraint.length &&
+                    last.value >= result->type_count && first.kind == C_TOKEN_IDENTIFIER)
+                {
+                    // A typedef may be bound in a cast or a type operand, but
+                    // this task is an expression leaf and must name a value.
+                    u32 use = c_parse_identifier_use_index(result, task->start);
+                    CScopeId lookup_scope = scope.value == C_ID_UNDERLYING_INVALID && result->scope_count
+                        ? (CScopeId){.value = 0} : scope;
+                    CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[task->start]);
+                    if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF)
+                    {
+                        machine->expression_constraint = string_format(arena, S8("typedef name '{S8}' is not an expression"),
+                            c_token_spelling(preprocess.spelling_base, first));
+                        machine->expression_constraint_token = task->start;
+                    }
+                }
                 task_count -= 1;
                 continue;
             }

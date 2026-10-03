@@ -274,6 +274,10 @@ groups such as `int ((T))` carry that classification down the explicit type
 machine. Pointer-led named groups, `int T`, `const T T`, member names and
 ordinary block-scope shadowing keep their existing rules.
 
+A typedef remains a type in the function body. Checked expression leaf queries
+reject its use as a value, including within parentheses or operator operands;
+casts and type operands keep their type-name binding.
+
 `c_test_parenthesized_typedef_parameters` checks the original prototype/body
 pairs, a char typedef, nested and deeply grouped abstract forms, retained
 typedef visibility, and rejected typedef-name expressions. Semantic-only and
