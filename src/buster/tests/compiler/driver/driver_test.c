@@ -7694,7 +7694,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_compiler_runtime(Uni
     {
         parts[index] = string_format(arguments->arena, S8("void {S8}(void);\n"), helpers[index]);
         parts[BUSTER_ARRAY_LENGTH(helpers) + 1 + index] = string_format(arguments->arena, S8("    {S8}();\n"), helpers[index]);
-        definitions[index] = string_format(arguments->arena, S8("void {S8}(void) {}\n"), helpers[index]);
+        definitions[index] = string_format(arguments->arena, S8("void {S8}(void) {{}}\n"), helpers[index]);
     }
     parts[BUSTER_ARRAY_LENGTH(helpers)] = S8("int main(void)\n{\n");
     parts[BUSTER_ARRAY_LENGTH(parts) - 1] = S8("    return 0;\n}\n");
