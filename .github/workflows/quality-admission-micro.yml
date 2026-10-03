@@ -1,0 +1,95 @@
+name: QUALITY admission micro research
+
+on:
+  push:
+    branches: [codex/313-admission-measurement]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality313-admission-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  micro:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      BASELINE_SHA: 97fb07f42b432864bee9fd38b70eb69b15252991
+      CANDIDATE_SHA: 735d270728441245c5a1d1721220c16408b101b9
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: packet
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: baseline
+          ref: ${{ env.BASELINE_SHA }}
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: candidate
+          ref: ${{ env.CANDIDATE_SHA }}
+          persist-credentials: false
+      - name: Verify exact subjects and extract exact helper bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/generated evidence/samples evidence/config
+          src=src/buster/lib/compiler/codegen/register_allocator_quality.c
+          header=src/buster/lib/compiler/codegen/register_allocator_quality_internal.h
+          test "$(git -C baseline rev-parse HEAD)" = "$BASELINE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C baseline hash-object "$src")" = c8d23927d87d6f6f320df23863d5dfff4edd5828
+          test "$(git -C candidate hash-object "$src")" = 747ffac55f9276633c85bcb8aa99a8232a3f459c
+          test "$(git -C baseline hash-object "$header")" = ee652fb8b2565f217d99d5dfbee1a4525c0f7259
+          test "$(git -C candidate hash-object "$header")" = 9f3dc31c6ec2900ba93fe8689326d07db2e5a995
+          git -C packet rev-parse HEAD 'HEAD^{tree}' > evidence/config/packet-revision.txt
+          git -C baseline rev-parse HEAD 'HEAD^{tree}' > evidence/config/baseline-revision.txt
+          git -C candidate rev-parse HEAD 'HEAD^{tree}' > evidence/config/candidate-revision.txt
+          cp "baseline/$src" evidence/config/baseline-quality.c
+          cp "candidate/$src" evidence/config/candidate-quality.c
+          cp "baseline/$header" evidence/config/baseline-quality.h
+          cp "candidate/$header" evidence/config/candidate-quality.h
+          clang --version > evidence/config/clang.txt
+          uname -a > evidence/config/uname.txt
+          lscpu > evidence/config/lscpu.txt
+          flags=(-O2 -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -fno-lto)
+          printf '%s\n' "${flags[*]}" > evidence/config/flags.txt
+          clang "${flags[@]}" packet/tools/quality313_admission/extract.c -o "$RUNNER_TEMP/quality313-extract"
+          "$RUNNER_TEMP/quality313-extract" "baseline/$src" "candidate/$src" "baseline/$header" "candidate/$header" evidence/generated
+          sha256sum evidence/generated/*.inc evidence/config/baseline-quality.* evidence/config/candidate-quality.* packet/tools/quality313_admission/* > evidence/config/source-identities.sha256
+      - name: Compile the opaque selection and timing translation units separately
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -x
+          flags=(-O2 -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -fno-lto -Ievidence/generated -Ipacket/tools/quality313_admission)
+          clang "${flags[@]}" packet/tools/quality313_admission/collect.c -o "$RUNNER_TEMP/quality313-collect"
+          for variant in 0 1; do
+            clang "${flags[@]}" -DPROBE_CANDIDATE="$variant" -c packet/tools/quality313_admission/select.c -o "$RUNNER_TEMP/quality313-select-$variant.o"
+            clang "${flags[@]}" -DPROBE_CANDIDATE="$variant" -c packet/tools/quality313_admission/probe.c -o "$RUNNER_TEMP/quality313-timer-$variant.o"
+            clang -fno-lto "$RUNNER_TEMP/quality313-select-$variant.o" "$RUNNER_TEMP/quality313-timer-$variant.o" -o "$RUNNER_TEMP/quality313-micro-$variant"
+          done
+          sha256sum "$RUNNER_TEMP"/quality313-select-*.o "$RUNNER_TEMP"/quality313-timer-*.o "$RUNNER_TEMP"/quality313-micro-* > evidence/config/binary-identities.sha256
+          objdump -d "$RUNNER_TEMP/quality313-micro-0" > evidence/config/baseline-disassembly.txt
+          objdump -d "$RUNNER_TEMP/quality313-micro-1" > evidence/config/candidate-disassembly.txt
+      - name: Fixed micro pairs and independent outside-timing oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/quality313-collect" "$GITHUB_WORKSPACE/evidence/samples/admission" "$RUNNER_TEMP/quality313-micro-0" "$RUNNER_TEMP/quality313-micro-1"
+      - name: Preserve measurement scope
+        if: always()
+        shell: bash
+        run: |
+          printf '%s\n' 'QUALITY #313 admission-only micro: exact pinned helpers, literal prefix baseline, known-eligible inputs, no lifetime/eligibility or placement probes.' 'Fixed populations16/4096/4099/8192; equal/ascending/descending;4096 selections per trial; one retained warmup pair plus12 fixed alternating pairs; outside-timing independent rank/payload/heap/canary oracle.' 'Separate translation units and no LTO keep all calls opaque. Standard hosted runner, no retries, no automatic profitability verdict. Full compiler/stress evidence remains separate.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: quality313-admission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: warn
