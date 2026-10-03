@@ -103,6 +103,15 @@ allocator modes and both frontend forms.
   it -- hence the by-shape strip. `tests/basic_c_typeof_conditional.c` runs
   both macros under all four allocators and
   `c_test_typeof_conditional_type` pins the resolved types themselves.
+- **A comma expression can be any value operand, including when its right side
+  calls a function.** The lowering expression machine sequences the complete
+  left operand before it prepares the right operand's calls, then yields only
+  the converted right value to a conditional arm, binary operator, cast,
+  initializer, comparison, argument or enclosing comma. The unselected
+  conditional arm is never evaluated, and the result is not an lvalue.
+  `c_test_comma_value_operands` checks these contexts on all six native target
+  layouts in both frontend forms and executes the exact-once ordering controls
+  in every native allocator/frontend combination (GitHub #1421).
 - `c_parse_direct_expression_type_core` resolves nested comma/prefix bases
   with explicit continuations. Each frame keeps its prefix slice and postfix
   range; all frames share one query-sized scratch allocation, released on
