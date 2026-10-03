@@ -4407,8 +4407,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_options(UnitTestAr
             TemporalArena target_temporary = arena_begin_temporal(temporary.arena);
             ByteSlice default_image = {0};
             ByteSlice default_payloads[BUSTER_ARRAY_LENGTH(payload_kinds)] = {0};
-            ObjectFile default_native = {0};
-            ObjectFile default_serialized = {0};
             for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(debug_options); mode += 1)
             {
                 String8 output = buster_test_temporary_path(target_temporary.arena, S8("buster-debug-options"), S8(".o"));
@@ -4464,62 +4462,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_options(UnitTestAr
                                     ByteSlice expected = default_payloads[payload];
                                     if (BUSTER_REQUIRE(arguments, bytes.length == expected.length))
                                     {
-                                        BUSTER_TEST(arguments, !bytes.length || !memcmp(bytes.pointer, expected.pointer, bytes.length));
                                         if (bytes.length && memcmp(bytes.pointer, expected.pointer, bytes.length))
                                         {
-                                            ObjectSectionKind kind = payload_kinds[payload];
-                                            ByteSlice native = built.object.sections[kind].data;
-                                            ByteSlice native_expected = default_native.sections[kind].data;
-                                            bool native_equal = native.length == native_expected.length &&
-                                                                (!native.length || !memcmp(native.pointer, native_expected.pointer, native.length));
-                                            arguments->show(arguments, S8("DEBUG_OPTION_PAYLOAD_V1 target={S8} mode={u32} kind={u32} "
-                                                "serialized_bytes={u64} native_bytes={u64} native_expected_bytes={u64} native_equal={u32}\n"),
-                                                targets[target_index], mode, (u32)kind, bytes.length, native.length, native_expected.length, (u32)native_equal);
-                                            u32 shown = 0;
-                                            u64 differences = 0;
-                                            for (u64 offset = 0; offset < bytes.length; offset += 1)
-                                            {
-                                                if (bytes.pointer[offset] != expected.pointer[offset])
-                                                {
-                                                    differences += 1;
-                                                    if (shown < 16)
-                                                    {
-                                                        arguments->show(arguments, S8("DEBUG_OPTION_BYTE_V1 target={S8} mode={u32} kind={u32} "
-                                                            "offset={u64} expected={u32:x} actual={u32:x}\n"),
-                                                            targets[target_index], mode, (u32)kind, offset,
-                                                            (u32)expected.pointer[offset], (u32)bytes.pointer[offset]);
-                                                        shown += 1;
-                                                    }
-                                                }
-                                            }
-                                            arguments->show(arguments, S8("DEBUG_OPTION_DIFF_COUNT_V1 target={S8} mode={u32} kind={u32} differences={u64}\n"),
-                                                targets[target_index], mode, (u32)kind, differences);
-                                            ObjectFile* observers[] = {&default_native, &built.object, &default_serialized, &serialized};
-                                            for (u32 observer = 0; observer < BUSTER_ARRAY_LENGTH(observers); observer += 1)
-                                            {
-                                                ObjectFile* observed = observers[observer];
-                                                for (u32 relocation_index = 0; relocation_index < observed->relocation_count; relocation_index += 1)
-                                                {
-                                                    ObjectRelocation* relocation = observed->relocations + relocation_index;
-                                                    if (relocation->section == (u32)kind && relocation->symbol < observed->symbol_count)
-                                                    {
-                                                        ObjectSymbol* symbol = observed->symbols + relocation->symbol;
-                                                        arguments->show(arguments, S8("DEBUG_OPTION_RELOCATION_V1 target={S8} mode={u32} observer={u32} "
-                                                            "kind={u32} site={u64} relocation_kind={u32} addend={s64} symbol={S8} symbol_section={u32} symbol_value={u64}\n"),
-                                                            targets[target_index], mode, observer, (u32)kind, relocation->offset,
-                                                            (u32)relocation->kind, relocation->addend, symbol->name, symbol->section, symbol->value);
-                                                    }
-                                                }
-                                            }
+                                            arguments->show(arguments, S8("DEBUG_OPTION_PAYLOAD_V1 target={S8} mode={u32} kind={u32} bytes={u64}\n"),
+                                                targets[target_index], mode, (u32)payload_kinds[payload], bytes.length);
                                         }
+                                        BUSTER_TEST(arguments, !bytes.length || !memcmp(bytes.pointer, expected.pointer, bytes.length));
                                     }
                                 }
                             }
                             if (!mode)
                             {
                                 default_image = image;
-                                default_native = built.object;
-                                default_serialized = serialized;
                             }
                             else if (!debug_expected[mode] && BUSTER_REQUIRE(arguments, default_image.length != 0))
                             {

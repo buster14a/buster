@@ -690,6 +690,10 @@ and leaves an existing output file untouched. `-v` prints the writer's exact
 work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
 `-c`. See [object emission](../object-emission.md).
 
+COFF object reads merge same-kind contributions into initialized file-backed
+storage. Alignment gaps and tails introduced by empty aligned sections contain
+zero bytes even when reader arenas are reused; BSS remains virtual-only.
+
 ## ELF TLS companion lookup
 
 The x86-64 executable writers index TLSGD/TLSLD section/offset sites in link
