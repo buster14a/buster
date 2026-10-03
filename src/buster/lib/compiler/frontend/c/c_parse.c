@@ -27130,6 +27130,7 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
         u32 alignment = 0;
         bool standard = false;
         bool valid = true;
+        bool reported = false;
         for (u32 cursor = begin; cursor < end; cursor += 1)
         {
             CDeclaration const* declaration = result->declarations + result->declarations_by_entity[cursor];
@@ -27139,12 +27140,26 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
             u32 requested = 0;
             String8 message = c_parse_validate_alignment_range(machine, result, preprocess, (CScopeId){.value = 0}, declaration->type,
                 declaration->alignment_start, declaration->alignment_count, &requested);
-            valid &= !message.length && (!alignment || alignment == requested);
+            // A malformed specifier already has its declaration diagnostic.
+            // Compare valid explicit requests even without an initialized
+            // definition; a tentative declaration does not defer a conflict.
+            if (message.length)
+            {
+                valid = false;
+                continue;
+            }
+            if (valid && !reported && alignment && alignment != requested)
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                    string_format(result->arena, S8("conflicting alignment for '{S8}': {u32} differs from previous alignment {u32}"),
+                                  declaration->name, requested, alignment));
+                reported = true;
+            }
             alignment = requested;
             for (u32 specifier = 0; specifier < declaration->alignment_count; specifier += 1)
                 standard |= c_alignment_specifier_is_standard(preprocess, result->alignments[declaration->alignment_start + specifier]);
         }
-        if (definition && (!valid || (standard && !definition->alignment_count)))
+        if (valid && !reported && definition && standard && !definition->alignment_count)
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, definition->location), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("invalid object alignment"));
     }
 }
