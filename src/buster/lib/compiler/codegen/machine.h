@@ -1919,6 +1919,11 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
 // original is safe.
 BUSTER_F_DECL void machine_function_stamp_frequency_classes(MachineFunction* function);
 BUSTER_F_DECL bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function);
+// Compose an optional canonical -> MIR projection through block renumbering.
+// A null map means identity; a split publishes an arena-owned projection before
+// reclaiming scratch, while an unchanged function retains its existing map.
+BUSTER_F_DECL bool machine_function_split_parameter_edges_with_canonical_map(Arena* arena, MachineFunction* function,
+                                                                            u32** canonical_entries, u32 canonical_count);
 BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function);
 BUSTER_F_DECL String8 machine_verify_error_name(MachineVerifyError error);
 BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function);

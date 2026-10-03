@@ -9658,7 +9658,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
-    if (!machine_function_split_parameter_edges(arena, &result.function))
+    if (!machine_function_split_parameter_edges_with_canonical_map(arena, &result.function,
+                                                                  &selector.block_entries, function->block_count))
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }

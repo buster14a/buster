@@ -22,7 +22,9 @@ fixture as well as compiling both architectures.
 ## Machine instruction selection and scheduling
 
 - Selection retains a canonical-block-to-MIR-entry projection when expansion
-  or entry-first layout changes block IDs. Module label-address initializers
+  or entry-first layout changes block IDs. Parameter-edge splitting composes
+  that projection through its block renumbering before reclaiming scratch,
+  including when the prior projection was identity. Module label-address initializers
   resolve through that projection before selector scratch is released. The
   expanded-label-table regression executes both destinations after an i128
   divide in every native allocator mode.

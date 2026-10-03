@@ -2434,6 +2434,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
             MachineBlockParameter parameters[] = {{.virtual_register = 0}, {.virtual_register = 1}};
             u32 kinds[BLOCK_COUNT] = {0};
             u32 block_map[BLOCK_COUNT] = {0};
+            u32 original_projection[BLOCK_COUNT];
+            for (u32 block = 0; block < BLOCK_COUNT; block += 1) { original_projection[block] = BLOCK_COUNT - 1u - block; }
+            u32* canonical_entries = variant & 1u ? original_projection : 0;
             u32 row_map[ROW_COUNT] = {0};
             u32 split_ids[EDGE_COUNT];
             memset(split_ids, 0xff, sizeof(split_ids));
@@ -2568,12 +2571,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
                 }
                 expected_edges[edge_cursor++] = copy;
             }
-            bool valid = machine_function_split_parameter_edges(arena, &function);
+            bool valid = machine_function_split_parameter_edges_with_canonical_map(arena, &function, &canonical_entries, BLOCK_COUNT);
             BUSTER_TEST(arguments, valid);
             BUSTER_TEST(arguments, function.block_count == expected_blocks && function.instruction_count == row_cursor && function.edge_count == edge_cursor);
             u64 retained = arena->position - start;
             u64 output_bytes = (u64)row_cursor * sizeof(MachineInstruction) + (u64)expected_blocks * sizeof(MachineBlock) +
-                               (u64)edge_cursor * sizeof(MachineEdge) + sizeof(cases);
+                               (u64)edge_cursor * sizeof(MachineEdge) + sizeof(cases) + sizeof(original_projection);
             BUSTER_TEST(arguments, split_count ? retained >= output_bytes && retained <= output_bytes + 64u : retained == 0);
             // Poison every reclaimed mapping/index word before examining output.
             u32* poison = arena_allocate(arena, u32, ROW_COUNT + 2u * EDGE_COUNT + 3u * BLOCK_COUNT + 16u);
@@ -2585,6 +2588,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
                 BUSTER_TEST(arguments, memcmp(function.edges, expected_edges, (u64)edge_cursor * sizeof(MachineEdge)) == 0);
                 BUSTER_TEST(arguments, memcmp(function.switch_cases, expected_cases, sizeof(cases)) == 0);
                 BUSTER_TEST(arguments, function.edge_copy_sources == copies && function.block_parameters == parameters);
+                BUSTER_TEST(arguments, split_count ? canonical_entries != 0 && canonical_entries != original_projection :
+                                       canonical_entries == (variant & 1u ? original_projection : 0));
+                for (u32 block = 0; canonical_entries && block < BLOCK_COUNT; block += 1)
+                {
+                    BUSTER_TEST(arguments, canonical_entries[block] == block_map[variant & 1u ? original_projection[block] : block]);
+                }
                 BUSTER_TEST(arguments, copies[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1) && copies[1] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0) &&
                                        copies[2] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0) && copies[3] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1));
                 for (u32 value = 0; value < BLOCK_COUNT; value += 1)
@@ -2599,8 +2608,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArg
                 BUSTER_TEST(arguments, marks[ROW_COUNT + 1].row == row_cursor);
                 u64 before_repeat = arena->position;
                 MachineInstruction* published = function.instructions;
-                BUSTER_TEST(arguments, machine_function_split_parameter_edges(arena, &function));
-                BUSTER_TEST(arguments, arena->position == before_repeat && function.instructions == published);
+                u32* published_projection = canonical_entries;
+                BUSTER_TEST(arguments, machine_function_split_parameter_edges_with_canonical_map(arena, &function, &canonical_entries, BLOCK_COUNT));
+                BUSTER_TEST(arguments, arena->position == before_repeat && function.instructions == published && canonical_entries == published_projection);
             }
             arena_set_position(arena, start);
         }

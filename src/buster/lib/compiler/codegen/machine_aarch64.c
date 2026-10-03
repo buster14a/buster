@@ -7294,7 +7294,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             machine_selection_certify_stack_memory(arena, &result.function, function);
         }
-        if (!machine_function_split_parameter_edges(arena, &result.function))
+        if (!machine_function_split_parameter_edges_with_canonical_map(arena, &result.function,
+                                                                      &selector.block_entries, function->block_count))
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }

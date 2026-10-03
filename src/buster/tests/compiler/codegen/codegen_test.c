@@ -1991,15 +1991,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_native_failure_publication(UnitT
 }
 
 // Static label tables retain canonical target identity when an earlier i128
-// divide expands into several MIR blocks. Exercise the relocated table by
-// executing both destinations, rather than comparing selector map internals.
+// divide expands into several MIR blocks and a conditional joins a carried
+// value. Exercise the relocated table by executing both destinations; the
+// splitter's shuffled-edge tests separately require actual block renumbering.
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_expanded_label_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     String8 source = S8("unsigned long long probe(unsigned long long high, unsigned long long divisor) { "
         "static void *targets[] = {&&first, &&second}; "
         "unsigned __int128 value = ((unsigned __int128)high << 64) | 17; "
-        "unsigned __int128 quotient = value / divisor; goto *targets[(unsigned long long)quotient & 1]; "
+        "unsigned __int128 quotient = value / divisor; unsigned long long selected = 0; "
+        "if (divisor & 1) selected = (unsigned long long)quotient; goto *targets[selected & 1]; "
         "first: return 17; second: return 31; }");
     Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = target_native.os},
                         {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = target_native.os}};
