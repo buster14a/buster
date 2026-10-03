@@ -240,7 +240,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_switch_images(UnitT
     {
         u32 width = widths[index];
         u32 carrier = width <= 32 ? 32 : 64;
-        u32 samples = (width == 8 ? 256 : 10) * (width < carrier ? 4 : 2);
+        u32 samples = (width == 8 ? 256u : 10u) * (width < carrier ? 4u : 2u);
         expected_checks += samples * COMPILER_DRIVER_WASM_SWITCH_SIGN_COUNT * COMPILER_DRIVER_WASM_SWITCH_VARIANT_COUNT;
     }
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
