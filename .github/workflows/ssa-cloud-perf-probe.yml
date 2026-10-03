@@ -1,0 +1,58 @@
+name: Disposable SSA cloud performance probe
+
+on:
+  push:
+    branches: [codex/2437-cloud-perf]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: disposable-2437-cloud-perf-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CANDIDATE_SOURCE_SHA: 159c9a3096147c89698f0eca913bf2791da2acf5
+
+jobs:
+  measurement:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: probe
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3d350c52f54b77048f100326d8ee7569b8cde4dd
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.CANDIDATE_SOURCE_SHA }}
+          path: candidate
+          persist-credentials: false
+      - name: Build immutable trusted compilers and measure the frozen source
+        run: python3 probe/tools/ssa_cloud_perf_probe.py --candidate-sha "$CANDIDATE_SOURCE_SHA" --workspace "$GITHUB_WORKSPACE"
+      - name: Publish measured results
+        if: always()
+        shell: bash
+        run: |
+          if test -f cloud-perf-evidence/paired-summary.md; then
+            cat cloud-perf-evidence/paired-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Frozen-source comparison did not complete; inspect retained evidence.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ssa-cloud-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            cloud-perf-evidence
+            baseline/build/throughput-ci-compiler/CMakeCache.txt
+            baseline/build/throughput-ci-compiler/compile_commands.json
+            candidate/build/throughput-ci-compiler/CMakeCache.txt
+            candidate/build/throughput-ci-compiler/compile_commands.json
+          retention-days: 14
+          if-no-files-found: warn
