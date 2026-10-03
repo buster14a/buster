@@ -100,6 +100,22 @@ instruction/value rows and machine rows do not change size.
 
 ## Existing checks and limits of the evidence
 
+Parameter provenance validation selects its route once per function. When
+`label_metadata_count == 0`, every provenance lookup is the zero record, so
+validated incoming IDs/types establish the provenance predicate without another
+walk. Mutable parameters still require the exact count, predecessor order,
+incoming IDs/types, list exhaustion and `last_incoming` identity in the first
+walk, including a null tail for zero incoming values. Published parameters retain
+the independent CFG extent/topology proof and their incoming ID/type walk.
+Functions with any metadata retain the existing provenance calculation; the
+exported standalone mutable helper retains all of its checks and scratch work.
+`VALIDATION_PARAMETER_PROVENANCE_CHECKS` counts actual provenance calculations.
+The registered parameter fixture covers both representations, malformed
+structure, poisoned scratch, zero incoming values, empty metadata records and
+an actual label-set union with a deliberately incomplete destination. Removing
+the metadata-free calculation is a bounded work reduction, not a measured
+whole-compiler throughput or RSS result.
+
 | Boundary / owner | Existing checks reused | What a successful check does not establish |
 | --- | --- | --- |
 | Canonical input and promotion output / `ir_validate_canonical_module` | Required storage; instruction-chain ownership; block sealing and termination; one definition per value (a row or one block parameter, never both); value and operation types; call/return signatures; parameter/incoming types, counts and predecessor order; branch-target validity; global alignment, initializer and relocation ownership | This change does not add a whole-function canonical dominance proof or prove full CFG predecessor/successor symmetry. Those properties must not be inferred merely from valid IDs and parameter counts. |
