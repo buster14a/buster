@@ -17,7 +17,7 @@ concurrency:
 env:
   BUSTER_DIAGNOSTIC_SOURCE_SHA: 232191b38663b07307aac6265db57a4ae850ebe8
   # Optional same-tests negative control, restoring only #1624 argument capture.
-  BUSTER_DIAGNOSTIC_NARROW_MUTANT: '1'
+  BUSTER_DIAGNOSTIC_NARROW_MUTANT: '0'
 
 defaults:
   run:
@@ -95,6 +95,30 @@ jobs:
           git diff --cached --exit-code
           printf 'Both eBPF fixtures executed through the kernel verifier/JIT at `%s`.\n' \
             "$BUSTER_DIAGNOSTIC_SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require privileged eBPF call relation and composition in both frontends
+        working-directory: source
+        run: |
+          set -euo pipefail
+          for frontend in 0 1; do
+            log="$RUNNER_TEMP/ebpf-diagnostic/metamorphic-$frontend.log"
+            sudo -- env BUSTER_METAMORPHIC_TARGET=ebpf BUSTER_METAMORPHIC_CASES=1 \
+              BUSTER_METAMORPHIC_TRANSFORMS=2047 BUSTER_METAMORPHIC_REQUIRE_EXECUTION=1 \
+              BUSTER_METAMORPHIC_FRONTEND_SSA="$frontend" \
+              BUSTER_METAMORPHIC_OUTPUT="$RUNNER_TEMP/ebpf-diagnostic/metamorphic-$frontend" \
+              "$GITHUB_WORKSPACE/source/build/Release/ide" metamorphic 2>&1 | tee "$log"
+            grep -Eq 'METAMORPHIC_EBPF_KERNEL available=1' "$log"
+            test "$(grep -Ec 'METAMORPHIC target=ebpf allocator=.* pairs=12 executed=12 unexecuted=0 failed=0' "$log")" = 4
+            grep -Eq "METAMORPHIC_SUMMARY seed=1 cases=1 pairs=48 executed=48 unexecuted=0 failures=0 unique=0 reducer_replays=0 frontend_ssa=$frontend " "$log"
+            if grep -Eq 'METAMORPHIC_(TRANSFORMS_UNAVAILABLE|REFERENCE_UNAVAILABLE|BUDGET_EXHAUSTED|FAILURE|REFERENCE_FAILURE)' "$log"; then
+              echo '::error::Incomplete metamorphic execution is not acceptance evidence.'
+              exit 1
+            fi
+          done
+          git diff --exit-code
+          git diff --cached --exit-code
+          printf 'eBPF call relation and composition executed in all four allocator settings and both frontend forms.\n' \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Same-tests narrow-argument negative control
         if: ${{ env.BUSTER_DIAGNOSTIC_NARROW_MUTANT == '1' }}
