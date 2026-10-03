@@ -1500,7 +1500,7 @@ class PeakRssTests(unittest.TestCase):
             with open("/proc/%d/stat" % pid) as handle:
                 state = handle.read().split()[2]
             self.assertEqual(state, "Z", "a live descendant survived the timeout")
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             pass
 
     def test_rss_value_needs_a_clear_margin_over_the_wrapper(self):
