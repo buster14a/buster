@@ -65,6 +65,45 @@ all 33 scalar arithmetic/comparison operations with matching and wrong-family
 operands. It pins `IR_VALIDATION_OPERATION` at the binary row for every
 wrong-family case and preserves Boolean, pointer and vector controls.
 
+## Label provenance validation work
+
+Global label-address relocations resolve their function owner through a lazy,
+module-local scratch index. The first lookup indexes each function once and
+subsequent lookups use a half-full hash table. Duplicate symbol ownership keeps
+the first function in module order, including its lowered-state check. Modules
+without label relocations allocate no owner index. Symbol kind/definition,
+block bounds, addends, initializer extents and relocation overlap remain
+independent rejection conditions (#2444).
+
+Label sets and provenance paths retain their caller-supplied order. Validation
+borrows ordered arrays and constructs immutable radix-sorted scratch views for
+larger unordered arrays; sets of at most eight IDs use bounded small-set work.
+Uniqueness checks adjacent IDs, set relations merge sorted views, and shape
+validation uses indexed membership plus coverage marks sized to the aggregate
+set rather than the function's entire block universe. The complete value check
+reuses its shape proof instead of recomputing uniqueness (#2445).
+
+Path shape validation checks adjacent intervals in offset order after proving
+their extents cannot overflow. Exact subrange transfer walks sorted source and
+result views together, translating offsets and preserving size, label sets and
+non-label flags. Missing and extra result paths both fail; touching intervals
+remain disjoint (#2446). These views live only for their validation call and
+never certify future mutations or replace the strict canonical-input boundary.
+
+Transfer and standalone parameter-provenance checks first require backing for
+their nonempty block/path arrays, including nested path block sets and every
+aggregate/incoming operand. Malformed metadata therefore refuses before a
+provenance query can traverse it; this is a backing check rather than another
+complete shape or uniqueness proof (#2480).
+
+The optional allocation-diagnostic counters report actual element visits,
+membership/hash probes and requested scratch bytes for these mechanisms.
+Fixed radix-bucket setup, memory copies and allocator overhead are not counted
+as element comparisons. Geometric registered regressions constrain the work
+and compare independent malformed-input expectations. Whole-compiler timing
+and hosted noise are reported separately; a better scaling bound is not an
+end-to-end throughput measurement.
+
 ## A certificate describes one input
 
 `CIRLowerResult.canonical_ir_certified` describes the successful C producer's
