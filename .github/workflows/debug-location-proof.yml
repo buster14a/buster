@@ -1,0 +1,187 @@
+name: Debug location allocation proof (#2528)
+
+on:
+  push:
+    branches: [codex/2528-debug-location-proof]
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/codex/2528-debug-location-proof'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      BASELINE_SHA: 97fb07f42b432864bee9fd38b70eb69b15252991
+      CANDIDATE_SHA: 9c24630faec6fdf9ea10192af515a261f09a5fec
+    steps:
+      - name: Check out diagnostic carrier
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: proof-carrier
+          persist-credentials: false
+
+      - name: Validate fixed revisions and installed tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          command -v clang
+          command -v gdb
+          command -v cmake
+          command -v ninja
+          command -v readelf
+          command -v rg
+          mkdir -p "$RUNNER_TEMP/2528-proof"
+          {
+            printf 'baseline=%s\ncandidate=%s\ncarrier=%s\n' "$BASELINE_SHA" "$CANDIDATE_SHA" "$GITHUB_SHA"
+            uname -a
+            clang --version
+            gdb --version
+          } > "$RUNNER_TEMP/2528-proof/provenance.txt"
+
+      - name: Check out exact baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.BASELINE_SHA }}
+          path: baseline
+          persist-credentials: false
+
+      - name: Check out exact candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: candidate
+          persist-credentials: false
+
+      - name: Generate fixed source populations and source-bound observers
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_directory="$RUNNER_TEMP/2528-proof"
+          [[ "$(git -C baseline rev-parse HEAD)" == "$BASELINE_SHA" ]]
+          [[ "$(git -C candidate rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
+          clang -std=c11 -O2 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char \
+            proof-carrier/tools/diagnostics/debug_location_proof.c -o "$proof_directory/proof"
+          for shape in loops ifs; do
+            "$proof_directory/proof" source "$shape" 12000 "$proof_directory/$shape-12000.c"
+            "$proof_directory/proof" source "$shape" 40000 "$proof_directory/$shape-40000.c"
+          done
+          for role in baseline candidate; do
+            "$proof_directory/proof" gdb "$role" "$GITHUB_WORKSPACE/$role/src/buster/lib/compiler/codegen/codegen.c" \
+              "$proof_directory/$role.gdb" >> "$proof_directory/provenance.txt"
+            git -C "$role" hash-object --no-filters src/buster/lib/compiler/codegen/codegen.c >> "$proof_directory/provenance.txt"
+          done
+          sha256sum proof-carrier/tools/diagnostics/debug_location_proof.c "$proof_directory"/*.c "$proof_directory"/*.gdb \
+            > "$proof_directory/input-sha256.txt"
+
+      - name: Build trusted candidate Debug and Release compilers
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/2528-proof/candidate-build.log") 2>&1
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/2528-proof/candidate-driver"
+          "$RUNNER_TEMP/2528-proof/candidate-driver" generate --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- \
+            -DBUSTER_DEBUG_INFO=ON -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=ON
+          "$RUNNER_TEMP/2528-proof/candidate-driver" build --config Debug -t ide
+          "$RUNNER_TEMP/2528-proof/candidate-driver" build --config Release -t ide
+          sha256sum build/Debug/ide build/Release/ide > "$RUNNER_TEMP/2528-proof/candidate-compiler-sha256.txt"
+
+      - name: Candidate Release explicit-g 40000-case completion
+        if: ${{ !cancelled() }}
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_directory="$RUNNER_TEMP/2528-proof"
+          proof_status=0
+          for shape in loops ifs; do
+            printf 'candidate_release command=build/Release/ide cc -g -nostdinc -c %s/%s-40000.c -o %s/candidate-%s-40000.o allocator=default\n' \
+              "$proof_directory" "$shape" "$proof_directory" "$shape" >> "$proof_directory/commands.txt"
+            if timeout --kill-after=10s 5m build/Release/ide cc -g -nostdinc -c "$proof_directory/$shape-40000.c" \
+              -o "$proof_directory/candidate-$shape-40000.o" 2>&1 | tee "$proof_directory/candidate-$shape-40000.log"; then
+              readelf -SW "$proof_directory/candidate-$shape-40000.o" > "$proof_directory/candidate-$shape-40000.sections.txt"
+              rg '\.debug_info' "$proof_directory/candidate-$shape-40000.sections.txt"
+              sha256sum "$proof_directory/candidate-$shape-40000.o" >> "$proof_directory/artifact-sha256.txt"
+              printf 'DEBUG_LOCATION_COMPLETION_V1 shape=%s repetitions=40000 allocator=default debug=explicit-g status=success\n' "$shape"
+            else
+              proof_status=1
+              printf 'DEBUG_LOCATION_COMPLETION_V1 shape=%s repetitions=40000 allocator=default debug=explicit-g status=failed\n' "$shape"
+            fi
+          done
+          exit "$proof_status"
+
+      - name: Candidate Debug source-bound 12000-case allocation observations
+        if: ${{ !cancelled() }}
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_directory="$RUNNER_TEMP/2528-proof"
+          proof_status=0
+          for shape in loops ifs; do
+            printf 'candidate_debug command=gdb --batch --return-child-result -x %s/candidate.gdb --args build/Debug/ide cc -g -nostdinc -c %s/%s-12000.c -o %s/candidate-%s-12000.o allocator=default\n' \
+              "$proof_directory" "$proof_directory" "$shape" "$proof_directory" "$shape" >> "$proof_directory/commands.txt"
+            if timeout --kill-after=10s 5m gdb --batch --return-child-result -x "$proof_directory/candidate.gdb" \
+              --args build/Debug/ide cc -g -nostdinc -c "$proof_directory/$shape-12000.c" \
+              -o "$proof_directory/candidate-$shape-12000.o" 2>&1 | tee "$proof_directory/candidate-$shape-12000.gdb.log"; then
+              rg 'DEBUG_LOCATION_REQUEST_V1 role=candidate' "$proof_directory/candidate-$shape-12000.gdb.log"
+              rg 'DEBUG_LOCATION_FINAL_V1 role=candidate' "$proof_directory/candidate-$shape-12000.gdb.log"
+              rg 'DEBUG_LOCATION_EXIT_V1 role=candidate inferior_status=0' "$proof_directory/candidate-$shape-12000.gdb.log"
+              sha256sum "$proof_directory/candidate-$shape-12000.o" >> "$proof_directory/artifact-sha256.txt"
+            else
+              proof_status=1
+            fi
+          done
+          exit "$proof_status"
+
+      - name: Build trusted baseline Debug compiler
+        if: ${{ !cancelled() }}
+        working-directory: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/2528-proof/baseline-build.log") 2>&1
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/2528-proof/baseline-driver"
+          "$RUNNER_TEMP/2528-proof/baseline-driver" generate --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- \
+            -DBUSTER_DEBUG_INFO=ON -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=ON
+          "$RUNNER_TEMP/2528-proof/baseline-driver" build --config Debug -t ide
+          sha256sum build/Debug/ide > "$RUNNER_TEMP/2528-proof/baseline-compiler-sha256.txt"
+
+      - name: Baseline Debug source-bound 12000-case allocation observations
+        if: ${{ !cancelled() }}
+        working-directory: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_directory="$RUNNER_TEMP/2528-proof"
+          proof_status=0
+          for shape in loops ifs; do
+            printf 'baseline_debug command=gdb --batch --return-child-result -x %s/baseline.gdb --args build/Debug/ide cc -g -nostdinc -c %s/%s-12000.c -o %s/baseline-%s-12000.o allocator=default\n' \
+              "$proof_directory" "$proof_directory" "$shape" "$proof_directory" "$shape" >> "$proof_directory/commands.txt"
+            if timeout --kill-after=10s 5m gdb --batch --return-child-result -x "$proof_directory/baseline.gdb" \
+              --args build/Debug/ide cc -g -nostdinc -c "$proof_directory/$shape-12000.c" \
+              -o "$proof_directory/baseline-$shape-12000.o" 2>&1 | tee "$proof_directory/baseline-$shape-12000.gdb.log"; then
+              rg 'DEBUG_LOCATION_REQUEST_V1 role=baseline' "$proof_directory/baseline-$shape-12000.gdb.log"
+              rg 'DEBUG_LOCATION_FINAL_V1 role=baseline' "$proof_directory/baseline-$shape-12000.gdb.log"
+              rg 'DEBUG_LOCATION_EXIT_V1 role=baseline inferior_status=0' "$proof_directory/baseline-$shape-12000.gdb.log"
+              sha256sum "$proof_directory/baseline-$shape-12000.o" >> "$proof_directory/artifact-sha256.txt"
+            else
+              proof_status=1
+            fi
+          done
+          exit "$proof_status"
+
+      - name: Retain proof receipts and artifacts, including failed attempts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: debug-location-proof-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/2528-proof
+          if-no-files-found: error
+          retention-days: 14
