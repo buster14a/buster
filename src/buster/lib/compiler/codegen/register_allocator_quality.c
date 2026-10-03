@@ -97,32 +97,75 @@ BUSTER_GLOBAL_LOCAL u32 machine_quality_frequency_weight(u16 frequency_class)
     return 1u << shift;
 }
 
-// Sift-down over a max-heap keyed on weight, so the priority walk needs no
-// sort routine and no recursion.
-void machine_quality_heap_sift(MachineQualityInterval* heap, u32 count, u32 root)
+// Greater benefit wins; equal benefits use the lower value ID in both
+// bounded admission and placement, independent of encounter/heap order.
+BUSTER_GLOBAL_LOCAL bool machine_quality_interval_better(MachineQualityInterval left, MachineQualityInterval right)
+{
+    bool result = left.weight > right.weight || (left.weight == right.weight && left.virtual_register < right.virtual_register);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_quality_heap_sift_order(MachineQualityInterval* heap, u32 count, u32 root, bool worst_first)
 {
     for (;;)
     {
-        u32 largest = root;
+        u32 top = root;
         u32 left = 2 * root + 1;
         u32 right = left + 1;
-        if (left < count && heap[left].weight > heap[largest].weight)
+        if (left < count && (worst_first ? machine_quality_interval_better(heap[top], heap[left])
+                                        : machine_quality_interval_better(heap[left], heap[top])))
         {
-            largest = left;
+            top = left;
         }
-        if (right < count && heap[right].weight > heap[largest].weight)
+        if (right < count && (worst_first ? machine_quality_interval_better(heap[top], heap[right])
+                                         : machine_quality_interval_better(heap[right], heap[top])))
         {
-            largest = right;
+            top = right;
         }
-        if (largest == root)
+        if (top == root)
         {
             break;
         }
         MachineQualityInterval swapped = heap[root];
-        heap[root] = heap[largest];
-        heap[largest] = swapped;
-        root = largest;
+        heap[root] = heap[top];
+        heap[top] = swapped;
+        root = top;
     }
+}
+
+// Placement consumes the retained set best first.
+void machine_quality_heap_sift(MachineQualityInterval* heap, u32 count, u32 root)
+{
+    machine_quality_heap_sift_order(heap, count, root, false);
+}
+
+// The first limit entries append without per-entry heap work. At the cap,
+// heapify worst first once; later candidates replace only a worse root.
+// Admission is O(population log limit), uses exactly limit slots, and does
+// not spend a placement probe on any discarded value.
+bool machine_quality_candidate_offer(MachineQualityInterval* heap, u32* count, u32 limit, MachineQualityInterval candidate)
+{
+    bool retained = false;
+    if (*count < limit)
+    {
+        heap[*count] = candidate;
+        *count += 1;
+        retained = true;
+        if (*count == limit)
+        {
+            for (u32 root = *count / 2; root > 0; root -= 1)
+            {
+                machine_quality_heap_sift_order(heap, *count, root - 1, true);
+            }
+        }
+    }
+    else if (limit && machine_quality_interval_better(candidate, heap[0]))
+    {
+        heap[0] = candidate;
+        machine_quality_heap_sift_order(heap, *count, 0, true);
+        retained = true;
+    }
+    return retained;
 }
 
 // Enumerate positive region costs in descending order, breaking ties by region
@@ -451,7 +494,11 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
     BUSTER_QUALITY_COUNT(initial_value_clear_bytes, (u64)register_count * (sizeof(MachineQualityTraffic) + 2 * sizeof(u32)));
     MachineQualityInterval* heap = arena_allocate(scratch.arena, MachineQualityInterval, MACHINE_QUALITY_MAXIMUM_CANDIDATES);
     u32 heap_count = 0;
-    for (u32 register_index = 0; register_index < register_count && heap_count < MACHINE_QUALITY_MAXIMUM_CANDIDATES; register_index += 1)
+#if BUSTER_BENCH_ALLOCATIONS
+    u32 eligible_count = 0;
+    MachineQualityTraffic eligible_traffic = 0;
+#endif
+    for (u32 register_index = 0; register_index < register_count; register_index += 1)
     {
         // The threshold is the break-even point: a pin must remove more
         // memory traffic than it costs. A value whose raw count reaches
@@ -475,20 +522,37 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
         {
             continue;
         }
-        candidate_indices[register_index] = heap_count;
-        heap[heap_count] = (MachineQualityInterval){
+        BUSTER_QUALITY_COUNT(candidate_eligible_values, 1);
+#if BUSTER_BENCH_ALLOCATIONS
+        eligible_count += 1;
+        eligible_traffic += baseline_traffic[register_index];
+#endif
+        MachineQualityInterval candidate = {
             .virtual_register = register_index,
             .start = interval_starts[register_index],
             .end = interval_ends[register_index],
             .weight = baseline_traffic[register_index],
             .marginal = baseline_traffic_counts[register_index] < 3,
         };
-        heap_count += 1;
+        machine_quality_candidate_offer(heap, &heap_count, MACHINE_QUALITY_MAXIMUM_CANDIDATES, candidate);
     }
     for (u32 root = heap_count / 2; root > 0; root -= 1)
     {
         machine_quality_heap_sift(heap, heap_count, root - 1);
     }
+    // Build the inverse map only after admission and heapification: a replaced
+    // candidate must not leave a stale row feeding another value's split costs.
+    for (u32 slot = 0; slot < heap_count; slot += 1)
+    {
+        candidate_indices[heap[slot].virtual_register] = slot;
+#if BUSTER_BENCH_ALLOCATIONS
+        eligible_traffic -= heap[slot].weight;
+#endif
+    }
+#if BUSTER_BENCH_ALLOCATIONS
+    BUSTER_QUALITY_COUNT(candidate_excluded_values, eligible_count - heap_count);
+    BUSTER_QUALITY_COUNT(candidate_excluded_traffic, eligible_traffic);
+#endif
     BUSTER_QUALITY_COUNT(candidates, heap_count);
     BUSTER_QUALITY_COUNT(candidate_cap_functions, heap_count == MACHINE_QUALITY_MAXIMUM_CANDIDATES);
     if (!heap_count || !function->instruction_count)

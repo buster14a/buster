@@ -42,7 +42,7 @@ and compiler hashes, commands, host metadata and all raw files.
 
 ## Scope and bounds
 
-There are 67 unsigned 64-bit counters: 536 bytes of fixed storage per OS thread.
+There are 70 unsigned 64-bit counters: 560 bytes of fixed storage per OS thread.
 The snapshot is cumulative on the calling thread, before metrics formatting,
 matching the allocation snapshot's existing scope. A single compilation is
 currently serial; worker totals are **not** aggregated, and this interface must
@@ -72,9 +72,16 @@ partition merged regions by their intersecting-value population using the same
 boundaries. A value spanning two regions counts in both, not once globally.
 
 `candidates` is the retained heap population, **not all qualifying values**.
-`candidate_cap_functions` records reaching the current 4096 cap; it does not
-estimate omitted benefit. `empty_candidate_functions` records the existing empty
-heap/empty-instruction early return. This does not repair #313's prefix policy.
+`candidate_eligible_values` counts the complete qualifying population before
+bounded admission. `candidate_cap_functions` records reaching the 4096 cap,
+including functions with exactly 4096 eligible values. `candidate_excluded_values`
+counts eligible values outside the best retained set; `candidate_excluded_traffic`
+sums their exact baseline weighted spill/reload benefit. This is potential
+traffic, not a claim that rejected intervals could legally pin or improve the
+accepted placement. `empty_candidate_functions` records the existing empty
+heap/empty-instruction early return. Admission retains the highest weighted
+benefit with lower value IDs winning ties; it visits the complete population
+without increasing candidate storage or the number of placement probes.
 
 `candidate_region_cells` is the logical candidate-by-region population
 (candidates times merged regions); no dense table of that size is allocated.

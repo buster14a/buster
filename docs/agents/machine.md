@@ -205,10 +205,18 @@ fixture as well as compiling both architectures.
   Explicit barrier/vector membership is not a latency or hazard model.
 - QUALITY placement accumulates exact u64 weighted traffic for values and loop
   regions, including split-boundary costs. A u32 edit count and maximum weight
-  4096 bound a traffic sum below 2^44. The heap preserves its strict-greater tie
-  policy; regional probes order by descending traffic then increasing region
-  index. The first regional probe has no upper-cost sentinel. Raw edit counts,
-  marginal eligibility and the first-4096 candidate policy remain unchanged.
+  4096 bound a traffic sum below 2^44. Bounded admission visits the complete
+  eligible population and retains the best 4096 intervals by weighted benefit,
+  with lower value IDs winning ties. A worst-first heap rejects losing entries
+  with one comparison and repairs replacements in O(log 4096); placement then
+  consumes a best-first heap with the same ties. Regional probes order by
+  descending traffic then increasing region index. The first regional probe
+  has no upper-cost sentinel. Raw edit counts and marginal eligibility remain
+  unchanged; pin/retry/span budgets do not grow. The inverse candidate map is
+  populated only after admission to preserve sparse split-row ownership.
+  Diagnostic census records the complete eligible population, omitted values
+  and their weighted baseline traffic; omitted traffic is potential benefit,
+  not accepted savings.
   The private `register_allocator_quality_internal.h` helpers are shared with
   bounded arithmetic/ordering tests. The 24-byte interval, 8-byte traffic cells
   and corresponding diagnostic clear/copy accounting are checked together.
