@@ -20529,14 +20529,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_character_literal_query_types(UnitTest
                 if (!valid)
                 {
                     buster_test_error_arguments(arguments, __LINE__, BUSTER_FUNCTION, S8(__FILE__),
-                        S8("character query target={u32} dialect={u32} query_mode={u32} complete={u32} preprocessing={u32} syntax={u32} semantics={u32}\n{S8}"),
+                        S8("character query target={u32} dialect={u32} query_mode={u32} complete={u32} preprocessing={u64} syntax={u64} semantics={u64}\n{S8}"),
                         target_index, dialect, query_mode, (u32)checked.analysis_complete,
-                        tokens.diagnostic_count, syntax.diagnostic_count, checked.diagnostic_count, source);
+                        (u64)tokens.diagnostic_count, (u64)syntax.diagnostic_count, (u64)checked.diagnostic_count, source);
                     CDiagnostic* diagnostics[] = {tokens.diagnostics, syntax.diagnostics, checked.diagnostics};
-                    u32 counts[] = {tokens.diagnostic_count, syntax.diagnostic_count, checked.diagnostic_count};
+                    u64 counts[] = {tokens.diagnostic_count, syntax.diagnostic_count, checked.diagnostic_count};
                     for (u32 phase = 0; phase < BUSTER_ARRAY_LENGTH(diagnostics); phase += 1)
                     {
-                        for (u32 diagnostic = 0; diagnostic < counts[phase]; diagnostic += 1)
+                        for (u64 diagnostic = 0; diagnostic < counts[phase]; diagnostic += 1)
                         {
                             CDiagnostic row = diagnostics[phase][diagnostic];
                             buster_test_error_arguments(arguments, __LINE__, BUSTER_FUNCTION, S8(__FILE__),

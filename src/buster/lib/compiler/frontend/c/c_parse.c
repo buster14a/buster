@@ -18363,7 +18363,8 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CParseResult* parse, CPrepr
             }
         }
         else if (c_preprocess_dialect_is_c23(preprocess.dialect) &&
-                 c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[scan], C_SYMBOL_WELL_KNOWN_AUTO))
+                 preprocess.tokens[scan].kind == C_TOKEN_IDENTIFIER &&
+                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[scan]), S8("auto")))
         {
             c23_auto_index = scan;
         }
@@ -18390,7 +18391,7 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CParseResult* parse, CPrepr
             {
                 break;
             }
-            if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_AUTO))
+            if (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("auto")))
             {
                 info->conflicting_specifier |= info->auto_index != UINT32_MAX;
                 info->auto_index = scan;
