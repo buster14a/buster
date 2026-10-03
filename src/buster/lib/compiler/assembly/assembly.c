@@ -2092,29 +2092,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAmdForm const* assembly_x86_amd_form_select(Assembly
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_condition_parse(String8 name, u8* result)
 {
-    static const struct
-    {
-        String8 name;
-        u8 condition;
-    } conditions[] = {
-        {S8_INITIALIZER("o"), 0},   {S8_INITIALIZER("no"), 1},  {S8_INITIALIZER("b"), 2},   {S8_INITIALIZER("c"), 2},
-        {S8_INITIALIZER("nae"), 2}, {S8_INITIALIZER("ae"), 3},  {S8_INITIALIZER("nb"), 3},  {S8_INITIALIZER("nc"), 3},
-        {S8_INITIALIZER("e"), 4},   {S8_INITIALIZER("z"), 4},   {S8_INITIALIZER("ne"), 5},  {S8_INITIALIZER("nz"), 5},
-        {S8_INITIALIZER("be"), 6},  {S8_INITIALIZER("na"), 6},  {S8_INITIALIZER("a"), 7},   {S8_INITIALIZER("nbe"), 7},
-        {S8_INITIALIZER("s"), 8},   {S8_INITIALIZER("ns"), 9},  {S8_INITIALIZER("p"), 10},  {S8_INITIALIZER("pe"), 10},
-        {S8_INITIALIZER("np"), 11}, {S8_INITIALIZER("po"), 11}, {S8_INITIALIZER("l"), 12},  {S8_INITIALIZER("nge"), 12},
-        {S8_INITIALIZER("ge"), 13}, {S8_INITIALIZER("nl"), 13}, {S8_INITIALIZER("le"), 14}, {S8_INITIALIZER("ng"), 14},
-        {S8_INITIALIZER("g"), 15},  {S8_INITIALIZER("nle"), 15},
-    };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(conditions); index += 1)
-    {
-        if (assembly_word_equal(name, conditions[index].name))
-        {
-            *result = conditions[index].condition;
-            return true;
-        }
-    }
-    return false;
+    return buster_x86_metadata_condition_parse(name, result);
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_lookup_exact(String8 mnemonic, AssemblyInstructionInfo* result)
@@ -9045,14 +9023,7 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_mnemonic(String8 mnemonic)
     if (assembly_word_equal(mnemonic, S8("cwtd"))) return S8("cwd");
     if (assembly_word_equal(mnemonic, S8("cltd"))) return S8("cdq");
     if (assembly_word_equal(mnemonic, S8("cqto"))) return S8("cqo");
-    // XED's condition-family spellings use Z/NZ and the negative aliases
-    // (NLE, etc.) as canonical keys.  The handwritten front end accepts the
-    // shorter Intel aliases (JE, SETNE, SETG, CMOVE); normalize those keys
-    // before metadata candidate selection.
-    if (assembly_word_equal(mnemonic, S8("je"))) return S8("jz");
-    if (assembly_word_equal(mnemonic, S8("setne"))) return S8("setnz");
-    if (assembly_word_equal(mnemonic, S8("setg"))) return S8("setnle");
-    if (assembly_word_equal(mnemonic, S8("cmove"))) return S8("cmovz");
+    mnemonic = buster_x86_metadata_condition_canonical_mnemonic(mnemonic);
     // GNU/AT&T scalar extension aliases carry both source and destination
     // widths in the mnemonic.  Metadata models the operation as MOVZX/MOVSX
     // (or MOVSXD for the dword-to-qword form); source memory width is restored
@@ -9275,13 +9246,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
     {
         // The suffix describes the operand width; the condition alias remains
         // syntax policy and uses the same condition identity as the parser.
-        static String8 const canonical[] = {
-            S8_INITIALIZER("cmovo"), S8_INITIALIZER("cmovno"), S8_INITIALIZER("cmovb"), S8_INITIALIZER("cmovnb"),
-            S8_INITIALIZER("cmovz"), S8_INITIALIZER("cmovnz"), S8_INITIALIZER("cmovbe"), S8_INITIALIZER("cmovnbe"),
-            S8_INITIALIZER("cmovs"), S8_INITIALIZER("cmovns"), S8_INITIALIZER("cmovp"), S8_INITIALIZER("cmovnp"),
-            S8_INITIALIZER("cmovl"), S8_INITIALIZER("cmovnl"), S8_INITIALIZER("cmovle"), S8_INITIALIZER("cmovnle"),
-        };
-        if (info.condition < BUSTER_ARRAY_LENGTH(canonical)) candidate = canonical[info.condition];
+        candidate = buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_MOVE, info.condition);
     }
     *base = candidate;
     if (base_info)
@@ -9622,49 +9587,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         String8 alias_statement = string_format(builder->arena, S8("{S8} {S8}"), wait_alias, alias_operands);
         return assembly_x86_metadata_instruction_parse(builder, alias_statement, line, column, offset + 1, target, syntax);
     }
-    // The condition-code aliases the metadata mnemonic table does not spell.
-    // `ja` and `jnbe` are one instruction, and hand-written assembly uses
-    // whichever reads better at the site, so the alias is rewritten to the
-    // canonical spelling the checked selector knows rather than reported as
-    // an unknown instruction.
-    static const struct
-    {
-        String8 alias;
-        String8 canonical;
-    } metadata_condition_aliases[] = {
-        {S8_INITIALIZER("c"), S8_INITIALIZER("b")},     {S8_INITIALIZER("nae"), S8_INITIALIZER("b")},
-        {S8_INITIALIZER("ae"), S8_INITIALIZER("nb")},   {S8_INITIALIZER("nc"), S8_INITIALIZER("nb")},
-        {S8_INITIALIZER("e"), S8_INITIALIZER("z")},     {S8_INITIALIZER("ne"), S8_INITIALIZER("nz")},
-        {S8_INITIALIZER("na"), S8_INITIALIZER("be")},
-        {S8_INITIALIZER("a"), S8_INITIALIZER("nbe")},   {S8_INITIALIZER("pe"), S8_INITIALIZER("p")},
-        {S8_INITIALIZER("po"), S8_INITIALIZER("np")},   {S8_INITIALIZER("nge"), S8_INITIALIZER("l")},
-        {S8_INITIALIZER("ge"), S8_INITIALIZER("nl")},   {S8_INITIALIZER("ng"), S8_INITIALIZER("le")},
-        {S8_INITIALIZER("g"), S8_INITIALIZER("nle")},
-    };
-    static String8 const metadata_condition_families[] = {S8_INITIALIZER("j"), S8_INITIALIZER("set"), S8_INITIALIZER("cmov")};
-    for (u32 family_index = 0; family_index < BUSTER_ARRAY_LENGTH(metadata_condition_families); family_index += 1)
-    {
-        String8 family = metadata_condition_families[family_index];
-        if (first_word.length <= family.length || !assembly_word_equal(string_slice(first_word, 0, family.length), family))
-        {
-            continue;
-        }
-        String8 condition = string_slice(first_word, family.length, first_word.length);
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(metadata_condition_aliases); index += 1)
-        {
-            if (!assembly_word_equal(condition, metadata_condition_aliases[index].alias))
-            {
-                continue;
-            }
-            String8 canonical = string_format(builder->arena, S8("{S8}{S8}"), family, metadata_condition_aliases[index].canonical);
-            String8 alias_statement =
-                first_space == trimmed_statement.length
-                    ? canonical
-                    : string_format(builder->arena, S8("{S8} {S8}"), canonical,
-                                    assembly_trim(string_slice(trimmed_statement, first_space, trimmed_statement.length)));
-            return assembly_x86_metadata_instruction_parse(builder, alias_statement, line, column, offset, target, syntax);
-        }
-    }
+    // Ordinary condition aliases resolve at the shared metadata lookup boundary.
     // The handwritten x87 front end accepts the traditional omitted-operand
     // spellings (for example `fadd` and `fadd st(2)`).  Metadata rows expose
     // the visible stack operand, so materialize the same canonical operands
