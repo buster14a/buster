@@ -90,7 +90,7 @@
 //                                                 entity lookup
 //   c_parse_local_declarations                    block-scope declarations,
 //                                                 auto inference, local
-//                                                 functions
+//                                                 linkage redeclarations
 //   c_parse_label_address_prefix_proven,          statement boundaries, asm
 //   c_parse_statement_end                         goto, label addresses
 //   c_parse_bind_function_body                    binds body identifiers to
@@ -18734,6 +18734,10 @@ BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CScope
     }
 }
 
+BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range_core(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                   CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out,
+                                                                   bool* request_out);
+
 BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                     CScopeId scope, u32 declaration_index, u32 start, u32 end)
 {
@@ -19171,6 +19175,15 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         // C17 6.2.2p5: without a storage-class specifier the declarator links
         // as if it were written `extern`, so it declares no automatic object.
         bool declares_function = !is_typedef && declared_type && declared_type->kind == C_TYPE_FUNCTION;
+        // Match the file-scope constraint before a neutral request could be
+        // replaced by a preceding declaration's alignment run. Declarator
+        // GNU attributes keep their separate extension path.
+        if (declares_function && alignment_count)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                               S8("alignment specifier cannot be applied to a function"));
+            return false;
+        }
         if (declares_function && result->declaration_count < result->declaration_capacity && result->entity_count + 1 < result->entity_capacity)
         {
             String8 function_name = c_token_spelling(preprocess.spelling_base, name);
@@ -19231,8 +19244,63 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         CEntityId duplicate = c_parse_lookup_entity_in_scope(result, scope, declared_symbol, declared_name);
         if (duplicate.value != C_ID_UNDERLYING_INVALID)
         {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_REDEFINITION, S8("redefinition of local identifier"));
-            return false;
+            CEntity* previous = result->entities + duplicate.value;
+            // C17 6.7p3/p4 permits compatible repeated declarations with
+            // linkage. Keep one local row per source declarator: lowering
+            // finds declaration statements through their individual ranges.
+            if (is_typedef || !(is_extern || declares_function) || previous->kind != C_ENTITY_LOCAL || !previous->is_extern)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_REDEFINITION,
+                                   S8("redefinition of local identifier"));
+                return false;
+            }
+            if (!c_parse_types_compatible(arena, result, preprocess, previous->type, type) || previous->is_thread_local != is_thread_local)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                   string_format(arena, S8("conflicting declaration of '{S8}'"), declared_name));
+                return false;
+            }
+            bool requested = false;
+            if (previous->alignment_count || declarator_alignment_count)
+            {
+                u32 previous_alignment;
+                bool previously_requested;
+                String8 message = c_parse_validate_alignment_range_core(machine, result, preprocess, previous->scope, previous->type,
+                    previous->alignment_start, previous->alignment_count, &previous_alignment, &previously_requested);
+                if (!message.length)
+                {
+                    u32 requested_alignment;
+                    message = c_parse_validate_alignment_range_core(machine, result, preprocess, scope, type,
+                        declarator_alignment_start, declarator_alignment_count, &requested_alignment, &requested);
+                    if (!message.length && previously_requested && requested && previous_alignment != requested_alignment)
+                    {
+                        message = S8("redeclaration has a different alignment requirement");
+                    }
+                }
+                if (message.length)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_ALIGNMENT, message);
+                    return false;
+                }
+            }
+            // A declaration without a nonzero request does not erase an
+            // earlier one. C17 6.7.5p5 makes _Alignas(0) neutral too.
+            if (!requested)
+            {
+                declarator_alignment_start = previous->alignment_start;
+                declarator_alignment_count = previous->alignment_count;
+            }
+            CType previous_type = result->types[previous->type.value];
+            CType new_type = result->types[type.value];
+            bool previous_complete_array = previous_type.kind == C_TYPE_ARRAY && previous_type.array_bound < result->array_bound_count &&
+                (result->array_bounds[previous_type.array_bound].token_count || result->array_bounds[previous_type.array_bound].has_inferred_count);
+            bool new_incomplete_array = new_type.kind == C_TYPE_ARRAY && new_type.array_bound < result->array_bound_count &&
+                !result->array_bounds[new_type.array_bound].token_count && !result->array_bounds[new_type.array_bound].has_inferred_count;
+            if ((previous_complete_array && new_incomplete_array) ||
+                (previous_type.kind == C_TYPE_FUNCTION && !previous_type.is_unprototyped && new_type.is_unprototyped))
+            {
+                type = previous->type;
+            }
         }
         CEntityId entity = {
             .value = result->entity_count,
@@ -24474,8 +24542,9 @@ BUSTER_C_INTERNAL bool c_parse_declarator_has_initializer(CPreprocessResult prep
     return initialized;
 }
 
-BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                              CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out)
+BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range_core(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                   CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out,
+                                                                   bool* request_out)
 {
     String8 message = {0};
     u64 mark = machine->scratch_arena->position;
@@ -24539,8 +24608,15 @@ BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* ma
         message = S8("invalid object alignment");
     }
     if (alignment_out) *alignment_out = (u32)BUSTER_MAX(maximum, natural);
+    if (request_out) *request_out = maximum != 0;
     arena_set_position(machine->scratch_arena, mark);
     return message;
+}
+
+BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                              CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out)
+{
+    return c_parse_validate_alignment_range_core(machine, result, preprocess, scope, type, start, count, alignment_out, 0);
 }
 
 BUSTER_C_SHARED bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
