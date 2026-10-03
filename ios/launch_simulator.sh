@@ -196,56 +196,154 @@ run_lifecycle_phase() {
     local status_log="${evidence_base}.${phase}.status.log"
     local native_log="${evidence_base}.${phase}.native-status.log"
     local started=$SECONDS
-    local statuses native_status=unavailable outcome result
+    local statuses native_status=unavailable outcome result helper_status=0
+    local deadline_reached=0 cleanup_status=1 native_kind=unavailable launch_error=none
+    local cancellation_signal=0 native_launch=0
+    local helper_error=none
+    local supervisor_valid=0 extra= key value expected_helper
+    local supervisor_prefix="${evidence_base}.${phase}"
+    local supervisor_fields="${supervisor_prefix}.supervisor-fields.log"
+    local supervisor_log="${supervisor_prefix}.supervisor-status.log"
     local capture_receipt=incomplete command_elapsed=unavailable capture_elapsed=unavailable
     local command_elapsed_log="${evidence_base}.${phase}.command-elapsed.log"
     local capture_elapsed_log="${evidence_base}.${phase}.capture-elapsed.log"
     mkdir -p "$(dirname "$evidence_base")"
-    rm -f "$native_log" "${output_log}.capture-status.log" "$command_elapsed_log" "$capture_elapsed_log"
-    # Record the command's own status before the timeout helper returns. This
-    # distinguishes an ordinary exit 124 from the helper's deadline status.
-    if (
-        command_started=$SECONDS
-        if run_with_timeout "$seconds" "$BASH" -c '
-        status_path=$1
-        shift
-        if "$@"; then status=0; else status=$?; fi
-        printf "%s\n" "$status" >"$status_path"
-        exit "$status"
-    ' bash "$native_log" "$@"; then command_status=0; else command_status=$?; fi
-        printf '%s\n' "$((SECONDS - command_started))" >"$command_elapsed_log"
-        exit "$command_status"
-    ) 2>&1 | (
-        capture_started=$SECONDS
-        if capture_lifecycle_output "$((seconds + 10 + monitor_command_timeout_seconds))" "$output_log"; then
-            capture_status=0
-        else
-            capture_status=$?
-        fi
-        printf '%s\n' "$((SECONDS - capture_started))" >"$capture_elapsed_log"
-        exit "$capture_status"
-    ); then
-        statuses=("${PIPESTATUS[@]}")
+    rm -f "$native_log" "${output_log}.capture-status.log" "$command_elapsed_log" "$capture_elapsed_log" \
+        "$supervisor_fields" "$supervisor_log"
+    # The supervisor keeps its private group anchor unreaped until the final
+    # dispatch. Native exit, explicit deadline, real EOF and cleanup are separate.
+    if python3 "$(dirname "${BASH_SOURCE[0]}")/lifecycle_capture.py" \
+        --prefix "$supervisor_prefix" --command-seconds "$seconds" \
+        --capture-seconds "$((seconds + 10 + monitor_command_timeout_seconds))" -- "$@"; then
+        helper_status=0
     else
-        statuses=("${PIPESTATUS[@]}")
+        helper_status=$?
     fi
-    if [[ -f $native_log ]]; then
-        read -r native_status <"$native_log" || native_status=unavailable
+    statuses=(125 1)
+    if [[ -s $supervisor_fields && -s $supervisor_log ]] \
+        && [[ $(wc -l <"$supervisor_fields") -eq 1 && $(wc -l <"$supervisor_log") -eq 1 ]] \
+        && grep -q '^BUSTER_IOS_SUPERVISOR version=1 ' "$supervisor_log" \
+        && read -r 'statuses[0]' native_status 'statuses[1]' command_elapsed capture_elapsed \
+            deadline_reached cleanup_status native_kind launch_error extra <"$supervisor_fields"; then
+        if [[ ${statuses[0]} =~ ^(0|[1-9][0-9]{0,2})$ && ${statuses[0]} -le 255 \
+            && ( $native_status == unavailable || $native_status =~ ^(0|[1-9][0-9]{0,2})$ && $native_status -le 255 ) \
+            && ${statuses[1]} =~ ^(0|1|124)$ && $command_elapsed =~ ^[0-9]+$ \
+            && $capture_elapsed =~ ^[0-9]+$ && $deadline_reached =~ ^[01]$ \
+            && $cleanup_status =~ ^[01]$ && $native_kind =~ ^(exit|signal|unavailable)$ \
+            && $launch_error =~ ^(none|ENOENT|EACCES|ENOEXEC|other)$ && -z $extra ]]; then
+            supervisor_valid=1
+            # The compact Bash fields and the named retained receipt must agree.
+            for key in command_status native_status capture_status command_elapsed capture_elapsed \
+                deadline_reached cleanup_status native_kind launch_error; do
+                case "$key" in
+                    command_status) value=${statuses[0]} ;;
+                    capture_status) value=${statuses[1]} ;;
+                    *) value=${!key} ;;
+                esac
+                if ! grep -Eq "(^| )${key}=${value}( |$)" "$supervisor_log" \
+                    || [[ $(grep -oE "(^| )${key}=" "$supervisor_log" | wc -l) -ne 1 ]]; then
+                    supervisor_valid=0
+                fi
+            done
+            for key in capture_eof native_reaped keeper_reaped group_authority_released native_launch; do
+                if ! grep -Eq "(^| )${key}=[01]( |$)" "$supervisor_log" \
+                    || [[ $(grep -oE "(^| )${key}=" "$supervisor_log" | wc -l) -ne 1 ]]; then
+                    supervisor_valid=0
+                fi
+            done
+            if ! grep -Eq '(^| )cancellation_signal=(0|2|15)( |$)' "$supervisor_log" \
+                || [[ $(grep -oE '(^| )cancellation_signal=' "$supervisor_log" | wc -l) -ne 1 ]]; then
+                supervisor_valid=0
+            else
+                value=$(grep -oE '(^| )cancellation_signal=(0|2|15)( |$)' "$supervisor_log")
+                value=${value#*cancellation_signal=}
+                cancellation_signal=${value%% *}
+            fi
+            value=$(grep -oE '(^| )native_launch=[01]( |$)' "$supervisor_log" || true)
+            value=${value#*native_launch=}
+            native_launch=${value%% *}
+            if ! grep -Eq '(^| )helper_error=[A-Za-z][A-Za-z0-9_]*( |$)' "$supervisor_log" \
+                || [[ $(grep -oE '(^| )helper_error=' "$supervisor_log" | wc -l) -ne 1 ]]; then
+                supervisor_valid=0
+            else
+                value=$(grep -oE '(^| )helper_error=[A-Za-z][A-Za-z0-9_]*( |$)' "$supervisor_log")
+                value=${value#*helper_error=}
+                helper_error=${value%% *}
+            fi
+            expected_helper=${statuses[0]}
+            if [[ $expected_helper -eq 0 && ( ${statuses[1]} -ne 0 || $cleanup_status -ne 0 ) ]]; then
+                expected_helper=1
+            fi
+            if [[ $helper_status -ne $expected_helper ]]; then
+                supervisor_valid=0
+            fi
+            if [[ $cancellation_signal -ne 0 ]]; then
+                if [[ ${statuses[0]} -ne $((128 + cancellation_signal)) ]]; then
+                    supervisor_valid=0
+                fi
+            elif [[ $deadline_reached -eq 1 ]]; then
+                if [[ ${statuses[0]} -ne 124 ]]; then
+                    supervisor_valid=0
+                fi
+            elif [[ $helper_error != none ]]; then
+                if [[ ${statuses[0]} -ne 125 ]]; then
+                    supervisor_valid=0
+                fi
+            elif [[ $launch_error == none && $native_status != unavailable \
+                && ${statuses[0]} -ne $native_status ]]; then
+                supervisor_valid=0
+            fi
+            if [[ ${statuses[0]} -eq 0 \
+                && ( $native_status != 0 || $native_kind != exit || $native_launch != 1 \
+                    || $deadline_reached -ne 0 || $cancellation_signal -ne 0 || $launch_error != none \
+                    || $helper_error != none ) ]]; then
+                supervisor_valid=0
+            fi
+            if [[ $native_kind == unavailable ]]; then
+                if [[ $native_status != unavailable || -e $native_log ]]; then
+                    supervisor_valid=0
+                fi
+            elif [[ $native_status == unavailable || ! -s $native_log ]] \
+                || [[ $(cat "$native_log") != "$native_status" ]] \
+                || ! grep -Eq '(^| )native_reaped=1( |$)' "$supervisor_log"; then
+                supervisor_valid=0
+            fi
+            if [[ $native_status != unavailable && $cleanup_status -eq 0 ]] \
+                && { ! grep -Eq '(^| )keeper_reaped=1( |$)' "$supervisor_log" \
+                    || ! grep -Eq '(^| )group_authority_released=1( |$)' "$supervisor_log"; }; then
+                supervisor_valid=0
+            fi
+        fi
     fi
-    if [[ -s $command_elapsed_log ]]; then
-        read -r command_elapsed <"$command_elapsed_log" || command_elapsed=unavailable
-    fi
-    if [[ -s $capture_elapsed_log ]]; then
-        read -r capture_elapsed <"$capture_elapsed_log" || capture_elapsed=unavailable
-    fi
-    if [[ ${statuses[1]} -eq 0 && -s ${output_log}.capture-status.log ]] \
+    if [[ $supervisor_valid -eq 1 && ${statuses[1]} -eq 0 && -s ${output_log}.capture-status.log ]] \
+        && grep -Eq '(^| )capture_eof=1( |$)' "$supervisor_log" \
         && grep -Eq '^BUSTER_IOS_CAPTURE total_bytes=[0-9]+ retained_bytes=[0-9]+ truncated=[01]$' \
             "${output_log}.capture-status.log"; then
         capture_receipt=complete
     fi
     result=${statuses[0]}
     outcome=command-failure
-    if [[ $result -eq 0 ]]; then
+    if [[ $supervisor_valid -ne 1 ]]; then
+        outcome=evidence-failure
+        result=1
+        statuses=(125 1)
+        native_status=unavailable
+        deadline_reached=0
+        cancellation_signal=0
+        cleanup_status=1
+        command_elapsed=unavailable
+        capture_elapsed=unavailable
+    elif [[ $cancellation_signal -ne 0 ]]; then
+        outcome=cancelled
+    elif [[ $deadline_reached -eq 1 ]]; then
+        outcome=timeout
+    elif [[ $helper_error != none ]]; then
+        outcome=helper-failure
+    elif [[ $launch_error != none ]]; then
+        outcome=launch-failure
+    elif [[ $native_kind == signal ]]; then
+        outcome=signal-or-command-failure
+    elif [[ $result -eq 0 ]]; then
         outcome=success
     elif [[ $native_status == unavailable ]]; then
         case "$result" in
@@ -260,6 +358,10 @@ run_lifecycle_phase() {
         outcome=evidence-failure
         result=1
     fi
+    if [[ $cleanup_status -ne 0 && $result -eq 0 ]]; then
+        outcome=cleanup-failure
+        result=1
+    fi
     if ! {
         printf 'BUSTER_IOS_PHASE phase=%s label=%s outcome=%s status=%s native_status=%s capture_status=%s elapsed_seconds=%s deadline_seconds=%s output_limit_bytes=65536 command_elapsed_seconds=%s capture_elapsed_seconds=%s capture_receipt=%s\n' \
             "$phase" "$label" "$outcome" "${statuses[0]}" "$native_status" "${statuses[1]}" "$((SECONDS - started))" "$seconds" \
@@ -267,6 +369,11 @@ run_lifecycle_phase() {
         printf 'command:'
         printf ' %q' "$@"
         printf '\noutput_log=%s\n' "$output_log"
+        printf 'BUSTER_IOS_SUPERVISOR_GATE helper_status=%s supervisor_valid=%s deadline_reached=%s cleanup_status=%s\n' \
+            "$helper_status" "$supervisor_valid" "$deadline_reached" "$cleanup_status"
+        if [[ -s $supervisor_log ]]; then
+            cat "$supervisor_log"
+        fi
         if [[ -s ${output_log}.capture-status.log ]]; then
             cat "${output_log}.capture-status.log"
         else

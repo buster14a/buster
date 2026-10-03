@@ -174,9 +174,31 @@
   process-table, unified-log and crash-report probes retain separate bounded
   lifecycle receipts and up to 64 KiB of stdout/stderr per command, with
   native exit, timeout/helper status and capture completion distinguished.
+  `ios/lifecycle_capture.py` owns each lifecycle command in a private POSIX
+  process group anchored by a deliberately unreaped keeper. A separate owned
+  native handle covers a command that leaves that group. Its explicit command
+  deadline, actual native exit/signal, real output EOF and owned cleanup are
+  separate facts; late native exit 0 does not turn a deadline into success.
+  The first 64 KiB are retained while remaining output is drained. The existing
+  command/10-second TERM grace/absolute capture bounds are preserved. Native
+  completion without observed EOF triggers owned cleanup; this observation alone
+  does not prove a descendant is alive. Escaped grandchildren remain outside
+  signal authority and can still yield incomplete capture at the existing bound.
+  A complete capture receipt is written only after a real zero-byte pipe read.
+  An EOF first observed at or after the absolute capture bound is retained as a
+  late observation and leaves capture incomplete; it does not extend the budget.
+  Ordinary EOF releases only the keeper; it does not prove silent descendants
+  are gone. Named supervisor receipts retain signal dispatches, authority release,
+  native/keeper reaping and keeper control-EOF acknowledgement. Failed ownership
+  cleanup remains failure even when the native command and capture succeed.
   Probe failure does not establish an app crash. The additive
   `bash ios/launch_diagnostics_mock_test.sh` attached-monitor controls
-  cover rejection, native exit 124, watchdog expiry, large output and cleanup.
+  run `python3 ios/lifecycle_capture_test.py -v` and cover rejection, actual
+  native 124/125/126/127/137 versus launch errors, watchdog expiry, exact binary
+  output retention, inherited/TERM-ignoring and escaped writers, direct escaped
+  commands, startup/active cancellation, unexpected keeper exit and malformed
+  receipt refusal. These controls use owned handles or finite fixture release
+  markers; they do not claim CoreSimulator descendants are contained by a group.
   `bash ios/launch_diagnostics_simulator_test.sh` uses a synthetic timed-out
   payload with real CoreSimulator boot, probes and shutdown on hosted macOS
   ARM64. The mobile lifecycle workflow retains actual probe availability and
