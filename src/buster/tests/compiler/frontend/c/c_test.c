@@ -23194,6 +23194,117 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_symbol_find_collisions(UnitTestArgumen
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    String8 path = S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_constraint_unions.c");
+    ByteSlice input = file_read(arguments->arena, path, (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, input.length != 0);
+    for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && mirror.diagnostic_count == 0);
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir_with_options(temporary.arena, path, tokens, parse, target,
+            (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+        BUSTER_TEST(arguments, lower.diagnostic_count == 0 && lower.program);
+        if (lower.program)
+        {
+            IrModule* module = lower.program->modules;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lower.program, module).error == IR_VALIDATION_NONE);
+            String8 names[] = {S8("constraint_am_identity"), S8("constraint_am_wide"), S8("constraint_am_early"),
+                               S8("constraint_dN_variable"), S8("constraint_dN_small"), S8("constraint_dN_large"),
+                               S8("constraint_numeric_clobber")};
+            for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, names[name]);
+                IrInstruction* assembly = 0;
+                for (u32 row = 0; function && !assembly && row < function->instruction_count; row += 1)
+                    if (function->instructions[row].opcode == IR_OPCODE_INLINE_ASSEMBLY) assembly = function->instructions + row;
+                BUSTER_TEST_RAW(arguments, assembly != 0, names[name]);
+                if (!assembly) continue;
+                if (name < 6)
+                {
+                    u32 operand = name < 3 ? 0 : 1;
+                    u64 expected = name < 3 ? IR_INLINE_ASSEMBLY_CONSTRAINT_A : IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+                    BUSTER_TEST(arguments, assembly->immediate_count > operand &&
+                        (assembly->immediates[operand] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == expected);
+                    if (name == 0) BUSTER_TEST(arguments, !(assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER));
+                    if (name == 1) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE);
+                    if (name == 2) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER);
+                }
+                else
+                {
+                    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, assembly));
+                    BUSTER_TEST(arguments, extra.clobber_count == 2 && string_equal(extra.clobbers[0], S8("rax")));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    struct
+    {
+        String8 source;
+        bool omitted_static;
+    } invalid_sources[] = {
+        {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=amx\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"am\"(value)); return value; }")},
+        {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=dN\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"dNx\"(value)); return value; }")},
+        {.source = S8("int invalid(void) { __asm__(\"\" : : : \"00\"); return 0; }")},
+        {.source = S8("int invalid(void) { __asm__(\"\" : : : \"1\"); return 0; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : \"+am\"(value) : : \"0\"); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"dN\"(value) : \"rdx\"); return value; }")},
+        {.source = S8("int invalid(void) { __asm__(\"\" : : : \"0\", \"rax\"); return 0; }")},
+        {.source = S8("static int invalid(int value) { __asm__(\"\" : \"+am\"(value) : : \"0\"); return value; } int main(void) { return 0; }"), .omitted_static = true},
+        {.source = S8("int invalid(void) { __asm__(\"\" : : : \"rax\", \"rax\"); return 0; }")},
+        {.source = S8("static int invalid(void) { __asm__(\"\" : : : \"0\", \"rax\"); return 0; } int main(void) { return 0; }"), .omitted_static = true},
+        {.source = S8("static int invalid(void) { __asm__(\"\" : : : \"rax\", \"rax\"); return 0; } int main(void) { return 0; }"), .omitted_static = true},
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid_sources); row += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, invalid_sources[row].source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("invalid-constraint-union.c"), tokens, parse, target);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+        // Direct lowering omits unused static bodies; their source-level
+        // rejection belongs to the semantic-only mirror rather than codegen.
+        if (!invalid_sources[row].omitted_static)
+            BUSTER_TEST_RAW(arguments, lower.diagnostic_count == 1, invalid_sources[row].source);
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, mirror.diagnostic_count == 1, invalid_sources[row].source);
+        scratch_end(temporary);
+    }
+    target.cpu_arch = CPU_ARCH_AARCH64;
+    String8 wrong_target_sources[] = {
+        S8("int invalid(int value) { __asm__(\"\" : \"+am\"(value)); return value; }"),
+        S8("int invalid(int value) { __asm__(\"\" : : \"dN\"(value)); return value; }"),
+        S8("int invalid(void) { __asm__(\"\" : : : \"0\"); return 0; }"),
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(wrong_target_sources); row += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, wrong_target_sources[row],
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("wrong-target-constraint-union.c"), tokens, parse, target);
+        CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, lower.diagnostic_count == 1 && mirror.diagnostic_count == 1, wrong_target_sources[row]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_volatile_ir(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -33180,6 +33291,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vectors);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_name_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_scratch_and_hardening);
+    BUSTER_TEST_FIXTURE(arguments, c_test_inline_assembly_constraint_unions);
     BUSTER_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
     BUSTER_TEST_FIXTURE(arguments, c_test_identifier_identity_once);

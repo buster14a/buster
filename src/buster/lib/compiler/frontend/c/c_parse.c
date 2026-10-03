@@ -26618,11 +26618,12 @@ BUSTER_C_INTERNAL String8 c_parse_asm_constraint_shape(String8 text, bool output
 {
     String8 message = {0};
     bool modifier = text.length == 2 || (text.length == 3 && text.pointer[1] == '&');
-    if (output && (!modifier || (text.pointer[0] != '=' && text.pointer[0] != '+')))
+    bool register_union = c_semantic_asm_register_alternative(text, output) != IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+    if (!register_union && output && (!modifier || (text.pointer[0] != '=' && text.pointer[0] != '+')))
     {
         message = S8("malformed asm output constraint");
     }
-    else
+    else if (!register_union)
     {
         u64 prefix = output ? text.length - 1 : 0;
         String8 classes = output ? S8("abcdSDrmxt") : S8("abcdSDrmxtuX");
@@ -26831,7 +26832,9 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                     }
                     if (!message.length && text.length && operand_end < section_end)
                     {
-                        u64 constraint = c_parse_asm_register_class(text.pointer[output ? text.length - 1 : 0]);
+                        u64 constraint = c_semantic_asm_register_alternative(text, output);
+                        if (constraint == IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
+                            constraint = c_parse_asm_register_class(text.pointer[output ? text.length - 1 : 0]);
                         bool matching = !output && (text.pointer[0] == '[' || (text.pointer[0] >= '0' && text.pointer[0] <= '9'));
                         u32 match = UINT32_MAX;
                         CScopeId scope = c_parse_scope_for_token(result, declaration->scope, operand_start);
@@ -26893,7 +26896,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                             if (!message.length) message = c_parse_asm_bound_register(machine, result, preprocess, scope, operand_start, operand_end, &constraint);
                             constraint |= output ? IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT : 0;
                             constraint |= output && text.pointer[0] == '+' ? IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE : 0;
-                            constraint |= output && text.length == 3 ? IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER : 0;
+                            constraint |= output && text.pointer[1] == '&' ? IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER : 0;
                         }
                         operands[operand_count] = (CSemanticAsmOperand){.name = operand_name, .size = scalar.layout.size, .type_class = type_class};
                         constraints[operand_count++] = constraint;
@@ -26937,6 +26940,8 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
         if (!message.length && separator_count >= 3 && separator_count <= 4)
         {
             u32 limit = separator_count == 4 ? separators[3] : close;
+            String8* clobbers = arena_allocate(machine->scratch_arena, String8, limit - separators[2]);
+            u32 clobber_count = 0;
             for (u32 cursor = separators[2] + 1; !message.length && cursor < limit; cursor += 1)
             {
                 if (preprocess.tokens[cursor].kind == C_TOKEN_STRING_LITERAL)
@@ -26944,17 +26949,24 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                     CIrDecodedString decoded = {0};
                     bool valid = c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor, cursor + 1, result->string_literals, &decoded);
                     valid &= decoded.element_width == 1;
-                    stack_clobber |= valid && string_equal((String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count}, S8("st"));
+                    String8 clobber = c_semantic_asm_clobber_name(preprocess.target,
+                        (String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count});
+                    stack_clobber |= valid && string_equal(clobber, S8("st"));
                     rbx_clobber |= valid && c_semantic_asm_clobber_matches_constraint(preprocess.target,
-                        (String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count}, IR_INLINE_ASSEMBLY_CONSTRAINT_B);
-                    if (!valid || !c_semantic_asm_clobber_valid(preprocess.target, (String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count}))
+                        clobber, IR_INLINE_ASSEMBLY_CONSTRAINT_B);
+                    if (!valid || !c_semantic_asm_clobber_valid(preprocess.target, clobber))
                     {
                         message = S8("unsupported GNU inline assembly clobber");
                     }
+                    for (u32 previous = 0; !message.length && previous < clobber_count; previous += 1)
+                    {
+                        if (string_equal(clobbers[previous], clobber)) message = S8("unsupported GNU inline assembly clobber");
+                    }
+                    if (!message.length) clobbers[clobber_count++] = clobber;
                     for (u32 operand = 0; !message.length && operand < operand_count; operand += 1)
                     {
                         if (c_semantic_asm_clobber_matches_constraint(preprocess.target,
-                            (String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count}, constraints[operand]))
+                            clobber, constraints[operand]))
                             message = S8("asm operand constraint conflicts with its clobber list");
                     }
                 }
