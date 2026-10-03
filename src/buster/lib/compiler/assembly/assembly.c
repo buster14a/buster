@@ -576,6 +576,7 @@ struct AssemblyBuilder
     u64 output_count;
     bool private_inline_labels;
     bool unit_control_relocations;
+    bool inline_assembly;
     // The metadata parser reports this transient semantic fact to the outer
     // source adapter when a feature-gated typed decorator candidate is the
     // authoritative form.  It prevents the handwritten INVALID_OPERANDS
@@ -8741,6 +8742,18 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_append_avx10_aliases(Target targe
     }
 }
 
+BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_append_inline_features(AssemblyBuilder* builder, String8 mnemonic, u32 operand_count,
+                                                                      String8* names, u32* count, u32 capacity)
+{
+    // The explicit zero-operand template owns the CPU availability contract.
+    // Keep the existing XED row, operand validation, and emitter authoritative;
+    // this token authorizes only RDTSCP, never a target-wide feature default.
+    if (builder->inline_assembly && !operand_count && assembly_word_equal(mnemonic, S8("RDTSCP")))
+    {
+        assembly_x86_metadata_append_feature(names, count, capacity, S8("RDTSCP"));
+    }
+}
+
 BUSTER_GLOBAL_LOCAL u8 assembly_x86_metadata_physical_class(AssemblyRegisterClass class)
 {
     return class == ASSEMBLY_REGISTER_GPR       ? BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR
@@ -10770,8 +10783,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         attributes.sae = true;
         attributes.decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ROUNDING | BUSTER_X86_METADATA_DECORATOR_SAE;
     }
-    String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
+    String8 feature_names[TARGET_CPU_FEATURE_COUNT + 1] = {0};
     u32 feature_count = assembly_x86_metadata_feature_names(target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+    assembly_x86_metadata_append_inline_features(builder, mnemonic, operand_count, feature_names, &feature_count,
+                                                   BUSTER_ARRAY_LENGTH(feature_names));
     assembly_x86_metadata_append_avx10_aliases(target, feature_names, &feature_count, BUSTER_ARRAY_LENGTH(feature_names), physical,
                                                 operand_count);
     // XED classifies a subset of legacy MMX rows under SSE2MMX even though
@@ -11939,8 +11954,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_local_relocation(AssemblyBuilder*
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, AssemblyInstruction* instruction)
 {
-    String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
+    String8 feature_names[TARGET_CPU_FEATURE_COUNT + 1] = {0};
     u32 feature_count = assembly_x86_metadata_feature_names(builder->target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+    assembly_x86_metadata_append_inline_features(builder, instruction->metadata_mnemonic, instruction->metadata_operand_count,
+                                                   feature_names, &feature_count, BUSTER_ARRAY_LENGTH(feature_names));
     BusterX86MetadataPhysicalOperand operands[ASSEMBLY_MAX_OPERANDS] = {0};
     if (instruction->metadata_operand_count > BUSTER_ARRAY_LENGTH(operands))
     {
@@ -12579,6 +12596,7 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
         .target = options.target,
         .private_inline_labels = options.private_inline_labels,
         .unit_control_relocations = options.unit_control_relocations,
+        .inline_assembly = options.inline_assembly,
         // A small set of source aliases (currently WAIT-prefixed x87 FINIT
         // and FCLEX) expands into multiple metadata instructions.
         .instruction_capacity = line_count * 2,

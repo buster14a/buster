@@ -5191,7 +5191,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* 
     {
         encoded = assembly_encode(selector->arena, (String8){.pointer = instructions, .length = instruction_length},
                                   (AssemblyEncodeOptions){.target = selector->target, .syntax = ASSEMBLY_SYNTAX_ATT,
-                                                          .private_inline_labels = true});
+                                                          .private_inline_labels = true, .inline_assembly = true});
         selected = encoded.diagnostic_count == 0;
     }
     if (selected)

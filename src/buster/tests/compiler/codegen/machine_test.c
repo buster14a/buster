@@ -4344,11 +4344,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_timestamps(UnitTestAr
     String8 mnemonics[] = {S8("rdtsc"), S8("rdtscp")};
     for (u32 mnemonic = 0; mnemonic < BUSTER_ARRAY_LENGTH(mnemonics); mnemonic += 1)
     {
-        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, mnemonics[mnemonic],
-            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
-        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
-            encoded.bytes.length == bytes[mnemonic].length &&
-            memcmp(encoded.bytes.pointer, bytes[mnemonic].pointer, bytes[mnemonic].length) == 0);
+        for (u32 inline_context = 0; inline_context < 2; inline_context += 1)
+        {
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, mnemonics[mnemonic],
+                (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT, .inline_assembly = inline_context != 0});
+            if (mnemonic == 1 && !inline_context)
+            {
+                BUSTER_TEST(arguments, encoded.diagnostic_count != 0 && encoded.bytes.length == 0);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                    encoded.bytes.length == bytes[mnemonic].length &&
+                    memcmp(encoded.bytes.pointer, bytes[mnemonic].pointer, bytes[mnemonic].length) == 0);
+            }
+        }
+    }
+    // Inline authorization is instruction-local: another gated mnemonic in
+    // the same template still fails. Explicit RDTSCP operands remain invalid.
+    String8 assembler_rejected[] = {S8("rdtscp %eax"), S8("rdtscp $1"), S8("rdrand %eax"), S8("rdtscp; rdrand %eax")};
+    for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(assembler_rejected); invalid += 1)
+    {
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, assembler_rejected[invalid],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT, .inline_assembly = true});
+        BUSTER_TEST(arguments, encoded.diagnostic_count != 0 && encoded.bytes.length == 0);
     }
     String8 rejected[] = {S8("rdtsc %eax"), S8("rdtscp $1"), S8("rdtscx")};
     for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(rejected); invalid += 1)

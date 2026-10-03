@@ -6748,12 +6748,13 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocat
 // crt's entry point is made of -- are the two shapes this exists for.
 BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_encode_instruction(Arena* arena, IrProgram* program, Target target, CodegenModuleOptions options, String8 line,
                                                                      String8 durable_names, CodegenBuffer* buffer, CodegenModule* result,
-                                                                     u32 relocation_capacity)
+                                                                     u32 relocation_capacity, bool inline_assembly)
 {
     u32 instruction_offset = (u32)buffer->count;
     AssemblyEncodeResult encoded = assembly_encode(arena, line,
                                                     (AssemblyEncodeOptions){
                                                         .target = target,
+                                                        .inline_assembly = inline_assembly,
                                                         // The AT&T/Intel distinction is x86-only, and the
                                                         // assembler rejects either spelling for another
                                                         // target rather than ignoring it.
@@ -6900,7 +6901,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* p
             // whitespace-stripped spelling the comparisons above want.
             valid = valid &&
                     (emitted ||
-                     codegen_global_assembly_encode_instruction(arena, program, target, options, line, (String8){0}, buffer, result, relocation_capacity));
+                     codegen_global_assembly_encode_instruction(arena, program, target, options, line, (String8){0}, buffer, result, relocation_capacity, false));
         }
         valid = valid && buffer->error == CODEGEN_ERROR_NONE;
     }
@@ -6954,7 +6955,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_inline_assembly(Arena* arena, IrProgram* p
         }
         else if (line.length)
         {
-            valid = codegen_global_assembly_encode_instruction(arena, program, target, options, line, literal, buffer, result, relocation_capacity);
+            valid = codegen_global_assembly_encode_instruction(arena, program, target, options, line, literal, buffer, result, relocation_capacity, true);
         }
         valid = valid && buffer->error == CODEGEN_ERROR_NONE;
     }
