@@ -398,6 +398,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics(UnitTestAr
     suppressed.suppress_diagnostic_records = true;
     BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, suppressed).error == COMPILER_DRIVER_ERROR_ARGUMENT);
     (void)os_file_delete(path);
+
+    // Both assembly spellings hand -E text to the emit phase. Measuring
+    // them preserves the text and partitions the complete input interval.
+    String8 extensions[] = {S8(".s"), S8(".S")};
+    String8 assembly_sources[] = {S8(".text\n.globl metrics_entry\nmetrics_entry: ret\n"),
+                                 S8("#define ENTRY metrics_entry\n.text\n.globl ENTRY\nENTRY: ret\n")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(extensions); index += 1)
+    {
+        String8 assembly = buster_test_temporary_path(arena, S8("buster-metrics-preprocess"), extensions[index]);
+        String8 output = buster_test_temporary_path(arena, S8("buster-metrics-preprocess"), S8(".txt"));
+        if (BUSTER_REQUIRE(arguments, file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(assembly_sources[index]))))
+        {
+            String8 command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-E"), S8("-o"), output, assembly};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            CompilerDriverResult plain = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST_RAW(arguments, plain.error == COMPILER_DRIVER_ERROR_NONE && plain.output.length, plain.diagnostic);
+            invocation.collect_input_metrics = true;
+            CompilerDriverResult measured = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST_RAW(arguments, measured.error == COMPILER_DRIVER_ERROR_NONE && string_equal(measured.output, plain.output), measured.diagnostic);
+            if (BUSTER_REQUIRE(arguments, measured.input_result_count == 1))
+            {
+                CompilerDriverInputResult* input = &measured.inputs[0];
+                BUSTER_TEST(arguments, input->status == COMPILER_DRIVER_INPUT_STATUS_OK && input->measured);
+                BUSTER_TEST(arguments, input->phase_nanoseconds[COMPILER_DRIVER_PHASE_EMIT] != 0);
+                BUSTER_TEST(arguments, compiler_driver_metrics_test_intervals(&measured, UINT64_MAX));
+                ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, bytes.length == plain.output.length && memory_compare(bytes.pointer, plain.output.pointer, bytes.length));
+            }
+        }
+        (void)os_file_delete(assembly);
+        (void)os_file_delete(output);
+    }
 #if !BUSTER_ANDROID && !BUSTER_IOS
     // Multi-input -c writes each object beside the working directory, so the
     // batches run inside a private directory and restore the original one.
@@ -506,6 +538,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics_lanes(Unit
         BUSTER_TEST(arguments, unreadable.input_result_count == 3 && unreadable.inputs[1].status == COMPILER_DRIVER_INPUT_STATUS_FAILED &&
                                    unreadable.inputs[1].error == COMPILER_DRIVER_ERROR_FILE_READ &&
                                    compiler_driver_metrics_test_contains(unreadable.inputs[1].message, S8("could not read")));
+
+        // A valid index defers selected member decoding until after the
+        // source inputs. A corrupt selected member is a failed input, and
+        // its failure cannot replace an earlier -fkeep-going rejection.
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        ObjectSymbol symbol = {.name = S8("lane_helper"), .section = OBJECT_SECTION_DATA, .global = true};
+        ObjectFile member = compiler_driver_archive_test_object(arena, target, &symbol, 1, 1);
+        ByteSlice archive_bytes = compiler_driver_archive_test_bytes(arena, &member, 1, 1);
+        ObjectArchive archive = object_archive_read_link(arena, archive_bytes, target);
+        String8 archive_path = buster_test_temporary_path(arena, S8("buster-metrics-lane-corrupt"), S8(".a"));
+        if (BUSTER_REQUIRE(arguments, archive.error == OBJECT_ERROR_NONE && archive.object_count == 1 && archive.member_bytes[0].length >= 4))
+        {
+            memcpy(archive.member_bytes[0].pointer, "NOPE", 4);
+            BUSTER_TEST(arguments, file_write(archive_path, archive_bytes));
+            for (u32 prior_error = 0; prior_error < 2; prior_error += 1)
+            {
+                String8 archive_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-fkeep-going"),
+                    S8("-fmetrics-out=unused.txt"), S8("-o"), output, main_path, prior_error ? bad_path : archive_path,
+                    prior_error ? archive_path : data_path, data_path};
+                CompilerDriverInvocation archive_invocation = compiler_driver_parse_arguments(arena,
+                    (SliceString8){.pointer = archive_command, .length = BUSTER_ARRAY_LENGTH(archive_command) - (prior_error == 0)});
+                BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, archive_invocation);
+                BUSTER_TEST(arguments, rejected.error == (prior_error ? COMPILER_DRIVER_ERROR_ANALYSIS : COMPILER_DRIVER_ERROR_OBJECT) &&
+                                           rejected.failed_input_count == 1 + prior_error);
+                if (BUSTER_REQUIRE(arguments, rejected.input_result_count == 3 + prior_error))
+                {
+                    CompilerDriverInputResult* failed = &rejected.inputs[1 + prior_error];
+                    BUSTER_TEST(arguments, failed->status == COMPILER_DRIVER_INPUT_STATUS_FAILED && failed->error == COMPILER_DRIVER_ERROR_OBJECT);
+                    BUSTER_TEST(arguments, string_equal(failed->diagnostic_code, S8("driver.object")) &&
+                                               compiler_driver_metrics_test_contains(failed->message, S8("could not read archive")));
+                    BUSTER_TEST(arguments, rejected.inputs[2 + prior_error].status == COMPILER_DRIVER_INPUT_STATUS_NOT_RUN);
+                    if (prior_error)
+                    {
+                        BUSTER_TEST(arguments, rejected.inputs[1].status == COMPILER_DRIVER_INPUT_STATUS_REJECTED &&
+                                                   string_equal(rejected.diagnostic, rejected.inputs[1].message));
+                    }
+                    String8 records = compiler_driver_metrics_format(arena, &archive_invocation, &rejected, (CompilerDriverProcessMetrics){0});
+                    BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(records, prior_error ? S8(" rejected=1 failed=1 not_run=1 prebuilt=0 error=driver.analysis ") :
+                                                                                                                     S8(" rejected=0 failed=1 not_run=1 prebuilt=0 error=driver.object ")));
+                }
+                ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, bytes.length == sentinel.length && memory_compare(bytes.pointer, sentinel.pointer, bytes.length));
+            }
+        }
+        (void)os_file_delete(archive_path);
     }
     (void)os_file_delete(main_path);
     (void)os_file_delete(helper_path);

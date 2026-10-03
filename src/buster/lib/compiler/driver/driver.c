@@ -3891,6 +3891,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single
     {
         // An assembly unit is already what the preprocessor would have
         // produced, so -E hands the text back unchanged.
+        compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_EMIT);
         result.output = string_duplicate_arena(arena, source, false);
         if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
         {
@@ -3994,6 +3995,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
         result.tokenizer_error_count = (u32)preprocess.error_count;
         result.diagnostic = preprocessing_error;
         return result;
+    }
+    if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
+    {
+        compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_EMIT);
     }
     String8 source = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
@@ -5358,9 +5363,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             compiler_driver_archive_extract(arena, &archive_state, archive, objects, &object_count);
             if (archive->error != OBJECT_ERROR_NONE)
             {
-                result.error = COMPILER_DRIVER_ERROR_OBJECT;
-                result.object_error = archive->error;
-                result.diagnostic = string_format(arena, S8("could not read archive {S8}: {S8}"), input_path, archive->diagnostic);
+                compiler_driver_fail_input(&result, inputs, input_index, COMPILER_DRIVER_ERROR_OBJECT, archive->error,
+                                              string_format(arena, S8("could not read archive {S8}: {S8}"), input_path, archive->diagnostic));
                 goto finish;
             }
             continue;
