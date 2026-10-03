@@ -3235,14 +3235,15 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
                         IR_SYMBOL_ID_INVALID);
             return;
         }
-        wasm64_fe_emit_value(emitter, instruction->operands[0]);
-        wasm64_fe_emit_value(emitter, instruction->operands[1]);
         IrType* index_type = wasm64_fe_value_ir_type(emitter, instruction->operands[1]);
+        bool signed_index = index_type && index_type->kind == IR_TYPE_INTEGER && index_type->is_signed;
+        wasm64_fe_emit_value(emitter, instruction->operands[0]);
+        wasm64_fe_emit_integer_value(emitter, instruction->operands[1], signed_index);
         Wasm64ValType index_valtype = 0;
         wasm64_valtype_for_type(context, index_type, false, &index_valtype);
         if (wasm64_is_memory64(context) && index_valtype == WASM64_VALTYPE_I32)
         {
-            wasm64_fe_u8(emitter, 0xad); // i64.extend_i32_u
+            wasm64_fe_u8(emitter, signed_index ? 0xac : 0xad); // i64.extend_i32_s/u
         }
         else if (!wasm64_is_memory64(context) && index_valtype == WASM64_VALTYPE_I64)
         {
