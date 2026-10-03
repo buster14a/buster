@@ -1552,6 +1552,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_writer_alignment_capacity(UnitTes
     return result;
 }
 
+// The refusal's formatter must not overrun an otherwise sufficient reader
+// arena. Narrow a real committed mapping, following the registered capacity
+// fixture's sentinel convention, and restore its actual limits after each read.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_variant_pcs_capacities(UnitTestArguments* arguments, ByteSlice original, Target target)
+{
+    UnitTestResult result = {0};
+    enum { OBJECT_TEST_PCS_ARENA_SIZE = 16384, OBJECT_TEST_PCS_SENTINEL_SIZE = 16 };
+    Arena* arena = arena_create((ArenaCreation){
+        .reserved_size = OBJECT_TEST_PCS_ARENA_SIZE,
+        .initial_size = OBJECT_TEST_PCS_ARENA_SIZE,
+        .granularity = 1,
+        .flags = {.no_pool = 1},
+    });
+    BUSTER_TEST(arguments, arena != 0 && original.length == 576);
+    if (arena && original.length == 576)
+    {
+        u64 reserved_size = arena->reserved_size;
+        u64 os_position = arena->os_position;
+        u64 start_padding[] = {0, 1, 7};
+        for (u32 named = 0; named < 2; named += 1)
+        {
+            u8 input[576];
+            memcpy(input, original.pointer, sizeof(input));
+            input[125] = 0x80;
+            if (!named)
+            {
+                object_test_write_u32((ByteSlice)BUSTER_ARRAY_TO_SLICE(input), 120, 0);
+            }
+            u8 snapshot[576];
+            memcpy(snapshot, input, sizeof(snapshot));
+            String8 expected = named ? S8("unsupported ELF AArch64 symbol variant_target (index 2): STO_AARCH64_VARIANT_PCS")
+                                     : S8("unsupported ELF AArch64 symbol <unnamed> (index 2): STO_AARCH64_VARIANT_PCS");
+            u64 diagnostic_capacity = (named ? S8("variant_target").length : S8("<unnamed>").length) + 128;
+            for (u32 run = 0; run < BUSTER_ARRAY_LENGTH(start_padding); run += 1)
+            {
+                u64 start = arena_minimum_position + start_padding[run];
+                arena_set_position(arena, start);
+                ObjectFile reference = object_read(arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(input), target);
+                bool valid_reference = reference.error == OBJECT_ERROR_UNSUPPORTED_TARGET && reference.diagnostic.pointer &&
+                                       string_equal(reference.diagnostic, expected);
+                BUSTER_TEST(arguments, valid_reference);
+                if (valid_reference)
+                {
+                    u64 diagnostic_start = (u64)((u8*)reference.diagnostic.pointer - (u8*)arena);
+                    bool capacity_valid = diagnostic_start >= start && diagnostic_capacity <= reserved_size - OBJECT_TEST_PCS_SENTINEL_SIZE &&
+                                          diagnostic_start <= reserved_size - OBJECT_TEST_PCS_SENTINEL_SIZE - diagnostic_capacity;
+                    BUSTER_TEST(arguments, capacity_valid);
+                    if (capacity_valid)
+                    {
+                        for (u64 remaining = 0; remaining <= diagnostic_capacity; remaining += 1)
+                        {
+                            arena_set_position(arena, start);
+                            u64 capacity = diagnostic_start + remaining;
+                            arena->reserved_size = capacity;
+                            arena->os_position = capacity;
+                            u8* sentinel = (u8*)arena + capacity;
+                            memset(sentinel, 0xa5, OBJECT_TEST_PCS_SENTINEL_SIZE);
+                            ObjectFile object = object_read(arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(input), target);
+                            BUSTER_TEST(arguments, object.error == OBJECT_ERROR_UNSUPPORTED_TARGET && arena->position <= capacity);
+                            if (remaining == diagnostic_capacity)
+                            {
+                                BUSTER_STRING_TEST(arguments, object.diagnostic, expected);
+                            }
+                            else
+                            {
+                                BUSTER_TEST(arguments, !object.diagnostic.pointer && !object.diagnostic.length);
+                            }
+                            ObjectArtifact failed = object_write(arena, &object, OBJECT_FORMAT_ELF64);
+                            BUSTER_TEST(arguments, failed.error != OBJECT_ERROR_NONE && !failed.bytes.pointer && !failed.bytes.length);
+                            bool sentinel_preserved = true;
+                            for (u32 byte = 0; byte < OBJECT_TEST_PCS_SENTINEL_SIZE; byte += 1)
+                            {
+                                sentinel_preserved &= sentinel[byte] == 0xa5;
+                            }
+                            BUSTER_TEST(arguments, sentinel_preserved);
+                            BUSTER_TEST(arguments, memcmp(input, snapshot, sizeof(input)) == 0);
+                            arena->reserved_size = reserved_size;
+                            arena->os_position = os_position;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (arena)
+    {
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
 // Original ELF64 records, independent of object_write and its symbol policy.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_variant_pcs(UnitTestArguments* arguments)
 {
@@ -1673,6 +1764,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_variant_pcs(UnitTestArguments
         }
         if (architectures[architecture] == CPU_ARCH_AARCH64)
         {
+            UnitTestResult capacities = object_test_elf_variant_pcs_capacities(arguments, bytes, target);
+            result.test_count += capacities.test_count;
+            result.succeeded_test_count += capacities.succeeded_test_count;
             // Do not let reserved definitions or discarded nonallocated
             // sections bypass the flag's explicit refusal.
             u16 indexes[] = {0xfff1, 0xfff2, 0xffff, 3};

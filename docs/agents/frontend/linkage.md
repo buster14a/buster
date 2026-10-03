@@ -28,7 +28,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   [AAELF64's symbol-table contract](https://github.com/ARM-software/abi-aa/blob/2025Q4/aaelf64/aaelf64.rst#symbol-table).
   The check precedes reserved-index and unallocated-section skipping, so those
   paths cannot silently erase the ABI requirement. An invalid name remains a
-  malformed-input error. Ordinary AArch64 visibility, ignored FILE/null records
+  malformed-input error. Formatting is bounded by the remaining arena capacity;
+  when that space is unavailable, the unsupported-target error remains and no
+  diagnostic bytes are allocated. Ordinary AArch64 visibility, ignored FILE/null records
   and other architectures retain their existing behavior; this is a refusal
   boundary, with variant-PCS execution support still open under GitHub #1243.
   `object_test_elf_variant_pcs` uses original raw ELF records to cover defined

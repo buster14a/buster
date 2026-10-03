@@ -5404,8 +5404,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     if (object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
                     {
                         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                        result.diagnostic = string_format(arena, S8("unsupported ELF AArch64 symbol {S8} (index {u32}): STO_AARCH64_VARIANT_PCS"),
-                                                          name.length ? name : S8("<unnamed>"), source_index);
+                        String8 diagnostic_name = name.length ? name : S8("<unnamed>");
+                        if (diagnostic_name.length <= UINT64_MAX - 128 &&
+                            object_reader_arena_can_allocate_bytes(arena, diagnostic_name.length + 128, BUSTER_ALIGN_OF(char8)))
+                        {
+                            result.diagnostic = string_format(arena, S8("unsupported ELF AArch64 symbol {S8} (index {u32}): STO_AARCH64_VARIANT_PCS"),
+                                                              diagnostic_name, source_index);
+                        }
                     }
                     read_ok = false;
                 }
