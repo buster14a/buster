@@ -17554,9 +17554,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_call_arity_ownership(UnitTestAr
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL String8 c_test_expression_aggregate_bit_field_source(void)
+BUSTER_GLOBAL_LOCAL String8 c_test_expression_aggregate_bit_field_source(Arena* arena)
 {
-    return S8(
+    String8 first = S8(
         "static int calls;\n"
         "static int take(unsigned long n) { calls += 1; return (int)n; }\n"
         "static int touch(void) { calls += 100; return 7; }\n"
@@ -17574,7 +17574,8 @@ BUSTER_GLOBAL_LOCAL String8 c_test_expression_aggregate_bit_field_source(void)
         "int unnamed_initializer(void) { int n = (int)sizeof(struct { int : 3; int x; }); return n; }\n"
         "int unnamed_return(void) { return (int)sizeof(struct { int : 0; int x; }); }\n"
         "int arithmetic_initializer(void) { int n = (int)sizeof(struct { int arithmetic_bit : 0 * 1 + 1; }); return n; }\n"
-        "int arithmetic_return(void) { return (int)sizeof(struct { int arithmetic_bit : 0 * 1 + 1; }); }\n"
+        "int arithmetic_return(void) { return (int)sizeof(struct { int arithmetic_bit : 0 * 1 + 1; }); }\n");
+    String8 second = S8(
         "int nested_return(void) { return (int)sizeof(struct { struct { unsigned int inner_bit : 1; } inner; int x; }); }\n"
         "int member_shadow(void) { int named_bit = 7; return (int)sizeof(struct { unsigned int named_bit : 1; }) + named_bit; }\n"
         "int tag_visibility(void) { (void)sizeof(struct ExpressionTag { unsigned int tag_bit : 1; });"
@@ -17608,6 +17609,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_expression_aggregate_bit_field_source(void)
         " failure += macro_argument() != 3; failure += calls != 2;"
         " failure += visible_bound() != 16; failure += nested_bound() != 20;"
         " failure += nested_enum() != 10; failure += ordered_bound() != 32; return failure; }\n");
+    return string_format(arena, S8("{S8}{S8}"), first, second);
 }
 
 // A type-name body declares members without opening a block scope or declaring
@@ -17616,7 +17618,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_expression_aggregate_bit_field_source(void)
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_aggregate_bit_fields(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source = c_test_expression_aggregate_bit_field_source();
+    String8 source = c_test_expression_aggregate_bit_field_source(arguments->arena);
     Target targets[6] = {target_native, target_native, target_native, target_native, target_native, target_native};
     targets[0].cpu_arch = targets[2].cpu_arch = targets[4].cpu_arch = CPU_ARCH_X86_64;
     targets[1].cpu_arch = targets[3].cpu_arch = targets[5].cpu_arch = CPU_ARCH_AARCH64;
