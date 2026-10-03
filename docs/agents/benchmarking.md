@@ -117,7 +117,7 @@ was frozen before sampling; the admitted service receipt must bind both facts.
     `ide 0x18f5ce` rather than an anonymous hex value.
 
   The phase breakdown needs a binary that accepts `-fmetrics-out=` and writes
-  a measured `CC_METRICS_INPUT` record (currently the #923 fold, not main); the
+  a measured `CC_METRICS_INPUT` record; the
   lab probes for it and otherwise reports the phase sections as NA. Phase
   boundaries come from the compiler's own clock, which starts after argument
   parsing, so the report states how much of the run lies outside it.
@@ -570,10 +570,21 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    python3 tools/uarch_lab.py report /tmp/ab     # re-render report.md and summary.json
    ```
 
-   Each binary is probed for `-fsource-metrics`/`-fmetrics-out`, warmed up and
-   checked for byte-identical output across its own runs; whether A and B
+   Both binaries are probed for `-fsource-metrics`/`-fmetrics-out` before
+   either is warmed up. Compare enables `-fmetrics-out` in both variants'
+   warm-ups, pilot and timed pairs only when both support it; otherwise it
+   omits the flag from both. Capability probes are separate, untimed compiles.
+   The report records support and enabled collection separately: timings
+   with collection enabled include metrics instrumentation. Single-binary
+   `run` continues collecting whenever its own compiler supports the flag.
+   With `run --warmups 0`, one untimed reference compile uses those
+   capability flags before measured runs start.
+   Each binary is checked for byte-identical output across its own runs; whether A and B
    outputs match is reported (`--require-identical-output` stops before timing
-   when they differ, for pure refactors). Runs alternate in ABBA blocks; the
+   when they differ, for pure refactors). With `--warmups 0`, each variant
+   gets one untimed reference compile under the shared collection policy;
+   the capability probe's output is never reused as that reference.
+   Runs alternate in ABBA blocks; the
    pair count is `--pairs` or is fixed once after a 2-pair pilot so the whole
    comparison fits `--target-minutes` (profile steps included). Profile steps
    are off by default.
@@ -659,7 +670,8 @@ meaning or a removal bumps the schema id):
 - `buster-uarch-lab-compare-v2`: `schema`, `directory`, `command`,
   `repo_root`, `cpu`, `host`, `baseline`/`candidate` (`path`, `sha256`,
   `size_bytes`, `runs`, `failed`, `identical_runs`, `deterministic`,
-  `metrics_out`, `source_metrics`), `outputs_identical`, `plan` (`pairs`,
+  `metrics_out`, `metrics_out_supported`, `metrics_out_enabled`,
+  `source_metrics`), `phase_metrics` (`enabled`, `reason`), `outputs_identical`, `plan` (`pairs`,
   `reason`, `order`, `fresh_copy`, `seed`, `confidence`,
   `bootstrap_resamples`, `complete_pairs`), `method`, `verdict` (`metric`,
   `outcome`, `ratio`, `ci_low`, `ci_high`, `ci_coverage`, `change_percent`,
@@ -683,6 +695,14 @@ meaning or a removal bumps the schema id):
   `instructions`, `cycles`, `ipc`, `branch_misses`, `branch_mpki`,
   `page_faults`, `minor_faults`, `major_faults`, `peak_rss`; phases are the
   `-fmetrics-out` phases plus `total` (ms), or null.
+  The additive collection fields distinguish an accepted flag
+  (`metrics_out_supported`) from the flag actually enabled for warm-ups and
+  timed pairs (`metrics_out_enabled`); the existing `metrics_out` field
+  retains its meaning of a measured `CC_METRICS_INPUT` capability probe.
+  `compare.json.phase_metrics` saves the shared policy and each variant's
+  `lab.json.collection.metrics_out` saves its enabled setting separately
+  from `capabilities`. Older directories have null enabled fields and an
+  unknown policy; re-rendering never retroactively claims matched flags.
 - `buster-uarch-lab-run-v1`: `schema`, `directory`, `command`, `cpu`, `ide`
   (`path`, `sha256`), `host`, `capabilities`, `steps` (`status`, `problems`),
   `timed` (`runs`, `failed`, `identical`, `plan` (with `fresh_copy`), `metrics` with the metric
