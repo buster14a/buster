@@ -1016,5 +1016,19 @@ class CompareFlowTests(Fakes, unittest.TestCase):
             self.compare(["--pairs", "2", "--require-identical-output"], {"OUTPUT": b"different"})
 
 
+
+class CliTests(unittest.TestCase):
+    # LAB3 (Python 3.14 validates help strings when a subparser is added): a
+    # bare `%` in any help text made every subcommand fail before dispatch.
+    # Rendering top-level and per-subcommand help expands every help string on
+    # all supported Python versions.
+    def test_every_help_string_renders(self):
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uarch_lab.py")
+        for arguments in ([], ["run"], ["compare"], ["report"]):
+            result = subprocess.run([sys.executable, script] + arguments + ["--help"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, (arguments, result.stderr))
+
+
 if __name__ == "__main__":
     unittest.main()

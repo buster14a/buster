@@ -2869,7 +2869,7 @@ def main(argv=None):
     run.add_argument("--sudo", action="store_true", help="enable the IBS / perf mem step")
     run.add_argument("--skip", nargs="*", default=[], choices=STEPS)
     run.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
-    compare = commands.add_parser("compare", help="A/B: paired ABBA timing of two compilers on the same source, verdict with a 95% CI")
+    compare = commands.add_parser("compare", help="A/B: paired ABBA timing of two compilers on the same source, verdict with a 95%% CI")
     compare.add_argument("--baseline", required=True, help="the A compiler (e.g. a Release ide built from the merge base)")
     compare.add_argument("--candidate", required=True, help="the B compiler (the change under test)")
     compare.add_argument("--repo-root", default=".", help="the frozen source tree both compilers compile")
