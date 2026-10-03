@@ -19922,7 +19922,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
-                        u16 value_width = 64;
+                        u32 value_width = 64;
                         if (instruction->operand_count && instruction->operands[0].value < function->value_count)
                         {
                             IrType* switch_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
@@ -23785,7 +23785,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                     else if (instruction->opcode == IR_OPCODE_SWITCH)
                     {
-                        u16 value_width = 64;
+                        u32 value_width = 64;
                         if (instruction->operand_count && instruction->operands[0].value < function->value_count)
                         {
                             IrType* switch_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
@@ -23801,7 +23801,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool compare_words = value_width <= 32;
                         u64 value_mask = value_width == 64 ? UINT64_MAX : (UINT64_C(1) << value_width) - 1;
                         c_a64_load(&emitter, 9, instruction->operands[0]);
-                        if (value_width < (compare_words ? 32 : 64))
+                        if (value_width < (compare_words ? 32u : 64u))
                         {
                             // UBFM W9/W9 or X9/X9, #0, #(width - 1).
                             codegen_emit_u32(&buffer, (compare_words ? 0x53000129u : 0xd3400129u) | ((u32)(value_width - 1) << 10));
