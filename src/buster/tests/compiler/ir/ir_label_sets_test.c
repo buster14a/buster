@@ -270,6 +270,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_label_sets(UnitTestArguments* argumen
         BUSTER_TEST(arguments, !ir_label_metadata_shape_valid(&program, &function, metadata_id));
         scratch_end(scale_temporary);
     }
+    // All paths share one compact unordered set. Requested bytes may repeat,
+    // but live scratch must follow the largest path rather than their sum.
+    for (u32 path_count = 16; path_count <= 64; path_count *= 4)
+    {
+        TemporalArena shared_temporary = arena_begin_temporal(arguments->arena);
+        IrBlockId shared_blocks[64];
+        IrBlockId shared_snapshot[64];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(shared_blocks); index += 1)
+        {
+            shared_blocks[index].value = (u32)BUSTER_ARRAY_LENGTH(shared_blocks) - index - 1;
+        }
+        memcpy(shared_snapshot, shared_blocks, sizeof(shared_blocks));
+        IrLabelProvenancePath* shared_paths = arena_allocate(arguments->arena, IrLabelProvenancePath, path_count);
+        IrLabelProvenancePath* paths_snapshot = arena_allocate(arguments->arena, IrLabelProvenancePath, path_count);
+        for (u32 index = 0; index < path_count; index += 1)
+        {
+            shared_paths[index] = (IrLabelProvenancePath){.offset = (u64)(path_count - index - 1) * 8, .size = 8,
+                .label_blocks = shared_blocks, .label_block_count = BUSTER_ARRAY_LENGTH(shared_blocks)};
+        }
+        memcpy(paths_snapshot, shared_paths, sizeof(*shared_paths) * path_count);
+        function.block_count = BUSTER_ARRAY_LENGTH(shared_blocks);
+        type.layout.size = (u64)path_count * 8;
+        metadata = (IrValueLabelMetadata){.label_blocks = shared_blocks, .label_block_count = BUSTER_ARRAY_LENGTH(shared_blocks),
+            .label_paths = shared_paths, .label_path_count = path_count, .has_label_provenance = true};
+        // Shape uses this same calling-thread scratch selection. Rewinds
+        // preserve its observed high water without retaining any copied set.
+        TemporalArena measurement = scratch_begin(0, 0);
+        u64 previous_high_water = measurement.arena->test_high_water;
+        measurement.arena->test_high_water = measurement.arena->position;
+        bool shared_valid = ir_label_metadata_shape_valid(&program, &function, metadata_id);
+        u64 shared_peak = BUSTER_MAX(measurement.arena->test_high_water, measurement.arena->position);
+        measurement.arena->test_high_water = BUSTER_MAX(previous_high_water, shared_peak);
+        BUSTER_TEST(arguments, shared_valid);
+        BUSTER_TEST(arguments, measurement.arena->position == measurement.position);
+        // Aggregate and one path each need two ID copies, plus coverage and
+        // two path-order views. The allowance includes alignment rounding.
+        BUSTER_TEST(arguments, shared_peak - measurement.position <= 4 * sizeof(IrBlockId) * BUSTER_ARRAY_LENGTH(shared_blocks) +
+                               BUSTER_ARRAY_LENGTH(shared_blocks) + 2 * sizeof(IrLabelProvenancePath*) * (u64)path_count + 64);
+        scratch_end(measurement);
+        BUSTER_TEST(arguments, !memcmp(shared_blocks, shared_snapshot, sizeof(shared_blocks)));
+        BUSTER_TEST(arguments, !memcmp(shared_paths, paths_snapshot, sizeof(*shared_paths) * path_count));
+        scratch_end(shared_temporary);
+    }
     metadata = (IrValueLabelMetadata){0};
     function.label_metadata_count = 0;
 #if BUSTER_BENCH_ALLOCATIONS

@@ -1778,6 +1778,10 @@ bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrV
                 path_has_label |= !path->is_non_label;
                 if (valid && path->label_block_count)
                 {
+                    // A compact input may reuse one unordered block array in
+                    // many paths. Retain only this path's sorting workspace;
+                    // the aggregate view and coverage marks precede its mark.
+                    TemporalArena path_temporary = arena_begin_temporal(temporary.arena);
                     IrBlockId* path_blocks = ir_label_sorted_blocks(temporary.arena, path->label_blocks, path->label_block_count);
                     valid = ir_label_sorted_blocks_unique(path_blocks, path->label_block_count);
                     for (u32 block_index = 0; valid && block_index < path->label_block_count; block_index += 1)
@@ -1789,6 +1793,7 @@ bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrV
                             covered[aggregate_index] = 1;
                         }
                     }
+                    scratch_end(path_temporary);
                 }
             }
             if (valid && value->label_path_count)
