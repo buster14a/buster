@@ -8,6 +8,7 @@
 // machine_test_sparse_local_state compares sparse and row-based local discovery.
 // machine_test_source_scan_writers carries source-authority brace state per body;
 // machine_test_source_writer_guards pins its sanitized token/guard classifications.
+// machine_test_x64_variadic_workspace checks reused rows across ABI shape changes.
 
 #include <buster/tests/compiler/codegen/machine_test.h>
 #if BUSTER_INCLUDE_TESTS
@@ -4753,6 +4754,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_uefi_platform_variadic(UnitT
     return result;
 }
 
+// The first call dirties twenty shape/placement rows; the short call changes
+// the fixed prefix, then the indirect call rewrites the same twenty rows with
+// different integer/float/aggregate positions. ABI counts and stack release
+// are independent goldens, rather than a second implementation of planning.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_variadic_workspace(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "typedef struct { long long i; double d; } Pair;\n"
+        "typedef int Probe(int, ...);\n"
+        "int workspace_probe_a(int, ...);\n"
+        "int workspace_probe_b(double, int, ...);\n"
+        "int workspace_calls(Probe* probe)\n"
+        "{\n"
+        "    Pair pair = {23, 24.0};\n"
+        "    int bad = workspace_probe_a(11, 1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll,\n"
+        "        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, pair, 31ll, 32.0);\n"
+        "    bad |= workspace_probe_b(0.5, 17, pair, 5ll);\n"
+        "    bad |= probe(-11, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0,\n"
+        "        pair, 1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll, 32.0, 31ll);\n"
+        "    return bad;\n"
+        "}\n");
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = systems[system]};
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("variadic-workspace.c"), source, target,
+                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrFunction* function = machine_test_ir_function_find(program->modules, S8("workspace_calls"));
+                BUSTER_TEST(arguments, function != 0);
+                if (function)
+                {
+                    MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                    BUSTER_TEST(arguments, selected.supported);
+                    if (selected.supported)
+                    {
+                        BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                        u16 flags[] = {17, 5, 17}; // SysV AL: eight, two, eight FP registers.
+                        u32 releases[] = {64, 0, 64}; // Seven stack eightbytes, then alignment padding.
+                        u32 calls = 0;
+                        for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                        {
+                            MachineInstruction* instruction = selected.function.instructions + row;
+                            if (instruction->opcode == MACHINE_X64_CALL_DIRECT || instruction->opcode == MACHINE_X64_CALL_INDIRECT)
+                            {
+                                BUSTER_TEST(arguments, calls < BUSTER_ARRAY_LENGTH(flags));
+                                if (calls < BUSTER_ARRAY_LENGTH(flags))
+                                {
+                                    BUSTER_TEST(arguments, instruction->opcode == (calls == 2 ? MACHINE_X64_CALL_INDIRECT : MACHINE_X64_CALL_DIRECT));
+                                    BUSTER_TEST(arguments, instruction->flags == (system ? 0 : flags[calls]));
+                                    u32 release = 0;
+                                    if (row + 1 < selected.function.instruction_count &&
+                                        selected.function.instructions[row + 1].opcode == MACHINE_X64_ADD_RSP)
+                                    {
+                                        release = selected.function.instructions[row + 1].payload;
+                                    }
+                                    BUSTER_TEST(arguments, release == (system ? 0 : releases[calls]));
+                                }
+                                calls += 1;
+                            }
+                        }
+                        BUSTER_TEST(arguments, calls == BUSTER_ARRAY_LENGTH(flags));
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_goto(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8002,6 +8080,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_alias);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_overlap);
     BUSTER_TEST_FIXTURE(arguments, machine_test_x64_uefi_platform_variadic);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_variadic_workspace);
     BUSTER_TEST_FIXTURE(arguments, machine_test_a64_atomic_pair_updates);
     BUSTER_TEST_FIXTURE(arguments, machine_test_a64_large_aggregate_copy);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_goto);

@@ -9,6 +9,7 @@
 // (compiler_driver_test_frame_vector_lane) and checks the cells serially.
 // compiler_driver_test_elf_weak_unwind checks local FDE anchors and host overrides.
 // compiler_driver_test_sysv_indirect_variadic checks AL against a foreign probe.
+// compiler_driver_test_variadic_workspace checks successive calls against host va_arg.
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
@@ -6397,6 +6398,145 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_indirect_variadic(U
                 if (host_compiled && compiled.error == COMPILER_DRIVER_ERROR_NONE && ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
                 {
                     String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-sysv-indirect-variadic-run"), S8(""));
+                    String8 link_command[10];
+                    u32 link_count = 0;
+                    link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
+                    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+#if BUSTER_LINUX
+                    link_command[link_count++] = S8("-no-pie");
+#endif
+                    link_command[link_count++] = object;
+                    link_command[link_count++] = host_object;
+                    link_command[link_count++] = S8("-o");
+                    link_command[link_count++] = executable;
+                    ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    bool link_ok = linked.handle && os_process_wait_deadline(temporary.arena, linked, 30000000).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, link_ok);
+                    if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                }
+#endif
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+// Keep inline sources outside the frozen native-retirement fixture inventory.
+// Host va_arg independently observes every argument, including aggregates
+// crossing the GP/FP boundary in long-short-long calls within one function.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_variadic_workspace(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "typedef struct { long long i; double d; } Pair;\n"
+        "typedef int Probe(int, ...);\n"
+        "int workspace_probe_a(int, ...);\n"
+        "int workspace_probe_b(double, int, ...);\n"
+        "int workspace_calls(Probe* probe)\n"
+        "{\n"
+        "    Pair pair = {23, 24.0};\n"
+        "    int bad = workspace_probe_a(11, 1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll,\n"
+        "        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, pair, 31ll, 32.0);\n"
+        "    bad |= workspace_probe_b(0.5, 17, pair, 5ll);\n"
+        "    bad |= probe(-11, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0,\n"
+        "        pair, 1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll, 32.0, 31ll);\n"
+        "    return bad;\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-variadic-workspace"), S8(".c"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 host_source = S8(
+        "#include <stdarg.h>\n"
+        "typedef struct { long long i; double d; } Pair;\n"
+        "typedef int Probe(int, ...);\n"
+        "int workspace_calls(Probe*);\n"
+        "int workspace_probe_a(int marker, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, marker);\n"
+        "    int bad = marker != 11 && marker != -11;\n"
+        "    if (marker == 11)\n"
+        "    {\n"
+        "        for (int i = 1; i <= 7; i += 1) bad |= va_arg(ap, long long) != i;\n"
+        "    }\n"
+        "    for (int i = 1; i <= 9; i += 1) bad |= va_arg(ap, double) != i;\n"
+        "    Pair pair = va_arg(ap, Pair);\n"
+        "    bad |= pair.i != 23 || pair.d != 24.0;\n"
+        "    if (marker == -11)\n"
+        "    {\n"
+        "        for (int i = 1; i <= 7; i += 1) bad |= va_arg(ap, long long) != i;\n"
+        "        bad |= va_arg(ap, double) != 32.0;\n"
+        "        bad |= va_arg(ap, long long) != 31;\n"
+        "    }\n"
+        "    else\n"
+        "    {\n"
+        "        bad |= va_arg(ap, long long) != 31;\n"
+        "        bad |= va_arg(ap, double) != 32.0;\n"
+        "    }\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+        "int workspace_probe_b(double seed, int marker, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, marker);\n"
+        "    Pair pair = va_arg(ap, Pair);\n"
+        "    int bad = seed != 0.5 || marker != 17 || pair.i != 23 || pair.d != 24.0;\n"
+        "    bad |= va_arg(ap, long long) != 5;\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+        "int main(void) { return workspace_calls(workspace_probe_a); }\n");
+    String8 host_input = buster_test_temporary_path(arguments->arena, S8("buster-variadic-workspace-host"), S8(".c"));
+    String8 host_object = buster_test_temporary_path(arguments->arena, S8("buster-variadic-workspace-host"), S8(".o"));
+    bool host_written = file_write(host_input, BUSTER_SLICE_TO_BYTE_SLICE(host_source));
+    BUSTER_TEST(arguments, host_written);
+    String8 host_command[10];
+    u32 host_count = 0;
+    host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+    host_command[host_count++] = S8("-O0");
+    host_command[host_count++] = S8("-c");
+    host_command[host_count++] = host_input;
+    host_command[host_count++] = S8("-o");
+    host_command[host_count++] = host_object;
+    ProcessSpawnResult host_spawn = {0};
+    if (host_written)
+    {
+        host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+    }
+    bool host_compiled = host_spawn.handle && os_process_wait_deadline(arguments->arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+    BUSTER_TEST(arguments, host_compiled);
+#endif
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-android"), S8("x86_64-ios"), S8("x86_64-windows")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 target = 0; written && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 object = buster_test_temporary_path(temporary.arena, S8("buster-variadic-workspace"), S8(".o"));
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                    S8("-fno-canonical-fast"), S8("-fverify-codegen"), input, S8("-o"), object};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object,
+                    string_format(temporary.arena, S8("variadic workspace {S8} {S8} {S8}: {S8}"),
+                                  targets[target], modes[mode], frontends[frontend], compiled.diagnostic));
+                BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 1 && compiled.codegen_statistics.fallback_function_count == 0);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                if (host_compiled && compiled.error == COMPILER_DRIVER_ERROR_NONE && ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
+                {
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-variadic-workspace-run"), S8(""));
                     String8 link_command[10];
                     u32 link_count = 0;
                     link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
@@ -17502,6 +17642,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_padding_eightbytes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_empty_aggregates);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_indirect_variadic);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_variadic_workspace);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_aligned_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_large_frame);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_arm64_unwind);
