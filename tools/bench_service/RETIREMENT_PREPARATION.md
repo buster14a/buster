@@ -1544,9 +1544,12 @@ complete without one.
    installed evidence directory `native-retirement-performance-v1.evidence`
    under `recipes/` (service-owned, not writable; its files single-link and
    read-only), whose files the pinned context covers by digest. Every
-   source is read and hashed before any file is written, and each again as
-   it is written; each must be exactly the descriptor's size (at most the
-   bundle's 64 MiB per-file cap, else the context refuses at listing) and
+   source is streamed and hashed in 64 KiB reads before any file is
+   written, and each again as it is written, so memory stays bounded
+   (`bq_retirement_worker_evidence_stream`); each must be exactly the
+   descriptor's size (at most the retirement evidence cap
+   `BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP`, 512 MiB, which covers a frozen
+   toolchain file, #1880; else the context refuses at listing) and
    SHA-256: a changed installed file refuses with `BQ_RECIPE_MISMATCH`, a
    changed held binary with `BQ_SOURCE_MISMATCH`, and a refusal leaves no
    evidence file (a second-pass refusal unlinks what it wrote). The

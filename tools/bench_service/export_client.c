@@ -118,6 +118,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_unpack(char const* archive_path, char cons
     u32 files = 0;
     char previous[BQ_PATH_CAP + 1] = {0};
     u32 entries = error == BQ_OK ? bq_u32(receipt + 44) : 0;
+    /* Each file must fit its own per-file cap, which only a retirement
+     * evidence entry raises (bq_worker_bundle_file_cap, #1880); the header's
+     * size is bounded by the largest cap before any arithmetic, and the
+     * entry's own cap is checked before anything is created for it. */
+    bool retirement = error == BQ_OK && bq_export_receipt_recipe(receipt) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
     for (u32 i = 0; error == BQ_OK && i < entries; i += 1)
     {
         u8 header[16];
@@ -128,13 +133,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_unpack(char const* archive_path, char cons
         u32 length = error == BQ_OK ? bq_u32(header + 4) : 0;
         u64 size = error == BQ_OK ? bq_u64(header + 8) : 0;
         if (error == BQ_OK && ((type != 1 && type != 2) || !length || length > BQ_PATH_CAP ||
-            (type == 1 && size) || size > BQ_WORKER_BUNDLE_FILE_CAP || offset + length + size > total))
+            (type == 1 && size) || size > BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP || offset + length + size > total))
             error = BQ_EXPORT_CORRUPT;
         char path[BQ_PATH_CAP + 1] = {0};
         if (error == BQ_OK) error = bq_export_io(input, path, length, sizeof(receipt) + offset, false, deadline);
         offset += length;
         if (error == BQ_OK && (strlen(path) != length || !bq_worker_bundle_path_valid(path) ||
-                              strcmp(previous, path) >= 0)) error = BQ_EXPORT_CORRUPT;
+                              strcmp(previous, path) >= 0 || size > bq_worker_bundle_file_cap(retirement, path)))
+            error = BQ_EXPORT_CORRUPT;
         u32 depth = 1;
         for (u32 j = 0; error == BQ_OK && j < length; j += 1) if (path[j] == '/') depth += 1;
         if (depth >= BQ_WORKER_BUNDLE_DEPTH_CAP) error = BQ_EXPORT_OVERSIZED;

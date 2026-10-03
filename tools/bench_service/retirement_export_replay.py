@@ -16,6 +16,7 @@ production binding validator over lane F's final binding
 ``a1_export_ledger`` maps the A1 campaign model (metrics shards, untimed
 records) onto the export limits, printed by the ``a1-capacity`` subcommand.
 ``composer_binding_path`` holds the binding to E's fixed result location.
+``result_file_cap`` is the per-file cap (retirement evidence has its own).
 retirement_lane_f.py writes the lane F directory ``--lane-f`` names.
 """
 
@@ -49,6 +50,13 @@ ENTRY_CAP = 4096
 # BQ_WORKER_BUNDLE_FILE_CAP: export and the worker reject only a larger file,
 # so a full 64 MiB metrics or transcript shard is one admissible entry.
 FILE_CAP = 64 * 1024 * 1024
+# (#1880) BQ_WORKER_RETIREMENT_EVIDENCE_PREFIX and
+# BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP: a flat result-root file with this
+# prefix and a non-empty rest is binding-context evidence (lane F's
+# EVIDENCE_PREFIX), which may hold a frozen toolchain file, so it alone has
+# this larger per-file cap (bq_worker_bundle_file_cap, ``result_file_cap``).
+EVIDENCE_PREFIX = "retirement-evidence-"
+EVIDENCE_FILE_CAP = 512 * 1024 * 1024
 # BQ_PATH_CAP; each archive entry has a 16-byte (type, length, size) header.
 PATH_CAP = 192
 ENTRY_HEADER_BYTES = 16
@@ -104,6 +112,13 @@ def u32(data, offset):
 
 def u64(data, offset):
     return int.from_bytes(data[offset:offset + 8], "little")
+
+
+def result_file_cap(name):
+    """The per-file cap of the result file at relative NAME, as the worker,
+    export and unpack apply it (bq_worker_bundle_file_cap)."""
+    evidence = name.startswith(EVIDENCE_PREFIX) and len(name) > len(EVIDENCE_PREFIX) and "/" not in name
+    return EVIDENCE_FILE_CAP if evidence else FILE_CAP
 
 
 def copy_ledger(archive_bytes, file_bytes):
@@ -319,6 +334,7 @@ def a1_export_ledger(model, limits, code_rows, prior_entries):
         "prior_closure_entries": prior_entries,
         "largest_file_bytes": largest,
         "per_file_cap": FILE_CAP,
+        "evidence_file_cap": EVIDENCE_FILE_CAP,
         "per_file_fits": per_file_fits,
         "owned_files": owned_files,
         "owned_bytes_upper_bound": owned_bytes,

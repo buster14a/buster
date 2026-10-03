@@ -56,14 +56,31 @@
  * bq_systemd_join); readback checks bq_worker_observed and
  * bq_worker_verify_cgroup. Durable identity: bq_worker_record_write,
  * bq_worker_instance_write. Results: bq_worker_result_open,
- * bq_worker_bundle_validate_recipe, bq_worker_result_evidence.
+ * bq_worker_bundle_validate_recipe, bq_worker_result_evidence; every bundle
+ * entry is capped by bq_worker_bundle_file_cap (retirement evidence has its
+ * own, larger cap, #1880) and hashed in fixed chunks.
  */
 #include "worker_linux.h"
 #include "phase_channel.h"
 #include "retirement_stage.h"
 #include "zen5_stage.h"
 
+/* Retirement evidence is a flat result-root name (lane F lays it out at its
+ * binding path only in the clean replay), so a nested path never qualifies. */
+u64 bq_worker_bundle_file_cap(bool retirement, char const* path)
+{
+    u64 prefix = sizeof(BQ_WORKER_RETIREMENT_EVIDENCE_PREFIX) - 1u;
+    bool evidence = retirement && path && !strncmp(path, BQ_WORKER_RETIREMENT_EVIDENCE_PREFIX, (size_t)prefix) &&
+                    path[prefix] && !strchr(path, '/');
+    u64 result = evidence ? BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP : BQ_WORKER_BUNDLE_FILE_CAP;
+    return result;
+}
+BUSTER_CT_CHECK(BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP >= BQ_WORKER_BUNDLE_FILE_CAP);
+BUSTER_CT_CHECK(BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP <= BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP);
+
 #ifdef __linux__
+/* A frozen toolchain file the evidence names fits one evidence entry. */
+BUSTER_CT_CHECK(BQ_RETIREMENT_TOOLCHAIN_FILE_CAP <= BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP);
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -2452,10 +2469,15 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_reserved(BqRecipeFiles const* recipe, 
     return reserved;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_retirement(BqRecipeFiles const* recipe)
+{
+    bool result = recipe && !strcmp(recipe->name, "native-retirement-performance-v1");
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u64 bq_worker_bundle_total_cap(BqRecipeFiles const* recipe)
 {
-    u64 result = recipe && !strcmp(recipe->name, "native-retirement-performance-v1") ?
-                 BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP : BQ_WORKER_BUNDLE_TOTAL_CAP;
+    u64 result = bq_worker_bundle_retirement(recipe) ? BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP : BQ_WORKER_BUNDLE_TOTAL_CAP;
     return result;
 }
 
@@ -2500,7 +2522,9 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_decimal(char const* text, u64 maximum,
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_entry_parse(char const* line, BqWorkerBundleEntry* entry)
+/* One index line; its size must fit the entry's own per-file cap
+ * (bq_worker_bundle_file_cap), which depends on its path. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_entry_parse(char const* line, bool retirement, BqWorkerBundleEntry* entry)
 {
     char const* first_space = line ? strchr(line, ' ') : NULL;
     char const* second_space = first_space ? strchr(first_space + 1, ' ') : NULL;
@@ -2518,8 +2542,8 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_entry_parse(char const* line, BqWorker
         memcpy(size_text, first_space + 1, (size_t)(second_space - first_space - 1));
         size_text[second_space - first_space - 1] = 0;
         ok = bq_worker_result_hex(digest, SHA256_HEX_CAPACITY - 1) &&
-             bq_worker_bundle_decimal(size_text, BQ_WORKER_BUNDLE_FILE_CAP, &size) &&
-             bq_worker_bundle_path_valid(second_space + 1);
+             bq_worker_bundle_path_valid(second_space + 1) &&
+             bq_worker_bundle_decimal(size_text, bq_worker_bundle_file_cap(retirement, second_space + 1), &size);
     }
     if (ok)
     {
@@ -2568,14 +2592,14 @@ BUSTER_GLOBAL_LOCAL int bq_worker_bundle_open_relative(int root, char const* pat
     return current;
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_file_digest(int root, char const* path, u64* size,
+/* Hash one result file of at most `cap` bytes in 64 KiB reads. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_file_digest(int root, char const* path, u64 cap, u64* size,
                                                        char output[SHA256_HEX_CAPACITY])
 {
     int descriptor = bq_worker_bundle_open_relative(root, path);
     struct stat before = {0}, after = {0};
     bool ok = descriptor >= 0 && fstat(descriptor, &before) == 0 && S_ISREG(before.st_mode) &&
-              before.st_nlink == 1 && before.st_size >= 0 &&
-              (u64)before.st_size <= BQ_WORKER_BUNDLE_FILE_CAP &&
+              before.st_nlink == 1 && before.st_size >= 0 && (u64)before.st_size <= cap &&
               (before.st_uid == 0 || before.st_uid == geteuid());
     Sha256 digest;
     sha256_init(&digest);
@@ -2587,7 +2611,7 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_file_digest(int root, char const* path
         if (count < 0 && errno == EINTR) continue;
         if (count < 0) ok = false;
         else if (!count) break;
-        else if (total > BQ_WORKER_BUNDLE_FILE_CAP - (u64)count) ok = false;
+        else if (total > cap - (u64)count) ok = false;
         else
         {
             sha256_add(&digest, bytes, (u64)count);
@@ -2653,6 +2677,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_recipe(int result_director
     bool valid = opened;
     u64 cursor = 0, declared_bytes = 0;
     u64 total_cap = bq_worker_bundle_total_cap(recipe);
+    bool retirement = bq_worker_bundle_retirement(recipe);
     u64 declared_entries = 0;
     char line[BQ_WORKER_BUNDLE_LINE_CAP];
     if (valid)
@@ -2670,7 +2695,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_recipe(int result_director
     for (u64 index = 0; valid && index < declared_entries; index += 1)
     {
         valid = bq_worker_bundle_next_line(bytes, size, &cursor, line) &&
-                bq_worker_bundle_entry_parse(line, entries + index) &&
+                bq_worker_bundle_entry_parse(line, retirement, entries + index) &&
                 (index == 0 || bq_worker_bundle_entry_compare(entries[index - 1].path, entries[index].path) < 0);
     }
     if (valid) valid = cursor == size;
@@ -2692,7 +2717,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_recipe(int result_director
         {
             u64 actual_size = 0;
             char actual_digest[SHA256_HEX_CAPACITY];
-            valid = bq_worker_bundle_file_digest(root, entries[index].path, &actual_size, actual_digest) &&
+            valid = bq_worker_bundle_file_digest(root, entries[index].path,
+                                                 bq_worker_bundle_file_cap(retirement, entries[index].path),
+                                                 &actual_size, actual_digest) &&
                     actual_size == entries[index].size && !memcmp(actual_digest, entries[index].digest, SHA256_HEX_CAPACITY) &&
                     measured_bytes <= total_cap - actual_size;
             if (valid) measured_bytes += actual_size;
@@ -2792,7 +2819,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_recipe(int result_director
                             if (!found) index += 1;
                         }
                         bool file_ok = found && !entries[index].seen &&
-                                       bq_worker_bundle_file_digest(walk_root, relative, &actual_size, actual_digest) &&
+                                       bq_worker_bundle_file_digest(walk_root, relative,
+                                                                    bq_worker_bundle_file_cap(retirement, relative),
+                                                                    &actual_size, actual_digest) &&
                                        actual_size == entries[index].size &&
                                        !memcmp(actual_digest, entries[index].digest, SHA256_HEX_CAPACITY);
                         valid = file_ok;
@@ -3313,11 +3342,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate_retirement(BqWorkerConfig 
     int length = error == BQ_OK &&
                  bq_worker_result_digest_line(bytes, "bundle-sha256=", bundle_digest) &&
                  bq_worker_bundle_file_digest(finalization->result_directory, TP_RETIREMENT_EXECUTION_RECEIPT_PATH,
-                                              &size, receipt) &&
-                 bq_worker_bundle_file_digest(finalization->result_directory, BQ_RETIREMENT_WORKER_SEALED_PATH, &size,
-                                              sealed) &&
-                 bq_worker_bundle_file_digest(finalization->result_directory, BQ_RETIREMENT_WORKER_BINDING_PATH, &size,
-                                              binding) ?
+                                              BQ_WORKER_BUNDLE_FILE_CAP, &size, receipt) &&
+                 bq_worker_bundle_file_digest(finalization->result_directory, BQ_RETIREMENT_WORKER_SEALED_PATH,
+                                              BQ_WORKER_BUNDLE_FILE_CAP, &size, sealed) &&
+                 bq_worker_bundle_file_digest(finalization->result_directory, BQ_RETIREMENT_WORKER_BINDING_PATH,
+                                              BQ_WORKER_BUNDLE_FILE_CAP, &size, binding) ?
                  bq_retirement_worker_manifest_format(expected, sizeof(expected), job->id, job->token,
                      string_from_pointer(workspace_text), finalization->result_root,
                      finalization->retirement_ready_sha256, finalization->retirement_authority_sha256, receipt, sealed,
@@ -3763,6 +3792,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalizatio
     u32 entry_count = 0;
     u32 object_count = 0;
     u64 total = 0;
+    bool retirement = ok && bq_worker_bundle_retirement(&finalization->recipe);
     if (ok)
     {
         memset(frames, 0, sizeof(*frames) * BQ_WORKER_BUNDLE_DEPTH_CAP);
@@ -3841,7 +3871,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalizatio
                 ok = entry_count < BQ_WORKER_BUNDLE_ENTRY_CAP && child_info.st_nlink == 1 &&
                      (child_info.st_uid == 0 || child_info.st_uid == geteuid()) &&
                      (child_info.st_mode & 022) == 0 && child_info.st_size >= 0 &&
-                     (u64)child_info.st_size <= BQ_WORKER_BUNDLE_FILE_CAP &&
+                     (u64)child_info.st_size <= bq_worker_bundle_file_cap(retirement, relative) &&
                      total <= bq_worker_bundle_total_cap(&finalization->recipe) - (u64)child_info.st_size;
                 if (ok)
                 {
@@ -3859,7 +3889,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalizatio
                     record->size = (u64)child_info.st_size;
                     record->seen = false;
                     ok = bq_worker_bundle_file_digest(finalization->result_directory, relative,
-                                                      NULL, record->digest);
+                                                      bq_worker_bundle_file_cap(retirement, relative), NULL,
+                                                      record->digest);
                     if (ok)
                     {
                         total += record->size;

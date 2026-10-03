@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -296,6 +297,14 @@ class ExportReplayTest(unittest.TestCase):
         self.assertEqual(entries, replay.ENTRY_CAP)
         self.assertEqual(path, replay.PATH_CAP)
         self.assertEqual(c_define(root, worker, "BQ_WORKER_BUNDLE_FILE_CAP"), replay.FILE_CAP)
+        # (#1880) Retirement evidence's own cap covers a frozen toolchain file.
+        self.assertEqual(c_define(root, worker, "BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP"), replay.EVIDENCE_FILE_CAP)
+        self.assertLessEqual(c_define(root, "tools/bench_service/retirement_toolchain.c",
+                                      "BQ_RETIREMENT_TOOLCHAIN_FILE_CAP"), replay.EVIDENCE_FILE_CAP)
+        prefix = re.search(r'^#define BQ_WORKER_RETIREMENT_EVIDENCE_PREFIX "([^"]+)"$',
+                           (root / worker).read_text(encoding="utf-8"), re.MULTILINE)
+        self.assertEqual(prefix and prefix.group(1), replay.EVIDENCE_PREFIX)
+        self.assertEqual(lane_f.EVIDENCE_PREFIX, replay.EVIDENCE_PREFIX)
         payload = c_define(root, worker, "BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP")
         self.assertEqual(payload, replay.RESULT_FILE_CAP)
         self.assertEqual(c_define(root, worker, "BQ_WORKER_BUNDLE_CAP"), replay.BUNDLE_INDEX_CAP)
@@ -311,6 +320,17 @@ class ExportReplayTest(unittest.TestCase):
         self.assertEqual(payload + replay.BUNDLE_INDEX_CAP + replay.EXPORT_CONTROL_RESERVE +
                          entries * (replay.ENTRY_HEADER_BYTES + path), replay.ARCHIVE_CAP)
         self.assertEqual(c_define(root, "tools/bench_service/export.c", "BQ_EXPORT_RECEIPT_CAP"), replay.RECEIPT_BYTES)
+
+    def test_result_file_cap_matches_the_worker_rule(self):
+        """(#1880) bq_worker_bundle_file_cap for the retirement recipe: only a
+        flat evidence name with a non-empty rest has the evidence cap."""
+        evidence = replay.EVIDENCE_PREFIX + "toolchain--bin--clang"
+        self.assertEqual(replay.result_file_cap(evidence), replay.EVIDENCE_FILE_CAP)
+        self.assertGreater(replay.EVIDENCE_FILE_CAP, replay.FILE_CAP)
+        for name in (replay.EVIDENCE_PREFIX, "nested/" + evidence, evidence + "/child",
+                     "retirement-sealed-result.json", "retirement-evidence"):
+            with self.subTest(name=name):
+                self.assertEqual(replay.result_file_cap(name), replay.FILE_CAP)
 
     def test_service_job_label_matches_the_c_format(self):
         root = Path(replay.__file__).resolve().parents[2]
@@ -396,6 +416,9 @@ class ExportReplayTest(unittest.TestCase):
                 self.assertEqual(ledger["largest_file_bytes"]["metrics_shard"], replay.FILE_CAP)
                 self.assertLessEqual(ledger["largest_file_bytes"]["untimed_record_file"], replay.FILE_CAP)
                 self.assertEqual(ledger["untimed_record_files"], 1)
+                # Only binding-context evidence has the larger cap (#1880).
+                self.assertEqual((ledger["per_file_cap"], ledger["evidence_file_cap"]),
+                                 (replay.FILE_CAP, replay.EVIDENCE_FILE_CAP))
                 # Every composer output is counted: manifests, code records,
                 # the adapter input's series shards and manifest (#1880),
                 # adapter output, bundle, receipt, retained manifest and seal.
@@ -558,6 +581,20 @@ HARNESS = ("4" * 40, "5" * 40)
 REPOSITORY = Path(replay.__file__).resolve().parents[2]
 
 
+def sparse_sha256(path):
+    """SHA-256 of PATH read in 1 MiB chunks."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def peak_rss_bytes():
+    """This process's peak resident set (Linux reports KiB)."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+
+
 def stub_validator_run(*_arguments, **_keywords):
     """Stands in for the validator subprocess only where a test checks what
     lane F lays out before it; the pin and closure tests run the real one."""
@@ -575,16 +612,25 @@ class LaneFWriterTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.result = self.lane_f_result()
 
-    def lane_f_result(self):
+    def lane_f_result(self, name="composed", sizes=None):
         """An unpacked composed result: the pending record, a sealed result
         whose seal enumerates its closure, the result bundle and one
-        binding-named file published flat (retirement-evidence-*)."""
-        result = self.root / "composed"
+        binding-named file published flat (retirement-evidence-*). SIZES maps
+        a closure path to a sparse file of that many bytes ending with the
+        path's usual bytes; no buffer of that size is ever built."""
+        result = self.root / name
         result.mkdir(mode=0o700)
 
         def put(path, data, stored=None):
-            (result / (stored or path)).write_bytes(data)
-            return {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            target = result / (stored or path)
+            size = (sizes or {}).get(path)
+            if size is None:
+                target.write_bytes(data)
+                return {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            with open(target, "wb") as stream:
+                stream.seek(size - len(data))
+                stream.write(data)
+            return {"path": path, "bytes": size, "sha256": sparse_sha256(target)}
 
         closure = {"workflow.adapter_input": put("retirement-series.manifest.json", b'{"series":1}\n'),
                    "workflow.adapter_result": put("retirement-statistics.json", b'{"members":[]}\n'),
@@ -670,6 +716,54 @@ class LaneFWriterTest(unittest.TestCase):
         # is unreachable through bind: the download must equal the archive
         # re-derived from sealed paths that relative_binding_path and
         # _artifact already accept, so no test drives it from here.
+
+    def test_evidence_entry_up_to_its_own_cap_is_sealed_copied_and_laid_out(self):
+        """(#1880) A flat evidence entry at EVIDENCE_FILE_CAP (above the 64 MiB
+        cap) passes the sealed-closure check, is copied into the clean replay
+        and moved to its binding path, all in fixed chunks: the peak resident
+        set grows by far less than the entry."""
+        cap = replay.EVIDENCE_FILE_CAP
+        result = self.lane_f_result("at-cap", {"docs/contract.md": cap})
+        peak = peak_rss_bytes()
+        state = lane_f.composed_state(result)
+        self.assertEqual(state["sources"], {"docs/contract.md": "retirement-evidence-docs--contract.md"})
+        self.assertIn(cap, [item["bytes"] for item in state["closure"] if item["path"] == "docs/contract.md"])
+        clean = self.root / "at-cap-clean"
+        lane_f.copy_result(result, clean)
+        entries, _digest = lane_f.evidence_layout(clean, self.composed)
+        lane_f.lay_out_evidence(clean, entries)
+        contract = clean / "docs" / "contract.md"
+        self.assertEqual(contract.stat().st_size, cap)
+        self.assertEqual(sparse_sha256(contract), self.composed["contract"]["source"]["sha256"])
+        self.assertLess(peak_rss_bytes() - peak, replay.FILE_CAP)
+
+    def test_evidence_over_its_cap_and_other_files_over_the_file_cap_are_refused(self):
+        """(#1880) One byte over the evidence cap, or a non-evidence file one
+        byte over the 64 MiB cap, is refused by the sealed-closure check and
+        by the clean copy before its target exists."""
+        cases = (("docs/contract.md", replay.EVIDENCE_FILE_CAP + 1, "retirement-evidence-docs--contract.md"),
+                 ("retirement-untimed-batches.jsonl", replay.FILE_CAP + 1, "retirement-untimed-batches.jsonl"))
+        for index, (path, size, stored) in enumerate(cases):
+            with self.subTest(path=path):
+                result = self.lane_f_result(f"over-{index}", {path: size})
+                with self.assertRaisesRegex(ValueError, f"{re.escape(stored)} exceeds its per-file cap"):
+                    lane_f.composed_state(result)
+                clean = self.root / f"over-{index}-clean"
+                with self.assertRaisesRegex(ValueError, f"exceeds its {size - 1}-byte bound"):
+                    lane_f.copy_result(result, clean)
+                self.assertFalse((clean / stored).exists())
+
+    def test_changed_byte_of_a_large_evidence_entry_fails_its_digest(self):
+        """(#1880) The larger cap never skips a byte: one changed byte at the
+        end of an evidence entry at the cap fails the sealed closure."""
+        cap = replay.EVIDENCE_FILE_CAP
+        result = self.lane_f_result("changed", {"docs/contract.md": cap})
+        with open(result / "retirement-evidence-docs--contract.md", "r+b") as stream:
+            stream.seek(cap - 1)
+            stream.write(b"X")
+        self.assertEqual((result / "retirement-evidence-docs--contract.md").stat().st_size, cap)
+        with self.assertRaisesRegex(ValueError, "digest does not match evidence"):
+            lane_f.composed_state(result)
 
     def test_writer_is_deterministic(self):
         self.bind("first")

@@ -59,7 +59,9 @@
  * binding path (TpRetirementComposeRequest.closure_stored). The
  * store plan reserves their exact count and bytes before timing
  * (bq_retirement_worker_evidence_measure); a file whose bytes differ from
- * the context's descriptor is refused, never substituted.
+ * the context's descriptor is refused, never substituted. An entry may reach
+ * the retirement evidence cap (bq_worker_bundle_file_cap, #1880: a frozen
+ * toolchain file), so every source is streamed and hashed in fixed chunks.
  *
  * Map: BqRetirementWorkerBindingContext, bq_retirement_worker_json_node,
  * bq_retirement_worker_json_text, bq_retirement_worker_json_integer,
@@ -69,6 +71,7 @@
  * (also the coordinator's re-rendering), bq_retirement_worker_binding_write,
  * BqRetirementWorkerEvidenceSite, bq_retirement_worker_evidence_map, bq_retirement_worker_evidence_list,
  * bq_retirement_worker_evidence_measure, bq_retirement_worker_evidence_open,
+ * bq_retirement_worker_evidence_stream, bq_retirement_worker_evidence_write,
  * bq_retirement_worker_evidence_publish, BqRetirementWorkerCompose,
  * bq_retirement_worker_compose_request,
  * bq_retirement_worker_authority_publish, bq_retirement_worker_chain_carried,
@@ -658,7 +661,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_map(char const* path, u32
 
 /* One {path, bytes, sha256} descriptor (other members, such as a support
  * file's name, are the validator's): a binding path with a result-root name
- * (bq_retirement_worker_evidence_map); 1 to BQ_WORKER_BUNDLE_FILE_CAP bytes,
+ * (bq_retirement_worker_evidence_map); 1 byte to its result-root name's
+ * per-file cap (bq_worker_bundle_file_cap: the retirement evidence cap, #1880),
  * without a leading zero; a lowercase SHA-256. Appended unless its path or
  * its result-root name is already listed, which refuses. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_add(TpComposeJson const* json, unsigned node,
@@ -686,7 +690,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_add(TpComposeJson const* 
         ok = c >= '0' && c <= '9';
         size = size * 10u + (u64)(c - '0');
     }
-    ok = ok && size && size <= BQ_WORKER_BUNDLE_FILE_CAP;
+    ok = ok && size && size <= bq_worker_bundle_file_cap(true, stored);
     if (ok)
     {
         *item = (BqRetirementWorkerEvidence){.bytes = size, .held = site->held};
@@ -774,88 +778,90 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_worker_evidence_open(int installed)
     return directory;
 }
 
-/* A held binary's bytes (its descriptor, read without moving its offset):
- * a regular file of exactly `size` bytes. *output receives malloc'd memory. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_evidence_held(int descriptor, u64 size, u8** output)
+/* Stream one listed evidence file from its source in 64 KiB reads by
+ * offset, hashing every byte and, when `output` >= 0, writing each chunk to
+ * it: the held descriptor (baseline, candidate) or the installed file (no
+ * link, regular, single-link, service-owned, not writable). The source must
+ * be a regular file of exactly the listed size, unchanged from the first
+ * read to the last, with exactly the listed SHA-256. BQ_OK; else
+ * BQ_SOURCE_MISMATCH (held) or BQ_RECIPE_MISMATCH (installed); BQ_IO for a
+ * failed write. No buffer grows with the file (#1880). */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_stream(BqRetirementWorkerEvidence const* item, int evidence,
+    int const held[2], int output)
 {
-    struct stat info = {0};
-    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISREG(info.st_mode) && (u64)info.st_size == size;
-    u8* bytes = ok ? malloc((size_t)size) : NULL;
-    ok = ok && bytes;
-    u64 offset = 0;
-    while (ok && offset < size)
+    int file = item->held ? (item->held <= 2u ? held[item->held - 1u] : -1) :
+               openat(evidence, item->stored, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    struct stat before = {0}, after = {0};
+    bool ok = file >= 0 && fstat(file, &before) == 0 && S_ISREG(before.st_mode) && before.st_size >= 0 &&
+              (u64)before.st_size == item->bytes &&
+              (item->held || (before.st_nlink == 1 && (before.st_uid == 0 || before.st_uid == geteuid()) &&
+                              !(before.st_mode & 0222)));
+    bool written = true;
+    Sha256 hash;
+    sha256_init(&hash);
+    u8 buffer[64u * 1024u];
+    u64 done = 0;
+    while (ok && written && done < item->bytes)
     {
-        ssize_t count = pread(descriptor, bytes + offset, (size_t)(size - offset), (off_t)offset);
+        size_t wanted = item->bytes - done < sizeof(buffer) ? (size_t)(item->bytes - done) : sizeof(buffer);
+        ssize_t count = pread(file, buffer, wanted, (off_t)done);
         if (count < 0 && errno == EINTR) continue;
         ok = count > 0;
-        if (ok) offset += (u64)count;
+        if (ok)
+        {
+            sha256_add(&hash, buffer, (u64)count);
+            written = output < 0 || bq_write_all(output, buffer, (u32)count);
+            done += (u64)count;
+        }
     }
-    if (!ok)
-    {
-        free(bytes);
-        bytes = NULL;
-    }
-    *output = bytes;
-    return ok;
+    char digest[SHA256_HEX_CAPACITY] = {0};
+    sha256_finish_hex(&hash, (char8*)digest);
+    ok = ok && written && fstat(file, &after) == 0 && before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+         before.st_size == after.st_size && before.st_mode == after.st_mode && before.st_uid == after.st_uid &&
+         before.st_nlink == after.st_nlink && before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+         before.st_mtim.tv_nsec == after.st_mtim.tv_nsec && before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
+         before.st_ctim.tv_nsec == after.st_ctim.tv_nsec && !strcmp(digest, item->sha256);
+    if (!item->held && file >= 0 && close(file) != 0) ok = false;
+    BqError result = !written ? BQ_IO : ok ? BQ_OK : item->held ? BQ_SOURCE_MISMATCH : BQ_RECIPE_MISMATCH;
+    return result;
 }
 
-/* One listed evidence file's bytes, from its held descriptor or the
- * installed evidence directory, when they are exactly the listed size and
- * SHA-256: BQ_OK with *output malloc'd, else BQ_SOURCE_MISMATCH (held) or
- * BQ_RECIPE_MISMATCH (installed) and nothing kept. */
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_read(BqRetirementWorkerEvidence const* item, int evidence,
-    int const held[2], u8** output)
+/* One listed evidence file as a new read-only result-root file under its
+ * listed name, streamed from its source (bq_retirement_worker_evidence_stream).
+ * Never replaces an entry; a file it created and could not complete, or whose
+ * source changed while it was copied, is removed again. */
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_write(int directory, BqRetirementWorkerEvidence const* item,
+    int evidence, int const held[2])
 {
-    char digest[SHA256_HEX_CAPACITY] = {0};
-    u8* bytes = NULL;
-    u32 length = 0;
-    bool read = item->held ? bq_retirement_worker_evidence_held(held[item->held - 1u], item->bytes, &bytes) :
-                bq_retirement_reference_read_installed(evidence, item->stored, (u32)BQ_WORKER_BUNDLE_FILE_CAP, &bytes,
-                                                       &length, digest, NULL);
-    if (read && item->held)
-    {
-        length = (u32)item->bytes;
-        bq_digest((char const*)bytes, length, (char8*)digest);
-    }
-    BqError result = read && length == item->bytes && !strcmp(digest, item->sha256) ? BQ_OK :
-                     item->held ? BQ_SOURCE_MISMATCH : BQ_RECIPE_MISMATCH;
-    if (result != BQ_OK)
-    {
-        free(bytes);
-        bytes = NULL;
-    }
-    *output = bytes;
+    int file = openat(directory, item->stored, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    BqError result = file >= 0 ? bq_retirement_worker_evidence_stream(item, evidence, held, file) : BQ_IO;
+    if (result == BQ_OK && !(fchmod(file, 0400) == 0 && fsync(file) == 0)) result = BQ_IO;
+    if (file >= 0 && close(file) != 0 && result == BQ_OK) result = BQ_IO;
+    if (result == BQ_OK && fsync(directory) != 0) result = BQ_IO;
+    if (file >= 0 && result != BQ_OK) unlinkat(directory, item->stored, 0);
     return result;
 }
 
 /* Each listed evidence file as a new, read-only result-root file under its
  * listed name: the subjects' binaries from the held descriptors (baseline,
  * candidate), every other file from the installed evidence directory. Every
- * source is read and verified first (bq_retirement_worker_evidence_read),
- * then each is read, verified again and written, so a refused source leaves
- * no evidence file: a changed installed file is BQ_RECIPE_MISMATCH, a changed
- * held binary BQ_SOURCE_MISMATCH, a write failure BQ_IO; on any refusal of
- * the second pass the files it wrote are unlinked again. */
+ * source is streamed and verified first (bq_retirement_worker_evidence_stream),
+ * then each is streamed, verified again and written in the same chunks
+ * (bq_retirement_worker_evidence_write), so memory stays bounded however large
+ * an entry is and a refused source leaves no evidence file: a changed
+ * installed file is BQ_RECIPE_MISMATCH, a changed held binary
+ * BQ_SOURCE_MISMATCH, a write failure BQ_IO; on any refusal of the second pass
+ * the files it wrote are unlinked again. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_worker_evidence_publish(BqRetirementWorkerEvidenceList const* list,
     int evidence, int const held[2], int result_root)
 {
     BqError result = list && held && evidence >= 0 && result_root >= 0 ? BQ_OK : BQ_IO;
     for (u32 index = 0; result == BQ_OK && index < list->count; index += 1)
-    {
-        u8* bytes = NULL;
-        result = bq_retirement_worker_evidence_read(&list->items[index], evidence, held, &bytes);
-        free(bytes);
-    }
+        result = bq_retirement_worker_evidence_stream(&list->items[index], evidence, held, -1);
     u32 written = 0;
     for (u32 index = 0; result == BQ_OK && index < list->count; index += 1)
     {
-        BqRetirementWorkerEvidence const* item = &list->items[index];
-        u8* bytes = NULL;
-        result = bq_retirement_worker_evidence_read(item, evidence, held, &bytes);
-        if (result == BQ_OK &&
-            !bq_retirement_worker_file_write(result_root, item->stored, (char const*)bytes, item->bytes, NULL))
-            result = BQ_IO;
-        free(bytes);
+        result = bq_retirement_worker_evidence_write(result_root, &list->items[index], evidence, held);
         written += result == BQ_OK;
     }
     for (u32 index = 0; result != BQ_OK && list && result_root >= 0 && index < written; index += 1)
@@ -1043,7 +1049,9 @@ typedef struct BqRetirementWorkerBundleEntry
 } BqRetirementWorkerBundleEntry;
 
 /* A regular, single-link, service-owned file's size and SHA-256, read from
- * the same inode it was listed as. */
+ * the same inode it was listed as, in 64 KiB reads: at most its own per-file
+ * cap (bq_worker_bundle_file_cap; a retirement evidence entry has the larger
+ * evidence cap, #1880). */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_bundle_hash(int directory, char const* name, struct stat const* listed,
     BqRetirementWorkerBundleEntry* entry)
 {
@@ -1051,7 +1059,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_worker_bundle_hash(int directory, char co
     struct stat info = {0};
     bool ok = file >= 0 && fstat(file, &info) == 0 && info.st_dev == listed->st_dev && info.st_ino == listed->st_ino &&
               S_ISREG(info.st_mode) && info.st_nlink == 1 && info.st_uid == geteuid() && !(info.st_mode & 022) &&
-              (u64)info.st_size <= BQ_WORKER_BUNDLE_FILE_CAP;
+              (u64)info.st_size <= bq_worker_bundle_file_cap(true, name);
     Sha256 hash;
     sha256_init(&hash);
     u8 buffer[65536];

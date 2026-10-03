@@ -28,6 +28,17 @@
  * them too. */
 #define BQ_WORKER_RETIREMENT_PHASE_RECEIPTS 6u
 #define BQ_WORKER_BUNDLE_FILE_CAP (64ull * 1024 * 1024)
+/* Retirement evidence (#1880). A retirement result-root file named
+ * BQ_WORKER_RETIREMENT_EVIDENCE_PREFIX plus a non-empty rest, with no "/", is
+ * one of the evidence files the binding context names (#1998's
+ * BQ_RETIREMENT_WORKER_EVIDENCE_PREFIX, lane F's EVIDENCE_PREFIX). They
+ * include the frozen toolchain's files, so only they have this per-file cap,
+ * which covers the toolchain's own (BQ_RETIREMENT_TOOLCHAIN_FILE_CAP). Every
+ * other file, and every file of another recipe, keeps
+ * BQ_WORKER_BUNDLE_FILE_CAP (bq_worker_bundle_file_cap). Each reader hashes
+ * and copies such a file in fixed chunks, never whole. */
+#define BQ_WORKER_RETIREMENT_EVIDENCE_PREFIX "retirement-evidence-"
+#define BQ_WORKER_RETIREMENT_EVIDENCE_FILE_CAP (512ull * 1024 * 1024)
 #define BQ_WORKER_BUNDLE_TOTAL_CAP (512ull * 1024 * 1024)
 /* The fixed retirement population needs millions of paired records. This is
  * a separate bounded ceiling; the installed smoke recipe keeps its limit. */
@@ -167,6 +178,10 @@ typedef struct BqWorkerConfig
     String8 retirement_budget;
 } BqWorkerConfig;
 
+/* The per-file cap of the result-root file at relative `path`: the evidence
+ * cap for a retirement evidence entry when `retirement`, else
+ * BQ_WORKER_BUNDLE_FILE_CAP. */
+BUSTER_F_DECL u64 bq_worker_bundle_file_cap(bool retirement, char const* path);
 BUSTER_F_DECL BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id);
 BUSTER_F_DECL BqError bq_worker_result_binding_validate(BqJob const* job);
 BUSTER_F_DECL BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token,
