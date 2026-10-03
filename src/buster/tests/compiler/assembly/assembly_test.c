@@ -2636,6 +2636,81 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbol_binding(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_bare_sections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    static const struct
+    {
+        String8 name;
+        AssemblyUnitSectionKind kind;
+    } rows[] = {
+        {S8_INITIALIZER(".text"), ASSEMBLY_UNIT_SECTION_TEXT},
+        {S8_INITIALIZER(".text.entry"), ASSEMBLY_UNIT_SECTION_TEXT},
+        {S8_INITIALIZER(".init"), ASSEMBLY_UNIT_SECTION_TEXT},
+        {S8_INITIALIZER(".fini"), ASSEMBLY_UNIT_SECTION_TEXT},
+        {S8_INITIALIZER(".rodata"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
+        {S8_INITIALIZER(".rodata.str1.1"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
+        {S8_INITIALIZER(".data"), ASSEMBLY_UNIT_SECTION_DATA},
+        {S8_INITIALIZER(".data.table"), ASSEMBLY_UNIT_SECTION_DATA},
+        {S8_INITIALIZER(".bss"), ASSEMBLY_UNIT_SECTION_ZERO},
+        {S8_INITIALIZER(".bss.value"), ASSEMBLY_UNIT_SECTION_ZERO},
+        {S8_INITIALIZER(".debug_info"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO},
+        {S8_INITIALIZER(".debug_abbrev"), ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV},
+        {S8_INITIALIZER(".debug_line"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE},
+        {S8_INITIALIZER(".debug_str"), ASSEMBLY_UNIT_SECTION_DEBUG_STR},
+        {S8_INITIALIZER(".debug_loc"), ASSEMBLY_UNIT_SECTION_DEBUG_LOC},
+        {S8_INITIALIZER(".debug_ranges"), ASSEMBLY_UNIT_SECTION_DEBUG_RANGES},
+        {S8_INITIALIZER(".debug_addr"), ASSEMBLY_UNIT_SECTION_DEBUG_ADDR},
+        {S8_INITIALIZER(".debug_str_offsets"), ASSEMBLY_UNIT_SECTION_DEBUG_STR_OFFSETS},
+        {S8_INITIALIZER(".debug_line_str"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE_STR},
+        {S8_INITIALIZER(".debug_rnglists"), ASSEMBLY_UNIT_SECTION_DEBUG_RNGLISTS},
+        {S8_INITIALIZER(".debug_loclists"), ASSEMBLY_UNIT_SECTION_DEBUG_LOCLISTS},
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+        {
+            String8 source = string_format(arguments->arena, S8(".section {S8}\n.zero 1\n"), rows[row].name);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count == 0 && unit.section_count == 1);
+            if (!unit.diagnostic_count && unit.section_count == 1)
+            {
+                AssemblyUnitSection section = unit.sections[0];
+                BUSTER_TEST(arguments, string_equal(section.name, rows[row].name) && section.kind == rows[row].kind &&
+                                       (section.kind == ASSEMBLY_UNIT_SECTION_ZERO ? section.zero_size == 1 : section.data.length == 1));
+            }
+        }
+        String8 rejected[] = {
+            S8(".section .textual_rodata\n"), S8(".section .initdata\n"), S8(".section .datafile\n"),
+            S8(".section .rodatafile\n"), S8(".section .bssfile\n"), S8(".section .init_array\n"),
+            S8(".section .fini_array\n"), S8(".section .debug_info_extra\n"), S8(".section .mysec\n"),
+        };
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, rejected[row], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count == 1 && unit.section_count == 0);
+            if (unit.diagnostic_count == 1)
+            {
+                BUSTER_TEST(arguments, unit.diagnostics[0].line == 1 &&
+                                       string_first_sequence(unit.diagnostics[0].message, S8(".section")) < unit.diagnostics[0].message.length);
+            }
+        }
+        AssemblyUnitResult explicit_flags = assembly_unit_encode(arguments->arena,
+            S8(".section .textual_rodata,\"a\",@progbits\n.byte 42\n"), (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, explicit_flags.diagnostic_count == 0 && explicit_flags.section_count == 1);
+        if (!explicit_flags.diagnostic_count && explicit_flags.section_count == 1)
+        {
+            BUSTER_TEST(arguments, explicit_flags.sections[0].kind == ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA &&
+                                   explicit_flags.sections[0].data.length == 1 && explicit_flags.sections[0].data.pointer[0] == 42);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3353,6 +3428,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_quoted_instruction_symbols);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_bare_sections);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
