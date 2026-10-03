@@ -13,4 +13,6 @@ BUSTER_F_DECL ObjectArtifact object_test_write_elf64_reference(Arena* arena, Obj
 // at SHN_LORESERVE -- that no test could allocate. `size` is the planned file
 // size, or zero with the error the writer would have returned.
 BUSTER_F_DECL ObjectError object_test_elf64_plan(Arena* arena, ObjectFile* object, u64* size);
+// Append-writer reservation checks only; never reads payload/name bytes.
+BUSTER_F_DECL ObjectError object_test_32_capacity(ObjectFile* object, ObjectFormat format, u64* capacity);
 #endif
