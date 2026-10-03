@@ -299,3 +299,30 @@ allocators and both frontend SSA forms on eligible hosts. Semantic checks
 for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
+
+## Calls through returned function pointers
+
+A function-pointer result is a call target, including when its producing call
+has an empty argument list: `get()(3)`, `get_free()(p)` and `l2()(1)(4)`
+are ordinary postfix call chains. Empty argument lists on the producing call
+must retain the same dependency as nonempty lists. A scalar result cannot be
+called, and a returned function pointer still follows its own parameter list.
+
+`c_test_call_result_callees` records this contract with explicit `(void)`
+factory declarations, independently of dialect-specific empty prototype
+policy. Two programs cover statement and value uses, typedef callbacks,
+pointer arguments, grouped and dereferenced callees, empty middle/final calls,
+nonempty-list neighbors and lazy operands. Named canonical functions retain
+their exact call counts in both frontend forms across six target layouts and
+GNU17/GNU23. Runtime checks use separate factory, callback and argument
+counters in all four native allocator modes; an untaken lazy operand calls
+neither factory nor callback. Invalid scalar callees and missing/extra
+callback arguments require diagnostics and an uncertified result.
+
+Call discovery accepts an empty argument-list group only when the existing
+active-call stack links its exact opening and closing delimiters to the
+producing call. Abstract pointer and type-name groups retain their exclusions.
+Existing prepared-call ordering emits the producing call once and consumes
+its returned pointer for the subsequent call; no extra source walk is added.
+Semantic constraints and indirect lowering share a pointer-to-function
+message for a nonfunction computed target before refusing the call.

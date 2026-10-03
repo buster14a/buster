@@ -23816,7 +23816,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 }
                 else if (call && value.kind != C_TYPE_FUNCTION)
                 {
-                    String8 message = S8("could not prepare C calls");
+                    String8 message = S8("a call target must have pointer-to-function type");
                     u32 use = c_parse_identifier_use_index(result, operand_start);
                     if (operand_start + 1 == index && use != C_ID_UNDERLYING_INVALID)
                     {
