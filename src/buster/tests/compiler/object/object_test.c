@@ -2434,15 +2434,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArgume
                     // Isolate W2's relocation semantics. The existing W3 private
                     // section name is normalized only in this oracle's input;
                     // no TLS-index sequence or runtime directory is involved.
+                    // Empty .pdata is also renamed: LLD records its chunk for
+                    // sorting, then removes its zero-size output section and
+                    // dereferences that missing section when sorting the chunk.
                     u16 section_count = 0;
                     memcpy(&section_count, artifact.bytes.pointer + 2, 2);
                     for (u32 section = 0; section < section_count; section += 1)
                     {
                         u64 header = 20 + (u64)section * 40;
-                        if (header <= artifact.bytes.length && 40 <= artifact.bytes.length - header &&
-                            memcmp(artifact.bytes.pointer + header, ".tdata", 6) == 0)
+                        if (header <= artifact.bytes.length && 40 <= artifact.bytes.length - header)
                         {
-                            object_test_coff_write_name(artifact.bytes.pointer, header, S8(".tls$AAA"));
+                            if (memcmp(artifact.bytes.pointer + header, ".tdata", 6) == 0)
+                            {
+                                object_test_coff_write_name(artifact.bytes.pointer, header, S8(".tls$AAA"));
+                            }
+                            u32 raw_size = 0;
+                            memcpy(&raw_size, artifact.bytes.pointer + header + 16, 4);
+                            if (raw_size == 0 && memcmp(artifact.bytes.pointer + header, ".pdata", 6) == 0)
+                            {
+                                object_test_coff_write_name(artifact.bytes.pointer, header, S8(".empty"));
+                            }
                         }
                     }
                     String8 input = buster_test_temporary_path(arguments->arena, S8("arm64-tls-external"), S8(".obj"));
