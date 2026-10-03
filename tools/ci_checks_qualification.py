@@ -60,6 +60,13 @@ The selected Go, iOS/analyzer/UEFI Ninja and Android adb observations additional
 need selected_tools={tool:REF} receipts from ci_checks_tools.py. Their source,
 run/attempt and workflow job key are verified; only hash/version enter equality.
 Legacy logs without these observations remain pending.
+The iOS role additionally requires simulator_selection=REF for the actual
+selected-record receipt from ci_ios_simulator.py. Source/run/attempt/mobile-job
+identity and observed runtime/device type are required. The initial UUID joins
+selection provenance to the launcher log; only runtime/device type enter
+equality. The one CI batch selects once for both configurations. Collection
+must reject retention failures or repeated selection and retain replacement
+UUIDs from the separate recovery log; explicit-UUID overrides remain unknown.
 
 Native phase journals report CPU time and peak RSS as unknown. This consumer
 can meet or reject timing/census thresholds, but cannot accept either issue's
@@ -271,6 +278,28 @@ def selected_tool(root, reference, run, job, tool):
     return comparable
 
 
+
+def simulator_selection(root, reference, run):
+    """Keep the selected UUID as provenance, comparing runtime/device only."""
+    value = record(root, reference)
+    require(isinstance(value, dict) and value.get("schema") == "buster-ci-ios-simulator-selection-v1" and
+            value.get("status") == "observed" and value.get("invalid_bindings") == [],
+            "missing/unknown selected iOS simulator observation")
+    expected = {"repository": "buster14a/buster", "source_revision": run["head_sha"], "run_id": str(run["id"]),
+                "run_attempt": str(run["run_attempt"]), "job": "mobile"}
+    require(all(value.get(key) == item for key, item in expected.items()), "iOS simulator source/run/attempt/job mismatch")
+    selection = value.get("selection", {})
+    require(isinstance(selection, dict) and set(selection) == {"kind", "udid", "runtime", "device_type"} and
+            selection.get("kind") in ("name-reuse", "created"), "iOS simulator was not actually discovered/created")
+    patterns = {"udid": r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}",
+                "runtime": r"com\.apple\.CoreSimulator\.SimRuntime\.[A-Za-z0-9-]+",
+                "device_type": r"com\.apple\.CoreSimulator\.SimDeviceType\.[A-Za-z0-9-]+"}
+    require(all(isinstance(selection.get(key), str) and len(selection[key].encode("utf-8")) <= 512 and
+                re.fullmatch(pattern, selection[key]) for key, pattern in patterns.items()),
+            "missing actual iOS simulator runtime/device/UUID identity")
+    return {key: selection[key] for key in ("runtime", "device_type")}
+
+
 def condition_inputs(root, entry, run, job):
     name = role(job["name"])
     tools, caches = condition_keys(name)
@@ -282,6 +311,9 @@ def condition_inputs(root, entry, run, job):
         require(entry["caches"]["explicit_actions_cache"] == "not-used", "unsupported explicit Actions-cache condition")
     if "BUSTER_CI_ZIG_CACHE_HIT" in caches:
         require(entry["caches"]["BUSTER_CI_ZIG_CACHE_HIT"] in ("true", "false"), "invalid observed Zig cache condition")
+    if name == "iOS AArch64":
+        require(entry["toolchains"]["ios_simulator"] == simulator_selection(root, entry.get("simulator_selection"), run),
+                "selected iOS simulator differs from condition map")
     if name == "Android x86-64":
         states = entry["caches"]["android_sdk_package_state_before"]
         require(isinstance(entry["toolchains"]["android_system_image"], str), "missing Android requested system-image identity")

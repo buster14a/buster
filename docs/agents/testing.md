@@ -349,6 +349,17 @@
   retain real selected Go/Ninja/adb receipts. No compiler build or measurement
   dispatch is needed to run these controls. Missing historical observations
   remain pending; see [checks qualification](../ci-combination-shards.md#further-checks-partition-qualification-2120).
+- The same opt-in retains `buster-ci/ios-simulator-selection.json` from the
+  selected discovery record, or the arguments and UUID of an actual creation.
+  `tools/ci_ios_simulator.py` adds no simulator query and preserves the launcher's
+  first available name match. Explicit UUIDs and missing observed fields remain
+  unknown. `python3 -B tools/ci_ios_simulator_test.py -v` checks this producer with
+  finite JSON; workflow lint also runs it. Qualification requires a digest-bound
+  `simulator_selection` reference with matching source/run/attempt/mobile-job
+  identity. Runtime and device type are comparable; the initial UUID remains
+  provenance. The CI batch selects once for Debug and Release; collection must
+  join that UUID to the initial launcher log, reject retention failures or
+  repeated selection, and retain any distinct replacement UUID from recovery.
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
