@@ -3,7 +3,9 @@
 // IrProgram from the preprocessed token stream and the parser's entities,
 // scopes, and types, lowering every function body and global initializer.
 // c_ir_lower_capacity_plan owns the non-mutating count/overflow check before
-// the program arena is touched. The remaining phase/state graph is in
+// the program arena is touched. c_ir_scratch_reservation_size and
+// c_ir_function_scratch_tail_reservation size large lowering workspaces before
+// their first allocation. The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
 // There is no AST — lowering re-walks token ranges directly, resolving
 // identifiers through the parse result's scopes and answering structure
@@ -50760,6 +50762,55 @@ BUSTER_C_INTERNAL bool c_ir_query_scratch_reservation(u64 reserved_size, u64* po
     return fits;
 }
 
+// Grow virtual reservation, not live rows. A request is accepted as a whole
+// before arena_create; explicit test budgets keep their original refusal path.
+BUSTER_C_INTERNAL bool c_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out)
+{
+    bool fits = size_out && current_size >= arena_minimum_position && current_size <= ARENA_MAX_RESERVATION &&
+                required_size >= arena_minimum_position && required_size <= ARENA_MAX_RESERVATION;
+    u64 size = current_size;
+    while (fits && size < required_size)
+    {
+        size = size <= ARENA_MAX_RESERVATION / 2 ? size * 2 : ARENA_MAX_RESERVATION;
+    }
+    if (fits)
+    {
+        *size_out = size;
+    }
+    return fits;
+}
+
+BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64 body_capacity, u64 lowering_capacity, bool direct_ssa)
+{
+    // One task per token, four more per control and one per switch label.
+    // A token cannot be both a control keyword and a switch label.
+    u64 task_capacity = body_capacity * 5 + 4;
+    bool fits = task_capacity <= UINT32_MAX &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrBodyTask), task_capacity + 1, BUSTER_ALIGN_OF(CIrBodyTask)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrLabel), body_capacity + 1, BUSTER_ALIGN_OF(CIrLabel)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSwitchCase), body_capacity + 1, BUSTER_ALIGN_OF(CIrSwitchCase)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSubstatementCase), body_capacity + 1, BUSTER_ALIGN_OF(CIrSubstatementCase)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrLowerAssignmentStatementState), body_capacity, BUSTER_ALIGN_OF(CIrLowerAssignmentStatementState)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrLowerAutomaticDeclarationState), body_capacity, BUSTER_ALIGN_OF(CIrLowerAutomaticDeclarationState)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrLowerAutomaticDeclarationListState), body_capacity, BUSTER_ALIGN_OF(CIrLowerAutomaticDeclarationListState));
+    if (fits && direct_ssa)
+    {
+        // Doubling retains old allocations: their sum is below four times
+        // the requested rows. Include SSA work arrays in the same plan so
+        // a large flat body does not merely move failure from frames to SSA.
+        u64 rows = lowering_capacity * 4;
+        fits = c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrDirectSsa), 1, BUSTER_ALIGN_OF(CIrDirectSsa)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaEvent), rows, BUSTER_ALIGN_OF(CIrSsaEvent)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaRead), rows, BUSTER_ALIGN_OF(CIrSsaRead)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaLocal), rows, BUSTER_ALIGN_OF(CIrSsaLocal)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaSlot), rows * 2, BUSTER_ALIGN_OF(CIrSsaSlot)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaParameter), lowering_capacity, BUSTER_ALIGN_OF(CIrSsaParameter)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(u32), lowering_capacity * 24, BUSTER_ALIGN_OF(u32)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(void*), lowering_capacity * 2, BUSTER_ALIGN_OF(void*));
+    }
+    return fits;
+}
+
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                                              CIRLowerOptions options, CIrLowerCapacityPlan plan, Arena* temporary_arena,
                                                              u64 function_reservation_limit)
@@ -53130,7 +53181,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         // the body is long does not exhaust the stack.  The other consumers of
         // lowering_capacity are per-value arrays the bound does not widen.
         u64 lower_frame_capacity = lowering_capacity + (u64)(declaration.body_start - declaration_start) * 3;
-        u64 reserved_size = function_reservation_limit ? BUSTER_MIN(function_reservation_limit, lowering_arena->reserved_size) : lowering_arena->reserved_size;
+        u64 reserved_size = function_reservation_limit ? BUSTER_MIN(function_reservation_limit, lowering_arena->reserved_size) : ARENA_MAX_RESERVATION;
         u64 position = lowering_arena->position;
         u64 local_array_capacity = local_capacity ? local_capacity : 1;
         u64 call_array_capacity = prepared_call_capacity ? prepared_call_capacity : 1;
@@ -53159,6 +53210,28 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedControlExpression),
                                           prepared_control_expression_capacity ? prepared_control_expression_capacity : 1,
                                           BUSTER_ALIGN_OF(CIrPreparedControlExpression));
+        if (scratch_fits && lowering_capacity <= UINT32_MAX && local_capacity <= UINT32_MAX && local_slot_capacity <= UINT32_MAX &&
+            prepared_call_capacity <= UINT32_MAX && prepared_control_expression_capacity <= UINT32_MAX && lower_frame_capacity <= UINT32_MAX &&
+            !function_reservation_limit)
+        {
+            u64 requested_size = 0;
+            scratch_fits = c_ir_function_scratch_tail_reservation(&position, body_array_capacity, lowering_capacity, direct_ssa_enabled) &&
+                           c_ir_scratch_reservation_size(position, lowering_arena->reserved_size, &requested_size);
+            if (scratch_fits && requested_size > lowering_arena->reserved_size)
+            {
+                Arena* grown = arena_create((ArenaCreation){.reserved_size = requested_size, .flags = {.no_pool = true}});
+                scratch_fits = grown != 0;
+                if (scratch_fits)
+                {
+                    // No builder rows exist yet. Close the old mark before
+                    // replacing its arena; every later path owns this mark.
+                    scratch_end(lowering_temporary);
+                    arena_destroy(lowering_arena, 1);
+                    lowering_arena = grown;
+                    lowering_temporary = arena_begin_temporal(lowering_arena);
+                }
+            }
+        }
         if (lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || local_slot_capacity > UINT32_MAX ||
             prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX || !scratch_fits)
         {
@@ -53611,7 +53684,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         Arena* temporary_conflicts[] = {arena};
         TemporalArena temporary = scratch_begin(temporary_conflicts, BUSTER_ARRAY_LENGTH(temporary_conflicts));
         Arena* temporary_arena = temporary.arena;
-        u64 reserved_size = query_reservation_limit ? BUSTER_MIN(query_reservation_limit, temporary_arena->reserved_size) : temporary_arena->reserved_size;
+        u64 reserved_size = query_reservation_limit ? BUSTER_MIN(query_reservation_limit, temporary_arena->reserved_size) : ARENA_MAX_RESERVATION;
+        Arena* owned_temporary_arena = 0;
         u64 position = temporary_arena->position;
         bool fits = true;
         if (!parse.scope_children_offsets)
@@ -53629,6 +53703,28 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                    c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), parse.scope_count, BUSTER_ALIGN_OF(u32));
         }
         fits = fits && c_ir_query_scratch_reservation(reserved_size, &position, plan.query_frame_capacity);
+        if (fits && !query_reservation_limit)
+        {
+            // Keep one ordinary arena's remaining workspace after the query
+            // stack and scope index. Initializers and declaration scratch
+            // must not lose the workspace the old fixed reservation provided.
+            u64 workspace = temporary_arena->reserved_size - temporary_arena->position;
+            fits = c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, 1, workspace, 1);
+            u64 requested_size = 0;
+            fits = fits && c_ir_scratch_reservation_size(position, temporary_arena->reserved_size, &requested_size);
+            // Ordinary queries continue to reuse thread scratch. Only a query
+            // stack larger than its available workspace needs another mapping.
+            u64 query_position = position - (fits ? workspace : 0);
+            if (fits && query_position > temporary_arena->reserved_size)
+            {
+                owned_temporary_arena = arena_create((ArenaCreation){.reserved_size = requested_size, .flags = {.no_pool = true}});
+                fits = owned_temporary_arena != 0;
+                if (fits)
+                {
+                    temporary_arena = owned_temporary_arena;
+                }
+            }
+        }
         if (fits)
         {
             result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena, function_reservation_limit);
@@ -53640,6 +53736,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                 .location = parse.declaration_count ? c_preprocess_site_location(&preprocess, parse.declarations[0].location) : (CSourceLocation){0},
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
+        }
+        if (owned_temporary_arena)
+        {
+            arena_destroy(owned_temporary_arena, 1);
         }
         scratch_end(temporary);
     }
@@ -53665,6 +53765,20 @@ CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena, String8 sour
                                                      CIRLowerOptions options, u64 query_reservation_limit, u64 function_reservation_limit)
 {
     return c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, query_reservation_limit, function_reservation_limit);
+}
+
+bool c_test_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out)
+{
+    return c_ir_scratch_reservation_size(required_size, current_size, size_out);
+}
+
+bool c_test_ir_function_scratch_size(u32 body_capacity, u32 lowering_capacity, bool direct_ssa, u64* size_out)
+{
+    u64 position = arena_minimum_position;
+    bool fits = c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(CIrLowerFrame), lowering_capacity, BUSTER_ALIGN_OF(CIrLowerFrame)) &&
+                c_ir_function_scratch_tail_reservation(&position, body_capacity, lowering_capacity, direct_ssa) &&
+                c_ir_scratch_reservation_size(position, BUSTER_MB(256), size_out);
+    return fits;
 }
 
 bool c_test_ir_arena_reservation_advance(u64 reserved_size, u64* position, u64 element_size, u64 count, u64 alignment)
