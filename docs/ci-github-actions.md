@@ -506,8 +506,12 @@ and `CI complete` requires the result. See
 
 ## Matched manual Zig cache cohorts
 
-Ordinary `Buster CI` manual dispatches retain the existing input surface and
-cache behavior. A deliberate matched cohort selects its mode through the
+Ordinary `Buster CI` events admit the split checks owners on Linux x86-64,
+Linux AArch64 and Windows x86-64. Every sibling uses the same exact Zig archive
+key as its lane's Release owner. Ordinary publication still occurs only on a
+default-branch push; unsupported split targets remain refused. Manual dispatches
+retain the existing input surface and cache behavior. A deliberate matched
+cohort selects its mode through the
 workflow-dispatch ref, so the event contract remains identical to ordinary CI:
 
 - `ci-cohort-prime-<namespace>` restores and, on a verified miss, publishes the
