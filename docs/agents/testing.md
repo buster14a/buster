@@ -30,9 +30,11 @@
   `python3 tools/bootstrap_wrapper_cases_test.py -v` on each Release lane,
   covering deadlines, launch/startup failures, cancellation, descendant cleanup,
   failure status and stable diagnostics. See [wrapper CI](../ci-bootstrap-wrapper.md).
-  The whole original suite's obsolete workflow assertions remain tracked by
-  [#1835](https://github.com/buster14a/buster/issues/1835); they are not an executed
-  CI contract.
+  `python3 tests/bootstrap_wrapper_test.py -v` runs the full local behavior,
+  child-process and immutable-driver build-graph harness. The authoritative
+  workflow guard, budgets, logs and required-summary failure checks live in
+  `tools/ci_zig_cache_test.py`, which the policy step executes on each Release
+  lane. The wrapper module has no duplicate workflow contract.
 - Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
@@ -62,11 +64,18 @@
   `if (BUSTER_REQUIRE(arguments, prerequisite))`. It records the prerequisite
   with normal assertion accounting, evaluates it once, and skips only the
   guarded body when it fails; unrelated fixtures and modules continue.
+- With a debugger attached, assertion failures stop through `os_fail()` after
+  reporting the diagnostic. The arena, fixture-timing, and prerequisite harness
+  self-tests set `UnitTestArguments.suppress_debugger_break` only around their
+  deliberately failed assertions and clear it before any dependent body or
+  later assertion. Failure counts and diagnostics remain unchanged.
+  `test_debugger_failure_self_test` checks debugger-present/absent decisions,
+  restoration, and argument-free failures without changing registered totals.
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
 - Active CI is defined under `.github/workflows/`; the current tree has no
-  Forgejo workflow definitions. The historical source-free broker contract is
+  Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
   runs the combination matrix, execution-mode matrix, Android and iOS on
   GitHub standard runners. Its five desktop lanes cover Linux and Windows at
@@ -116,10 +125,12 @@
   push runs, revalidates exact-key Zig archive caches, and treats UBSan reports
   as failures. Independent later suites run after earlier test failures;
   captured logs and fail-closed summaries remain outside generated build trees.
-  See `docs/ci-github-actions.md` for timing cohorts and exact reproductions. Do not add source mirroring, Actions artifacts/caches,
-  durable GitHub-side credentials, verbose broker logs, or untrusted-PR
-  triggers to the broker; see
-  `docs/ci-github-hosted-runners.md`.
+  See `docs/ci-github-actions.md` for timing cohorts and exact reproductions.
+  The removed Forgejo broker has no current setup or validation commands.
+  Its regression source is preserved as
+  `tests/retired/github_runner_bridge_test.py.txt`, outside Python discovery,
+  with the same dependency-only support identity. It is historical input,
+  not executed bridge coverage; see `docs/ci-github-hosted-runners.md`.
 
 - The workflow-tools aggregate regression executes the actual `CI complete`
   shell body for all 633 shard outcomes. Git Bash on Windows has a 120-second
@@ -215,6 +226,17 @@
   the mobile artifact. Every required package is validated after each attempt;
   a nonzero installer status or invalid package still fails setup. Run
   `python3 tools/ci_android_sdk_test.py -v` for the hermetic setup controls.
+- Qualification tool observations use `tools/ci_checks_tools.py` only when
+  `BUSTER_CI_CONDITIONS_EVIDENCE=1`. `python3 tools/ci_checks_tools_test.py -v`
+  exercises selected CMake/override paths, exact source/run/job binding,
+  deadlines, output limits, tool replacement and disabled no-op behavior using
+  Python-only fake tools. `python3 tools/ci_checks_qualification_test.py -v`
+  covers required role keys, wrong/unknown observations, digest-bound selected
+  tools, unchanged split-role maps and the existing Android validity scope.
+  Workflow lint runs both controls normally; the qualification branches alone
+  retain real selected Go/Ninja/adb receipts. No compiler build or measurement
+  dispatch is needed to run these controls. Missing historical observations
+  remain pending; see [checks qualification](../ci-combination-shards.md#further-checks-partition-qualification-2120).
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
@@ -394,6 +416,11 @@ for ABI fixtures, diagnostics, opt-in IR/MIR validation, sanitizer controls,
 reduction limits and evidence format. This supplements all existing gates;
 it does not replace target-matrix execution or the seeded differential corpus.
 
+Allocator-matrix commands place optimization flags before the explicit allocator
+flag because the last allocator-affecting option wins. Assert the parsed allocator
+on the invocation passed to execution; retain `-fverify-codegen` and allow machine
+fallback for NONE, while requiring strict machine coverage on applicable MIR rows.
+
 ## Oracle independence
 
 A differential test is evidence only when its two sides obtain the answer
@@ -412,6 +439,40 @@ matrix, optional engine discovery, explicit unexecuted rows, and grammar-aware
 failure reduction. See [metamorphic testing](../metamorphic-testing.md) for the
 transformation preconditions, reproducible seeds, strict execution mode and
 failure bundles. Cross-target compilation is not a behavioral pass.
+
+## Executed DWARF lifetimes
+
+`tools/debug_info_lifetime_oracle.py` executes a Linux x86-64 DWARF fixture
+through GDB with Python support. It checks exact source breakpoints, live
+`x`/`y`, three loop/callee transitions, the caller frame, callee lexical scope,
+and a correct-value-to-unavailable transition under FAST and QUALITY. The loop
+index may be explicitly unavailable before its first certified use; the callee
+parameter is required after its use. Arbitrary lookup errors are failures.
+
+On an authorized correctness host, run:
+
+```sh
+python3 tools/debug_info_lifetime_oracle.py --ide build/Release/ide --output /tmp/dwarf-lifetime
+```
+
+The Clang/GDB reference and wrong-value/missing-debug negative controls are
+required. `--baseline-ide PATH --expect-baseline-defect` additionally requires
+an executed wrong `x` after correct initial live values at the pinned baseline;
+it retains that failure explicitly. `--skip-costs` runs only the small fixture.
+The default three-trial cost workload separates object compilation with/without
+debug info, DWARF/relocation bytes, native/external linking, symbol loading,
+breakpoint resolution and stopped queries. Baseline failure aborts earlier, so
+aggregate debugger/query durations contain unequal work. Compare matching live
+queries. `.text` hashes must match across debug modes and compiler revisions.
+
+`debug-lifetime-slice.yml` retains the executed oracle on relevant PRs and main
+changes on GitHub-hosted Ubuntu. The issue branch additionally runs matched
+serial builds and cost diagnostics; no qualified performance hardware is
+selected. Qualified performance acceptance remains pending.
+The existing static-type oracle is format/consumer coverage without inferior
+execution and does not replace these checks. Selector stack-slot aliases,
+sibling lexical blocks and optimized constant reconstruction are outside this
+bounded vreg-home slice.
 
 ## Constant name-binding oracle
 
@@ -596,6 +657,49 @@ have bounded 30-second deadlines. `object_tests` covers REL/RELA, instruction
 classes, scale mismatches and malformed sites; `link_tests` derives patched
 addresses from static/dynamic section tables and imported-data copy slots.
 
+## Wasm object-address alignment
+
+`compiler_driver_test_wasm_stack_alignment` lowers both C frontend forms for
+wasm32 and Memory64, validates canonical IR and compares repeated module bytes.
+An opaque Node import observes actual linear-memory addresses and checks ordinary
+eight-byte objects, extended 64-byte objects, mixed locals and aggregate copies.
+Odd runtime allocation sizes stay live across nested calls; the next allocation
+must start at the independently rounded original caller end.
+
+Direct canonical controls raise only each LOCAL place's alignment above its
+unchanged byte-aligned array type. A deliberately non-64-aligned stack base
+exercises exact-limit success, padding-plus-frame exhaustion and base-padding
+exhaustion. The same instance must recover its exact entry pointer after every
+normal return and deliberate trap. Each pointer-width/frontend run completes
+84 engine checks, records the consumed module SHA-256 and checks the artifact
+against the original returned bytes after execution. The source and oracle are
+generated inline, leaving the frozen support inventory unchanged. Existing
+stack-reservation and memory-hint regressions remain required.
+
+## Direct canonical Wasm bit counts
+
+`compiler_driver_test_wasm_bit_counts` constructs CLZ, CTZ and population-count
+functions directly in canonical IR, so C integer promotions cannot hide a
+narrow backend defect. The block-row protocol commits each argument, unary
+operation and return; canonical preparation validates the module before each
+pointer-width emitter run. Signed and unsigned widths 7, 8, 16, 24, 32, 33, 48
+and 64 separate semantic width from the i32/i64 carrier.
+
+An inline Node oracle checks twelve literal expectations, exhausts both 7- and
+8-bit bit patterns, and checks zero, all ones, sign boundaries, alternating
+patterns, every single bit and its complement at larger widths. Dirty carrier
+bits separately check normalization. Each pointer-size run makes 5,352 actual
+export calls; zero CLZ/CTZ results use the canonical width convention, and
+32/64-bit controls retain full-carrier behavior. The oracle loops over the
+semantic bits instead of calling a host count intrinsic.
+
+Repeated emission must be byte-identical. The consumed module SHA-256 and
+before/after artifact comparisons prove that Node receives the original bytes.
+Normal zero exit, empty stderr and the exact terminal summary are required
+through the existing bounded Node runner. Missing Node is reported as an
+execution skip, not an engine pass. The script is inline; frozen Wasm oracles,
+startup shims and support inventory stay untouched.
+
 ## Node-backed Wasm oracle deadlines
 
 `compiler_driver_test_wasm_integers` runs the frozen integer oracle and the
@@ -615,7 +719,7 @@ The compiler-driver Node oracles use a bounded 30-second deadline on Linux and m
 
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
 
-The startup shim also stamps the rest of the integer run, so a post-summary timeout (#2066) can be located. After the oracle returns, it queues `WASM_NODE_DONE uptime_us=<n> resources=<active Node resources>` on stdout. From Node's `exit` event, which fires only once the event loop has drained, it writes `WASM_NODE_EXIT uptime_us=<n>` synchronously. For readiness oracles the harness strips well-formed trailing stamps before the terminal-marker check. It logs `node_done`, `done_uptime_us`, `node_exit`, `exit_uptime_us` and `post_done_us` (elapsed harness time minus the DONE uptime, an upper bound on the time spent after the oracle returned). A timed-out run with the summary becomes `summary-then-teardown-stall` when EXIT was written, `summary-then-event-loop-stall` when only DONE was written, and stays `summary-before-timeout` otherwise. All three still fail without retry. Stamps are evidence only: they never replace the summary, a zero exit or empty stderr, and a malformed stamp fails the terminal-marker check.
+The startup shim also stamps the rest of the integer run, so a post-summary timeout (#2066) can be located. It writes the frozen oracle's console output synchronously, restoring `console.log` even when loading or checking throws. Only after the oracle returns successfully does it synchronously write `WASM_NODE_DONE uptime_us=<n> resources=<active Node resources>` and explicitly exit zero. This prevents the observed post-summary `PipeWrap` event-loop stall (#1793/#2066) without dropping buffered success output. From Node's `exit` event it writes `WASM_NODE_EXIT uptime_us=<n>` synchronously. For readiness oracles the harness strips well-formed trailing stamps before the terminal-marker check. It logs `node_done`, `done_uptime_us`, `node_exit`, `exit_uptime_us` and `post_done_us` (elapsed harness time minus the DONE uptime, an upper bound on the time spent after the oracle returned). A timed-out run with the summary becomes `summary-then-teardown-stall` when EXIT was written, `summary-then-event-loop-stall` when only DONE was written, and stays `summary-before-timeout` otherwise. All three still fail without retry. Stamps are evidence only: they never replace the summary, a zero exit or empty stderr, and a malformed stamp fails the terminal-marker check.
 
 The Wasm oracle process-policy controls launch a native `ide test` child before
 compiler prewarming. Their short deadlines exercise completion, output, errors
@@ -640,3 +744,5 @@ working tree before running these tests; that expected generated drift must
 not become the fixture for a control that requires clean committed source.
 Tracked-drift, source-identity, and checkout-race controls still exercise the
 production validator against those private checkouts.
+
+`node tools/wasm_integer_execution_startup_test.js` checks the real frozen oracle against an independently emitted Wasm fixture, buffered-output and live-resource controls, arithmetic/load/output failures, and an implicit-exit mutation that must time out. The focused hosted workflow runs these controls on Linux and Windows; the full driver policy still rejects deliberate hangs, nonzero exits, stderr and missing summaries.

@@ -233,6 +233,12 @@ without facts for identical bitcode and diagnostics.
   probe on names sharing the whole key, and `c_test_pasted_keyword_body_walk`
   both the carried ids and the fallback on the same stream with ids cleared.
 
+  Specifier-word queries share `c_parse_word_bits_token`. Its symbol lookup
+  stays first; without a usable symbol table/id, only identifier and INVALID
+  hand-built tokens reach the spelling ladder. Other token kinds answer zero
+  without reading spelling bytes. Keep the INVALID fallback and each caller's
+  GNU/C23 mask: token eligibility does not change dialect admission.
+
 - `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
   without scanning unrelated undo records. A live undo record implies a valid
   current binding: bind installs the new entity, and unwind removes its record
@@ -467,6 +473,15 @@ without facts for identical bitcode and diagnostics.
   validity oracle, guard-page/window differential cases and driver failures are
   registered in the frontend/driver suites; `basic_c_utf8_identifiers.c` checks
   valid source through every native allocator (GitHub #253).
+- In C99/GNU99 and C11/C17/GNU11/GNU17, identifier UCNs are decoded under
+  the dialect's Annex D policy before symbol interning. Raw and escaped
+  spellings then share canonical UTF-8 identity. Original token spellings
+  survive macro `#` and `##`; only the final fused identifier-respelling
+  pass exposes canonical bytes to semantic/lowering consumers, under stamps
+  retaining the original source location. C23/GNU23/GNU89 identifier-escape
+  admission is unchanged. Literal conversion remains separate; raw UTF-8
+  keeps the encoding-only rule above. See the dialect boundary and registered
+  UCN fixtures in [frontend.md](../frontend.md).
 - Arena ownership is part of the API contract. Returned source, syntax,
   semantic, and IR structures may reference earlier-stage storage; callers must
   retain the translation-unit arena until every downstream consumer finishes.
@@ -550,17 +565,24 @@ without facts for identical bitcode and diagnostics.
   Sibling intervals must remain disjoint; equal-range nesting resolves to the
   deepest child. Empty siblings sort before nonempty siblings at the same
   start. Queries before index construction retain the unindexed fallback.
-- `CAggregateLookup` doubles its slot array at half occupancy. Its stable
-  header and every rehashed slot survive speculative rollback; live type IDs
+- `CAggregateLookup` starts with a complete zero-slot header. Units without
+  unqualified tagged types allocate no slot array; anonymous aggregates and
+  qualified aliases do not trigger it. The first tag owner reserves and zeroes
+  the existing 16,384-slot array, then the array doubles at half occupancy.
+  Its stable header and every rehashed slot survive speculative rollback; live type IDs
   are revalidated, qualified aliases cannot own tags, and duplicate scoped
   tags retain the scope-aware fallback. Only arena exhaustion or count overflow
-  makes the index incomplete. `c_test_aggregate_lookup_growth` covers both
-  8,192 and 16,384 tag boundaries and rollback across growth. With
+  makes the index incomplete. A failed initial reservation leaves no slots
+  and requires scope-aware scanning; a complete empty header certifies absence.
+  `c_test_aggregate_lookup_growth` covers untagged and anonymous source controls,
+  both 8,192 and 16,384 tag boundaries and rollback across growth. Identity and
+  unique-search tests also cover first-reservation failure, dirty slot reuse
+  and rollback of the first insertion. With
   `BUSTER_BENCH_ALLOCATIONS=ON`, it also bounds production probes/rehash work
   and requires zero fallback type visits for unique tags;
   `BUSTER_AGGREGATE_CENSUS=1` prints these diagnostic-only counts. Lowering's
   tag type names (`c_ir_type_name_prefix`) ask `c_parse_aggregate_unique`
-  first: an unused slot on a complete index means no row, and a live slot
+  first: a complete empty header or unused slot means no row, and a live slot
   not marked `multiple` is the only row, whatever the reference scope. Only
   duplicated, stale or incomplete keys search the type table (#1467);
   `c_test_aggregate_unique_search` requires zero lowering search rows for
@@ -918,6 +940,14 @@ without facts for identical bitcode and diagnostics.
   deferred assertions, once per token range however often the definition is
   parsed. Regression:
   `c_test_member_declaration_without_declarator_diagnostics` (GitHub #1661).
+  The same registered test pins GitHub #1250: false literal assertions in
+  structs and unions report once even when several declarators reparse the
+  definition, under C11/C17 and the C23 message-less spelling. True assertions
+  at the beginning, middle and end preserve every member. The issue's nested
+  bit-field record and the trailing struct/union members retain their
+  `sizeof`/`offsetof` answers and canonical-IR layout on x86-64 Linux in both
+  frontend forms; the named target keeps Windows bit-field ABI differences
+  out of that oracle.
 
 ## String literal memo
 

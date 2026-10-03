@@ -2478,7 +2478,8 @@ CodegenAbi codegen_abi_for_target(Target target)
     case CPU_ARCH_WASM32:
     case CPU_ARCH_WASM64:
     case CPU_ARCH_BPFEL:
-        // WebAssembly and eBPF are emitted directly from canonical IR and do not
+    case CPU_ARCH_SPIRV_COMPUTE:
+        // WebAssembly, eBPF and SPIR-V are emitted directly from canonical IR and do not
         // use a native platform ABI or the native machine-code pipeline.
         return CODEGEN_ABI_COUNT;
         break;
@@ -4452,9 +4453,11 @@ BUSTER_GLOBAL_LOCAL u32 codegen_canonical_va_list_component_count(IrProgram* pro
 bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count)
 {
     IrType* type = ir_type_from_id(&program->types, type_id);
-    if (type && type->kind == IR_TYPE_INTEGER && type->layout.resolved && type->bit_width > 64 && type->bit_width <= 128 && type->layout.size <= 16)
+    bool empty_aggregate = type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && type->layout.resolved && !type->layout.size;
+    if (empty_aggregate ||
+        (type && type->kind == IR_TYPE_INTEGER && type->layout.resolved && type->bit_width > 64 && type->bit_width <= 128 && type->layout.size <= 16))
     {
-        *part_count = (u32)((type->layout.size + 7) / 8);
+        *part_count = empty_aggregate ? 0 : (u32)((type->layout.size + 7) / 8);
         return true;
     }
     if (type && type->kind == IR_TYPE_VA_LIST && type->layout.resolved && type->layout.size > 8 && type->layout.size <= 32 && !(type->layout.size & 7))
@@ -9812,6 +9815,8 @@ struct CodegenMachineDebugRowGroups
     u32* rows;
     u32 slot_mask;
     u32 group_count;
+    // Distinct spill subjects sharing a home cannot retain it across edges.
+    u8* shared;
 };
 
 typedef struct CodegenMachineDebugIndex CodegenMachineDebugIndex;
@@ -9895,7 +9900,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_group_find(CodegenMachineDebugRowG
 // `keys` and `rows` are parallel and `rows` ascends, so filling each group in
 // input order leaves every group's rows ascending for the replay's cursors.
 BUSTER_GLOBAL_LOCAL void codegen_machine_debug_groups_build(Arena* arena, CodegenMachineDebugRowGroups* groups, u32 const* keys, u32 const* rows,
-                                                             u32 count)
+                                                             u32 count, u32 const* subjects)
 {
     u32 slot_count = 8u;
     while (slot_count / 2u < count && slot_count < (1u << 30))
@@ -9909,6 +9914,8 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_groups_build(Arena* arena, Codege
     u32* entry_groups = arena_allocate(arena, u32, count ? count : 1u);
     u32* group_cursors = arena_allocate(arena, u32, count ? count : 1u);
     groups->group_count = 0;
+    groups->shared = subjects ? arena_allocate(arena, u8, count ? count : 1u) : 0;
+    u32* owners = subjects ? arena_allocate(arena, u32, count ? count : 1u) : 0;
     for (u32 entry = 0; entry < count; entry += 1)
     {
         u32 key = keys[entry];
@@ -9922,10 +9929,20 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_groups_build(Arena* arena, Codege
             groups->slot_keys[slot] = key;
             groups->slot_groups[slot] = groups->group_count;
             group_cursors[groups->group_count] = 0;
+            if (subjects)
+            {
+                owners[groups->group_count] = subjects[entry];
+                groups->shared[groups->group_count] = 0;
+            }
             groups->group_count += 1;
         }
         entry_groups[entry] = groups->slot_groups[slot];
         group_cursors[entry_groups[entry]] += 1;
+        if (subjects)
+        {
+            u32 group = entry_groups[entry];
+            groups->shared[group] |= (u8)(owners[group] != subjects[entry]);
+        }
     }
     groups->offsets = arena_allocate(arena, u32, (u64)groups->group_count + 1u);
     u32 cursor = 0;
@@ -10178,6 +10195,7 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_build(Arena* arena, Machine
     scratch_end(event_scratch);
     u32* home_keys = arena_allocate(arena, u32, spill_edits ? spill_edits : 1u);
     u32* home_rows = arena_allocate(arena, u32, spill_edits ? spill_edits : 1u);
+    u32* home_subjects = arena_allocate(arena, u32, spill_edits ? spill_edits : 1u);
     u32* remat_keys = arena_allocate(arena, u32, remat_edits ? remat_edits : 1u);
     u32* remat_rows = arena_allocate(arena, u32, remat_edits ? remat_edits : 1u);
     u32 home_count = 0;
@@ -10191,6 +10209,7 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_build(Arena* arena, Machine
             home_keys[home_count] = edit->subject < function->virtual_register_count ? placement->virtual_register_offsets[edit->subject]
                                                                                     : UINT32_MAX;
             home_rows[home_count] = row;
+            home_subjects[home_count] = edit->subject;
             home_count += 1;
         }
         else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
@@ -10200,8 +10219,8 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_build(Arena* arena, Machine
             remat_count += 1;
         }
     }
-    codegen_machine_debug_groups_build(arena, &index->homes, home_keys, home_rows, home_count);
-    codegen_machine_debug_groups_build(arena, &index->remats, remat_keys, remat_rows, remat_count);
+    codegen_machine_debug_groups_build(arena, &index->homes, home_keys, home_rows, home_count, home_subjects);
+    codegen_machine_debug_groups_build(arena, &index->remats, remat_keys, remat_rows, remat_count, 0);
     index->blocks_ascending = true;
     for (u32 block_index = 1; block_index < function->block_count; block_index += 1)
     {
@@ -10500,6 +10519,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
         u32 remat_cursor = remat_group == UINT32_MAX ? 0 : index->remats.offsets[remat_group];
         u32 subject_cursor = index->subject_offsets[payload];
         u32 subject_end = index->subject_offsets[payload + 1u];
+        bool shared_home = home_group != UINT32_MAX && index->homes.shared[home_group];
+        // Once no machine operand or memory edit names this value again, a
+        // shared home has no retained-value guarantee. Expire that frame copy;
+        // stop unrelated suffix replay once no certified register can remain.
+        u32 home_end = shared_home ? (subject_cursor < subject_end ? index->subject_rows[subject_end - 1u] + 1u : 0u)
+                                   : function->instruction_count;
         CodegenMachineDebugReference state = {.physical_register = -1};
         u32 physical_bucket = UINT32_MAX;
         u32 physical_cursor = 0;
@@ -10510,6 +10535,22 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                                              function->instruction_count);
         while (row < function->instruction_count)
         {
+            if (shared_home && row >= home_end)
+            {
+                state.frame_valid = false;
+                codegen_machine_debug_selection_push(entries, entry_count, capacity,
+                                                     codegen_machine_debug_sample(&state, row, frame_offset, has_home),
+                                                     function->instruction_count);
+                // A certified register may outlive the final operand. Keep its
+                // clobber tracking and any immediate rematerializations; only
+                // an unavailable value with no recovery event ends replay.
+                bool remat_pending = remat_group != UINT32_MAX &&
+                                     codegen_machine_debug_group_next(&index->remats, remat_group, &remat_cursor, row) != UINT32_MAX;
+                if (state.physical_register < 0 && !remat_pending)
+                {
+                    break;
+                }
+            }
             while (subject_cursor < subject_end && index->subject_rows[subject_cursor] < row)
             {
                 subject_cursor += 1u;
@@ -10535,8 +10576,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                                             ? index->physical_rows[unmapped_cursor]
                                             : UINT32_MAX);
             }
-            // A block start clears any held register and changes nothing
-            // else. The first block changes nothing at all -- the replay this
+            next = BUSTER_MIN(next, row < home_end ? home_end : function->instruction_count);
+            // A block start clears any held register; a shared home also loses
+            // its path-specific validity. An own spill can publish it again.
+            // An unshared home changes nothing else. The first block changes
+            // nothing at all -- the replay this
             // stands in for skips it -- and neither does any other while
             // nothing is held. Skip those without stopping: the cursor still
             // advances, because the replay consumes exactly one block per row.
@@ -10547,7 +10591,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                 block_cursor += 1u;
                 block_row = codegen_machine_debug_block_row(function, block_cursor, row);
             }
-            if (block_row < next && state.physical_register < 0)
+            if (block_row < next && state.physical_register < 0 && !(shared_home && state.frame_valid))
             {
                 if (index->blocks_ascending)
                 {
@@ -10577,15 +10621,14 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                     {
                         if (block_cursor)
                         {
-                            // Physical ownership is edge-specific. A published
-                            // home is path-independent: every executing
-                            // definition spilled the same vreg there, and reuse
-                            // writes invalidate it explicitly. The home
-                            // preference needs no republication beside it: with
-                            // no register held it does not enter the selection,
-                            // and every transition back to holding one rewrites
-                            // it.
+                            // A back edge can arrive after another vreg wrote
+                            // a shared home at a later layout row. Layout-order
+                            // replay cannot certify those bytes at this entry.
                             state.physical_register = -1;
+                            if (shared_home)
+                            {
+                                state.frame_valid = false;
+                            }
                         }
                         block_cursor += 1u;
                     }
@@ -11053,22 +11096,72 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
     {
         return false;
     }
+    // Independent dense reference: detect competing stores directly instead
+    // of consuming the production home hash or subject-event index.
+    bool shared_home = false;
+    u32 first_spill_subject = UINT32_MAX;
+    u32 home_end = 0;
+    for (u32 edit_index = 0; edit_index < placement->edit_count; edit_index += 1)
+    {
+        MachineEdit const* edit = placement->edits + edit_index;
+        if (edit->kind == MACHINE_EDIT_SPILL && edit->subject < function->virtual_register_count &&
+            home != MACHINE_VIRTUAL_REGISTER_NO_HOME && placement->virtual_register_offsets[edit->subject] == home)
+        {
+            if (first_spill_subject == UINT32_MAX)
+            {
+                first_spill_subject = edit->subject;
+            }
+            else
+            {
+                shared_home |= first_spill_subject != edit->subject;
+            }
+        }
+        if ((edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME) &&
+            edit->subject == payload)
+        {
+            home_end = BUSTER_MAX(home_end, machine_point_instruction(edit->point) + 1u);
+        }
+    }
+    for (u32 row = 0; row < function->instruction_count; row += 1)
+    {
+        MachineInstruction const* instruction = function->instructions + row;
+        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        for (u32 operand = 0; info && operand < info->operand_count; operand += 1)
+        {
+            u32 role = info->operand_info[operand] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+            MachineRef operand_reference = instruction->operands[operand];
+            if (role != MACHINE_OPERAND_ROLE_NONE && machine_ref_kind(operand_reference) == MACHINE_REF_VIRTUAL_REGISTER &&
+                machine_ref_payload(operand_reference) == payload)
+            {
+                home_end = BUSTER_MAX(home_end, row + 1u);
+            }
+        }
+    }
+    home_end = shared_home ? BUSTER_MIN(home_end, function->instruction_count) : function->instruction_count;
     CodegenMachineDebugReference state = {.physical_register = -1};
     u32 edit_cursor = 0;
     u32 block_cursor = 0;
     for (u32 row = 0; row < function->instruction_count; row += 1)
     {
+        if (shared_home && row >= home_end)
+        {
+            state.frame_valid = false;
+        }
         if (block_cursor < function->block_count && function->blocks[block_cursor].first_instruction == row)
         {
             if (block_cursor)
             {
-                // Physical ownership is edge-specific. A published home is
-                // path-independent: every executing definition spilled the
-                // same vreg there, and reuse writes invalidate it explicitly.
+                // Physical ownership is edge-specific. An unshared home
+                // retains its value; a shared home cannot be certified from
+                // the preceding layout row when a back edge can arrive here.
                 // The home preference needs no republication beside it: with no
                 // register held it does not enter the selection, and every
                 // transition back to holding one rewrites it.
                 state.physical_register = -1;
+                if (shared_home)
+                {
+                    state.frame_valid = false;
+                }
             }
             block_cursor += 1;
         }
@@ -16830,6 +16923,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool aggregate = codegen_canonical_integer_aggregate_parts(program, instruction->canonical_type, &integer_parts);
                         bool floating = value_type && value_type->kind == IR_TYPE_FLOAT;
                         CodegenCanonicalAbiValue aggregate_abi = codegen_canonical_aggregate_abi(program, instruction->canonical_type, result.abi, false, true);
+                        if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && aggregate && value_type && !value_type->layout.size)
+                        {
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value
+                                                       ? IR_ID_UNDERLYING_INVALID
+                                                       : instruction_id.value + 1;
+                            continue;
+                        }
                         if (!value_type || !value_type->layout.size || value_type->layout.size > 16 ||
                             (!aggregate && !floating && value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_BOOLEAN &&
                              value_type->kind != IR_TYPE_POINTER))
@@ -16856,7 +16956,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                             }
                         }
-                        if (split_system_v_aggregate && split_float_count)
+                        if (split_system_v_aggregate && (aggregate || split_float_count))
                         {
                             u32 overflow_branch_offsets[2] = {0};
                             u32 overflow_branch_sizes[2] = {0};
@@ -17875,7 +17975,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             callee_type = ir_type_from_id(&program->types, callee_type->element_type);
                         }
-                        if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic)
+                        bool system_v_variadic_call = result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && callee_type &&
+                                                      callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
+                        if (system_v_variadic_call)
                         {
                             BusterX86MetadataPhysicalOperand variadic_register_count_operands[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
@@ -17890,8 +17992,20 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (indirect_call)
                         {
-                            c_x64_load(&emitter, 0x85, instruction->operands[0]);
-                            BusterX86MetadataPhysicalOperand call_register = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+                            // Reload from the callee's frame home after argument staging.
+                            // R10 is caller-saved and carries no System V argument; RAX
+                            // must retain the variadic vector-register count in AL.
+                            X64Register target_register = system_v_variadic_call ? X64_REGISTER_R10 : X64_REGISTER_RAX;
+                            if (system_v_variadic_call)
+                            {
+                                codegen_canonical_x64_asm_load(&buffer, target_register, X64_REGISTER_RBP,
+                                                              (u32)c_x64_value_displacement(&emitter, instruction->operands[0]), 8);
+                            }
+                            else
+                            {
+                                c_x64_load(&emitter, 0x85, instruction->operands[0]);
+                            }
+                            BusterX86MetadataPhysicalOperand call_register = codegen_canonical_x64_metadata_gpr(target_register, 64);
                             if (buffer.error || !codegen_canonical_x64_metadata_emit(&buffer, S8("CALL"), &call_register, 1))
                             {
                                 result.error = buffer.error;
@@ -18169,6 +18283,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                                 instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
+                                continue;
+                            }
+                            if (aggregate_return && !return_parts)
+                            {
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value
+                                                           ? IR_ID_UNDERLYING_INVALID
+                                                           : instruction_id.value + 1;
                                 continue;
                             }
                             c_x64_store_result(&emitter, result_displacement);
@@ -20798,7 +20919,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                             }
-                            else
+                            else if (!aggregate_return || return_parts)
                             {
                                 c_x64_load(&emitter, 0x85, return_value);
                             }

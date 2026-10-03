@@ -889,6 +889,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         return false;
     }
     IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
+    if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type->layout.size == 0 &&
+        (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && !abi.indirect && !abi.memory && !abi.part_count)
+    {
+        *shape = (MachineX64ValueShape){.aggregate = true};
+        return true;
+    }
     if (use == IR_ABI_USE_RESULT && convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && !abi.memory && !abi.indirect &&
         ((abi.part_count == 2 && type->layout.size == 16 && abi.parts[0].abi_class == IR_ABI_CLASS_X87 &&
           abi.parts[1].abi_class == IR_ABI_CLASS_X87_UP) || ir_abi_value_is_complex_x87_result(program, type_id, convention)))
@@ -915,7 +921,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
                 .exact_byte_size = (u32)type->layout.size,
                 .aggregate = true,
                 .indirect = true,
-                .stack_alignment = use == IR_ABI_USE_RESULT ? 0 : BUSTER_MAX(codegen_canonical_x64_stack_argument_alignment(type), 16u),
+                .stack_alignment = use == IR_ABI_USE_RESULT ? codegen_canonical_x64_stack_argument_alignment(type)
+                                                          : BUSTER_MAX(codegen_canonical_x64_stack_argument_alignment(type), 16u),
             };
             return true;
         }
@@ -1890,7 +1897,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_member_write(MachineX64Selector* sel
     bool vector = value_register != UINT32_MAX && member_size == 64 && selector->vector_registers_supported &&
                   machine_x64_type_is_vector_register(selector->program, value_type);
     bool selected = member_offset <= INT32_MAX && member_size <= INT32_MAX;
-    if (selected && !vector && (value_register != UINT32_MAX || value_slot == UINT32_MAX))
+    if (selected && !member_size)
+    {
+        selected = value_type && value_type->layout.resolved && value_type->layout.size == 0 &&
+                   (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION) && value_slot != UINT32_MAX;
+    }
+    else if (selected && !vector && (value_register != UINT32_MAX || value_slot == UINT32_MAX))
     {
         u16 store_opcode = member_size == 1   ? MACHINE_X64_STORE_FRAME8
                            : member_size == 2 ? MACHINE_X64_STORE_FRAME16
@@ -2007,7 +2019,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_arg(MachineX64Selector* selector,
                           machine_x64_type_is_f80(selector, instruction->canonical_type));
         MachineVaArg metadata;
         bool vector = selector->vector_registers_supported && machine_x64_type_is_vector_register(selector->program, value_type);
-        if (machine_x64_target_is_windows(selector->target) && (scalar || aggregate || vector) && result_is_frame == aggregate)
+        MachineX64ValueShape empty_shape = {0};
+        bool empty_record = result_is_frame &&
+                            machine_x64_value_shape(program, instruction->canonical_type, IR_ABI_USE_VARIADIC_ARGUMENT,
+                                                    selector->target, &empty_shape) &&
+                            empty_shape.aggregate && !empty_shape.byte_size && !empty_shape.part_count;
+        if (empty_record)
+        {
+            selected = true;
+        }
+        else if (machine_x64_target_is_windows(selector->target) && (scalar || aggregate || vector) && result_is_frame == aggregate)
         {
             selected = machine_x64_select_windows_va_arg(selector, value_type, source_register, result_register, result_slot, aggregate);
         }
@@ -4532,7 +4553,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_aggregate(MachineX64Selector* select
                 // left no room for a declared-type unit of carries a narrower
                 // one, and every other field reads its own size back.
                 u64 field_size = ir_field_access_size(&program->types, type->fields + field_index);
-                if (!field_size || field_offset > INT32_MAX)
+                if (field_offset > INT32_MAX)
                 {
                     selected = false;
                 }
@@ -4860,7 +4881,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                 // record is fetched here for the copy's byte count.
                 IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
                 BUSTER_CHECK(loaded_type);
-                bool aggregate_supported = loaded_type->layout.resolved & (loaded_type->layout.size <= UINT32_MAX);
+                bool zero_record = loaded_type->layout.size == 0 &&
+                                   (loaded_type->kind == IR_TYPE_STRUCT || loaded_type->kind == IR_TYPE_UNION);
+                bool aggregate_supported = loaded_type->layout.resolved & (loaded_type->layout.size <= UINT32_MAX) &
+                                           (loaded_type->layout.size != 0 || zero_record);
                 if (aggregate_supported)
                 {
                     bool local_slot_valid = (place_kind == MACHINE_X64_PLACE_LOCAL) & (slot != UINT32_MAX);
@@ -4878,7 +4902,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                     bool address_register_selected = machine_x64_operand_register(selector, value_id, &address_register) & place_is_addressed;
                     selected = local_slot_valid | address_register_selected;
 
-                    if (selected)
+                    if (selected && loaded_type->layout.size)
                     {
                         MachineRef destination = machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot);
                         u32 source_payload = address_register_selected ? address_register : slot;
@@ -4930,23 +4954,30 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_aggregate_store(MachineX64Selector* 
                                                             u32 value_slot)
 {
     bool selected = false;
-    if (instruction->opcode != IR_OPCODE_ATOMIC_STORE && size && size <= UINT32_MAX)
+    IrType* value_type = ir_type_from_id(&selector->program->types,
+                                         selector->function->values[instruction->operands[1].value].canonical_type);
+    bool zero_record = value_type && value_type->layout.resolved && value_type->layout.size == 0 &&
+                       (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION);
+    if (instruction->opcode != IR_OPCODE_ATOMIC_STORE && (size || zero_record) && size <= UINT32_MAX)
     {
         if (place_kind == MACHINE_X64_PLACE_LOCAL && slot != UINT32_MAX)
         {
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                 .payload = (u32)size,
-                                                 .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
-                                             });
+            if (size)
+            {
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                     .payload = (u32)size,
+                                                     .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                                                 });
+            }
             selected = true;
         }
         else if (machine_x64_place_is_addressed(selector, instruction->operands[0], place_kind))
         {
             u32 address_register;
             selected = machine_x64_operand_register(selector, instruction->operands[0], &address_register);
-            if (selected)
+            if (selected && size)
             {
                 machine_x64_select_row(selector, (MachineInstruction){
                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
@@ -6298,15 +6329,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
                 // An unused indirect result still needs backing storage.
                 plan->indirect_result_slot = machine_x64_append_slot(selector, plan->return_shape.byte_size, 8);
             }
-            if (planned && plan->return_shape.stack_alignment > 16)
+            if (planned && plan->return_shape.stack_alignment > 8)
             {
                 u64 backing_size = (u64)plan->return_shape.byte_size + plan->return_shape.stack_alignment - 1;
                 planned = backing_size <= UINT32_MAX;
                 if (planned)
                 {
                     // Internal aggregate slots are only eight-aligned. Give
-                    // an external callee enough slack for its naturally
-                    // aligned vector store, then copy back after the call.
+                    // a callee enough slack for the result type's natural
+                    // alignment, including sixteen, then copy back after the call.
                     plan->indirect_result_backing_slot = machine_x64_append_slot(selector, (u32)backing_size, 8);
                 }
             }

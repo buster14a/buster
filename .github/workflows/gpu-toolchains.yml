@@ -64,7 +64,7 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/buster-build" generate --ci --linker DEFAULT --fuzz OFF --include-tests OFF
           "$RUNNER_TEMP/buster-build" build --config Debug -t ide
-      - name: Validate all four Linux profiles
+      - name: Validate all five Linux profiles
         shell: bash
         env:
           BUSTER_DXC: ${{ runner.temp }}/dxc/bin/dxc
@@ -73,7 +73,7 @@ jobs:
           BUSTER_GPU_TEST_LLD: /usr/lib/llvm-18/bin/ld.lld
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/buster-build" test_gpu_toolchains --ide build/Debug/ide --out "$RUNNER_TEMP/gpu-evidence" --profile spirv-dxc-2025.07 --profile ptx-llvm18-cuda12.4 --profile amdgcn-llvm18 --profile dxil-dxc-2025.07
+          "$RUNNER_TEMP/buster-build" test_gpu_toolchains --ide build/Debug/ide --out "$RUNNER_TEMP/gpu-evidence" --profile spirv-dxc-2025.07 --profile ptx-llvm18-cuda12.4 --profile amdgcn-llvm18 --profile dxil-dxc-2025.07 --profile spirv-direct-vulkan1.2
       - name: Retain commands, diagnostics, versions and hashes
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

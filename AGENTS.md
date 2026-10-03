@@ -155,10 +155,25 @@ branch/PR, exact revision, actual validation, unresolved findings and next actio
 on the issue/PR. Keep live progress out of PROJECTS.md and preserve the existing
 [research lifecycle](docs/agents/research.md).
 
+Before editing, read the owning issue's latest comments and all-state matching
+PRs, then record the planned branch and bounded scope on the issue. Parallel
+sessions use those claims or an existing shared ledger to reserve independent
+work; an idle session is not evidence that its branch is abandoned. Keep one
+writer per branch. Resolve overlapping ownership before creating a competing
+fix, and record an intentional merge order when separate branches touch the
+same contract.
+
+After publishing, continue watching the exact-head checks and reviews through
+integration within the authorized task. Before pausing or ending with an open
+PR, leave a handoff on the issue/PR naming its next owner, exact revision,
+completed validation, outstanding gates and next action. If no successor has
+accepted ownership, say so explicitly; publishing a PR does not complete a bug.
+
 Use the repository/host the user names; for a GitHub URL, work on that GitHub
-repository. Otherwise inspect the current remote. The project also retains
-Forgejo workflows and a source-free GitHub runner broker; their infrastructure
-rules are in [workflow.md](docs/agents/workflow.md) and [testing.md](docs/agents/testing.md).
+repository. Otherwise inspect the current remote. Historical Forgejo issue
+records and the retired source-free runner broker design remain available;
+active GitHub infrastructure rules are in [workflow.md](docs/agents/workflow.md)
+and [testing.md](docs/agents/testing.md).
 Check live CI for the submitted commit instead of relying on old reports.
 
 Historical issue references may use Forgejo numbers. Resolve those through

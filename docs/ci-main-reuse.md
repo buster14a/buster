@@ -85,8 +85,9 @@ The bound source is rechecked during those waits. Multiple/replacement runs,
 changed attempts/identity, failed execution, malformed listings, exhausted page
 bounds, and definite permission errors do not retry. A persistently unavailable
 or inconsistent listing remains a failure: direct retrieval alone is not a
-waiver of the uniqueness/completeness policy. Before scheduling, missing proof
-still selects full CI immediately rather than polling.
+waiver of the uniqueness/completeness policy. Before scheduling, the decision uses the same bounded discovery recollection.
+It still selects full CI if complete proof cannot be collected. See the decision
+recollection contract below.
 
 Both phases write `buster-main-ci-reuse-result-v1` diagnostic JSON. Only a
 `status: verified` result contains `receipt`. Failures record the phase, stage,
@@ -121,3 +122,41 @@ transition; an older incident is a baseline, not an after measurement.
 The existing `github_ci_time.py` normal matrix cohorts describe full
 executions. Reused main runs must be measured separately and must not be
 pooled into those full-execution medians.
+
+## Bounded decision discovery recollection
+
+Both phases may recollect the workflow-scoped, exact-SHA discovery listing at
+most three times, with one- and two-second backoff. Only an empty listing,
+a moving pagination total, HTTP 429/5xx, or an identified transport failure is
+eligible. The production GET reader wraps exhausted failures in
+`APIReadError`; the reuse reader recognizes its numeric status or transport
+classification and retains HTTP status in diagnostics. Definite 403/404,
+malformed metadata, duplicate runs, wrong identities, changed attempts, failed
+coverage and unavailable artifacts remain refusals. No pages or evidence from a
+failed read are combined with another snapshot.
+
+A decision retry has no source receipt to trust yet. Every recovered listing
+must still yield exactly one already-completed, successful first attempt,
+finished before the main run was created within the existing two-hour window.
+The full job, step, artifact, workflow and run-recheck predicate is unchanged.
+A source that completes during backoff cannot authorize reuse for that main run.
+At finish, the previously bound source is still reread before discovery and
+during backoff; changed evidence fails the aggregate.
+
+The three seconds are backoff, not total request time. The shared GET reader
+already permits four transport attempts within a 30-second budget per GET.
+Discovery can therefore add two listing collections beyond the former decision
+policy. The existing five-minute decision-job timeout bounds live execution;
+a timeout or persistent uncertainty cannot enable reuse. There are no retries
+of missing jobs, failed/cancelled required steps, stale workflow blobs or
+expired/missing artifacts in this change.
+
+The network-free state replay compares the former one-read decision with
+absent-then-complete evidence: the old policy falls back; the new policy reuses
+only after all nineteen jobs and artifacts are independently verified. The
+production wrapper regression exercises actual `GitHub.pages/get` and the
+shared GET reader with a mocked HTTP transport in both phases. Hosted CI runs
+these controls through the existing workflow-tools suite. This is a prospective
+reliability improvement: historical full-main fallbacks in the lifecycle sample
+had no exact-SHA queue source and remain full executions under this policy.
+No observed runner-minute saving or latency speedup is attributed to this change.

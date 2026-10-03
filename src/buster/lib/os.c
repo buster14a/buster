@@ -8,6 +8,11 @@
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
 // process spawn/wait with deadlines, executable lookup, dynamic libraries, and
 // the crash/failure printers. Replacement publication follows os_file_close.
+// Opt-in child resource witnesses in os_process_wait_deadline retain native
+// accounting scope; they do not alter process ownership or cleanup.
+// os_process_capture_step separates ordinary POSIX pipe drain transitions
+// from native observations in os_process_wait_deadline; its private replay
+// contract lives in os_internal.h, without process-group identity changes.
 // The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
@@ -3201,6 +3206,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 
     result.capture_limits = options.capture_limits;
     result.capture_overflow_policy = options.capture_overflow_policy;
+    result.observe_resources = options.observe_resources;
     memcpy(result.capture_overflow_files, options.capture_overflow_files, sizeof(result.capture_overflow_files));
     if (options.capture_overflow_policy >= PROCESS_CAPTURE_OVERFLOW_COUNT)
     {
@@ -3807,6 +3813,139 @@ BUSTER_GLOBAL_LOCAL void pipe_capture_append(Arena* arena, PipeCapture* capture,
         }
     }
 }
+
+bool os_process_capture_step(OsProcessCaptureState* state, OsProcessCaptureEvent event, u64 bytes)
+{
+    bool valid = event < OS_PROCESS_CAPTURE_EVENT_COUNT &&
+        (event == OS_PROCESS_CAPTURE_READ_BYTES ? bytes && bytes <= OS_PROCESS_CAPTURE_READ_LIMIT : !bytes);
+    OsProcessCaptureState next = *state;
+    if (valid)
+    {
+        switch (event)
+        {
+            case OS_PROCESS_CAPTURE_WAIT_READY:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING;
+                next.phase = OS_PROCESS_CAPTURE_READY;
+            } break;
+            case OS_PROCESS_CAPTURE_WAIT_IDLE:
+            case OS_PROCESS_CAPTURE_WAIT_INTERRUPTED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING;
+            } break;
+            case OS_PROCESS_CAPTURE_WAIT_FAILED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING;
+                next.failed = true;
+                next.phase = OS_PROCESS_CAPTURE_CLOSING;
+            } break;
+            case OS_PROCESS_CAPTURE_READ_BYTES:
+            case OS_PROCESS_CAPTURE_READ_INTERRUPTED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_READY && bytes <= (u64)-1 - next.observed_bytes;
+                next.observed_bytes += bytes;
+                next.phase = OS_PROCESS_CAPTURE_WAITING;
+            } break;
+            case OS_PROCESS_CAPTURE_READ_EOF:
+            case OS_PROCESS_CAPTURE_READ_FAILED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_READY;
+                next.eof = event == OS_PROCESS_CAPTURE_READ_EOF;
+                next.failed |= !next.eof;
+                next.phase = OS_PROCESS_CAPTURE_CLOSING;
+            } break;
+            case OS_PROCESS_CAPTURE_STOP:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_WAITING || next.phase == OS_PROCESS_CAPTURE_READY;
+                next.phase = OS_PROCESS_CAPTURE_CLOSING;
+            } break;
+            case OS_PROCESS_CAPTURE_CLOSE_OK:
+            case OS_PROCESS_CAPTURE_CLOSE_FAILED:
+            {
+                valid = next.phase == OS_PROCESS_CAPTURE_CLOSING && !next.close_attempts;
+                next.close_attempts += 1;
+                next.close_outcome_unknown = event == OS_PROCESS_CAPTURE_CLOSE_FAILED;
+                next.failed |= next.close_outcome_unknown;
+                next.phase = OS_PROCESS_CAPTURE_CLOSED;
+            } break;
+            default: { valid = false; } break;
+        }
+    }
+    if (valid) { *state = next; }
+    return valid;
+}
+
+ProcessResult os_process_capture_result(const OsProcessCaptureState* state, ProcessResult child_result)
+{
+    ProcessResult result = state->phase == OS_PROCESS_CAPTURE_CLOSED && state->eof && !state->failed
+        ? child_result : PROCESS_RESULT_FAILED;
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsProcessCaptureEvent os_process_capture_test_failure = OS_PROCESS_CAPTURE_EVENT_COUNT;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_process_capture_test_consumed;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 os_process_capture_test_calls_remaining;
+
+void os_process_capture_test_fail_on_call(OsProcessCaptureEvent event, u32 call_index)
+{
+    BUSTER_VALIDATE(os_process_capture_test_failure == OS_PROCESS_CAPTURE_EVENT_COUNT &&
+        call_index < 16 &&
+        (event == OS_PROCESS_CAPTURE_WAIT_FAILED || event == OS_PROCESS_CAPTURE_READ_FAILED || event == OS_PROCESS_CAPTURE_CLOSE_FAILED));
+    os_process_capture_test_failure = event;
+    os_process_capture_test_consumed = false;
+    os_process_capture_test_calls_remaining = call_index;
+}
+
+bool os_process_capture_test_end(void)
+{
+    bool result = os_process_capture_test_consumed;
+    os_process_capture_test_failure = OS_PROCESS_CAPTURE_EVENT_COUNT;
+    os_process_capture_test_consumed = false;
+    os_process_capture_test_calls_remaining = 0;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_process_capture_test_take(OsProcessCaptureEvent event)
+{
+    bool result = os_process_capture_test_failure == event;
+    if (result && os_process_capture_test_calls_remaining)
+    {
+        os_process_capture_test_calls_remaining -= 1;
+        result = false;
+    }
+    else if (result)
+    {
+        os_process_capture_test_failure = OS_PROCESS_CAPTURE_EVENT_COUNT;
+        os_process_capture_test_consumed = true;
+    }
+    return result;
+}
+#endif
+
+#if !BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool os_process_capture_close(int* descriptor, OsProcessCaptureState* state)
+{
+    int close_result = close(*descriptor);
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+    if (state && os_process_capture_test_take(OS_PROCESS_CAPTURE_CLOSE_FAILED))
+    {
+        close_result = -1;
+        errno = EIO;
+    }
+#endif
+    *descriptor = -1;
+    if (state)
+    {
+        if (state->phase != OS_PROCESS_CAPTURE_CLOSING)
+        {
+            BUSTER_CHECK(os_process_capture_step(state, OS_PROCESS_CAPTURE_STOP, 0));
+        }
+        BUSTER_CHECK(os_process_capture_step(state, close_result ? OS_PROCESS_CAPTURE_CLOSE_FAILED : OS_PROCESS_CAPTURE_CLOSE_OK, 0));
+    }
+    return close_result == 0;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* capture)
 {
@@ -4927,6 +5066,53 @@ bool os_process_group_ownership_loss_self_test(void)
 #endif
 #endif
 
+#if BUSTER_WINDOWS
+// TinyCC has neither psapi.h nor its import stubs. This is the fixed ABI of
+// PROCESS_MEMORY_COUNTERS; resolve the existing kernel32 export at runtime.
+typedef struct OsProcessMemoryCounters OsProcessMemoryCounters;
+struct OsProcessMemoryCounters
+{
+    DWORD cb;
+    DWORD page_fault_count;
+    SIZE_T peak_working_set_size;
+    SIZE_T working_set_size;
+    SIZE_T quota_peak_paged_pool_usage;
+    SIZE_T quota_paged_pool_usage;
+    SIZE_T quota_peak_non_paged_pool_usage;
+    SIZE_T quota_non_paged_pool_usage;
+    SIZE_T pagefile_usage;
+    SIZE_T peak_pagefile_usage;
+};
+
+BUSTER_GLOBAL_LOCAL ProcessResourceStatus os_windows_process_memory_counters(HANDLE handle, OsProcessMemoryCounters* counters, OsError* error)
+{
+    ProcessResourceStatus result = PROCESS_RESOURCE_UNSUPPORTED;
+    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, OsProcessMemoryCounters*, DWORD);
+    GetProcessMemoryInfoProc get_process_memory_info =
+        (GetProcessMemoryInfoProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
+    counters->cb = sizeof(*counters);
+    if (get_process_memory_info)
+    {
+        if (get_process_memory_info(handle, counters, sizeof(*counters))) { result = PROCESS_RESOURCE_OBSERVED; }
+        else
+        {
+            *error = os_get_last_error();
+            if (!error->v) { error->v = ERROR_GEN_FAILURE; }
+            result = PROCESS_RESOURCE_ERROR;
+        }
+    }
+    return result;
+}
+#else
+BUSTER_GLOBAL_LOCAL bool os_process_usage_microseconds(struct timeval value, u64* output)
+{
+    bool result = value.tv_sec >= 0 && value.tv_usec >= 0 && value.tv_usec < 1000000 &&
+        (u64)value.tv_sec <= ((u64)-1 - (u64)value.tv_usec) / 1000000;
+    if (result) { *output = (u64)value.tv_sec * 1000000 + (u64)value.tv_usec; }
+    return result;
+}
+#endif
+
 ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds)
 {
     ProcessWaitResult result = {0};
@@ -5113,6 +5299,25 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
             CloseHandle((HANDLE)spawn.process_tree);
         }
+        if (spawn.observe_resources && wait_result == WAIT_OBJECT_0)
+        {
+            FILETIME created, exited, kernel, user;
+            if (GetProcessTimes((HANDLE)spawn.handle, &created, &exited, &kernel, &user))
+            {
+                result.resources.user_cpu_us = (((u64)user.dwHighDateTime << 32) | (u64)user.dwLowDateTime) / 10;
+                result.resources.system_cpu_us = (((u64)kernel.dwHighDateTime << 32) | (u64)kernel.dwLowDateTime) / 10;
+                result.resources.cpu_status = PROCESS_RESOURCE_OBSERVED;
+            }
+            else
+            {
+                result.resources.cpu_status = PROCESS_RESOURCE_ERROR;
+                result.resources.cpu_error = os_get_last_error();
+                if (!result.resources.cpu_error.v) { result.resources.cpu_error.v = ERROR_GEN_FAILURE; }
+            }
+            OsProcessMemoryCounters counters = {0};
+            result.resources.memory_status = os_windows_process_memory_counters((HANDLE)spawn.handle, &counters, &result.resources.memory_error);
+            if (result.resources.memory_status == PROCESS_RESOURCE_OBSERVED) { result.resources.peak_memory_bytes = (u64)counters.peak_working_set_size; }
+        }
         CloseHandle(spawn.handle);
         if (result.process_tree_cleanup_failed)
         {
@@ -5135,6 +5340,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         }
 
         int read_pipes[(u64)STANDARD_STREAM_COUNT];
+        OsProcessCaptureState capture_states[(u64)STANDARD_STREAM_COUNT] = {0};
         u64 quiescent_capture_remaining[(u64)STANDARD_STREAM_COUNT] = {0};
         u64 open_pipe_count = 0;
         bool quiescent_capture_snapshot = false;
@@ -5235,7 +5441,18 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             {
                 poll_milliseconds = 10;
             }
-            int poll_result = poll(poll_fds, poll_count, (int)poll_milliseconds);
+            int poll_result;
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+            if (!spawn.process_group && os_process_capture_test_take(OS_PROCESS_CAPTURE_WAIT_FAILED))
+            {
+                poll_result = -1;
+                errno = ENOMEM;
+            }
+            else
+#endif
+            {
+                poll_result = poll(poll_fds, poll_count, (int)poll_milliseconds);
+            }
             int poll_error = errno;
 #if BUSTER_INCLUDE_TESTS
             if (!spawn.process_group && poll_result > 0 && test_expire_deadline_after_ready)
@@ -5261,7 +5478,22 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             {
                 if (poll_error == EINTR)
                 {
+                    if (!spawn.process_group)
+                    {
+                        for (nfds_t index = 0; index < poll_count; index += 1)
+                        {
+                            BUSTER_CHECK(os_process_capture_step(capture_states + poll_streams[index], OS_PROCESS_CAPTURE_WAIT_INTERRUPTED, 0));
+                        }
+                    }
                     continue;
+                }
+                capture_failed = true;
+                if (!spawn.process_group)
+                {
+                    for (nfds_t index = 0; index < poll_count; index += 1)
+                    {
+                        BUSTER_CHECK(os_process_capture_step(capture_states + poll_streams[index], OS_PROCESS_CAPTURE_WAIT_FAILED, 0));
+                    }
                 }
                 errno = poll_error;
                 string_print(S8("Failed to poll process pipes: {EOs}\n"), os_get_last_error());
@@ -5269,31 +5501,55 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
             for (nfds_t poll_index = 0; poll_index < poll_count; poll_index += 1)
             {
-                if (!(poll_fds[poll_index].revents & (POLLIN | POLLHUP | POLLERR)))
+                u64 stream = poll_streams[poll_index];
+                OsProcessCaptureState* capture_state = spawn.process_group ? 0 : capture_states + stream;
+                if (!(poll_fds[poll_index].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
                 {
+                    if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_WAIT_IDLE, 0)); }
                     continue;
                 }
 
-                u64 stream = poll_streams[poll_index];
-                u8 buffer[16 * 1024];
-                ssize_t read_result = read(read_pipes[stream], buffer, sizeof(buffer));
+                if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_WAIT_READY, 0)); }
+                u8 buffer[OS_PROCESS_CAPTURE_READ_LIMIT];
+                ssize_t read_result;
+#if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
+                if (capture_state && os_process_capture_test_take(OS_PROCESS_CAPTURE_READ_FAILED))
+                {
+                    read_result = -1;
+                    errno = EBADF;
+                }
+                else
+#endif
+                {
+                    read_result = read(read_pipes[stream], buffer, sizeof(buffer));
+                }
+                int read_error = errno;
 
                 if (read_result > 0)
                 {
+                    if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_READ_BYTES, (u64)read_result)); }
                     pipe_capture_append(scratch.arena, &captures[stream], spawn, &result, (StandardStream)stream, buffer, (u64)read_result);
                 }
                 else
                 {
-                    if (read_result < 0 && errno != EINTR)
+                    if (read_result < 0 && read_error != EINTR)
                     {
-                        string_print(S8("Failed to read from process pipe: {EOs}\n"), os_get_last_error());
+                        capture_failed = true;
+                        string_print(S8("Failed to read from process pipe: {EOs}\n"), (OsError){.v = (u32)read_error});
                     }
 
-                    if (read_result == 0 || (read_result < 0 && errno != EINTR))
+                    if (read_result == 0 || (read_result < 0 && read_error != EINTR))
                     {
-                        close(read_pipes[stream]);
-                        read_pipes[stream] = -1;
+                        if (capture_state)
+                        {
+                            BUSTER_CHECK(os_process_capture_step(capture_state, read_result ? OS_PROCESS_CAPTURE_READ_FAILED : OS_PROCESS_CAPTURE_READ_EOF, 0));
+                        }
+                        capture_failed = !os_process_capture_close(read_pipes + stream, capture_state) || capture_failed;
                         open_pipe_count -= 1;
+                    }
+                    else if (capture_state)
+                    {
+                        BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_READ_INTERRUPTED, 0));
                     }
                 }
             }
@@ -5312,8 +5568,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
             if (read_pipes[stream] >= 0)
             {
-                close(read_pipes[stream]);
-                read_pipes[stream] = -1;
+                capture_failed = !os_process_capture_close(read_pipes + stream, spawn.process_group ? 0 : capture_states + stream) || capture_failed;
             }
         }
 
@@ -5415,6 +5670,26 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
         }
 
+        if (spawn.observe_resources && wait_result == pid)
+        {
+            bool cpu_valid = os_process_usage_microseconds(usage.ru_utime, &result.resources.user_cpu_us) &&
+                os_process_usage_microseconds(usage.ru_stime, &result.resources.system_cpu_us);
+            result.resources.cpu_status = cpu_valid ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (!cpu_valid) { result.resources.cpu_error.v = (u32)EOVERFLOW; }
+#if BUSTER_LINUX
+            bool memory_valid = usage.ru_maxrss >= 0 && (u64)usage.ru_maxrss <= (u64)-1 / 1024;
+            result.resources.memory_status = memory_valid ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (memory_valid) { result.resources.peak_memory_bytes = (u64)usage.ru_maxrss * 1024; }
+            else { result.resources.memory_error.v = (u32)EOVERFLOW; }
+#elif BUSTER_MACOS
+            result.resources.memory_status = usage.ru_maxrss >= 0 ? PROCESS_RESOURCE_OBSERVED : PROCESS_RESOURCE_ERROR;
+            if (result.resources.memory_status == PROCESS_RESOURCE_OBSERVED) { result.resources.peak_memory_bytes = (u64)usage.ru_maxrss; }
+            else { result.resources.memory_error.v = (u32)EOVERFLOW; }
+#else
+            result.resources.memory_status = PROCESS_RESOURCE_UNSUPPORTED;
+#endif
+        }
+
         if (program_flag_get(PROGRAM_FLAG_VERBOSE))
         {
             string_print(S8("Process [{s32}]: Time (user): {s64}:{s64} s,us, (system): {s64}:{s64} s,us. Max RSS: {s64} KB. PF (soft): {s64}, (hard): {s64}. "
@@ -5442,6 +5717,18 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         {
             result.result = PROCESS_RESULT_FAILED;
         }
+        if (!spawn.process_group)
+        {
+            for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+            {
+                if (captured[stream])
+                {
+                    result.result = os_process_capture_result(capture_states + stream, result.result);
+                    capture_failed |= capture_states[stream].failed;
+                }
+            }
+        }
+        result.capture_failed |= capture_failed;
         if (capture_failed) { wait_failed = true; }
         if (wait_failed) { result.result = PROCESS_RESULT_FAILED; }
         result.process_group_reservation_retained = spawn.process_group && wait_result != pid;
@@ -5929,34 +6216,9 @@ u64 os_get_resident_memory_size(void)
         result = (u64)usage.ru_maxrss;
     }
 #else
-    // Resolved at runtime for the same reason GlobalMemoryStatusEx is below:
-    // tcc's bundled import stubs do not carry it. K32GetProcessMemoryInfo is
-    // the kernel32 export, so no psapi import library is needed either.
-    //
-    // The counters are declared here rather than taken from psapi.h, which
-    // tcc's bundled headers do not ship: build.c includes this file and is
-    // bootstrapped with tcc, so naming PROCESS_MEMORY_COUNTERS is an "invalid
-    // type" there long before any Windows compiler sees it. The layout is
-    // fixed by the ABI, and `cb` tells the callee which version it received.
-    typedef struct
-    {
-        DWORD cb;
-        DWORD page_fault_count;
-        SIZE_T peak_working_set_size;
-        SIZE_T working_set_size;
-        SIZE_T quota_peak_paged_pool_usage;
-        SIZE_T quota_paged_pool_usage;
-        SIZE_T quota_peak_non_paged_pool_usage;
-        SIZE_T quota_non_paged_pool_usage;
-        SIZE_T pagefile_usage;
-        SIZE_T peak_pagefile_usage;
-    } OsProcessMemoryCounters;
-    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, OsProcessMemoryCounters*, DWORD);
-    GetProcessMemoryInfoProc get_process_memory_info =
-        (GetProcessMemoryInfoProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
     OsProcessMemoryCounters counters = {0};
-    counters.cb = sizeof(counters);
-    if (get_process_memory_info && get_process_memory_info(GetCurrentProcess(), &counters, sizeof(counters)))
+    OsError error = {0};
+    if (os_windows_process_memory_counters(GetCurrentProcess(), &counters, &error) == PROCESS_RESOURCE_OBSERVED)
     {
         result = (u64)counters.working_set_size;
     }

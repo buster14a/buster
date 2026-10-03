@@ -7,9 +7,14 @@
 // defined and which are called once per module, not once per symbol, before it
 // orders imports; wasm64_prepare_wasi_imports reserves command imports before
 // definitions, and wasm64_fe_emit_wasi_start writes the adapter.
+// wasm64_fe_emit_instruction keeps scalar bit counts at their semantic width,
+// with zero extended operands, CLZ padding bias and a narrow CTZ zero sentinel.
 // Local aggregate snapshots use private shadow-stack slots. Their SSA locals
 // carry slot addresses; loads copy immediately, so later stores cannot change
 // an earlier value. Function ABIs and block parameters remain scalar-only.
+// wasm64_fe_initialize plans actual place alignment; wasm64_fe_emit_prologue
+// aligns the fixed-frame base while retaining the unrounded entry SP for returns
+// and deliberate stack traps. Dynamic allocations may publish odd end pointers.
 // wasm64_build_name_payload names the data segments of section-attributed
 // data in the name section.
 // Scalar function pointers are i64 handles into a private i32-indexed table.
@@ -173,6 +178,7 @@ struct Wasm64FunctionEmitter
     u32* value_offsets;
     u32* parameter_locals;
     u32 pc_local;
+    u32 entry_sp_local;
     u32 fp_local;
     u32 sp_local;
     u32 scratch_local;
@@ -182,6 +188,7 @@ struct Wasm64FunctionEmitter
     u32 local_count;
     u32 extra_local_count;
     u32 frame_size;
+    u32 frame_alignment;
 };
 
 static String8 wasm64_s8(char8 const* pointer)
@@ -2460,6 +2467,7 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
     }
 
     u64 frame_cursor = 0;
+    emitter->frame_alignment = 16;
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
         IrInstruction* instruction = function->instructions + instruction_index;
@@ -2475,6 +2483,7 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
         }
         u64 size = type && type->layout.resolved ? type->layout.size : 0;
         u64 alignment = type && type->layout.alignment ? type->layout.alignment : 1;
+        alignment = BUSTER_MAX(alignment, function->values[instruction->result.value].alignment);
         if (!size || size > UINT32_MAX || alignment > UINT32_MAX || alignment == 0 || alignment > (UINT64_C(1) << 31) ||
             (snapshot && alignment > 16))
         {
@@ -2495,6 +2504,7 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
         }
         emitter->value_offsets[instruction->result.value] = (u32)frame_cursor;
         frame_cursor += size;
+        emitter->frame_alignment = BUSTER_MAX(emitter->frame_alignment, (u32)alignment);
     }
     if (!wasm64_align_cursor(&frame_cursor, 16) || frame_cursor > UINT32_MAX)
     {
@@ -2504,11 +2514,12 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
     emitter->frame_size = (u32)frame_cursor;
     u32 temp_count = wasm64_fe_count_block_parameters(function);
     emitter->pc_local = record->signature.param_count + function->value_count;
-    emitter->fp_local = emitter->pc_local + 1;
+    emitter->entry_sp_local = emitter->pc_local + 1;
+    emitter->fp_local = emitter->entry_sp_local + 1;
     emitter->sp_local = emitter->fp_local + 1;
     emitter->scratch_local = emitter->sp_local + 1;
     emitter->temp_base = emitter->scratch_local + 1;
-    emitter->extra_local_count = 4 + temp_count;
+    emitter->extra_local_count = 5 + temp_count;
     emitter->local_count = record->signature.param_count + function->value_count + emitter->extra_local_count;
     u32 declared_local_count = function->value_count + emitter->extra_local_count;
     emitter->local_types = arena_allocate(context->arena, u8, declared_local_count ? declared_local_count : 1);
@@ -2518,6 +2529,7 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
     }
     u32 local_type_index = function->value_count;
     emitter->local_types[local_type_index++] = WASM64_VALTYPE_I32;
+    emitter->local_types[local_type_index++] = (u8)wasm64_pointer_valtype(context);
     emitter->local_types[local_type_index++] = (u8)wasm64_pointer_valtype(context);
     emitter->local_types[local_type_index++] = (u8)wasm64_pointer_valtype(context);
     emitter->local_types[local_type_index++] = (u8)wasm64_pointer_valtype(context);
@@ -2550,7 +2562,7 @@ static void wasm64_fe_emit_stack_trap_if(Wasm64FunctionEmitter* emitter)
     wasm64_fe_u8(emitter, 0x04); // if
     wasm64_fe_u8(emitter, 0x40);
     // Restore this function's entry pointer before the deliberate trap.
-    wasm64_fe_local_get(emitter, emitter->fp_local);
+    wasm64_fe_local_get(emitter, emitter->entry_sp_local);
     wasm64_fe_global_set(emitter, emitter->context->stack_global_index);
     wasm64_fe_u8(emitter, 0x00); // unreachable
     wasm64_fe_u8(emitter, 0x0b); // end if
@@ -2578,6 +2590,21 @@ static void wasm64_fe_emit_stack_bounds_check(Wasm64FunctionEmitter* emitter, u3
 static void wasm64_fe_emit_prologue(Wasm64FunctionEmitter* emitter)
 {
     wasm64_fe_global_get(emitter, emitter->context->stack_global_index);
+    wasm64_fe_local_set(emitter, emitter->entry_sp_local);
+    wasm64_fe_emit_stack_bounds_check(emitter, emitter->entry_sp_local);
+    // Offsets alone cannot align a fixed object when a caller's live alloca
+    // leaves an odd SP. Check the padding addition before rounding the base.
+    wasm64_fe_local_get(emitter, emitter->entry_sp_local);
+    wasm64_fe_pointer_const(emitter, emitter->frame_alignment - 1);
+    wasm64_fe_pointer_add(emitter);
+    wasm64_fe_local_set(emitter, emitter->fp_local);
+    wasm64_fe_local_get(emitter, emitter->fp_local);
+    wasm64_fe_local_get(emitter, emitter->entry_sp_local);
+    wasm64_fe_u8(emitter, wasm64_is_memory64(emitter->context) ? 0x54 : 0x49); // padding addition wrapped
+    wasm64_fe_emit_stack_trap_if(emitter);
+    wasm64_fe_local_get(emitter, emitter->fp_local);
+    wasm64_fe_pointer_const(emitter, ~((u64)emitter->frame_alignment - 1));
+    wasm64_fe_pointer_and(emitter);
     wasm64_fe_local_set(emitter, emitter->fp_local);
     wasm64_fe_emit_stack_bounds_check(emitter, emitter->fp_local);
     wasm64_fe_local_get(emitter, emitter->fp_local);
@@ -2832,7 +2859,7 @@ static void wasm64_fe_emit_integer_constant(Wasm64FunctionEmitter* emitter, IrIn
 static void wasm64_fe_emit_return(Wasm64FunctionEmitter* emitter, IrInstruction* instruction)
 {
     bool has_value = instruction->operand_count == 1;
-    wasm64_fe_local_get(emitter, emitter->fp_local);
+    wasm64_fe_local_get(emitter, emitter->entry_sp_local);
     wasm64_fe_global_set(emitter, emitter->context->stack_global_index);
     if (has_value)
     {
@@ -3260,7 +3287,14 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
             instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
             instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)
         {
-            wasm64_fe_emit_integer_value(emitter, instruction->operands[0], operand_type && operand_type->kind == IR_TYPE_INTEGER && operand_type->is_signed);
+            u32 bit_width = wasm64_integer_bits(type);
+            u32 carrier_width = bit_width <= 32 ? 32 : 64;
+            bool count_bits = bit_width != 0 &&
+                              (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                               instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
+                               instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT);
+            wasm64_fe_emit_integer_value(emitter, instruction->operands[0],
+                                         !count_bits && operand_type && operand_type->kind == IR_TYPE_INTEGER && operand_type->is_signed);
             if (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE)
             {
                 if (wasm64_integer_bits(type) > 32)
@@ -3288,7 +3322,34 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
             }
             else
             {
+                // Count semantic bits, with zero extended carrier padding.
+                // The sentinel makes CTZ(0) return the semantic width too.
+                bool narrow = count_bits && bit_width < carrier_width;
+                if (narrow && instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
+                {
+                    if (carrier_width == 64)
+                    {
+                        wasm64_fe_i64_const(emitter, (s64)(UINT64_C(1) << bit_width));
+                    }
+                    else
+                    {
+                        wasm64_fe_i32_const(emitter, (s32)(UINT32_C(1) << bit_width));
+                    }
+                    wasm64_fe_emit_binary_opcode(emitter, IR_BINARY_INTEGER_BITWISE_OR, type);
+                }
                 wasm64_fe_emit_unary_opcode(emitter, instruction->unary_operation, type);
+                if (narrow && instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS)
+                {
+                    if (carrier_width == 64)
+                    {
+                        wasm64_fe_i64_const(emitter, (s64)(carrier_width - bit_width));
+                    }
+                    else
+                    {
+                        wasm64_fe_i32_const(emitter, (s32)(carrier_width - bit_width));
+                    }
+                    wasm64_fe_emit_binary_opcode(emitter, IR_BINARY_INTEGER_SUBTRACT, type);
+                }
             }
             wasm64_fe_emit_result_set(emitter, instruction, true, type->kind == IR_TYPE_INTEGER && type->is_signed);
         }

@@ -280,12 +280,50 @@ class RulesTests(unittest.TestCase):
                     with self.assertRaisesRegex(gate.AdmissionError, "bypass actors differ"):
                         gate.validate_ruleset(data, read_only_response=read_only)
 
-    def test_reader_bypass_authority_is_rejected(self):
+    def test_administrator_response_accepts_known_reader_capabilities(self):
+        for authority in ("never", "always", "pull_requests_only"):
+            with self.subTest(authority=authority):
+                data = self.ruleset()
+                data["current_user_can_bypass"] = authority
+                gate.validate_ruleset(data)
+
+    def test_administrator_reader_capability_requires_reviewed_inventory(self):
+        for authority in ("always", "pull_requests_only"):
+            for inventory in (None, [], [{"actor_type": "OrganizationAdmin"}]):
+                with self.subTest(authority=authority, inventory=inventory):
+                    data = self.ruleset()
+                    data["current_user_can_bypass"] = authority
+                    if inventory is None:
+                        del data["bypass_actors"]
+                    else:
+                        data["bypass_actors"] = inventory
+                    with self.assertRaisesRegex(gate.AdmissionError, "bypass (inventory|actors)"):
+                        gate.validate_ruleset(data)
+
+    def test_readonly_reader_bypass_authority_is_rejected(self):
         for authority in ("always", "pull_requests_only", None, ""):
-            data = live_rules()
-            data["current_user_can_bypass"] = authority
-            with self.assertRaisesRegex(gate.AdmissionError, "bypass authority"):
+            for visible in (False, True):
+                with self.subTest(authority=authority, visible=visible):
+                    data = self.ruleset() if visible else live_rules()
+                    data["current_user_can_bypass"] = authority
+                    with self.assertRaisesRegex(gate.AdmissionError, "bypass authority"):
+                        gate.validate_ruleset(data, read_only_response=True)
+
+    def test_readonly_reader_without_bypass_is_accepted(self):
+        for visible in (False, True):
+            with self.subTest(visible=visible):
+                data = self.ruleset() if visible else live_rules()
+                data["current_user_can_bypass"] = "never"
                 gate.validate_ruleset(data, read_only_response=True)
+
+    def test_unknown_reader_capability_is_rejected_in_both_modes(self):
+        for authority in (None, "", "ALWAYS", "unknown", True, 1, [], {}):
+            for read_only in (False, True):
+                with self.subTest(authority=authority, read_only=read_only):
+                    data = self.ruleset()
+                    data["current_user_can_bypass"] = authority
+                    with self.assertRaises(gate.AdmissionError):
+                        gate.validate_ruleset(data, read_only_response=read_only)
 
     def test_live_ruleset_identity_and_visibility(self):
         api = gate.GitHub("buster14a/buster", "fixture-token")
@@ -378,11 +416,16 @@ class RulesTests(unittest.TestCase):
         self.assertNotIn(": write", text)
         self.assertNotIn("pull_request_target:", text)
         self.assertNotIn("secrets.", text)
-        self.assertIn("github.event_name == 'merge_group' && 'main' || github.sha", text)
         self.assertNotIn("github.event.merge_group.base_sha || github.sha", text)
         self.assertIn("persist-credentials: false", text)
         self.assertIn("github.event_name == 'push' && github.run_id", text)
-        self.assertIn("check-group", text)
+        # The reconciler is the only merge-group producer of CONTEXT (#1807):
+        # no merge_group trigger, no runner-held check-group wait.
+        # group_owner keys on exactly this marker in the group head's file.
+        self.assertNotIn("\n  merge_group:\n", text)
+        self.assertNotIn("merge_group", text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0])
+        self.assertNotIn("check-group", text)
+        self.assertNotIn("timeout-minutes: 310", text)
 
 
 class CombinedTreeTests(unittest.TestCase):

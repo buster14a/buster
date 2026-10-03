@@ -20,6 +20,27 @@ their source/debug locations.
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Source-format literal rounding
+
+`c_ir_float_literal_value` rounds a float-suffixed literal to binary32 before
+widening its value into the binary64 constant carrier. Exact rational overflow
+materializes source-format infinity; underflow materializes zero only when the
+converter reports that the rounded significand is zero. Nonzero subnormals
+retain their `C_IR_ROUND_OK` image. Unary negation then preserves the sign of
+infinity and zero. Only `C_IR_ROUND_FAILED` retains the existing approximate
+parser fallback; it is separate from representable special results.
+`c_ir_emit_float_spelling` applies the same range statuses to automatic
+expressions, including bounded large mantissas whose approximate accumulator
+would produce infinity divided by infinity instead of the rounded zero.
+
+Registered `c_test_float_literal_initializer_rounding` checks fixed IEEE images
+for scalar and array globals, source-format comparison queries and rejected
+nonfinite integer conversions on six target layouts and both frontend forms.
+Its runtime companion checks the same independently specified images in
+global, automatic and local-static storage through all four native allocators
+and both frontend forms. Decimal/hexadecimal maximum, subnormal, halfway and
+negative-zero rows preserve finite-boundary and per-literal rounding behavior.
+
 - **`_Float16` is IEEE-754 binary16, and it is a real type rather than a
   storage alias.** Two naturally aligned bytes on every supported target
   (`TargetDataLayout.float16_type`, `C_TYPE_FLOAT16`), its own rank below

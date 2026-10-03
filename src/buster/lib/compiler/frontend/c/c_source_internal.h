@@ -74,6 +74,8 @@ BUSTER_F_DECL bool c_test_source_allocation_plan(u64 length, CSourceAllocationPl
 // Includes lex into a shared spelling space; exercise that production entry
 // without creating or mapping a multi-gigabyte file.
 BUSTER_F_DECL CLexResult c_test_lex_include_source(Arena* arena, String8 source);
+// Preserve public GNU17 lexing while comparing each dialect's phase-one path.
+BUSTER_F_DECL CLexResult c_test_lex_dialect(Arena* arena, String8 source, CPreprocessDialect dialect, bool force_scalar);
 BUSTER_F_DECL CIncludeFileStatus c_test_include_file_entry(CIncludeFileTable* table, CIncludeFileIdentity identity, String8 spelling, CIncludeFileEntry** entry_out);
 BUSTER_F_DECL bool c_test_include_file_table_grow(CIncludeFileTable* table);
 BUSTER_F_DECL void c_test_source_map_sort(Arena* arena, IrSourceRegion* regions, u32 count);

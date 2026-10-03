@@ -10,6 +10,7 @@ interruption_evidence) for failed jobs whose runner stopped reporting.
 queue-collect/queue-summarize measure runner scheduling across every workflow
 (#1805): queue_collect, queue_summarize, _queue_job_record, _occupancy.
 require-jobs is CI complete's inventory gate (require_jobs, validate_required_jobs);
+separate_reconciled_jobs proves and retains admission metadata separately (#2388);
 transient API reads retry inside its metadata budget (_transient_api_failure,
 _gate_get) and an unsuccessful verdict is printed (report_gate_failure).
 combination_jobs selects the complete combined or dispatch-only split layout;
@@ -71,6 +72,13 @@ MACOS_RUNNER_JOBS = tuple(name for name in COMBINATION_PLATFORMS + NATIVE + MOBI
 DEFERRED_SUFFIX = " (deferred for draft PR)"
 DEFERRAL_STEP = "Defer macOS runner lane for draft pull request"
 MAIN_REUSE_JOB = "Main CI reuse decision"
+# Same exact-head provenance contract as .github/scripts/recover-ci.py and
+# the trusted merge_queue_admission publisher. Names alone authorize nothing.
+RECONCILED_CHECK_MARKERS = {
+    "Main integration admission": "buster-merge-queue-admission-v1:",
+    "Native retirement merge admission": "buster-native-retirement-admission-v1:",
+}
+GITHUB_ACTIONS_APP_ID = 15368
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
               "run_attempt", "created_at", "run_started_at", "html_url")
 JOB_FIELDS = ("id", "name", "run_attempt", "status", "conclusion", "created_at", "started_at", "completed_at", "labels")
@@ -552,6 +560,91 @@ def _carried_forward_copy(job, original):
     return timed and original.get("status") == "completed" and _job_execution(job) == _job_execution(original)
 
 
+def reconciled_job_candidates(jobs):
+    """Select rows needing independent provenance proof, never an exemption."""
+    if not isinstance(jobs, list) or not all(isinstance(job, dict) for job in jobs):
+        raise ValueError("Malformed job inventory")
+    return [job for job in jobs if isinstance(job.get("name"), str) and
+            job["name"] in RECONCILED_CHECK_MARKERS]
+
+
+def separate_reconciled_jobs(jobs, run_id, run_attempt, head_sha, checks):
+    """Separate proven controller metadata; its verdict remains a queue gate.
+
+    GitHub can attach checks created outside Actions to an Actions run's jobs
+    listing. They are not executions of that workflow. Preserve their raw rows
+    and check identity without waiting for admission to finish before CI does.
+    """
+    candidates = reconciled_job_candidates(jobs)
+    metadata = []
+    if candidates:
+        if not isinstance(checks, list) or not all(isinstance(check, dict) for check in checks):
+            raise ValueError("Malformed reconciler check inventory")
+        check_ids = [check.get("id") for check in checks]
+        if (not all(type(identity) is int and identity > 0 for identity in check_ids) or
+                len(set(check_ids)) != len(check_ids)):
+            raise ValueError("Reconciler check snapshot IDs are malformed or duplicated")
+        identities = [job.get("id") for job in jobs]
+        names = Counter(job["name"] for job in candidates)
+        for job in candidates:
+            identity, name = job.get("id"), job["name"]
+            if (type(identity) is not int or identity <= 0 or identities.count(identity) != 1 or
+                    names[name] != 1 or job.get("run_id") != run_id or
+                    job.get("head_sha") != head_sha or type(job.get("run_attempt")) is not int or
+                    not 1 <= job["run_attempt"] <= run_attempt or
+                    job.get("steps") != [] or job.get("runner_id") not in (None, 0)):
+                raise ValueError("Reconciler job identity is invalid, duplicated or executed: " + name)
+            marker = RECONCILED_CHECK_MARKERS[name] + head_sha
+            owned = [check for check in checks if check.get("name") == name and
+                     check.get("head_sha") == head_sha and
+                     isinstance(check.get("app"), dict) and
+                     check["app"].get("id") == GITHUB_ACTIONS_APP_ID and
+                     check.get("external_id") == marker]
+            matching = [check for check in checks if check.get("id") == identity]
+            if (len(owned) != 1 or len(matching) != 1 or
+                    type(owned[0].get("id")) is not int or owned[0]["id"] != identity or
+                    matching[0] != owned[0]):
+                raise ValueError("Reconciler check lacks unique exact ID/name/head/app/marker proof: " + name)
+            metadata.append({"job": dict(job),
+                             "check": {key: owned[0].get(key) for key in
+                                       ("id", "name", "head_sha", "app", "external_id",
+                                        "status", "conclusion")}})
+    excluded = {record["job"]["id"] for record in metadata}
+    return [job for job in jobs if type(job.get("id")) is not int or job["id"] not in excluded], metadata
+
+
+def _gate_reconciled_checks(repository, head_sha, token, deadline, lookups):
+    """Read a complete check snapshot inside require-jobs' existing budget."""
+    checks = []
+    total = None
+    page = 1
+    while total is None or len(checks) < total:
+        if page > 10:
+            raise ValueError("Reconciler check pagination limit reached")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("Reconciler check proof exhausted the metadata budget")
+        path = f"commits/{head_sha}/check-runs?filter=all&per_page={JOB_PAGE_SIZE}&page={page}"
+        batch, failure = _gate_get(repository, path, token, min(API_TIMEOUT_SECONDS, remaining), lookups)
+        if failure is not None:
+            raise ValueError("Reconciler check read unresolved: " + _api_failure_text(failure))
+        if not isinstance(batch, dict):
+            raise ValueError("Malformed reconciler check page")
+        count = batch.get("total_count")
+        if type(count) is not int or not 0 <= count <= 1000 or (total is not None and count != total):
+            raise ValueError("Missing, changing or excessive reconciler check inventory")
+        total = count
+        chunk = batch.get("check_runs")
+        if (not isinstance(chunk, list) or len(chunk) > JOB_PAGE_SIZE or len(checks) + len(chunk) > total or
+                (not chunk and len(checks) < total)):
+            raise ValueError("Incomplete reconciler check pagination")
+        checks.extend(chunk)
+        if len(chunk) != JOB_PAGE_SIZE and len(checks) != total:
+            raise ValueError("Partial reconciler check page")
+        page += 1
+    return checks
+
+
 def latest_run_jobs(jobs, run_id, run_attempt, head_sha):
     """Select by attempt, never by success; prior green cannot hide later red.
 
@@ -644,6 +737,7 @@ def require_jobs(args):
     jobs = []
     errors = []
     snapshot_attempts = 0
+    reconciled_checks = []
     page_size = JOB_PAGE_SIZE
     for snapshot_attempt in range(len(JOB_METADATA_REFRESH_DELAYS_SECONDS) + 1):
         snapshot_attempts = snapshot_attempt + 1
@@ -652,6 +746,7 @@ def require_jobs(args):
         errors = []
         exhausted = False
         inventory = []
+        reconciled_checks = []
         total = None
         page = 1
         while total is None or len(inventory) < total:
@@ -685,6 +780,10 @@ def require_jobs(args):
             break
         if not errors:
             try:
+                checks = (_gate_reconciled_checks(args.repository, head_sha, token, deadline, lookups)
+                          if reconciled_job_candidates(inventory) else [])
+                inventory, reconciled_checks = separate_reconciled_jobs(
+                    inventory, args.run_id, args.run_attempt, head_sha, checks)
                 # filter=latest can hide successful non-rerun jobs. Reconstruct each
                 # logical job from all attempts of this exact immutable run/head.
                 jobs = latest_run_jobs(inventory, args.run_id, args.run_attempt, head_sha)
@@ -724,7 +823,8 @@ def require_jobs(args):
                              "refreshes": max(0, snapshot_attempts - 1),
                              "refresh_budget_seconds": JOB_METADATA_REFRESH_BUDGET_SECONDS,
                              "final_page_size": page_size, "lookups": lookups},
-            "jobs": _job_evidence(jobs, interruptions)}
+            "jobs": _job_evidence(jobs, interruptions),
+            "reconciled_checks": reconciled_checks}
 
 
 def report_deferrals(data, summary_path, notice):

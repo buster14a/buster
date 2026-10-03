@@ -14,6 +14,14 @@ fixture as well as compiling both architectures.
 
 ## Machine instruction selection and scheduling
 
+- System V indirect variadic calls keep the vector-register count in AL
+  through the call instruction. The canonical emitter reloads the callee from
+  its frame home into caller-saved R10 after argument staging; the MIR allocators
+  reserve the same indirect-call register. `compiler_driver_test_sysv_indirect_variadic`
+  checks counts 0/1/8 and floating arguments crossing the register/stack boundary
+  against aligned foreign assembly and host-compiled `va_arg` callees. It covers
+  both frontend forms and every allocator on all four System V x86-64 targets;
+  matching desktop hosts execute the mixed objects.
 - `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
   memory-effect, fixed-register, tie, early-clobber, register-clobber, and
   implicit-vector-scratch membership in `MachineOpcodeInfo`, accessed through the
@@ -73,6 +81,16 @@ fixture as well as compiling both architectures.
   values are followed per row across definitions and allocator edits;
   indirect/over-aligned and unrepresentable values publish UNAVAILABLE rather
   than guessing. Selection without debug info allocates no table.
+- Debug replay treats a home written by distinct virtual registers as shared.
+  Its validity ends at a nonentry block boundary unless an own spill certifies
+  it again, and after the value's final operand or memory edit. This bounds
+  suffix replay and prevents a loop back edge exposing a later owner's bytes.
+  Certified registers retain their clobber tracking after the final operand;
+  replay stops only when neither a register nor a recovery event can remain.
+  An unshared home may retain a dead value. The independent dense test model
+  scans the full function; explicit reused-home tests cover both x86-64 and
+  AArch64. Executed Linux x86-64 DWARF/GDB coverage is documented in
+  [testing](testing.md#executed-dwarf-lifetimes).
 - An ordinary machine virtual register has exactly one definition and every
   use, including an edge-copy source, is dominated by it. The temporary
   `MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE` exception is explicit and counted;
@@ -222,7 +240,11 @@ fixture as well as compiling both architectures.
   when no call in the function returns twice: a `longjmp` can re-enter the frame
   at a row no machine edge reaches. Address-taken, volatile-tainted,
   inline-assembly, variadic, outgoing-argument and unproven-form objects keep
-  storage of their own. Debug records may name slots but never decide layout.
+  storage of their own. With an optional `stack_slot_memory_flags` array, only
+  `MACHINE_STACK_SLOT_MEMORY_NONVOLATILE` admits an object to reuse; zero is
+  unknown and keeps dedicated storage. An absent array preserves manual
+  fixtures' existing reuse subject to the other lifetime and ownership guards.
+  Debug records may name slots but never decide layout.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
@@ -472,6 +494,15 @@ fixture as well as compiling both architectures.
   integer staging pass, after all XMM bridges, and omit the System V AL count.
   Cross-compiler regressions cover both call directions, register exhaustion,
   copied lists, small/indirect aggregates, and hidden result pointers.
+- x86-64 hidden aggregate-result pointers satisfy the return type's natural
+  alignment for direct and indirect calls, including discarded results. Internal
+  SSA aggregate homes retain eight-byte alignment. Stronger result alignment,
+  including sixteen, uses checked private backing slack and ordinary MIR pointer
+  rounding; used results copy exact object bytes back after the call. The registered
+  `machine_test_x64_result_alignment` covers eight-aligned controls and
+  16/32/64/128-byte results in both frontend forms and all allocators. Its native
+  System V observer reads the raw hidden pointer and performs an aligned SSE
+  store independently of Buster's aggregate-store choices.
 - Windows/UEFI x86-64 indirect aggregate arguments occupy one pointer slot.
   Callers copy exact value bytes after their shadow and stack-argument area.
   Copies meet both the sixteen-byte floor and the declared type alignment;

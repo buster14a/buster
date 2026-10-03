@@ -6,14 +6,12 @@
 
 Use the repository and host named by the user; a GitHub URL names the GitHub
 repository, not a Forgejo task. Otherwise inspect the current git remote.
-Forgejo at `https://code.buster14a.com/buster/buster` retains the workflows
-under `.forgejo/`; `.github/workflows/ci.yml` runs the migration matrix described
-in `docs/ci-github-actions.md`. Check the live checks on the submitted commit.
-The separate private workflow-only GitHub broker may supply opt-in hosted
-desktop runners as documented in `docs/ci-github-hosted-runners.md`; that
-broker is never a source mirror. When working on Forgejo, use **`fj`**, the Forgejo CLI. It reads
-the repository from the git remote, so run it from inside a checkout (or pass
-`-C <path>` / `-r buster/buster`).
+Active CI and merge admission are defined under `.github/workflows/`; check
+the live checks on the submitted commit. The `.forgejo/` implementation and
+source-free GitHub runner broker were removed in commit
+`02c0400a34d04be9e984f29a59291750b3998d3f`. Their
+[retirement record](../ci-github-hosted-runners.md) links historical material,
+not current setup or validation commands.
 
 The issues open on 2026-08-31 were copied to `buster14a/buster` on GitHub as
 part of the migration. Numbers did not survive the copy, so historical
@@ -21,33 +19,6 @@ references in the topic guides, code comments, and commit messages may name a
 **Forgejo** number: resolve those through `docs/issue-migration-map.md`, or
 through `docs/forgejo-issue-archive.md` for issues already closed by then.
 Do not remap an issue identified by a current GitHub URL.
-
-`fj` needs a token once per machine. The password half of the
-`code.buster14a.com` line in `~/.git-credentials` is a valid API token, so
-authentication is a pipe, not a browser round trip:
-
-```sh
-grep code.buster14a.com ~/.git-credentials \
-  | sed 's|https://[^:]*:||; s|@code.buster14a.com.*||' \
-  | fj auth add-token -H code.buster14a.com
-fj whoami          # verify: <account>@code.buster14a.com
-```
-
-`fj issue create "<title>" --body-file <path> --no-template`,
-`fj issue search [-s open|closed|all]`, `fj issue view <n>`,
-`fj issue comment <n>`, and `fj pr create --base main --head <branch>
---body-file <path>` are the whole working set; `fj pr search`, `fj pr status`
-and `fj pr view` read the other side. Two things to know before scripting it:
-the subcommand for listing issues is `search`, not `list`, and **omitting both
-`--body` and `--body-file` opens `$EDITOR`**, which hangs a non-interactive
-session — always pass a body file. Write the body as a file rather than a
-shell string: backticks inside `$(cat <<EOF)` get command-substituted by zsh,
-which has mangled a commit message before.
-
-`fj` supersedes the older workarounds. `tea`'s login for this host has no
-token, and the raw-`curl` recipe that went with it needed a browser
-`User-Agent` to get past Cloudflare's `403 error code: 1010`; `fj` is not
-subject to either problem.
 
 **Issues are the task queue.** Work that is real but not being done right now
 becomes an issue, not a paragraph in an audit that nobody will find — a chip
@@ -312,8 +283,9 @@ replacement head after its checks pass. No manual generated-file repair is neede
 
 The main merge queue was enabled and read back on 2026-09-22 after #945 landed.
 All eight documented checks are required from GitHub Actions. The repository
-contract permits up to 4 speculative combined-head builds (lowered from 20 by
-#1805) while allowing only one validated candidate to merge at a time.
+contract permits up to 6 speculative combined-head builds (raised from 4 by
+#2012 after #1805 lowered it from 20) while allowing only one validated candidate
+to merge at a time.
 `ALLGREEN` requires every queued group's checks, and `MERGE` retains merge
 commits. The initial activation had
 one build slot and no bypass; the administrator must read back the current live

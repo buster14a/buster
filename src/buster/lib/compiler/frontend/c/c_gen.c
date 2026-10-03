@@ -840,6 +840,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind k
                                                               .is_signed = is_signed,
                                                               .is_nullptr = kind == C_TYPE_NULLPTR,
                                                               .float_format = kind == C_TYPE_BFLOAT16 ? IR_FLOAT_FORMAT_BFLOAT16 : IR_FLOAT_FORMAT_IEEE,
+                                                              .integer_conversion_rank = c_semantic_integer_rank(kind),
                                                           });
     context->scalar_types[kind] = type;
     if (ir_kind == IR_TYPE_INTEGER)
@@ -1506,7 +1507,10 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
                                  !(type->layout.size & (type->layout.size - 1))));
         }
     }
-    return type->kind != IR_TYPE_FUNCTION && vector_supported && (type->kind != IR_TYPE_VA_LIST || type->layout.size <= 32) && abi.part_count;
+    bool empty_system_v_aggregate = convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && !type->layout.size &&
+                                    (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && !abi.part_count && !abi.indirect && !abi.memory;
+    return type->kind != IR_TYPE_FUNCTION && vector_supported && (type->kind != IR_TYPE_VA_LIST || type->layout.size <= 32) &&
+           (abi.part_count || empty_system_v_aggregate);
 }
 
 BUSTER_C_INTERNAL bool c_ir_signature_body_supported(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId return_type,
@@ -2727,10 +2731,10 @@ struct CIntegerIrBuilder
     IrProgram* program;
     IrModule* module;
     IrFunction* function;
-    // Only unsigned int bit-field values need a promotion fact absent from
+    // Narrow bit-fields can need a promotion fact absent from
     // their canonical type. Allocate lazily; ordinary functions pay no table.
-    u8* unsigned_bit_field_values;
-    u32 unsigned_bit_field_value_capacity;
+    u8* bit_field_promotions;
+    u32 bit_field_value_capacity;
     CIrVlaArrayType* vla_array_types;
     CIrVlaSavedBound* vla_saved_bounds;
     IrTypeId* vla_c_types;
@@ -3400,6 +3404,20 @@ BUSTER_C_INTERNAL bool c_ir_query_offsetof(CIntegerIrBuilder* builder, u32 start
     }
     *offset_out = result.integer;
     return result.success;
+}
+
+// Runtime expressions enter the same query-frame walk used by static
+// initializer constants; its children resolve type names and array indexes.
+BUSTER_C_INTERNAL bool c_ir_offsetof_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out)
+{
+    CIrQueryFrame result = {0};
+    bool success = c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_OFFSETOF}, &result) &&
+                   result.success;
+    if (success)
+    {
+        *offset_out = result.integer;
+    }
+    return success;
 }
 
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out);
@@ -4657,13 +4675,21 @@ BUSTER_C_INTERNAL IrValueId c_ir_add_result(CIntegerIrBuilder* builder, IrTypeId
     {
         builder->failure_message = S8("C IR value capacity exhausted");
     }
-    if (result.value < builder->unsigned_bit_field_value_capacity)
+    if (result.value < builder->bit_field_value_capacity)
     {
         // Speculative lowering can reuse a value id after rolling back.
-        builder->unsigned_bit_field_values[result.value] = 0;
+        builder->bit_field_promotions[result.value] = 0;
     }
     return result;
 }
+
+// Zero is the ordinary declared type; only a different promotion needs a row.
+typedef enum CIrBitFieldPromotion
+{
+    C_IR_BIT_FIELD_PROMOTION_NONE,
+    C_IR_BIT_FIELD_PROMOTION_INT,
+    C_IR_BIT_FIELD_PROMOTION_UNSIGNED_INT,
+} CIrBitFieldPromotion;
 
 BUSTER_C_INTERNAL IrTypeId c_ir_integer_promoted_value_type(CIntegerIrBuilder* builder, IrValueId value)
 {
@@ -4673,40 +4699,54 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_promoted_value_type(CIntegerIrBuilder* b
         result = builder->function->values[value.value].canonical_type;
         IrType* type = ir_type_from_id(&builder->program->types, result);
         if (type && (type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM ||
-                     (type->kind == IR_TYPE_INTEGER && type->bit_width < 32) ||
-                     (type->kind == IR_TYPE_INTEGER && type->bit_width == 32 && !type->is_signed &&
-                      value.value < builder->unsigned_bit_field_value_capacity && builder->unsigned_bit_field_values[value.value])))
+                     (type->kind == IR_TYPE_INTEGER && type->bit_width < 32)))
         {
             result = builder->s32_type;
+        }
+        else if (type && type->kind == IR_TYPE_INTEGER && value.value < builder->bit_field_value_capacity &&
+                 builder->bit_field_promotions[value.value])
+        {
+            result = builder->bit_field_promotions[value.value] == C_IR_BIT_FIELD_PROMOTION_INT
+                         ? builder->s32_type : builder->scalar_types[C_TYPE_UNSIGNED_INT];
         }
     }
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_unsigned_bit_field_promotes_to_int(CIntegerIrBuilder* builder, IrField const* field)
+BUSTER_C_INTERNAL CIrBitFieldPromotion c_ir_bit_field_promotion(CIntegerIrBuilder* builder, IrField const* field)
 {
     IrType* type = field ? ir_type_from_id(&builder->program->types, field->type) : 0;
-    return field && field->is_bit_field && field->bit_width && field->bit_width < 32 && type && type->kind == IR_TYPE_INTEGER &&
-           type->bit_width == 32 && !type->is_signed;
+    CIrBitFieldPromotion result = C_IR_BIT_FIELD_PROMOTION_NONE;
+    if (field && field->is_bit_field && field->bit_width && field->bit_width <= 32 && type && type->kind == IR_TYPE_INTEGER &&
+        type->bit_width >= 32)
+    {
+        bool signed_promotion = field->bit_width < 32 || type->is_signed;
+        if (type->bit_width > 32 || signed_promotion != type->is_signed)
+        {
+            result = signed_promotion ? C_IR_BIT_FIELD_PROMOTION_INT : C_IR_BIT_FIELD_PROMOTION_UNSIGNED_INT;
+        }
+    }
+    return result;
 }
 
-BUSTER_C_INTERNAL void c_ir_mark_unsigned_bit_field_value(CIntegerIrBuilder* builder, IrValueId value, IrField const* field)
+BUSTER_C_INTERNAL void c_ir_mark_bit_field_value(CIntegerIrBuilder* builder, IrValueId value, IrField const* field)
 {
-    if (value.value < builder->function->value_count && c_ir_unsigned_bit_field_promotes_to_int(builder, field))
+    CIrBitFieldPromotion promotion = c_ir_bit_field_promotion(builder, field);
+    if (value.value < builder->function->value_count && promotion != C_IR_BIT_FIELD_PROMOTION_NONE)
     {
-        if (value.value >= builder->unsigned_bit_field_value_capacity)
+        if (value.value >= builder->bit_field_value_capacity)
         {
             u32 capacity = builder->function->value_capacity;
             u8* values = arena_allocate(builder->arena, u8, capacity);
             memset(values, 0, capacity);
-            if (builder->unsigned_bit_field_value_capacity)
+            if (builder->bit_field_value_capacity)
             {
-                memcpy(values, builder->unsigned_bit_field_values, builder->unsigned_bit_field_value_capacity);
+                memcpy(values, builder->bit_field_promotions, builder->bit_field_value_capacity);
             }
-            builder->unsigned_bit_field_values = values;
-            builder->unsigned_bit_field_value_capacity = capacity;
+            builder->bit_field_promotions = values;
+            builder->bit_field_value_capacity = capacity;
         }
-        builder->unsigned_bit_field_values[value.value] = 1;
+        builder->bit_field_promotions[value.value] = (u8)promotion;
     }
 }
 
@@ -6976,7 +7016,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerI
 {
     CIrSsaLocal* direct = local->direct_ssa ? c_ir_ssa_place_local(builder, local->place) : 0;
     IrValueId result = direct ? c_ir_ssa_read(builder, direct, c_ir_token_source_range(builder, token), true)
-                             : c_ir_emit_memory_load(builder, local, token);
+                              : c_ir_emit_memory_load(builder, local, token);
     c_ir_vla_loaded_shape(builder, result, local->place);
     return result;
 }
@@ -7233,7 +7273,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder,
 {
     CIrSsaLocal* local = c_ir_ssa_place_local(builder, place);
     IrValueId result = local && local->type.value == type.value ? c_ir_ssa_read(builder, local, source, false)
-                                                            : c_ir_emit_memory_load_place_raw(builder, place, type, source);
+                                                               : c_ir_emit_memory_load_place_raw(builder, place, type, source);
     c_ir_vla_loaded_shape(builder, result, place);
     return result;
 }
@@ -7408,7 +7448,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_split_bit_field_load(CIntegerIrBuilder* bu
     // field type into arithmetic, returns, and call arguments.
     IrTypeId result_type = value_type->is_atomic || value_type->is_volatile ? value_type->unqualified_type : type;
     IrValueId result = c_ir_emit_cast(builder, assembled, result_type, source);
-    c_ir_mark_unsigned_bit_field_value(builder, result, field);
+    c_ir_mark_bit_field_value(builder, result, field);
     return result;
 }
 
@@ -7570,7 +7610,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrV
         {
             value = c_ir_emit_cast(builder, value, result_type, source);
         }
-        c_ir_mark_unsigned_bit_field_value(builder, value, field);
+        c_ir_mark_bit_field_value(builder, value, field);
     }
 
     return value;
@@ -7614,11 +7654,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_bit_field_assignment_value(CIntegerIrBuilder* b
         }
         // An identity conversion can reuse an RHS bit-field value. Its
         // promotion fact belongs to the destination field after assignment.
-        if (result.value < builder->unsigned_bit_field_value_capacity)
+        if (result.value < builder->bit_field_value_capacity)
         {
-            builder->unsigned_bit_field_values[result.value] = 0;
+            builder->bit_field_promotions[result.value] = 0;
         }
-        c_ir_mark_unsigned_bit_field_value(builder, result, field);
+        c_ir_mark_bit_field_value(builder, result, field);
     }
     return result;
 }
@@ -8577,6 +8617,8 @@ BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValue
     {
         return false;
     }
+    bool empty_aggregate = !atomic && qualified_place_type && qualified_place_type->layout.resolved && !qualified_place_type->layout.size &&
+                           (qualified_place_type->kind == IR_TYPE_STRUCT || qualified_place_type->kind == IR_TYPE_UNION);
     if (atomic && !builder->preparing_calls && c_ir_wide_atomic_runtime_required(builder, type))
     {
         return c_ir_emit_wide_atomic_runtime_store(builder, place, type, value, source, IR_MEMORY_ORDER_SEQUENTIAL);
@@ -8647,7 +8689,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValue
         c_ir_ssa_event(builder, (u32)(local - builder->direct_ssa->locals), IR_OPCODE_STORE, value, source);
         builder->direct_ssa->statistics.writes += 1;
     }
-    else
+    else if (!empty_aggregate)
     {
         IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
         operands[0] = place;
@@ -10896,8 +10938,9 @@ BUSTER_C_INTERNAL bool c_ir_float16_literal_bits(String8 spelling, u64* bits_out
 // leaves its small exact window, and flushes subnormals to zero, which is
 // what made a global disagree with a local.
 //
-// Typed halves use the exact path for zero, subnormal, and special results
-// too. Other widths retain their existing accumulation fallback.
+// Every supported IEEE width uses the exact path for zero, subnormal, and
+// special results. Only a failed rational conversion retains the existing
+// accumulation fallback; overflow and rounded-to-zero underflow are values.
 //
 // An f suffix rounds to float first and widens the result: the literal's own
 // type is float, so `double d = 1.1f;` must hold that float, and the
@@ -10924,20 +10967,33 @@ BUSTER_C_INTERNAL bool c_ir_float_literal_value(String8 spelling, f64* value_out
         CIrExt80Big denominator;
         s32 binary_exponent = 0;
         u64 bits = 0;
-        if (result && c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent) &&
-            c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false, single ? 23 : 52, single ? -126 : -1022,
-                                    single ? 127 : 1023, single ? 8 : 11, &bits) == C_IR_ROUND_OK)
+        if (result && c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
         {
-            if (single)
+            u8 status = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false,
+                                               single ? 23 : 52, single ? -126 : -1022, single ? 127 : 1023, single ? 8 : 11, &bits);
+            if (status == C_IR_ROUND_OVERFLOW)
             {
-                u32 narrowed_bits = (u32)bits;
-                f32 narrowed = 0.0f;
-                memcpy(&narrowed, &narrowed_bits, sizeof(narrowed));
-                *value_out = (f64)narrowed;
+                bits = single ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
             }
-            else
+            else if (status == C_IR_ROUND_UNDERFLOW)
             {
-                memcpy(value_out, &bits, sizeof(*value_out));
+                // This status means a nonzero source rounded to zero. A
+                // representable subnormal instead has C_IR_ROUND_OK bits.
+                bits = 0;
+            }
+            if (status != C_IR_ROUND_FAILED)
+            {
+                if (single)
+                {
+                    u32 narrowed_bits = (u32)bits;
+                    f32 narrowed = 0.0f;
+                    memcpy(&narrowed, &narrowed_bits, sizeof(narrowed));
+                    *value_out = (f64)narrowed;
+                }
+                else
+                {
+                    memcpy(value_out, &bits, sizeof(*value_out));
+                }
             }
         }
     }
@@ -12125,11 +12181,20 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     }
     else if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
     {
-        converted = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false,
+        u8 status = c_ir_ieee_from_rational(&numerator, &denominator, binary_exponent, false,
                                              type_value->bit_width == 32 ? 23 : 52,
                                              type_value->bit_width == 32 ? -126 : -1022,
                                              type_value->bit_width == 32 ? 127 : 1023,
-                                             type_value->bit_width == 32 ? 8 : 11, &bits) == C_IR_ROUND_OK;
+                                             type_value->bit_width == 32 ? 8 : 11, &bits);
+        if (status == C_IR_ROUND_OVERFLOW)
+        {
+            bits = type_value->bit_width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+        }
+        else if (status == C_IR_ROUND_UNDERFLOW)
+        {
+            bits = 0;
+        }
+        converted = status != C_IR_ROUND_FAILED;
     }
     if (!converted && type_value->bit_width == 16)
     {
@@ -12137,9 +12202,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     }
     if (!converted)
     {
-        // Preserve the existing behavior for underflow/overflow spellings
-        // that are outside the finite IEEE range; the host conversion yields
-        // the required zero or infinity representation in those cases.
+        // Only a failed exact conversion uses the accumulation fallback.
+        // Range statuses already carry the literal's infinity or zero image.
         f64 value = 0.0;
         if (!c_ir_float_parse(spelling, &value, &suffix))
         {
@@ -21968,9 +22032,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 {
                     value = c_ir_emit_cast(builder, value, builder->f64_type, source);
                 }
-                else if (c_ir_integer_promoted_value_type(builder, value).value != value_type_id.value)
+                else
                 {
-                    value = c_ir_emit_cast(builder, value, builder->s32_type, source);
+                    IrTypeId promoted_type = c_ir_integer_promoted_value_type(builder, value);
+                    if (promoted_type.value != value_type_id.value)
+                    {
+                        value = c_ir_emit_cast(builder, value, promoted_type, source);
+                    }
                 }
             }
             if (value.value == IR_ID_UNDERLYING_INVALID)
@@ -23022,9 +23090,9 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         }
         // An explicit cast produces an ordinary value even when no machine
         // conversion is needed. It must not retain the operand's bit-field.
-        if (result.value < builder->unsigned_bit_field_value_capacity)
+        if (result.value < builder->bit_field_value_capacity)
         {
-            builder->unsigned_bit_field_values[result.value] = 0;
+            builder->bit_field_promotions[result.value] = 0;
         }
         // Canonical scalar pointers flatten pointer-to-VLA types. An explicit
         // cast such as (char *)&rows[i] must discard both row stride and the
@@ -23517,24 +23585,10 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         else if (right_type.value != operation_type.value && binary != IR_BINARY_SHIFT_LEFT && binary != IR_BINARY_SIGNED_SHIFT_RIGHT &&
                  binary != IR_BINARY_UNSIGNED_SHIFT_RIGHT)
         {
-            if (right_type_value->is_signed == operation_type_value->is_signed)
-            {
-                if (right_type_value->bit_width > operation_type_value->bit_width)
-                {
-                    operation_type = right_type;
-                    operation_type_value = right_type_value;
-                }
-            }
-            else if (!right_type_value->is_signed && right_type_value->bit_width >= operation_type_value->bit_width)
-            {
-                operation_type = right_type;
-                operation_type_value = right_type_value;
-            }
-            else if (right_type_value->is_signed && !operation_type_value->is_signed && right_type_value->bit_width > operation_type_value->bit_width)
-            {
-                operation_type = right_type;
-                operation_type_value = right_type_value;
-            }
+            // Emission and protected type queries must choose one C identity,
+            // including equal-width operands with different conversion ranks.
+            operation_type = c_ir_usual_arithmetic_type(builder, operation_type, right_type);
+            operation_type_value = ir_type_from_id(&builder->program->types, operation_type);
         }
     }
     if (operation_type_value->kind == IR_TYPE_FLOAT && operation_type_value->bit_width > 64)
@@ -23876,7 +23930,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
     // and the usual arithmetic conversions. Only the existing atomic RMW path
     // needs a destination-typed operand here; non-atomic stores/results convert
     // after c_ir_apply_operation, not before it (C17 6.5.16.2).
-    else if (atomic && !pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
+    else if (atomic && !pointer_arithmetic && c_ir_bit_field_promotion(builder, c_ir_bit_field_from_place(builder, place)) == C_IR_BIT_FIELD_PROMOTION_NONE)
     {
         right = c_ir_emit_cast(builder, right, value_type, source);
         operation_right = right;
@@ -27083,9 +27137,13 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuild
         bool final_member = index + 2 == end ||
                             (index + 3 == end && (c_token_is_punctuator(&builder->preprocess.tokens[index + 2], C_PUNCTUATOR_PLUS_PLUS) ||
                                                  c_token_is_punctuator(&builder->preprocess.tokens[index + 2], C_PUNCTUATOR_MINUS_MINUS)));
-        if (promote_bit_fields && final_member && c_ir_unsigned_bit_field_promotes_to_int(builder, member.field))
+        if (promote_bit_fields && final_member)
         {
-            *type = builder->s32_type;
+            CIrBitFieldPromotion promotion = c_ir_bit_field_promotion(builder, member.field);
+            if (promotion != C_IR_BIT_FIELD_PROMOTION_NONE)
+            {
+                *type = promotion == C_IR_BIT_FIELD_PROMOTION_INT ? builder->s32_type : builder->scalar_types[C_TYPE_UNSIGNED_INT];
+            }
         }
         index += 2;
     }
@@ -29247,86 +29305,8 @@ c_ir_expression_core_loop:
             c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            u32 comma = close;
-            u32 nested = 0;
-            for (u32 scan = index + 2; scan < close; scan += 1)
-            {
-                CToken item = builder->preprocess.tokens[scan];
-                if (c_token_is_punctuator(&item, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&item, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    nested += 1;
-                }
-                else if (c_token_is_punctuator(&item, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&item, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    if (!nested)
-                    {
-                        break;
-                    }
-                    nested -= 1;
-                }
-                else if (!nested && c_token_is_punctuator(&item, C_PUNCTUATOR_COMMA))
-                {
-                    comma = scan;
-                    break;
-                }
-            }
-            IrTypeId type = comma < close ? c_ir_type_name(builder, index + 2, comma) : IR_TYPE_ID_INVALID;
             u64 offset = 0;
-            u32 designator = comma + 1;
-            bool valid = close < end && designator < close && type.value != IR_ID_UNDERLYING_INVALID;
-            while (valid && designator < close)
-            {
-                CToken member = builder->preprocess.tokens[designator];
-                IrType* aggregate = ir_type_from_id(&builder->program->types, type);
-                if (!aggregate || member.kind != C_TOKEN_IDENTIFIER || (aggregate->kind != IR_TYPE_STRUCT && aggregate->kind != IR_TYPE_UNION))
-                {
-                    valid = false;
-                    break;
-                }
-                IrField* field = 0;
-                for (u32 field_index = 0; field_index < aggregate->field_count; field_index += 1)
-                {
-                    if (string_equal(aggregate->fields[field_index].name, c_token_spelling(builder->preprocess.spelling_base, member)))
-                    {
-                        field = aggregate->fields + field_index;
-                        break;
-                    }
-                }
-                if (!field || field->is_bit_field)
-                {
-                    valid = false;
-                    break;
-                }
-                offset += field->offset;
-                type = field->type;
-                designator += 1;
-                while (valid && designator < close && c_token_is_punctuator(&builder->preprocess.tokens[designator], C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    u32 bracket_close = c_ir_matching_delimiter_cached(builder, designator, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-                    IrType* array = ir_type_from_id(&builder->program->types, type);
-                    u64 element_index = 0;
-                    IrType* element = array && array->kind == IR_TYPE_ARRAY ? ir_type_from_id(&builder->program->types, array->element_type) : 0;
-                    if (bracket_close >= close || !element || !element->layout.resolved ||
-                        !c_ir_integer_constant_evaluate(builder->arena, builder, designator + 1, bracket_close, &element_index))
-                    {
-                        valid = false;
-                        break;
-                    }
-                    offset += element->layout.size * element_index;
-                    type = array->element_type;
-                    designator = bracket_close + 1;
-                }
-                if (designator < close)
-                {
-                    if (!c_token_is_punctuator(&builder->preprocess.tokens[designator], C_PUNCTUATOR_DOT) || designator + 1 >= close)
-                    {
-                        valid = false;
-                        break;
-                    }
-                    designator += 1;
-                }
-            }
-            if (!valid)
+            if (close >= end || !c_ir_offsetof_evaluate(builder, index + 2, close, &offset))
             {
                 builder->failure_message = S8("invalid __builtin_offsetof type or member designator");
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -33286,66 +33266,66 @@ BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder
 {
     IrType* left = ir_type_from_id(&builder->program->types, left_type);
     IrType* right = ir_type_from_id(&builder->program->types, right_type);
+    IrTypeId result;
     if (!left || !right)
     {
-        return IR_TYPE_ID_INVALID;
+        result = IR_TYPE_ID_INVALID;
     }
-    // One complex operand makes the result complex, over the usual arithmetic
-    // type of the two corresponding real types (C11 6.3.1.8p1).
-    if (left->is_complex || right->is_complex)
+    else if (left->is_complex || right->is_complex)
     {
-        return c_ir_complex_result_type(builder, left_type, right_type);
-    }
-    if (left->kind == IR_TYPE_BOOLEAN || left->kind == IR_TYPE_ENUM || (left->kind == IR_TYPE_INTEGER && left->bit_width < 32))
-    {
-        left_type = builder->s32_type;
-        left = ir_type_from_id(&builder->program->types, left_type);
-    }
-    if (right->kind == IR_TYPE_BOOLEAN || right->kind == IR_TYPE_ENUM || (right->kind == IR_TYPE_INTEGER && right->bit_width < 32))
-    {
-        right_type = builder->s32_type;
-        right = ir_type_from_id(&builder->program->types, right_type);
-    }
-    bool left_arithmetic = left && (left->kind == IR_TYPE_INTEGER || left->kind == IR_TYPE_FLOAT);
-    bool right_arithmetic = right && (right->kind == IR_TYPE_INTEGER || right->kind == IR_TYPE_FLOAT);
-    if (!left_arithmetic || !right_arithmetic)
-    {
-        return IR_TYPE_ID_INVALID;
-    }
-    if (left->kind == IR_TYPE_FLOAT || right->kind == IR_TYPE_FLOAT)
-    {
-        if (left->kind != IR_TYPE_FLOAT)
-        {
-            return right_type;
-        }
-        if (right->kind != IR_TYPE_FLOAT)
-        {
-            return left_type;
-        }
-        return c_ir_float_conversion_rank(right) > c_ir_float_conversion_rank(left) ? right_type : left_type;
-    }
-    if (left_type.value == right_type.value)
-    {
-        return left_type;
-    }
-    if (left->is_signed == right->is_signed)
-    {
-        return right->bit_width > left->bit_width ? right_type : left_type;
-    }
-    IrTypeId signed_type = left->is_signed ? left_type : right_type;
-    IrTypeId unsigned_type = left->is_signed ? right_type : left_type;
-    IrType* signed_value = left->is_signed ? left : right;
-    IrType* unsigned_value = left->is_signed ? right : left;
-    IrTypeId result;
-    if (unsigned_value->bit_width >= signed_value->bit_width)
-    {
-        result = unsigned_type;
+        // C17 6.3.1.8 combines the corresponding real types first.
+        result = c_ir_complex_result_type(builder, left_type, right_type);
     }
     else
     {
-        result = signed_type;
+        if (left->kind == IR_TYPE_BOOLEAN || left->kind == IR_TYPE_ENUM || (left->kind == IR_TYPE_INTEGER && left->bit_width < 32))
+        {
+            left_type = builder->s32_type;
+            left = ir_type_from_id(&builder->program->types, left_type);
+        }
+        if (right->kind == IR_TYPE_BOOLEAN || right->kind == IR_TYPE_ENUM || (right->kind == IR_TYPE_INTEGER && right->bit_width < 32))
+        {
+            right_type = builder->s32_type;
+            right = ir_type_from_id(&builder->program->types, right_type);
+        }
+        bool left_arithmetic = left && (left->kind == IR_TYPE_INTEGER || left->kind == IR_TYPE_FLOAT);
+        bool right_arithmetic = right && (right->kind == IR_TYPE_INTEGER || right->kind == IR_TYPE_FLOAT);
+        if (!left_arithmetic || !right_arithmetic)
+        {
+            result = IR_TYPE_ID_INVALID;
+        }
+        else if (left->kind == IR_TYPE_FLOAT || right->kind == IR_TYPE_FLOAT)
+        {
+            result = left->kind != IR_TYPE_FLOAT ? right_type :
+                     right->kind != IR_TYPE_FLOAT ? left_type :
+                     c_ir_float_conversion_rank(right) > c_ir_float_conversion_rank(left) ? right_type : left_type;
+        }
+        else if (left_type.value == right_type.value)
+        {
+            result = left_type;
+        }
+        else if (left->integer_conversion_rank && right->integer_conversion_rank)
+        {
+            CTypeKind left_kind = c_semantic_integer_kind(left->integer_conversion_rank, left->is_signed);
+            CTypeKind right_kind = c_semantic_integer_kind(right->integer_conversion_rank, right->is_signed);
+            CTypeKind common = c_semantic_integer_arithmetic_kind(builder->target, left_kind, right_kind);
+            result = c_ir_builder_scalar_type(builder, common);
+        }
+        else if (left->is_signed == right->is_signed)
+        {
+            // Synthetic IR integer carriers have no source rank. Keep their
+            // representation-only conversion rule independent of C identity.
+            result = right->bit_width > left->bit_width ? right_type : left_type;
+        }
+        else
+        {
+            IrTypeId signed_type = left->is_signed ? left_type : right_type;
+            IrTypeId unsigned_type = left->is_signed ? right_type : left_type;
+            IrType* signed_value = left->is_signed ? left : right;
+            IrType* unsigned_value = left->is_signed ? right : left;
+            result = unsigned_value->bit_width >= signed_value->bit_width ? unsigned_type : signed_type;
+        }
     }
-
     return result;
 }
 
@@ -48260,102 +48240,92 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_bytes(CIntegerIrBuilder
 
 BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out)
 {
-    if (start >= end)
-    {
-        return false;
-    }
+    bool valid = start < end;
     u32 comma = end;
-    u32 parentheses = 0;
+    u32 nested = 0;
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            parentheses += 1;
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-            parentheses -= 1;
-        else if (!parentheses && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            nested += 1;
+        }
+        else if ((c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                  c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                  c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE)) && nested)
+        {
+            nested -= 1;
+        }
+        else if (!nested && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
         {
             comma = index;
             break;
         }
     }
-    if (comma == end)
-    {
-        return false;
-    }
     IrTypeId type_id = IR_TYPE_ID_INVALID;
-    if (!c_ir_query_type_name(builder, start, comma, true, &type_id) && builder->queries->has_request)
+    valid = valid && comma < end && comma + 1 < end;
+    if (valid)
     {
-        return false;
+        valid = c_ir_query_type_name(builder, start, comma, true, &type_id);
     }
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
-    if (!type || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION))
-    {
-        return false;
-    }
+    valid = valid && type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
     u64 offset = 0;
     u32 index = comma + 1;
-    while (index < end)
+    while (valid && index < end)
     {
-        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT))
+        CToken token = builder->preprocess.tokens[index];
+        CIrPromotedMemberPath path = {0};
+        valid = token.kind == C_TOKEN_IDENTIFIER &&
+                c_ir_promoted_member_path(builder, type_id, c_token_spelling(builder->preprocess.spelling_base, token), &path) &&
+                path.field && !path.field->is_bit_field && offset <= UINT64_MAX - path.offset;
+        if (valid)
+        {
+            offset += path.offset;
+            type_id = path.type;
             index += 1;
-        if (index >= end || builder->preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
-        {
-            return false;
         }
-        String8 member = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]);
-        IrField* field = 0;
-        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-        {
-            if (string_equal(type->fields[field_index].name, member)) { field = type->fields + field_index; break; }
-        }
-        if (!field || offset > UINT64_MAX - field->offset)
-        {
-            return false;
-        }
-        offset += field->offset;
-        type = ir_type_from_id(&builder->program->types, field->type);
-        index += 1;
-        // C11 7.19p3 lets the member designator subscript as well as select,
-        // and musl's ioctl.c writes `offsetof(struct v4l2_event, ts[0])` in a
-        // *static* initializer -- so this constant walk, not just the value
-        // path, has to follow one.  It only became reachable when __GNUC__
-        // started being predefined in every dialect: <stddef.h> spells
-        // offsetof as pointer arithmetic without it, and that form never
-        // arrives here.
-        while (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
+        // Subscripts are constant-query children, so nested offsetof and sizeof
+        // index expressions use the same explicit query stack.
+        while (valid && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-            if (close >= end || !type || type->kind != IR_TYPE_ARRAY)
-            {
-                return false;
-            }
+            IrType* array = ir_type_from_id(&builder->program->types, type_id);
+            IrTypeId element_id = array && array->kind == IR_TYPE_ARRAY ? array->element_type : IR_TYPE_ID_INVALID;
             CIrConstantValue subscript = {0};
-            if (!c_ir_query_constant(builder, index + 1, close, &subscript) || subscript.kind != C_IR_CONSTANT_INTEGER)
+            valid = close < end && element_id.value != IR_ID_UNDERLYING_INVALID &&
+                    c_ir_query_constant(builder, index + 1, close, &subscript) && subscript.kind == C_IR_CONSTANT_INTEGER;
+            IrType* element = ir_type_from_id(&builder->program->types, element_id);
+            valid = valid && element && element->layout.resolved;
+            if (valid)
             {
-                return false;
+                valid = !element->layout.size || subscript.integer <= UINT64_MAX / element->layout.size;
+                if (valid)
+                {
+                    u64 element_offset = subscript.integer * element->layout.size;
+                    valid = offset <= UINT64_MAX - element_offset;
+                    if (valid)
+                    {
+                        offset += element_offset;
+                        type_id = element_id;
+                        index = close + 1;
+                    }
+                }
             }
-            IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
-            if (!element || !element->layout.resolved)
-            {
-                return false;
-            }
-            if (element->layout.size && subscript.integer > UINT64_MAX / element->layout.size)
-            {
-                return false;
-            }
-            u64 element_offset = subscript.integer * element->layout.size;
-            if (offset > UINT64_MAX - element_offset)
-            {
-                return false;
-            }
-            offset += element_offset;
-            type = element;
-            index = close + 1;
+        }
+        if (valid && index < end)
+        {
+            valid = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT) && index + 1 < end;
+            index += 1;
         }
     }
-    *offset_out = offset;
-    return true;
+    if (valid)
+    {
+        *offset_out = offset;
+    }
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_constant_is_null_pointer_constant(CIntegerIrBuilder* builder, CIrConstantValue const* value)
@@ -50246,10 +50216,11 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CAr
 //
 // `requested_out`, when asked for, receives the largest alignment any of the
 // records *asks* for, before it is merged with the declared type's natural
-// alignment. Only the bit-field placement rule needs that raw number: GNU
-// `aligned(N)` starts a bit-field at the next multiple of N bytes even when N
-// is below the declared type's own alignment, while every other reader of a
-// request only ever raises with it. Zero means no record resolved.
+// alignment. Packed members merge that raw number with their placement floor
+// after validating standard constraints against the declared type. GNU
+// `aligned(N)` also starts a bit-field at the next multiple of N bytes even
+// when N is below the declared type's own alignment. Zero means no record
+// resolved.
 BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 alignment_start, u32 alignment_count, u32 natural_alignment,
                                                              u32* alignment_out, u32* requested_out, String8* rejection_out)
 {
@@ -51283,14 +51254,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                 // two agreeing is not evidence the rule is the target's, which
                 // is what record_layout_tests checks (#1439).
                 //
-                // `__attribute__((packed))` on the definition and `#pragma
-                // pack(N)` around it ask the same question: the ceiling a
-                // member's alignment is clamped to. Packed is that ceiling at
-                // one byte.
+                // GNU packed lowers natural member alignment to one byte,
+                // but explicit alignment can raise it again. Keep pragma
+                // pack's separate ceiling to cap the merged request below.
                 CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(&parse, (CTypeId){.value = type_index});
-                u32 pack_alignment = c_type->definition_start < preprocess.token_count
-                                         ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
-                                         : 0;
+                u32 pragma_pack_alignment = c_type->definition_start < preprocess.token_count
+                                                ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
+                                                : 0;
+                u32 pack_alignment = pragma_pack_alignment;
                 if (aggregate_attributes.is_packed)
                 {
                     pack_alignment = 1;
@@ -51361,15 +51332,22 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                     // member can be laid out with, so the definition finishes
                     // and the program hears about the attribute it wrote
                     // rather than about a type that never got a layout.
-                    // Almost no member carries a specifier at all, and the
-                    // evaluation answers the alignment it was handed for the
-                    // ones that do not; asking first keeps the call itself off
-                    // the path every other member takes.
+                    // Standard requests are constrained by the declared
+                    // type's natural alignment before packing. GNU aligned
+                    // still merges with the packed floor, so a packed int
+                    // requesting GNU alignment two is placed at two bytes.
                     u32 field_alignment_request = 0;
-                    CIrAlignmentStatus member_status =
-                        member->alignment_count ? c_ir_alignment_evaluate(&constant_builder, member->alignment_start, member->alignment_count, field_alignment,
-                                                                          &field_alignment, &field_alignment_request, &member_rejection)
-                                                : C_IR_ALIGNMENT_RESOLVED;
+                    CIrAlignmentStatus member_status = C_IR_ALIGNMENT_RESOLVED;
+                    if (member->alignment_count)
+                    {
+                        u32 field_alignment_floor = field_alignment;
+                        member_status = c_ir_alignment_evaluate(&constant_builder, member->alignment_start, member->alignment_count, natural_alignment,
+                                                                &field_alignment, &field_alignment_request, &member_rejection);
+                        if (member_status != C_IR_ALIGNMENT_PENDING)
+                        {
+                            field_alignment = BUSTER_MAX(field_alignment_floor, field_alignment_request);
+                        }
+                    }
                     if (member_status == C_IR_ALIGNMENT_PENDING)
                     {
                         fields_resolved = false;
@@ -51427,6 +51405,22 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                     {
                         fields_resolved = false;
                         break;
+                    }
+                    // Match the parse fold's pragma ceiling after merging
+                    // explicit requests; over-ceiling bit-field starts are
+                    // suppressed rather than rounded to the pragma ceiling.
+                    // Microsoft and zero-width bit-fields retain their rules.
+                    if (pragma_pack_alignment && record.policy != C_RECORD_LAYOUT_MICROSOFT && (!member->is_bit_field || member_bit_width))
+                    {
+                        if (member->is_bit_field)
+                        {
+                            field_alignment = BUSTER_MAX(natural_alignment, field_alignment_request);
+                            if (field_alignment_request > pragma_pack_alignment)
+                            {
+                                field_alignment_request = 0;
+                            }
+                        }
+                        field_alignment = BUSTER_MIN(field_alignment, pragma_pack_alignment);
                     }
                     CRecordLayoutPlacement placement = c_record_layout_place(&record, (CRecordLayoutMember){
                                                                                           .size = field_type->layout.size,

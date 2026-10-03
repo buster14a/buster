@@ -215,7 +215,8 @@ struct ProcessSpawnResult
     // On POSIX, the child is the leader of a fresh process group. On Windows,
     // it was assigned to a kill-on-close Job Object before its first instruction.
     u64 process_group : 1;
-    u64 reserved : 63;
+    u64 observe_resources : 1;
+    u64 reserved : 62;
 };
 
 typedef struct ProcessSpawnOptions ProcessSpawnOptions;
@@ -232,16 +233,44 @@ struct ProcessSpawnOptions
     // pipe or platform spawn object is created. Direct execution never asks an
     // OS API to search PATH.
     u64 search_path : 1;
-    u64 reserved : sizeof(u64) * 8 - (size_t)STANDARD_STREAM_COUNT - 3;
+    // Optional OS accounting for this child. Does not add process-tree
+    // sampling, change capture/cleanup, or measure simultaneous tree RSS.
+    u64 observe_resources : 1;
+    u64 reserved : sizeof(u64) * 8 - (size_t)STANDARD_STREAM_COUNT - 4;
     ProcessCaptureLimits capture_limits;
     OsFileDescriptor* capture_overflow_files[(size_t)STANDARD_STREAM_COUNT];
     ProcessCaptureOverflowPolicy capture_overflow_policy;
+};
+
+typedef enum ProcessResourceStatus
+{
+    PROCESS_RESOURCE_UNKNOWN,
+    PROCESS_RESOURCE_OBSERVED,
+    PROCESS_RESOURCE_ERROR,
+    PROCESS_RESOURCE_UNSUPPORTED,
+} ProcessResourceStatus;
+
+typedef struct ProcessResourceUsage ProcessResourceUsage;
+struct ProcessResourceUsage
+{
+    // Values are valid only for OBSERVED. wait4 CPU includes the child and
+    // descendants it waited for; Windows process times are leader-only.
+    u64 user_cpu_us;
+    u64 system_cpu_us;
+    // Linux/macOS: ru_maxrss, the largest individual high water in that
+    // accounting scope. Windows: the leader's peak working set, not commit.
+    u64 peak_memory_bytes;
+    ProcessResourceStatus cpu_status;
+    ProcessResourceStatus memory_status;
+    OsError cpu_error;
+    OsError memory_error;
 };
 
 typedef struct ProcessWaitResult ProcessWaitResult;
 struct ProcessWaitResult
 {
     ByteSlice streams[(size_t)STANDARD_STREAM_COUNT];
+    ProcessResourceUsage resources;
     // observed = every byte drained; captured = the returned prefix; streamed
     // = overflow written to the configured descriptor; dropped = the rest.
     u64 observed_bytes[(size_t)STANDARD_STREAM_COUNT];
@@ -262,7 +291,8 @@ struct ProcessWaitResult
     u8 termination_requested;
     u8 forcibly_terminated;
     // The returned in-memory streams are prefixes because at least one bound
-    // was reached. capture_failed additionally makes result a plain failure.
+    // was reached. capture_failed additionally makes result a plain failure;
+    // POSIX transport/close failures set it as well; a deadline alone does not.
     u8 capture_limit_exceeded;
     u8 output_truncated;
     u8 capture_failed;

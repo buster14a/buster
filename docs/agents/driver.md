@@ -212,6 +212,14 @@ pipelines reject them because their toolchains do not use Buster's C frontend.
 
 ## C input phase selection
 
+`--target=spirv-vulkan1.2-compute -c` selects the direct Vulkan 1.2 / SPIR-V 1.5
+compute emitter. It accepts one bounded C kernel and no native link inputs,
+external GPU tool flags, LLVM emission, explicit native allocator, debug/PIC,
+or native verification options. The [compute contract](../spirv-compute.md)
+defines the interface, unsigned integer subset, automatic bounds guard and
+pending physical-device evidence. Existing external `spirv` routes are separate.
+Without `-o`, the direct target publishes `<input-path>.spv`.
+
 A `.c` input and any path under `-x c` begin as raw C source and run the full
 preprocessor. In automatic language mode, `.i` begins as preprocessed C;
 `-x cpp-output` selects that same phase for any suffix, including an
@@ -245,6 +253,27 @@ describes unwinding rather than bytes. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
+
+Statement boundaries follow the target: x86-64 and non-Apple AArch64 use
+`;` between statements; Apple AArch64 uses `%%` and treats `;` as a line
+comment. `#` starts an x86-64 comment and remains part of AArch64 immediates.
+`//` comments are accepted on both architectures. Quoted strings retain these
+markers and block-comment text, including escaped quotes. Diagnostics keep
+physical lines/columns after a separator; numeric labels resolve by statement
+order even when their definitions share one physical line. Scalar AArch64
+constant operands accept an optional `#` through the existing constant parser.
+`mov wN, constant` and `mov xN, constant` accept an unsigned sixteen-bit
+constant through the scalar `movz` form; register aliases keep their existing
+operand rules.
+Pair-exclusive `ldxp`/`ldaxp` and `stxp`/`stlxp` spellings project matching W/X
+data registers, W store status and an X/SP base into the existing typed AArch64
+memory semantic encoder. Data/status ZR roles are retained; store status cannot
+overlap either data register or a non-SP base. The optional address offset must
+be zero. Nonzero/symbolic offsets, mismatched widths, and writeback are source
+operand diagnostics. No pair instruction words or generated identities are
+duplicated in the source adapter.
+Unsupported post-index memory operands are refused with their full spelling,
+so their writeback cannot silently disappear during comment handling.
 
 Integer data expressions retain `.` as the current field's section-relative
 address, including each separate operand in a comma-separated directive.
@@ -283,6 +312,20 @@ hand-written section gets alignment 1, because `crti.o` and `crtn.o`
 contribute one and two bytes to `.init` and any padding between them would
 run as code.
 
+AArch64 units fold same-section, binding-invariant `b`, `bl`, `b.cond`,
+`cbz`/`cbnz`, and `tbz`/`tbnz` references using the shared control semantic
+fixup, including signed addends and numeric labels. Out-of-range or unaligned
+references are diagnosed at their physical source position. Undefined,
+cross-section, weak, and default-visible ELF global short branches are refused
+because the object model cannot retain their relocation families; `b`/`bl`
+retain the existing object relocations. This unit-local capability does not
+enable machine inline-asm private-label expansion. The registered driver
+fixture assembles pristine `tests/aarch64_atomic_update_pair_oracle.s` through
+`.s` inference and `-x assembler`, checks all 108 text bytes against independent
+literal words, and compares the same words with Clang cross-assembly when a
+configured or PATH Clang is available. An unavailable Clang observer is reported
+explicitly; its comparison is not a passed gate.
+
 A forward branch to a label always uses the near form: the instruction layer
 sizes a statement before the label is known and this assembler does not relax.
 `.S` inputs run through C preprocessing with assembly comment-line handling.
@@ -320,6 +363,12 @@ or `wasm32-wasip1` (also spelled `wasm32-wasi`). The latter emits a WASI Preview
 command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
 header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
 output rejects `-emit-llvm`, native link inputs, and `-S`.
+
+The direct backend consumes canonical integer bit-count operations at their
+semantic bit width, independently of the i32/i64 WebAssembly carrier. Leading
+and trailing zeros count within that width; a zero operand produces the width,
+and population count ignores carrier extension bits. This is the canonical IR
+contract rather than a promise about C builtins on undefined zero inputs.
 
 Static archive extraction uses `compiler_driver_archive_extract` in the
 private `driver/archive.c` implementation. Its invocation-owned name table
@@ -577,6 +626,17 @@ diagnostic `native elf64 object exceeds the object writer's limits (...)`,
 and leaves an existing output file untouched. `-v` prints the writer's exact
 work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
 `-c`. See [object emission](../object-emission.md).
+
+## ELF TLS companion lookup
+
+The x86-64 executable writers index TLSGD/TLSLD section/offset sites in link
+scratch after initializer stripping. Import classification and relocation
+planning reuse those exact identities; input relocation order and duplicate
+sites do not determine membership. Shared images retain helper calls. Empty
+cases allocate no table, scratch exhaustion fails before publication, and the
+existing encoding and relocation bounds checks remain mandatory. See the
+[link comparison package](../linker-tls-comparison.md) for work counters,
+object/archive loader controls, latency boundaries and evidence limitations.
 
 ## External ELF debug information
 

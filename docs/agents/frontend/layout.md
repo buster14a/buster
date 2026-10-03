@@ -74,9 +74,23 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   bit on `CMember`; an object declarator's `aligned` joins the specifier-level
   alignment specifiers in the one contiguous run `alignment_start`/
   `alignment_count` names, which is why the trailing scan runs immediately
-  after the specifier one. `#pragma pack(N)` asks the same question -- the
-  ceiling a member's alignment is clamped to -- and `packed` is that ceiling at
-  one byte, so both feed one knob. **Two layout engines read it**:
+  after the specifier one. GNU `packed` lowers natural member alignment to one
+  byte, and an explicit member `aligned` or `_Alignas` can raise it again.
+  Standard `_Alignas` constraints still use the declared type's original
+  natural alignment, so packing cannot legalize a weaker request (#2192).
+  GNU `aligned` may request less than the natural alignment and merges with
+  the packed placement floor.
+  `#pragma pack(N)` instead caps that merged member alignment on Itanium and
+  AAPCS64 targets (#1244, duplicate #1248). A nonzero bit-field contributes its
+  unpacked alignment capped to the pragma ceiling, even with GNU packed. Its
+  explicit start request applies only when it does not exceed that ceiling. Zero-width bit-fields retain their natural and
+  explicit alignment; Microsoft's required explicit member alignment overrides
+  packing. The actual pragma ceiling stays separate from aggregate `packed` in
+  both engines. `c_test_pragma_pack_explicit_alignment` pins these target rules,
+  parse-time constants, and canonical member offsets. The registered
+  `compiler_driver_test_pragma_pack_alignment` also cross-links independent
+  host/Buster definitions and consumers in both directions for every allocator
+  on desktop Linux. **Two layout engines read it**:
   `c_parse_type_layout` in `c_parse.c` folds `sizeof`/`_Alignof` during the
   parse and `c_lower_to_ir` in `c_gen.c` builds the `IrType`. They disagreed
   about `#pragma pack` before this: the fold packed and the IR did not, so a
@@ -231,10 +245,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   or call arguments.
   **Integer promotion uses the bit-field width, not its storage width.** An
   `unsigned int : 3` promotes to `int`, while an `unsigned int : 32` remains
-  unsigned. `c_ir_mark_unsigned_bit_field_value` keeps this distinction in a
-  lazily allocated frontend table; canonical types and field layout retain
-  the declared type. Arithmetic, unary plus, default arguments, and switches
-  consult the promotion fact. Explicit casts discard it, and assignment
+  unsigned. The same width rule applies to implementation-defined wider
+  integer bit-fields: widths below 32 promote to `int`, signed width 32 to
+  `int`, and unsigned width 32 to `unsigned int`; widths above 32 retain the
+  declared type. `c_ir_mark_bit_field_value` keeps a differing `int` or
+  `unsigned int` promotion in a lazily allocated frontend table; canonical
+  types and field layout retain the declared type. Arithmetic, unary plus,
+  default arguments, and switches consult the promotion fact. Explicit casts discard it, and assignment
   results retain it after masking to the stored width, without rereading a
   volatile field. The strict operand type walk receives the promotion context
   explicitly so `_Generic(+field)` and conditional arms agree with emitted
@@ -257,6 +274,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `c_test_bit_field_assignment_accesses` also pins the volatile load/store
   counts on six desktop layouts in both forms. Boolean raw-unit accesses
   remain valid even when their layout needs no narrowed storage unit.
+  The registered `c_test_typeof_conditional_type` additionally covers
+  `long`/`long long` fields of widths 20, 31, 32 and 33, signed and unsigned
+  promotions, both semantic and IR signatures, and an inline runtime regression
+  under GNU17/GNU23, both frontend forms and every allocator (GitHub #1245).
   Automatic nested initializers select known fields by index, preserving the
   initializer expression's source range without inventing a token for an
   anonymous member. Positional cursors and brace-elided descent skip unnamed
@@ -421,6 +442,39 @@ compiles the other half for `x86-64-v4`, which has the same 64-byte vector ABI
 and is accepted by Clang releases older than 19, unlike `znver5`. The approved retirement
 corpus and its pre-existing C ABI header stay unchanged: #507 explicitly
 leaves this new frontend feature to #73, separate from retirement coverage.
+
+## Offsetof member promotion
+
+Runtime `__builtin_offsetof` enters `c_ir_offsetof_evaluate`, and static
+initializers use the OFFSETOF query child. Both dispatch
+`c_ir_constant_offsetof_attempt`, which selects each member through the
+existing `c_ir_promoted_member_path`. Anonymous struct/union promotion, missing
+or ambiguous members, and bit-field refusal therefore use the same lowering
+walk. Member sums, array-index multiplication and accumulated array offsets
+are checked before publication. Array-index expressions are constant-query
+children on the explicit query stack; a dot must separate member selections.
+
+Parser enumerators and static assertions still use
+`c_parse_constant_offsetof` / `c_parse_constant_member_offset`. They already
+promote anonymous members and refuse bit-fields. Issue #1570 remains open for
+a shared parser/lowering designator authority, signed-index policy, the
+parser's unchecked offset arithmetic and nested `offsetof` in array indices.
+The parser's index evaluator accepts `sizeof` but does not evaluate nested
+`offsetof`; this lowering repair does not settle those contracts.
+
+`c_test_offsetof_members` pins direct and anonymous member offsets, a nested
+anonymous struct within a union, and an anonymous array element through
+parser constants, scalar initializer bits, aggregate initializer bytes and both canonical frontend forms
+on Linux, Windows and macOS x86-64/AArch64 in GNU17/GNU23. It also refuses
+direct/promoted bit-fields in enumerators, assertions, static initializers and
+runtime expressions, plus missing members, malformed dot separators and lowering arithmetic overflow.
+The positive source also includes a named multidimensional member chain.
+Static initializer and runtime witnesses use an array index containing nested
+`sizeof` and `offsetof` queries; the matching parser enumerator uses literal
+index 1 so it remains independent of the parser's nested-index limitation.
+`c_test_offsetof_members_runtime` compares all three constant contexts with
+addresses of real subobjects in generated programs, using both frontend forms
+and all four register allocators. Runtime execution is omitted on Android/iOS.
 
 ## Parse-side layout solve: ordered passes and the agenda
 

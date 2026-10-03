@@ -12,7 +12,7 @@ The target is deliberately small:
 C source
   -> C frontend
   -> dense, certified block-argument SSA canonical IR
-       |-> Wasm64 / eBPF / LLVM-bitcode and other canonical consumers
+       |-> Wasm64 / eBPF / LLVM-bitcode / bounded Vulkan SPIR-V compute
        `-> target selection and legalization
            -> legal target-specific SSA machine IR
            -> scheduling and allocation side data

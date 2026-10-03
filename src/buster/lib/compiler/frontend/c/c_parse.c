@@ -76,8 +76,8 @@
 //   c_parse_word_bits_compute,                    specifier words answered
 //   c_parse_word_bits_token                       from the interned symbol
 //                                                 id (C_WORD_* bits), with
-//                                                 the spelling ladders as
-//                                                 the symbol-0 fallback
+//                                                 spelling fallback only for
+//                                                 identifiers/unclassified rows
 //   c_type_parse_alignment_step ..                the type-parse machine
 //   c_type_parse_machine_run                      steps
 //   c_parse_scalar_type_core_begin,               declarators: pointers,
@@ -193,8 +193,9 @@ enum
 // The `_token` specifier predicates: same answers as their String8
 // counterparts, but an interned token settles on one word_bits load instead
 // of a spelling ladder. Symbol 0 (pasted, synthesized, or test-built tokens)
-// falls back to the spelling compute, so a missed path costs speed and never
-// correctness; a symbol above predefined_limit is a constant-time "no"
+// falls back to the spelling compute for identifier or unclassified hand-built
+// kinds, so a missed path costs speed and never correctness; a symbol above
+// predefined_limit is a constant-time "no"
 // because every specifier-word spelling is interned into the predefined
 // range. Defined after the spelling ladders they derive from.
 BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CToken token);
@@ -3183,7 +3184,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
             // Members are placed by c_record_layout_place, the rule the IR
             // layout in c_gen places them by too, so a sizeof folded during the
             // parse cannot contradict the object it sizes (#1439).
-            u32 pack_alignment = type.definition_start < preprocess.token_count ? c_preprocess_pack_alignment(&preprocess, type.definition_start) : 0;
+            u32 pragma_pack_alignment = type.definition_start < preprocess.token_count ? c_preprocess_pack_alignment(&preprocess, type.definition_start) : 0;
+            u32 pack_alignment = pragma_pack_alignment;
             CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(result, (CTypeId){.value = type_index});
             if (aggregate_attributes.is_packed)
             {
@@ -3244,6 +3246,23 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 {
                     fields_resolved = false;
                     break;
+                }
+                // Pragma pack caps explicit member requests on Itanium and
+                // AAPCS64 targets. GNU packed alone and Microsoft's required
+                // alignment let the request win; zero-width fields keep it.
+                if (pragma_pack_alignment && record.policy != C_RECORD_LAYOUT_MICROSOFT && (!member.is_bit_field || member.bit_width))
+                {
+                    if (member.is_bit_field)
+                    {
+                        member_alignment = BUSTER_MAX(natural_alignment, member_alignment_request);
+                        // An over-ceiling bit-field request contributes to
+                        // alignment but does not move the starting bit.
+                        if (member_alignment_request > pragma_pack_alignment)
+                        {
+                            member_alignment_request = 0;
+                        }
+                    }
+                    member_alignment = BUSTER_MIN(member_alignment, pragma_pack_alignment);
                 }
                 CRecordLayoutPlacement placement = c_record_layout_place(&record, (CRecordLayoutMember){
                                                                                       .size = member_size,
@@ -4546,6 +4565,91 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_unsigned_kind(CTypeKind kind)
     return C_TYPE_INVALID;
 }
 
+// Integer rank is independent of the target's storage widths (C17 6.3.1.1).
+// The canonical type carries only this numeric provenance, never a CTypeId.
+BUSTER_C_SHARED u8 c_semantic_integer_rank(CTypeKind kind)
+{
+    u8 rank;
+    switch (kind)
+    {
+    case C_TYPE_BOOL: rank = C_INTEGER_RANK_BOOL; break;
+    case C_TYPE_CHAR:
+    case C_TYPE_SIGNED_CHAR:
+    case C_TYPE_UNSIGNED_CHAR: rank = C_INTEGER_RANK_CHAR; break;
+    case C_TYPE_SHORT:
+    case C_TYPE_UNSIGNED_SHORT: rank = C_INTEGER_RANK_SHORT; break;
+    case C_TYPE_INT:
+    case C_TYPE_UNSIGNED_INT:
+    case C_TYPE_ENUM: rank = C_INTEGER_RANK_INT; break;
+    case C_TYPE_LONG:
+    case C_TYPE_UNSIGNED_LONG: rank = C_INTEGER_RANK_LONG; break;
+    case C_TYPE_LONG_LONG:
+    case C_TYPE_UNSIGNED_LONG_LONG: rank = C_INTEGER_RANK_LONG_LONG; break;
+    case C_TYPE_INT128:
+    case C_TYPE_UNSIGNED_INT128: rank = C_INTEGER_RANK_INT128; break;
+    default: rank = C_INTEGER_RANK_INVALID; break;
+    }
+    return rank;
+}
+
+BUSTER_C_SHARED CTypeKind c_semantic_integer_kind(u8 rank, bool is_signed)
+{
+    CTypeKind kind;
+    switch (rank)
+    {
+    case C_INTEGER_RANK_BOOL: kind = C_TYPE_BOOL; break;
+    case C_INTEGER_RANK_CHAR: kind = is_signed ? C_TYPE_SIGNED_CHAR : C_TYPE_UNSIGNED_CHAR; break;
+    case C_INTEGER_RANK_SHORT: kind = is_signed ? C_TYPE_SHORT : C_TYPE_UNSIGNED_SHORT; break;
+    case C_INTEGER_RANK_INT: kind = is_signed ? C_TYPE_INT : C_TYPE_UNSIGNED_INT; break;
+    case C_INTEGER_RANK_LONG: kind = is_signed ? C_TYPE_LONG : C_TYPE_UNSIGNED_LONG; break;
+    case C_INTEGER_RANK_LONG_LONG: kind = is_signed ? C_TYPE_LONG_LONG : C_TYPE_UNSIGNED_LONG_LONG; break;
+    case C_INTEGER_RANK_INT128: kind = is_signed ? C_TYPE_INT128 : C_TYPE_UNSIGNED_INT128; break;
+    default: kind = C_TYPE_INVALID; break;
+    }
+    return kind;
+}
+
+// The operands have already undergone their context's integer promotions.
+// Rank chooses the type; target widths answer only signed representability.
+BUSTER_C_SHARED CTypeKind c_semantic_integer_arithmetic_kind(Target target, CTypeKind left, CTypeKind right)
+{
+    u8 left_rank = c_semantic_integer_rank(left);
+    u8 right_rank = c_semantic_integer_rank(right);
+    CTypeKind kind = C_TYPE_INVALID;
+    if (left_rank && right_rank)
+    {
+        bool left_signed = c_parse_expression_signed_kind(left);
+        bool right_signed = c_parse_expression_signed_kind(right);
+        if (left_signed == right_signed)
+        {
+            kind = right_rank > left_rank ? right : left;
+        }
+        else
+        {
+            CTypeKind signed_kind = left_signed ? left : right;
+            CTypeKind unsigned_kind = left_signed ? right : left;
+            u8 signed_rank = left_signed ? left_rank : right_rank;
+            u8 unsigned_rank = left_signed ? right_rank : left_rank;
+            if (unsigned_rank >= signed_rank)
+            {
+                kind = unsigned_kind;
+            }
+            else
+            {
+                u64 signed_size = 0;
+                u64 unsigned_size = 0;
+                u32 ignored_alignment = 0;
+                if (c_parse_builtin_type_layout(target, signed_kind, &signed_size, &ignored_alignment) &&
+                    c_parse_builtin_type_layout(target, unsigned_kind, &unsigned_size, &ignored_alignment))
+                {
+                    kind = signed_size > unsigned_size ? signed_kind : c_parse_expression_unsigned_kind(signed_kind);
+                }
+            }
+        }
+    }
+    return kind;
+}
+
 BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
 {
     if (kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
@@ -4559,13 +4663,13 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
 BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind_with_width(Target target, CTypeKind kind, u32 bit_field_width)
 {
     kind = c_parse_expression_promoted_kind(kind);
-    if (bit_field_width && kind == C_TYPE_UNSIGNED_INT)
+    if (bit_field_width && c_parse_expression_integer_kind(kind))
     {
         u64 int_size = 0;
         u32 int_alignment = 0;
-        if (c_parse_builtin_type_layout(target, C_TYPE_INT, &int_size, &int_alignment) && bit_field_width < int_size * 8)
+        if (c_parse_builtin_type_layout(target, C_TYPE_INT, &int_size, &int_alignment) && bit_field_width <= int_size * 8)
         {
-            kind = C_TYPE_INT;
+            kind = bit_field_width < int_size * 8 || c_parse_expression_signed_kind(kind) ? C_TYPE_INT : C_TYPE_UNSIGNED_INT;
         }
     }
     return kind;
@@ -4650,84 +4754,54 @@ BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CPreprocessResu
 BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
                                                                 u32 left_bit_field_width, u32 right_bit_field_width)
 {
+    CTypeId type;
     if (left_id.value >= result->type_count || right_id.value >= result->type_count)
     {
-        return C_TYPE_ID_INVALID;
-    }
-    CTypeKind left = c_parse_expression_value_kind(result, left_id);
-    CTypeKind right = c_parse_expression_value_kind(result, right_id);
-    bool complex = c_type_kind_is_complex(left) || c_type_kind_is_complex(right);
-    if (c_type_kind_is_complex(left)) left = c_type_kind_complex_element(left);
-    if (c_type_kind_is_complex(right)) right = c_type_kind_complex_element(right);
-    bool left_arithmetic = c_parse_expression_integer_kind(left) || left == C_TYPE_FLOAT16 || left == C_TYPE_BFLOAT16 ||
-                           left == C_TYPE_FLOAT || left == C_TYPE_DOUBLE || left == C_TYPE_LONG_DOUBLE;
-    bool right_arithmetic = c_parse_expression_integer_kind(right) || right == C_TYPE_FLOAT16 || right == C_TYPE_BFLOAT16 ||
-                            right == C_TYPE_FLOAT || right == C_TYPE_DOUBLE || right == C_TYPE_LONG_DOUBLE;
-    if (!left_arithmetic || !right_arithmetic) return C_TYPE_ID_INVALID;
-    if (left == C_TYPE_LONG_DOUBLE || right == C_TYPE_LONG_DOUBLE)
-    {
-        return c_parse_expression_scalar_type(result, complex ? C_TYPE_LONG_DOUBLE_COMPLEX : C_TYPE_LONG_DOUBLE);
-    }
-    if (left == C_TYPE_DOUBLE || right == C_TYPE_DOUBLE)
-    {
-        return c_parse_expression_scalar_type(result, complex ? C_TYPE_DOUBLE_COMPLEX : C_TYPE_DOUBLE);
-    }
-    if (left == C_TYPE_FLOAT || right == C_TYPE_FLOAT)
-    {
-        return c_parse_expression_scalar_type(result, complex ? C_TYPE_FLOAT_COMPLEX : C_TYPE_FLOAT);
-    }
-    // `_Float16` ranks below every other real floating type, so it only wins
-    // once the three above have declined: `h * h` and `h * i` are `_Float16`,
-    // while `h * f` is `float`. C23 6.3.1.8p1 gives it that rank and clang
-    // computes the same result type.
-    if (left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16 || left == C_TYPE_BFLOAT16 || right == C_TYPE_BFLOAT16)
-    {
-        return c_parse_expression_scalar_type(result, complex ? C_TYPE_FLOAT16_COMPLEX : left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16 ? C_TYPE_FLOAT16 : C_TYPE_BFLOAT16);
-    }
-    if (!c_parse_expression_integer_kind(left) || !c_parse_expression_integer_kind(right))
-    {
-        return C_TYPE_ID_INVALID;
-    }
-    left = c_parse_expression_promoted_kind_with_width(target, left, left_bit_field_width);
-    right = c_parse_expression_promoted_kind_with_width(target, right, right_bit_field_width);
-    u64 left_size = 0;
-    u64 right_size = 0;
-    u32 ignored_alignment = 0;
-    if (!c_parse_builtin_type_layout(target, left, &left_size, &ignored_alignment) ||
-        !c_parse_builtin_type_layout(target, right, &right_size, &ignored_alignment))
-    {
-        return C_TYPE_ID_INVALID;
-    }
-    CTypeKind result_kind = left;
-    bool left_signed = c_parse_expression_signed_kind(left);
-    bool right_signed = c_parse_expression_signed_kind(right);
-    if (left_signed == right_signed)
-    {
-        if (right_size > left_size || (right_size == left_size && (u32)right > (u32)left))
-        {
-            result_kind = right;
-        }
+        type = C_TYPE_ID_INVALID;
     }
     else
     {
-        CTypeKind signed_kind = left_signed ? left : right;
-        CTypeKind unsigned_kind = left_signed ? right : left;
-        u64 signed_size = left_signed ? left_size : right_size;
-        u64 unsigned_size = left_signed ? right_size : left_size;
-        if (unsigned_size >= signed_size)
+        CTypeKind left = c_parse_expression_value_kind(result, left_id);
+        CTypeKind right = c_parse_expression_value_kind(result, right_id);
+        bool complex = c_type_kind_is_complex(left) || c_type_kind_is_complex(right);
+        if (c_type_kind_is_complex(left)) left = c_type_kind_complex_element(left);
+        if (c_type_kind_is_complex(right)) right = c_type_kind_complex_element(right);
+        bool left_arithmetic = c_parse_expression_integer_kind(left) || left == C_TYPE_FLOAT16 || left == C_TYPE_BFLOAT16 ||
+                               left == C_TYPE_FLOAT || left == C_TYPE_DOUBLE || left == C_TYPE_LONG_DOUBLE;
+        bool right_arithmetic = c_parse_expression_integer_kind(right) || right == C_TYPE_FLOAT16 || right == C_TYPE_BFLOAT16 ||
+                                right == C_TYPE_FLOAT || right == C_TYPE_DOUBLE || right == C_TYPE_LONG_DOUBLE;
+        CTypeKind kind;
+        if (!left_arithmetic || !right_arithmetic)
         {
-            result_kind = unsigned_kind;
+            kind = C_TYPE_INVALID;
+        }
+        else if (left == C_TYPE_LONG_DOUBLE || right == C_TYPE_LONG_DOUBLE)
+        {
+            kind = complex ? C_TYPE_LONG_DOUBLE_COMPLEX : C_TYPE_LONG_DOUBLE;
+        }
+        else if (left == C_TYPE_DOUBLE || right == C_TYPE_DOUBLE)
+        {
+            kind = complex ? C_TYPE_DOUBLE_COMPLEX : C_TYPE_DOUBLE;
+        }
+        else if (left == C_TYPE_FLOAT || right == C_TYPE_FLOAT)
+        {
+            kind = complex ? C_TYPE_FLOAT_COMPLEX : C_TYPE_FLOAT;
+        }
+        else if (left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16 || left == C_TYPE_BFLOAT16 || right == C_TYPE_BFLOAT16)
+        {
+            // The existing real floating ranks remain independent of integers.
+            kind = complex ? C_TYPE_FLOAT16_COMPLEX :
+                   left == C_TYPE_FLOAT16 || right == C_TYPE_FLOAT16 ? C_TYPE_FLOAT16 : C_TYPE_BFLOAT16;
         }
         else
         {
-            result_kind = signed_kind;
+            left = c_parse_expression_promoted_kind_with_width(target, left, left_bit_field_width);
+            right = c_parse_expression_promoted_kind_with_width(target, right, right_bit_field_width);
+            kind = c_semantic_integer_arithmetic_kind(target, left, right);
         }
-        if (signed_size == unsigned_size && c_parse_expression_signed_kind(result_kind))
-        {
-            result_kind = c_parse_expression_unsigned_kind(result_kind);
-        }
+        type = kind == C_TYPE_INVALID ? C_TYPE_ID_INVALID : c_parse_expression_scalar_type(result, kind);
     }
-    return result_kind == C_TYPE_INVALID ? C_TYPE_ID_INVALID : c_parse_expression_scalar_type(result, result_kind);
+    return type;
 }
 
 BUSTER_C_INTERNAL bool c_parse_expression_token_ends_operand(CToken token)
@@ -8744,6 +8818,8 @@ BUSTER_C_SHARED void c_parse_infer_file_array_bounds(CTypeParseMachine* machine,
     }
 }
 
+#define C_AGGREGATE_LOOKUP_INITIAL_SLOT_COUNT 16384u
+
 // Diagnostic counts stay out of ordinary compilers and timing builds.
 #if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
 #define C_AGGREGATE_LOOKUP_COUNT(lookup, field) do { if (lookup) { (lookup)->field += 1; } } while (0)
@@ -8772,7 +8848,7 @@ BUSTER_C_INTERNAL bool c_parse_aggregate_lookup_grow(CParseResult* result)
     bool grown = false;
     if (lookup->slot_count <= UINT32_MAX / 2)
     {
-        u32 slot_count = lookup->slot_count * 2;
+        u32 slot_count = lookup->slot_count ? lookup->slot_count * 2 : C_AGGREGATE_LOOKUP_INITIAL_SLOT_COUNT;
         u64 size = (u64)slot_count * sizeof(CAggregateLookupSlot);
         if (c_parse_arena_can_allocate(result->arena, size, BUSTER_ALIGN_OF(CAggregateLookupSlot)))
         {
@@ -8804,37 +8880,46 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
     // Qualified aliases carry the tag but never own its identity.
     if (lookup && type->tag.length && !type->has_unqualified_type)
     {
-        CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
-        if (slot->used)
+        // A complete empty header needs no slots until its first tag owner.
+        // Failed initial admission leaves it incomplete, with no slots to probe.
+        if (!lookup->slot_count && !lookup->incomplete)
         {
-            u32 existing = slot->type_index;
-            if (existing < id.value && result->types[existing].kind == type->kind &&
-                !result->types[existing].has_unqualified_type && string_equal(result->types[existing].tag, type->tag))
-            {
-                slot->multiple = true;
-            }
-            else
-            {
-                slot->type_index = id.value;
-            }
+            lookup->incomplete = !c_parse_aggregate_lookup_grow(result);
         }
-        else if (!lookup->incomplete)
+        if (lookup->slot_count)
         {
-            if (lookup->fill >= lookup->slot_count / 2)
+            CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
+            if (slot->used)
             {
-                lookup->incomplete = !c_parse_aggregate_lookup_grow(result);
-                // Growth invalidates the slot pointer, including its empty slot.
-                slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
+                u32 existing = slot->type_index;
+                if (existing < id.value && result->types[existing].kind == type->kind &&
+                    !result->types[existing].has_unqualified_type && string_equal(result->types[existing].tag, type->tag))
+                {
+                    slot->multiple = true;
+                }
+                else
+                {
+                    slot->type_index = id.value;
+                }
             }
-            if (!lookup->incomplete)
+            else if (!lookup->incomplete)
             {
-                lookup->fill += 1;
-                *slot = (CAggregateLookupSlot){
-                    .tag = type->tag,
-                    .kind = (u32)type->kind,
-                    .type_index = id.value,
-                    .used = true,
-                };
+                if (lookup->fill >= lookup->slot_count / 2)
+                {
+                    lookup->incomplete = !c_parse_aggregate_lookup_grow(result);
+                    // Growth invalidates the slot pointer, including its empty slot.
+                    slot = c_parse_aggregate_lookup_slot(lookup, type->kind, type->tag);
+                }
+                if (!lookup->incomplete)
+                {
+                    lookup->fill += 1;
+                    *slot = (CAggregateLookupSlot){
+                        .tag = type->tag,
+                        .kind = (u32)type->kind,
+                        .type_index = id.value,
+                        .used = true,
+                    };
+                }
             }
         }
     }
@@ -9692,13 +9777,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKi
     if (tag.length)
     {
         CAggregateLookup* lookup = result->aggregate_lookup;
-        bool scan = !lookup;
-        bool scan_by_scope = false;
-        if (lookup)
+        bool scan = !lookup || lookup->incomplete;
+        bool scan_by_scope = lookup && lookup->incomplete;
+        if (lookup && lookup->slot_count)
         {
             CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
-            scan = lookup->incomplete;
-            scan_by_scope = lookup->incomplete;
             if (slot->used)
             {
                 u32 type_index = slot->type_index;
@@ -9777,9 +9860,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_tag_lookup(CParseResult* result, String8 tag, 
 // The only row a (kind, tag) type name can mean, when the aggregate-tag index
 // vouches for it: every unqualified tagged row enters the index as it is
 // added, and a second live one marks its slot `multiple`, so a complete
-// index's unused slot means no row carries the tag and a single live slot
-// row means no other does. `*decided` stays false -- the caller must search
-// -- for duplicate or stale slots and for an incomplete index.
+// index's empty header or unused slot means no row carries the tag and a
+// single live slot row means no other does. `*decided` stays false -- the
+// caller must search -- for duplicate or stale slots and for an incomplete index.
 BUSTER_C_SHARED CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind kind, String8 tag, bool* decided)
 {
     CTypeId found = C_TYPE_ID_INVALID;
@@ -9787,16 +9870,23 @@ BUSTER_C_SHARED CTypeId c_parse_aggregate_unique(CParseResult* result, CTypeKind
     *decided = false;
     if (lookup && !lookup->incomplete && tag.length)
     {
-        CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
-        if (!slot->used)
+        if (!lookup->slot_count)
         {
             *decided = true;
         }
-        else if (!slot->multiple && slot->type_index < result->type_count && result->types[slot->type_index].kind == kind &&
-                 !result->types[slot->type_index].has_unqualified_type && string_equal(result->types[slot->type_index].tag, tag))
+        else
         {
-            found = (CTypeId){.value = slot->type_index};
-            *decided = true;
+            CAggregateLookupSlot* slot = c_parse_aggregate_lookup_slot(lookup, kind, tag);
+            if (!slot->used)
+            {
+                *decided = true;
+            }
+            else if (!slot->multiple && slot->type_index < result->type_count && result->types[slot->type_index].kind == kind &&
+                     !result->types[slot->type_index].has_unqualified_type && string_equal(result->types[slot->type_index].tag, tag))
+            {
+                found = (CTypeId){.value = slot->type_index};
+                *decided = true;
+            }
         }
     }
     return found;
@@ -11272,9 +11362,15 @@ BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CTok
     {
         bits = token.symbol <= preprocess.symbols->predefined_limit ? preprocess.symbols->word_bits[token.symbol] : 0;
     }
-    else
+    else if (c_token_may_spell_word(token))
     {
         bits = c_parse_word_bits_compute(c_token_spelling(preprocess.spelling_base, token));
+    }
+    else
+    {
+        // Known non-word kinds cannot match a specifier. Keep unclassified
+        // hand-built rows on the spelling path, as identifier queries do.
+        bits = 0;
     }
     return bits;
 }
@@ -11363,6 +11459,28 @@ BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix_token(CPreprocessResult
     c_parse_qualifier_bits_apply(bits, qualifiers);
     return (bits & mask) != 0;
 }
+
+#if BUSTER_INCLUDE_TESTS
+u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token)
+{
+    CType qualifier = {0};
+    CType prefix = {0};
+    u32 classes = 0;
+    classes |= c_parse_type_word_for_dialect_token(preprocess, token) ? C_TEST_WORD_CLASS_TYPE : 0;
+    classes |= c_parse_auto_type_word_token(preprocess, token) ? C_TEST_WORD_CLASS_AUTO_TYPE : 0;
+    classes |= c_parse_type_name_start_word_token(preprocess, token) ? C_TEST_WORD_CLASS_TYPE_NAME_START : 0;
+    classes |= c_parse_type_qualifier_word_token(preprocess, token, &qualifier) ? C_TEST_WORD_CLASS_QUALIFIER : 0;
+    classes |= c_parse_atomic_declaration_prefix_token(preprocess, token, &prefix) ? C_TEST_WORD_CLASS_ATOMIC_PREFIX : 0;
+    classes |= qualifier.is_const ? C_TEST_WORD_CLASS_CONST : 0;
+    classes |= qualifier.is_volatile ? C_TEST_WORD_CLASS_VOLATILE : 0;
+    classes |= qualifier.is_restrict ? C_TEST_WORD_CLASS_RESTRICT : 0;
+    classes |= qualifier.is_atomic ? C_TEST_WORD_CLASS_ATOMIC : 0;
+    classes |= prefix.is_const == qualifier.is_const && prefix.is_volatile == qualifier.is_volatile &&
+                       prefix.is_restrict == qualifier.is_restrict && prefix.is_atomic == qualifier.is_atomic
+                   ? C_TEST_WORD_CLASS_QUALIFIERS_AGREE : 0;
+    return classes;
+}
+#endif
 
 BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
@@ -13408,15 +13526,15 @@ BUSTER_C_INTERNAL u32 c_parse_parameter_list_reserved_count(CPreprocessResult pr
     return reserved;
 }
 
-// `()` -- an empty parameter list -- declares a function with no prototype,
-// which C11 6.2.7p3 makes compatible with a non-variadic prototype; `(void)`
-// declares a prototype with zero parameters and is compatible with no other
-// list. Both produce zero parameter records, so the shape is read back off
-// the tokens: the list is empty exactly when its closing parenthesis abuts
-// its opening one.
+// Before C23, `()` leaves the parameters unspecified; `(void)` declares a
+// zero-parameter prototype. C23 makes both spellings zero-parameter
+// prototypes (N3096 6.7.6.3p13). Every function-type constructor records
+// that distinction here, before type compatibility or call checks consume it.
+// Both spellings produce zero parameter rows, so token adjacency identifies
+// the empty list.
 BUSTER_C_INTERNAL bool c_parse_parameter_list_unprototyped(CPreprocessResult preprocess, u32 list_close)
 {
-    return list_close && list_close - 1 < preprocess.token_count &&
+    return !c_preprocess_dialect_is_c23(preprocess.dialect) && list_close && list_close - 1 < preprocess.token_count &&
            c_token_is_punctuator(&preprocess.tokens[list_close - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
 }
 
@@ -15927,7 +16045,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                     if (list_end) list_close = index;
                     if (list_end && !segment_count && !written_parameter_count)
                     {
-                        unprototyped = true;
+                        unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close);
                         break;
                     }
                     if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_ELLIPSIS))
@@ -22675,45 +22793,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
 
 BUSTER_C_INTERNAL CIntegerRank c_parse_integer_rank(CTypeKind kind)
 {
-    CIntegerRank rank = C_INTEGER_RANK_INVALID;
-    switch (kind)
-    {
-    case C_TYPE_BOOL: rank = C_INTEGER_RANK_BOOL; break;
-    case C_TYPE_CHAR:
-    case C_TYPE_SIGNED_CHAR:
-    case C_TYPE_UNSIGNED_CHAR: rank = C_INTEGER_RANK_CHAR; break;
-    case C_TYPE_SHORT:
-    case C_TYPE_UNSIGNED_SHORT: rank = C_INTEGER_RANK_SHORT; break;
-    case C_TYPE_INT:
-    case C_TYPE_UNSIGNED_INT: rank = C_INTEGER_RANK_INT; break;
-    case C_TYPE_LONG:
-    case C_TYPE_UNSIGNED_LONG: rank = C_INTEGER_RANK_LONG; break;
-    case C_TYPE_LONG_LONG:
-    case C_TYPE_UNSIGNED_LONG_LONG: rank = C_INTEGER_RANK_LONG_LONG; break;
-    case C_TYPE_INT128:
-    case C_TYPE_UNSIGNED_INT128: rank = C_INTEGER_RANK_INT128; break;
-    case C_TYPE_INVALID:
-    case C_TYPE_VOID:
-    case C_TYPE_FLOAT16:
-    case C_TYPE_BFLOAT16:
-    case C_TYPE_FLOAT:
-    case C_TYPE_DOUBLE:
-    case C_TYPE_LONG_DOUBLE:
-    case C_TYPE_FLOAT16_COMPLEX:
-    case C_TYPE_FLOAT_COMPLEX:
-    case C_TYPE_DOUBLE_COMPLEX:
-    case C_TYPE_LONG_DOUBLE_COMPLEX:
-    case C_TYPE_VA_LIST:
-    case C_TYPE_NULLPTR:
-    case C_TYPE_POINTER:
-    case C_TYPE_ARRAY:
-    case C_TYPE_VECTOR:
-    case C_TYPE_FUNCTION:
-    case C_TYPE_STRUCT:
-    case C_TYPE_UNION:
-    case C_TYPE_ENUM:
-    case C_TYPE_COUNT: break;
-    }
+    // An unresolved enum has no stable constant rank yet. Scalar kinds share
+    // the arithmetic conversion vocabulary after that existing refusal.
+    CIntegerRank rank = kind == C_TYPE_ENUM ? C_INTEGER_RANK_INVALID : (CIntegerRank)c_semantic_integer_rank(kind);
     return rank;
 }
 
@@ -23389,11 +23471,20 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
                 CType source_element = result->types[source_pointee.value];
                 bool object_void_compatible = (target_element.kind == C_TYPE_VOID && source_element.kind != C_TYPE_FUNCTION) ||
                                               (source_element.kind == C_TYPE_VOID && target_element.kind != C_TYPE_FUNCTION);
+                // ISO assignment permits void pointers only against object pointers.
+                // GNU modes on native Linux/macOS also admit callback storage through
+                // void*: an explicit Buster extension, not an ISO compatibility rule.
+                // Keep other pointee mismatches and qualifier losses diagnosed.
+                bool native_callback_storage = (preprocess.target.cpu_arch == CPU_ARCH_X86_64 || preprocess.target.cpu_arch == CPU_ARCH_AARCH64) &&
+                                               (preprocess.target.os == OPERATING_SYSTEM_LINUX || preprocess.target.os == OPERATING_SYSTEM_MACOS);
+                bool function_void_compatible = c_preprocess_dialect_is_gnu(preprocess.dialect) && native_callback_storage &&
+                                                ((target_element.kind == C_TYPE_VOID && source_element.kind == C_TYPE_FUNCTION) ||
+                                                 (source_element.kind == C_TYPE_VOID && target_element.kind == C_TYPE_FUNCTION));
                 bool drops_qualifier = (source_element.is_const && !target_element.is_const) ||
                                        (source_element.is_volatile && !target_element.is_volatile) ||
                                        (source_element.is_restrict && !target_element.is_restrict) ||
                                        (!object_void_compatible && source_element.is_atomic && !target_element.is_atomic);
-                bool compatible = object_void_compatible ||
+                bool compatible = object_void_compatible || function_void_compatible ||
                                   c_parse_types_compatible(machine->scratch_arena, result, preprocess,
                                       c_parse_unqualified_type(result, target_pointee), c_parse_unqualified_type(result, source_pointee));
                 if (!compatible && target_element.kind == C_TYPE_ARRAY && source_element.kind == C_TYPE_ARRAY &&
@@ -23472,10 +23563,13 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
                 {
                     CTypeId a = from.element_type;
                     CTypeId b = result->types[field.value].element_type;
+                    // A transparent member accepts the same pointer assignment
+                    // as an ordinary parameter, including qualifier addition.
+                    // Keep pointee identity and every qualifier-loss check at
+                    // the shared assignment-conversion owner.
                     compatible |= a.value < result->type_count && b.value < result->type_count &&
-                                  (result->types[a.value].kind == C_TYPE_VOID || result->types[b.value].kind == C_TYPE_VOID ||
-                                   c_parse_types_compatible(machine->scratch_arena, result, preprocess, a, b)) &&
-                                  (!result->types[a.value].is_const || result->types[b.value].is_const);
+                                  !c_parse_assignment_conversion_message(machine, result, preprocess, scope, field, source,
+                                                                         start, end).length;
                 }
                 else if (!source_pointer && field_pointer)
                     compatible |= c_parse_range_is_null_pointer_constant(machine->scratch_arena, preprocess, result, scope, source, start, end);
@@ -27486,15 +27580,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         result.binding_undo_capacity = result.entity_capacity + 1;
         result.binding_undo = arena_allocate(arena, CParseBindingUndo, result.binding_undo_capacity);
     }
-    {
-        u32 aggregate_slot_count = 16384;
-        result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
-        *result.aggregate_lookup = (CAggregateLookup){
-            // Reused arena bytes can be dirty; empty slots must be zeroed.
-            .slots = arena_allocate_zeroed(arena, CAggregateLookupSlot, aggregate_slot_count),
-            .slot_count = aggregate_slot_count,
-        };
-    }
+    // The stable header survives rollback even before the first tag owner.
+    result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
+    *result.aggregate_lookup = (CAggregateLookup){0};
     {
         u32 definition_slot_count = 1024;
         result.definition_index = arena_allocate(arena, CDefinitionIndex, 1);
