@@ -496,6 +496,14 @@ without facts for identical bitcode and diagnostics.
   so no result may reference it. `c_preprocess_seal` copies the preprocessing
   result out of it; semantic layout queries keep their tables there and
   release them on return. See [compiler phase lifetimes](../../compiler-lifetime.md).
+- `debug_fill_ir_type` copies each nonempty canonical type name once into
+  the debug model's arena. Its initial `name` and `declaration_name` fields
+  share that immutable payload. For a nonempty canonical name, an
+  `IR_SYMBOL_TYPE` can replace only the declaration-name field later;
+  an empty canonical name retains the existing symbol-name fallback.
+  Neither field borrows canonical name bytes.
+  `debug_test_type_name_ownership` checks canonical-input mutation, owned
+  storage sharing, declaration-name replacement and both empty-name forms.
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin
