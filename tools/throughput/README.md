@@ -787,6 +787,9 @@ A completed run seals the six primary machine-readable evidence files with
 SHA-256 in `complete.txt`. Comparison rechecks the seal, strict row counts,
 unique pair slots/order positions, numeric validity, invariant workload units
 and repeat output hashes, then regenerates `summary.json` and `summary.md`.
+Each telemetry replay must match its own timing variant's output bytes/hash
+and source bytes/lines/functions. Different variants may emit different artifacts;
+a zero function count remains valid when that denominator is unavailable.
 These two reports are derived outputs, not retained evidence: comparison removes
 old reports before validation and discards newly written reports on validation
 or stream failure. A failed replay therefore cannot reuse an earlier verdict or
