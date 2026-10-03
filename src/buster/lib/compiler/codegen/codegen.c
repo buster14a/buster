@@ -19922,22 +19922,46 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
-                        u16 compare_width = 64;
+                        u32 value_width = 64;
                         if (instruction->operand_count && instruction->operands[0].value < function->value_count)
                         {
                             IrType* switch_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
-                            if (switch_type && (switch_type->kind == IR_TYPE_BOOLEAN ||
-                                                (switch_type->kind == IR_TYPE_INTEGER && switch_type->bit_width <= 32)))
+                            if (switch_type && switch_type->kind == IR_TYPE_BOOLEAN)
                             {
-                                compare_width = 32;
+                                value_width = 1;
+                            }
+                            else if (switch_type && switch_type->kind == IR_TYPE_INTEGER && switch_type->bit_width < 64)
+                            {
+                                value_width = switch_type->bit_width;
                             }
                         }
+                        u16 compare_width = value_width <= 32 ? 32 : 64;
+                        u64 value_mask = value_width == 64 ? UINT64_MAX : (UINT64_C(1) << value_width) - 1;
                         c_x64_load(&emitter, 0x85, instruction->operands[0]);
+                        if (value_width < compare_width)
+                        {
+                            if (compare_width == 64)
+                            {
+                                BusterX86MetadataPhysicalOperand mask_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                    codegen_canonical_x64_metadata_unsigned_immediate(value_mask, 64),
+                                };
+                                (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), mask_operands,
+                                                                         BUSTER_ARRAY_LENGTH(mask_operands));
+                            }
+                            BusterX86MetadataPhysicalOperand normalize_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, compare_width),
+                                compare_width == 64 ? codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64)
+                                                    : codegen_canonical_x64_metadata_immediate((s64)value_mask, 32),
+                            };
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), normalize_operands,
+                                                                     BUSTER_ARRAY_LENGTH(normalize_operands));
+                        }
                         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
                         {
                             BusterX86MetadataPhysicalOperand move_case_operands[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, compare_width),
-                                codegen_canonical_x64_metadata_unsigned_immediate(instruction->immediates[case_index], compare_width),
+                                codegen_canonical_x64_metadata_unsigned_immediate(instruction->immediates[case_index] & value_mask, compare_width),
                             };
                             BusterX86MetadataPhysicalOperand compare_case_operands[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, compare_width),
@@ -23761,22 +23785,30 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                     else if (instruction->opcode == IR_OPCODE_SWITCH)
                     {
-                        // A case immediate carries the switched type's own
-                        // bits while a register may hold that value extended
-                        // past them, so a 32-bit or narrower type is compared
-                        // at 32 bits -- the same rule the x86-64 branch above
-                        // and the AArch64 selector both apply.
-                        bool compare_words = false;
+                        u32 value_width = 64;
                         if (instruction->operand_count && instruction->operands[0].value < function->value_count)
                         {
                             IrType* switch_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
-                            compare_words = switch_type && (switch_type->kind == IR_TYPE_BOOLEAN ||
-                                                            (switch_type->kind == IR_TYPE_INTEGER && switch_type->bit_width <= 32));
+                            if (switch_type && switch_type->kind == IR_TYPE_BOOLEAN)
+                            {
+                                value_width = 1;
+                            }
+                            else if (switch_type && switch_type->kind == IR_TYPE_INTEGER && switch_type->bit_width < 64)
+                            {
+                                value_width = switch_type->bit_width;
+                            }
                         }
+                        bool compare_words = value_width <= 32;
+                        u64 value_mask = value_width == 64 ? UINT64_MAX : (UINT64_C(1) << value_width) - 1;
                         c_a64_load(&emitter, 9, instruction->operands[0]);
+                        if (value_width < (compare_words ? 32u : 64u))
+                        {
+                            // UBFM W9/W9 or X9/X9, #0, #(width - 1).
+                            codegen_emit_u32(&buffer, (compare_words ? 0x53000129u : 0xd3400129u) | ((u32)(value_width - 1) << 10));
+                        }
                         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
                         {
-                            u64 immediate = instruction->immediates[case_index];
+                            u64 immediate = instruction->immediates[case_index] & value_mask;
                             codegen_emit_u32(&buffer, 0xd280000a | ((u32)(immediate & 0xffff) << 5));
                             codegen_emit_u32(&buffer, 0xf2a0000a | ((u32)((immediate >> 16) & 0xffff) << 5));
                             codegen_emit_u32(&buffer, 0xf2c0000a | ((u32)((immediate >> 32) & 0xffff) << 5));
