@@ -219,6 +219,17 @@
   the mobile artifact. Every required package is validated after each attempt;
   a nonzero installer status or invalid package still fails setup. Run
   `python3 tools/ci_android_sdk_test.py -v` for the hermetic setup controls.
+- Qualification tool observations use `tools/ci_checks_tools.py` only when
+  `BUSTER_CI_CONDITIONS_EVIDENCE=1`. `python3 tools/ci_checks_tools_test.py -v`
+  exercises selected CMake/override paths, exact source/run/job binding,
+  deadlines, output limits, tool replacement and disabled no-op behavior using
+  Python-only fake tools. `python3 tools/ci_checks_qualification_test.py -v`
+  covers required role keys, wrong/unknown observations, digest-bound selected
+  tools, unchanged split-role maps and the existing Android validity scope.
+  Workflow lint runs both controls normally; the qualification branches alone
+  retain real selected Go/Ninja/adb receipts. No compiler build or measurement
+  dispatch is needed to run these controls. Missing historical observations
+  remain pending; see [checks qualification](../ci-combination-shards.md#further-checks-partition-qualification-2120).
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
