@@ -1073,7 +1073,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         compiler_print_diagnostic(S8("cc: error: {S8}\n"), compile.diagnostic);
         result = PROCESS_RESULT_FAILED;
     }
-    else if (!invocation.output_path.length)
+    else if (!invocation.output_path.length || string_equal(invocation.output_path, S8("-")))
     {
         string_print(S8("{S8}"), compile.output);
     }

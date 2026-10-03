@@ -3708,11 +3708,16 @@ void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes, OsError* error)
+BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes, NativeExecutableLinkResult* result)
 {
     FilePublishResult published = file_publish_checked(path, bytes, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
-    *error = published.error;
-    return published.status == FILE_PUBLISH_PUBLISHED;
+    bool success = published.status == FILE_PUBLISH_PUBLISHED;
+    if (!success)
+    {
+        result->write_error = published.error;
+        result->write_unsupported_destination = published.status == FILE_PUBLISH_UNSUPPORTED_DESTINATION;
+    }
+    return success;
 }
 
 BUSTER_GLOBAL_LOCAL u32 link_symbol_find(ObjectFile* object, String8 name)
@@ -5419,7 +5424,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .eh_frame_header_offset = eh_frame_header_offset,
                                       .eh_frame_header_size = eh_frame_header_size,
                                   });
-    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -6914,7 +6919,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         memcpy(layout_section_offsets, section_offsets, sizeof(section_offsets));
     }
-    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -8211,7 +8216,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                                           .dynamic = true,
                                       });
     }
-    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -8546,7 +8551,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
                                       .eh_frame_header_offset = eh_frame_header_offset,
                                       .eh_frame_header_size = eh_frame_header_size,
                                   });
-    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -8962,7 +8967,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         }
         link_write_u32(bytes, output_offset, patched);
     }
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
@@ -11100,12 +11105,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     }
     if (result.error == LINK_ERROR_NONE)
     {
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = options.output_path;
         }
-        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result.write_error))
+        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = result.pdb_path;
@@ -12298,12 +12303,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
     }
     if (result.error == LINK_ERROR_NONE)
     {
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = options.output_path;
         }
-        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result.write_error))
+        else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = result.pdb_path;
@@ -14155,7 +14160,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             u64 page_size = BUSTER_MIN((u64)MACH_CODE_PAGE_SIZE, signature_offset - page_offset);
             link_sha256(arena, bytes + page_offset, page_size, bytes + hash_offset + slot * 32);
         }
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = options.output_path;
@@ -14241,7 +14246,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
             memset(bytes + string_table_offset + 1, 0, sizeof("libc.so.6"));
             memcpy(bytes + string_table_offset + 1, library, sizeof(library));
         }
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result.write_error))
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
         {
             result.error = LINK_ERROR_FILE_WRITE;
             result.symbol = options.output_path;

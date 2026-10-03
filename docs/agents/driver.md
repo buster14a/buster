@@ -5,10 +5,24 @@
 ## Compiler output streams
 
 `ide cc` writes warnings, source diagnostics, and `cc: error:` driver errors to
-stderr. With `-E` or `-S` and no `-o`, the generated text goes to stdout;
+stderr. With `-E` or `-S` and no `-o`, or with `-o -`, generated text
+goes to stdout;
 warnings cannot enter the preprocessed or assembly stream. `#warning` and
 `#error` messages retain the spelling between the first and last message
 tokens, including punctuation and internal whitespace, without expanding macros.
+
+The invocation API retains that text in `CompilerDriverResult.output`.
+`-o -` is refused for binary output and for multiple inputs. An explicit
+`-o` with multiple `-E` inputs is refused, as for `-c` and `-S`. Default
+LLVM bitcode output uses the source basename in the current directory, matching
+object output.
+
+C, assembly and direct canonical emitters retain atomic publication for regular
+files. Existing POSIX character devices and FIFOs such as `/dev/null` are
+written directly. Symbolic links/reparse points, directories and other special
+destinations are explicitly refused. Write failures name the path and the OS
+error when supplied; native link failures identify the executable or PDB that
+failed. External GPU tools retain their own file-publication behavior.
 
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source

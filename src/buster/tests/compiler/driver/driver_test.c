@@ -1,5 +1,7 @@
 // Driver integration tests: compiler_driver_tests registers argument parsing,
-// artifact, link, runtime, and cross-mode checks. compiler_driver_test_pic_arguments
+// artifact, link, runtime, and cross-mode checks. compiler_driver_test_output_paths
+// owns stdout/output placement and publication refusal coverage.
+// compiler_driver_test_pic_arguments
 // owns the configured external compiler command for the ELF PIC fixture.
 // compiler_driver_test_bit_field_assignment_results checks stored-width results.
 // compiler_driver_test_dwarf5_objects covers external DWARF contributions and links.
@@ -347,6 +349,164 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_prepr
         actual_index += 1;
     }
     BUSTER_TEST(arguments, actual_index == actual.token_count);
+    return result;
+}
+
+// Exercise the public invocation and CLI stream conventions, and retain the
+// file layer's direct-device and atomic regular-file publication boundaries.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_paths(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 input = buster_test_temporary_path(arena, S8("output-path-contract"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("output-path-contract"), S8(".out"));
+    String8 source = S8("int main(void) { return 0; }\n");
+    ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                   .use_process_environment = 1, .search_path = 1};
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 text_modes[] = {S8("-E"), S8("-S")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(text_modes); mode += 1)
+        {
+            String8 command[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-g0"),
+                                  text_modes[mode], input, S8("-o"), S8("-")};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.output.length != 0, compiled.diagnostic);
+            String8 child_command[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-target"),
+                                        S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-g0"), text_modes[mode], input,
+                                        S8("-o"), S8("-")};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_command),
+                                                         (SliceString8){0}, (SliceString8){0}, capture);
+            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+            {
+                ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
+                BUSTER_TEST_RAW(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS,
+                                BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]), compiled.output);
+            }
+        }
+        String8 binary_modes[] = {S8("-c"), S8("-emit-llvm"), S8("")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(binary_modes); mode += 1)
+        {
+            String8 command[] = {input, S8("-o"), S8("-"), binary_modes[mode]};
+            u64 count = BUSTER_ARRAY_LENGTH(command) - (binary_modes[mode].length ? 0u : 1u);
+            CompilerDriverResult binary = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){command, count}));
+            BUSTER_TEST(arguments, binary.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            BUSTER_TEST(arguments, string_first_sequence(binary.diagnostic, S8("-o -")) != BUSTER_STRING_NO_MATCH);
+        }
+
+        String8 sentinel = S8("prior output survives a refused invocation");
+        BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+        String8 destinations[] = {output, S8("-")};
+        for (u32 destination = 0; destination < BUSTER_ARRAY_LENGTH(destinations); destination += 1)
+        {
+            String8 command[] = {S8("-E"), input, input, S8("-o"), destinations[destination]};
+            CompilerDriverResult multiple = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, multiple.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            BUSTER_TEST(arguments, string_first_sequence(multiple.diagnostic, S8("multiple input files")) != BUSTER_STRING_NO_MATCH);
+        }
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0})), sentinel);
+
+        u64 name = 0;
+        for (u64 index = 0; index < input.length; index += 1)
+        {
+            if (input.pointer[index] == '/' || input.pointer[index] == '\\') name = index + 1;
+        }
+        String8 basename = {.pointer = input.pointer + name, .length = input.length - name - S8(".c").length};
+        String8 bitcode = string_format_z(arena, S8("{S8}.bc"), basename);
+        String8 beside_source = string_format_z(arena, S8("{S8}.bc"), (String8){input.pointer, input.length - S8(".c").length});
+        String8 llvm_command[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-g0"),
+                                   S8("-c"), S8("-emit-llvm"), input};
+        CompilerDriverResult llvm = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(llvm_command)));
+        BUSTER_TEST_RAW(arguments, llvm.error == COMPILER_DRIVER_ERROR_NONE && llvm.has_llvm_bitcode, llvm.diagnostic);
+        BUSTER_TEST(arguments, file_read(arena, bitcode, (FileReadOptions){0}).length != 0);
+        if (name) BUSTER_TEST(arguments, !file_read(arena, beside_source, (FileReadOptions){0}).pointer);
+        BUSTER_TEST(arguments, os_file_delete(bitcode));
+
+        // PE debug publication is a second destination after the image. A
+        // refused sidecar must identify the PDB rather than the executable.
+        String8 pe_targets[] = {S8("x86_64-pc-windows"), S8("aarch64-pc-windows")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(pe_targets); target += 1)
+        {
+            String8 pe_stem = buster_test_temporary_path(arena, S8("output-pdb-contract"), S8(""));
+            String8 pe_output = string_format_z(arena, S8("{S8}.exe"), pe_stem);
+            String8 pdb_output = string_format_z(arena, S8("{S8}.pdb"), pe_stem);
+            if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(pdb_output)))
+            {
+                String8 command[] = {S8("-target"), pe_targets[target], S8("-nostdinc"), S8("-g"),
+                                      S8("-o"), pe_output, input};
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK &&
+                                          refused.native_link.error == LINK_ERROR_FILE_WRITE, refused.diagnostic);
+                BUSTER_STRING_TEST(arguments, refused.native_link.symbol, pdb_output);
+                BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, pdb_output) != BUSTER_STRING_NO_MATCH);
+                BUSTER_TEST(arguments, refused.native_link.write_unsupported_destination);
+                BUSTER_TEST(arguments, !refused.native_link.executable.pointer && !refused.native_link.pdb.pointer);
+                BUSTER_TEST(arguments, os_directory_delete(pdb_output));
+                BUSTER_TEST(arguments, os_file_delete(pe_output));
+            }
+        }
+
+        String8 missing = string_format_z(arena, S8("{S8}/output"), input);
+        String8 modes[] = {S8("-E"), S8("-S"), S8("-c"), S8("-emit-llvm"), S8("")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            String8 command[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-g0"),
+                                  S8("-o"), missing, input, modes[mode]};
+            u64 count = BUSTER_ARRAY_LENGTH(command) - (modes[mode].length ? 0u : 1u);
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
+            if (mode == 3) invocation.action = COMPILER_DRIVER_ACTION_OBJECT;
+            CompilerDriverResult refused = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST_RAW(arguments, refused.error == COMPILER_DRIVER_ERROR_FILE_WRITE ||
+                                      (refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_FILE_WRITE),
+                            refused.diagnostic);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, missing) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8(": ")) != BUSTER_STRING_NO_MATCH);
+            if (refused.native_link.error == LINK_ERROR_FILE_WRITE)
+            {
+                BUSTER_STRING_TEST(arguments, refused.native_link.symbol, missing);
+                BUSTER_TEST(arguments, refused.native_link.write_error.v != 0);
+                String8 reason = string8_from_os_error(arena, refused.native_link.write_error, false);
+                BUSTER_TEST(arguments, reason.length && string_first_sequence(refused.diagnostic, reason) != BUSTER_STRING_NO_MATCH);
+            }
+#if BUSTER_LINUX || BUSTER_MACOS
+            invocation.output_path = S8("/dev/null");
+            CompilerDriverResult device = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST_RAW(arguments, device.error == COMPILER_DRIVER_ERROR_NONE, device.diagnostic);
+#endif
+        }
+#if BUSTER_LINUX || BUSTER_MACOS
+        String8 symlink_path = buster_test_temporary_path(arena, S8("output-symlink-contract"), S8(".o"));
+        String8Z source_z = {0};
+        String8Z symlink_z = {0};
+        bool paths_ready = string8z_copy_arena(arena, os_path_absolute(arena, input, true), &source_z) && string8z_copy_arena(arena, symlink_path, &symlink_z);
+        if (BUSTER_REQUIRE(arguments, paths_ready && symlink(source_z.pointer, symlink_z.pointer) == 0))
+        {
+            String8 command[] = {S8("-c"), S8("-g0"), input, S8("-o"), symlink_path};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_FILE_WRITE);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("symbolic links")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, symlink_path) != BUSTER_STRING_NO_MATCH);
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, input, (FileReadOptions){0})), source);
+            BUSTER_TEST(arguments, os_file_replacement_target_stats(symlink_path).kind == OS_FILE_KIND_LINK);
+            BUSTER_TEST(arguments, os_file_delete(symlink_path));
+        }
+#endif
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    BUSTER_TEST(arguments, os_file_delete(output));
+    arena_set_position(arena, position);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
     return result;
 }
 
@@ -17883,6 +18043,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pragma_pack_alignment(Un
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_output_paths);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);

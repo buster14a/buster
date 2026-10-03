@@ -178,6 +178,9 @@ struct NativeExecutableLinkResult
     // named instead of reported only as a failed write. Zero when the writer
     // refused the destination without a system error.
     OsError write_error;
+    // Distinguish policy refusals (links, directories, special files) from an
+    // incomplete transfer when no native OS error was supplied.
+    bool write_unsupported_destination;
     LinkError error;
 };
 
