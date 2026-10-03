@@ -249,7 +249,12 @@ relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
 `.att_syntax prefix`; and the `.cfi_*` family, accepted and dropped because it
-describes unwinding rather than bytes. Anything else -- a directive the table
+describes unwinding rather than bytes. Widths and alignment follow the target
+as in GNU as: on x86-64 `.align N` is N bytes and `.word` is 16 bits; on
+AArch64 `.align N` is 2^N bytes like `.p2align`, `.word` is 32 bits, and
+`.xword`/`.dword` add 64-bit data. A constant that fits neither the signed nor
+the unsigned reading of its directive's width is refused, as llvm-mc does,
+rather than truncated. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.

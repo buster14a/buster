@@ -2643,10 +2643,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArgument
         {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
     };
-    String8 directives[] = {S8(".p2align 4"), S8(".balign 16"), S8(".align 16")};
     u8 aarch64_nop[] = {0x1f, 0x20, 0x03, 0xd5};
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
     {
+        // `.align` is a power of two on AArch64 and a byte count on x86 ELF.
+        String8 directives[] = {S8(".p2align 4"), S8(".balign 16"), target_index ? S8(".align 16") : S8(".align 4")};
         for (u32 directive_index = 0; directive_index < BUSTER_ARRAY_LENGTH(directives); directive_index += 1)
         {
             for (u32 prefix = 1; prefix <= 16; prefix += 1)
@@ -2723,6 +2724,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArgument
         jit_program_release(&program);
     }
 #endif
+    return result;
+}
+
+// Data directives follow the target: AArch64 `.align N` is 2^N and `.word`
+// is 32 bits. Bytes, offsets and alignment are llvm-mc 18.1.3 output (GNU as
+// 2.42 agrees on x86-64); out-of-range constants are refused, as llvm-mc does.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_data_widths(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct AssemblyDataWidthCase
+    {
+        String8 source;
+        String8 symbol;
+        u64 symbol_value;
+        u32 alignment;
+        u8 byte_count;
+        u8 bytes[48];
+        u8 text_count;
+        u8 text[8];
+        CpuArch arch;
+    } const cases[] = {
+        {
+            S8(".data\n.byte 1\n.align 4\nt16: .word 7\n.hword 0xbeef\n.xword 0x1122334455667788\n.dword -1\n.byte 255, -128\n"
+               ".word 0xffffffff, -2147483648\n.text\nf: .word 0xd2800540\nret\n"),
+            S8("t16"), 16, 16, 48,
+            {0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+             0x07, 0x00, 0x00, 0x00, 0xef, 0xbe, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x80, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x80},
+            8, {0x40, 0x05, 0x80, 0xd2, 0xc0, 0x03, 0x5f, 0xd6}, CPU_ARCH_AARCH64,
+        },
+        {
+            S8(".data\n.byte 1\n.align 4\nt4: .word 0xbeef\n.short -1\n.value 65535\n.long 0xffffffff\n.byte -128\n"),
+            S8("t4"), 4, 4, 15,
+            {0x01, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x80},
+            0, {0}, CPU_ARCH_X86_64,
+        },
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        Target target = {.cpu_arch = cases[index].arch, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, cases[index].source, (AssemblyEncodeOptions){.target = target});
+        BUSTER_TEST(arguments, !unit.diagnostic_count && unit.relocation_count == 0);
+        bool data_matched = false;
+        bool text_matched = !cases[index].text_count;
+        for (u32 section = 0; section < unit.section_count; section += 1)
+        {
+            AssemblyUnitSection record = unit.sections[section];
+            bool data = string_equal(record.name, S8(".data"));
+            u32 expected_count = data ? cases[index].byte_count : cases[index].text_count;
+            u8 const* expected = data ? cases[index].bytes : cases[index].text;
+            bool matched = record.data.length == expected_count && (!data || record.alignment == cases[index].alignment);
+            for (u32 byte = 0; byte < expected_count && matched; byte += 1)
+            {
+                matched = record.data.pointer[byte] == expected[byte];
+            }
+            data_matched = data_matched || (data && matched);
+            text_matched = text_matched || (!data && matched);
+        }
+        BUSTER_TEST(arguments, data_matched && text_matched);
+        bool symbol_matched = false;
+        for (u32 symbol = 0; symbol < unit.symbol_count; symbol += 1)
+        {
+            symbol_matched = symbol_matched ||
+                             (string_equal(unit.symbols[symbol].name, cases[index].symbol) && unit.symbols[symbol].value == cases[index].symbol_value);
+        }
+        BUSTER_TEST(arguments, symbol_matched);
+    }
+    String8 refused[] = {
+        S8(".data\n.byte 256\n"), S8(".data\n.byte -129\n"), S8(".data\n.short 65536\n"), S8(".data\n.short -32769\n"),
+        S8(".data\n.word 0x12345\n"), S8(".data\n.long 0x100000000\n"), S8(".data\n.long -2147483649\n"),
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+        {
+            // The AArch64 `.word` holds 0x12345; only x86's 16-bit one refuses it.
+            bool fits = !target_index && index == 4;
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, refused[index], (AssemblyEncodeOptions){.target = targets[target_index]});
+            BUSTER_TEST(arguments, fits ? !unit.diagnostic_count : unit.diagnostic_count == 1);
+        }
+    }
+    // The 64-bit spellings are AArch64 directives only.
+    AssemblyUnitResult x86_xword = assembly_unit_encode(arguments->arena, S8(".data\n.xword 1\n"), (AssemblyEncodeOptions){.target = targets[1]});
+    BUSTER_TEST(arguments, x86_xword.diagnostic_count != 0);
     return result;
 }
 
@@ -3232,6 +3321,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_control_labels(UnitTestArg
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_data_widths);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
