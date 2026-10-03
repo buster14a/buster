@@ -1193,6 +1193,21 @@ enumerators defer to typed semantic evaluation instead of replacing names with
 untyped decimal spellings. Full-width runtime constants use ordinary canonical
 shift/or operations; the one-immediate integer-constant contract is unchanged.
 
+Switch lowering applies integer promotion before checking the dispatch type.
+A `_Bool` parameter, comparison result or evaluated call therefore reaches
+the same signed-int dispatch as a narrow integer. Case constants and GNU
+ranges still convert to that promoted type before overlap validation.
+`c_test_switch_integer_controls` checks canonical signed-32-bit controls and
+single call preparation on six native targets in both frontend forms, plus
+desktop execution through all four allocators. Narrow signed/unsigned and
+64-bit cases remain independent controls.
+
+The current canonical SWITCH label representation contains one u64 per case.
+A signed or unsigned `__int128` control receives a structured unsupported
+diagnostic naming its type and the 64-bit dispatch limit, including when the
+case constants themselves fit 64 bits. Full 128-bit dispatch remains
+unimplemented; narrowing an input in the source is an explicit user choice.
+
 A selection or iteration statement is a block (C17 6.8.4p3, 6.8.5p5). When an
 `if`, `switch` or `while` controlling expression defines a tag, as in
 `if (sizeof(enum { Q = 8 })) v = Q;`, `c_parse_bind_block_statements` opens a
