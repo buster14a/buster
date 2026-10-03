@@ -15882,6 +15882,352 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_object(UnitTestArguments* argu
     return result;
 }
 
+// #1249: final member expressions use the declaring field's placement.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_parts[] = {
+        S8(
+            "#if defined(_WIN32)\n"
+            "#define PRAGMA_REQUEST 16\n"
+            "#else\n"
+            "#define PRAGMA_REQUEST 1\n"
+            "#endif\n"
+            "_Alignas(64) int g1; int g2 __attribute__((aligned(128)));\n"
+            "struct S2 { char c; int x __attribute__((aligned(16))); _Alignas(32) short y; } s2;\n"
+            "struct __attribute__((packed)) P { char c; int i; } p;\n"
+            "struct MemberPacked { char c; int i __attribute__((packed)); } mp;\n"
+            "struct PackedRequest { char c; int i __attribute__((packed, aligned(2))); } rp;\n"
+            "struct __attribute__((packed)) Raised { char c; int i __attribute__((aligned(8))); } raised;\n"
+            "struct Inner { char c; int x __attribute__((aligned(8))); };\n"
+            "struct __attribute__((packed)) Outer { char c; struct Inner inner; } outer;\n"
+            "struct __attribute__((packed)) Promoted { char c; struct { int x __attribute__((aligned(16))); }; } promoted;\n"
+            "struct ArrayMember { char c; _Alignas(16) int values[3]; } array_member;\n"
+            "union AlignedUnion { int x __attribute__((aligned(16))); char c; } au;\n"
+            "const union AlignedUnion groups[2];\n"
+            "enum { REQUEST = 8 };\n"
+            "struct RequestExpression { int x __attribute__((aligned(REQUEST))); } request_expression;\n"
+            "struct CastRequest { int x __attribute__((aligned((unsigned char)264))); } cast_request;\n"
+            "struct Chained { int x __attribute__((aligned(__alignof__(s2.x)))); } chained;\n"
+            "struct __attribute__((aligned(64))) Incidental { char c; } incidental;\n"
+            "#pragma pack(push, 1)\n"
+            "struct Pragma { char c; int requested __attribute__((aligned(16))); int plain; } pragma_object;\n"
+            "#pragma pack(pop)\n"
+            "static volatile int calls;\n"
+            "static struct S2 *next(void) { calls += 1; return &s2; }\n"
+            "static struct S2 *pick(int value) { calls += value; return &s2; }\n"
+            "static struct S2 *cursor = &s2;\n"
+            "enum {\n"
+            "    E_X = __alignof__(s2.x), E_Y = _Alignof(s2.y), E_PACKED = __alignof__(p.i),\n"
+            "    E_MEMBER_PACKED = __alignof__(mp.i), E_REQUEST = __alignof__(rp.i), E_RAISED = __alignof__(raised.i),\n"
+            "    E_NESTED = __alignof__(outer.inner.x), E_PROMOTED = __alignof__(promoted.x), E_ARRAY = __alignof__(array_member.values),\n"
+            "    E_UNION = __alignof__(au.x), E_ADDRESS = __alignof__((&au)->x), E_CONST = __alignof__(groups[0].x),\n"
+            "    E_EXPRESSION = __alignof__(request_expression.x), E_CAST = __alignof__(cast_request.x), E_CHAIN = __alignof__(chained.x),\n"
+            "    E_PREFIX = __alignof__((++cursor)->x), E_POSTFIX = __alignof__((cursor++)->x),\n"
+            "    E_CAST_UPDATE = __alignof__(((struct S2 *)cursor++)->x),\n"
+            "    E_CAST_DEREF = __alignof__((*(struct S2 *)cursor++).x),\n"
+            "    E_SIZEOF_UPDATE = __alignof__(((struct S2 *)(sizeof cursor++))->x),\n"
+            "    E_ALIGNOF_UPDATE = __alignof__(((struct S2 *)(_Alignof cursor++))->x),\n"
+            "    E_PRAGMA = __alignof__(pragma_object.requested)\n"
+            "};\n"
+        ),
+        S8(
+            "unsigned long folded_member_alignment = __alignof__(s2.x);\n"
+            "char member_bound[__alignof__(s2.x)];\n"
+            "_Alignas(__alignof__(s2.x)) int derived;\n"
+            "_Static_assert(__alignof__(g1) == 64 && __alignof__(g2) == 128 && E_X == 16 && E_Y == 32 && E_PACKED == 1, \"original queries\");\n"
+            "_Static_assert(E_MEMBER_PACKED == 1 && E_REQUEST == 2 && E_RAISED == 8 && E_NESTED == 8 && E_PROMOTED == 16, \"packing and declaring owner\");\n"
+            "_Static_assert(E_ARRAY == 16 && E_UNION == 16 && E_ADDRESS == 16 && E_CONST == 16 && E_EXPRESSION == 8 && E_CAST == 8 && E_CHAIN == 16, \"typed and const member queries\");\n"
+            "_Static_assert(E_PREFIX == 16 && E_POSTFIX == 16, \"unevaluated pointer updates\");\n"
+            "_Static_assert(__alignof__((0, cursor++)->x) == 16 && __alignof__(((struct S2 *)cursor++)->x) == 16 && E_CAST_UPDATE == 16, \"comma and cast pointer updates\");\n"
+            "_Static_assert(__alignof__((*(struct S2 *)cursor++).x) == 16 && E_CAST_DEREF == 16, \"cast under dereference\");\n"
+            "_Static_assert(__alignof__(((struct S2 *)(sizeof cursor++))->x) == 16 && E_SIZEOF_UPDATE == 16, \"sizeof pointer update\");\n"
+            "_Static_assert(__alignof__(((struct S2 *)(_Alignof cursor++))->x) == 16 && E_ALIGNOF_UPDATE == 16, \"alignof pointer update\");\n"
+            "_Static_assert(__alignof__((__extension__ cursor++)->x) == 16, \"extension pointer update\");\n"
+            "_Static_assert(__alignof__(((struct S2 *)__real__ sizeof cursor++)->x) == 16 && __alignof__(((struct S2 *)__imag__ sizeof cursor++)->x) == 16, \"real imaginary sizeof operands\");\n"
+            "_Static_assert(E_PRAGMA == PRAGMA_REQUEST && __alignof__(pragma_object.plain) == 1, \"pragma target rules\");\n"
+            "_Static_assert(__alignof__(int) == 4 && _Alignof(short) == 2 && __alignof__(incidental.c) == 1, \"type and incidental alignment\");\n"
+            "_Static_assert(sizeof s2.x == 4, \"sizeof direct member\");\n"
+            "_Static_assert(sizeof((&au)->x) == 4, \"sizeof address member\");\n"
+            "_Static_assert(sizeof groups[0].x == 4, \"sizeof const union member\");\n"
+            "_Static_assert(sizeof promoted.x == 4, \"sizeof promoted member\");\n"
+            "_Static_assert(sizeof(((struct S2 *)0)->x) == 4, \"sizeof cast member\");\n"
+            "_Static_assert(__alignof__(+s2.x) == 4 && __alignof__(1 + s2.x) == 4 && __alignof__(s2.x + 1) == 4, \"arithmetic values\");\n"
+            "_Static_assert(__alignof__(&s2.x) == 8 && __alignof__(++s2.x) == 4 && __alignof__(s2.x = s2.x) == 4, \"outer operators\");\n"
+            "_Static_assert(__alignof__((0, s2.x)) == 4 && __alignof__(1 ? s2.x : s2.x) == 4 && __alignof__(array_member.values[0]) == 4, \"other values\");\n"
+            "_Static_assert(__alignof__((((0, s2)).x)) == 16 && __alignof__((1 ? &s2 : &s2)->x) == 16, \"grouped aggregate expressions\");\n"
+            "_Static_assert(__alignof__(_Generic(0, int: s2, default: s2).x) == 16, \"generic aggregate expression\");\n"
+            "_Static_assert(__alignof__(((struct S2){.x = ++calls}).x) == 16 && __alignof__(next()->x) == 16 && __alignof__(pick(++calls)->x) == 16, \"unevaluated operands\");\n"
+            "int scope_control(void) {\n"
+            "    enum { REQUEST = 32 };\n"
+            "    struct Local { char c; int x __attribute__((aligned(REQUEST))); } local;\n"
+            "    _Static_assert(__alignof__(local.x) == 32 && __alignof__(request_expression.x) == 8, \"declaration scopes\");\n"
+            "    return __alignof__(local.x) != 32 || __alignof__(request_expression.x) != 8;\n"
+            "}\n"
+        ),
+        S8(
+            "int main(void) {\n"
+            "    _Alignas(32) int loc = 0; s2.x = 1;\n"
+            "    int failed = __alignof__(g1) != 64 || __alignof__(g2) != 128 || __alignof__(s2.x) != 16 ||\n"
+            "        __alignof__(s2.y) != 32 || __alignof__(p.i) != 1 || __alignof__(loc) != 32;\n"
+            "    failed |= __alignof__(mp.i) != 1 || __alignof__(rp.i) != 2 || __alignof__(raised.i) != 8;\n"
+            "    failed |= __alignof__(outer.inner.x) != 8 || __alignof__(promoted.x) != 16 || __alignof__(array_member.values) != 16;\n"
+            "    failed |= __alignof__((&au)->x) != 16 || __alignof__(groups[0].x) != 16 || folded_member_alignment != 16;\n"
+            "    failed |= __alignof__(request_expression.x) != 8 || __alignof__(cast_request.x) != 8 || __alignof__(chained.x) != 16;\n"
+            "    failed |= __alignof__(_Generic(0, int: s2, default: s2).x) != 16;\n"
+            "    failed |= __alignof__(pragma_object.requested) != PRAGMA_REQUEST || __alignof__(pragma_object.plain) != 1;\n"
+            "    failed |= __alignof__(derived) != 16 || sizeof member_bound != 16 || __alignof__(incidental.c) != 1;\n"
+            "    failed |= __alignof__(++s2.x) != 4 || __alignof__(((struct S2){.x = ++calls}).x) != 16 || __alignof__(next()->x) != 16 || __alignof__(pick(++calls)->x) != 16;\n"
+            "    failed |= __alignof__((++cursor)->x) != 16 || __alignof__((cursor++)->x) != 16;\n"
+            "    failed |= __alignof__((0, cursor++)->x) != 16 || __alignof__(((struct S2 *)cursor++)->x) != 16;\n"
+            "    failed |= __alignof__((*(struct S2 *)cursor++).x) != 16;\n"
+            "    failed |= __alignof__(((struct S2 *)(sizeof cursor++))->x) != 16;\n"
+            "    failed |= __alignof__(((struct S2 *)(_Alignof cursor++))->x) != 16;\n"
+            "    failed |= __alignof__((__extension__ cursor++)->x) != 16;\n"
+            "    failed |= __alignof__(((struct S2 *)__real__ sizeof cursor++)->x) != 16 || __alignof__(((struct S2 *)__imag__ sizeof cursor++)->x) != 16;\n"
+            "    failed |= s2.x != 1 || calls != 0 || cursor != &s2 || scope_control() != 0; return failed;\n"
+            "}\n"
+        )
+    };
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+    typedef struct CTestMemberAlignmentExpected CTestMemberAlignmentExpected;
+    struct CTestMemberAlignmentExpected
+    {
+        String8 name;
+        u32 alignment;
+    };
+    CTestMemberAlignmentExpected expected[] = {
+        {S8("E_X"), 16}, {S8("E_Y"), 32}, {S8("E_PACKED"), 1}, {S8("E_MEMBER_PACKED"), 1},
+        {S8("E_REQUEST"), 2}, {S8("E_RAISED"), 8}, {S8("E_NESTED"), 8}, {S8("E_PROMOTED"), 16},
+        {S8("E_ARRAY"), 16}, {S8("E_UNION"), 16}, {S8("E_ADDRESS"), 16}, {S8("E_CONST"), 16},
+        {S8("E_EXPRESSION"), 8}, {S8("E_CAST"), 8}, {S8("E_CHAIN"), 16},
+        {S8("E_PREFIX"), 16}, {S8("E_POSTFIX"), 16}, {S8("E_CAST_UPDATE"), 16}, {S8("E_CAST_DEREF"), 16},
+        {S8("E_SIZEOF_UPDATE"), 16}, {S8("E_ALIGNOF_UPDATE"), 16},
+    };
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                for (u32 index = 0; index < parsed.diagnostic_count; index += 1)
+                {
+                    BUSTER_TEST_RAW(arguments, false, parsed.diagnostics[index].message);
+                }
+                for (u32 index = 0; index <= BUSTER_ARRAY_LENGTH(expected); index += 1)
+                {
+                    String8 name = index < BUSTER_ARRAY_LENGTH(expected) ? expected[index].name : S8("E_PRAGMA");
+                    u32 alignment = index < BUSTER_ARRAY_LENGTH(expected) ? expected[index].alignment : target.os == OPERATING_SYSTEM_WINDOWS ? 16 : 1;
+                    u32 matches = 0;
+                    for (u32 member = 0; member < parsed.enum_member_count; member += 1)
+                    {
+                        if (string_equal(parsed.enum_members[member].name, name))
+                        {
+                            CIntegerConstant constant = parsed.enum_members[member].integer_constant;
+                            matches += 1;
+                            BUSTER_TEST_RAW(arguments, constant.valid && constant.magnitude == alignment &&
+                                !constant.magnitude_high && !constant.is_negative, name);
+                        }
+                    }
+                    BUSTER_TEST_RAW(arguments, matches == 1, name);
+                }
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("alignof-member.c"), tokens, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                {
+                    String8 context = string_format(temporary.arena, S8("member alignment target={u32} dialect={u32} form={u32} line={u32} column={u32}: {S8}"),
+                        target_index, dialect, form, lowered.diagnostics[index].location.line, lowered.diagnostics[index].location.column,
+                        lowered.diagnostics[index].message);
+                    BUSTER_TEST_RAW(arguments, false, context);
+                }
+                if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
+                                              lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    bool folded = false;
+                    bool bound = false;
+                    for (u32 index = 0; index < module->global_count; index += 1)
+                    {
+                        IrGlobal* global = module->globals + index;
+                        IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+                        if (symbol && string_equal(symbol->link_name, S8("folded_member_alignment")))
+                            folded = global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_bits == 16;
+                        if (symbol && string_equal(symbol->link_name, S8("member_bound")))
+                        {
+                            IrType* type = ir_type_from_id(&lowered.program->types, global->type);
+                            bound = type && type->kind == IR_TYPE_ARRAY && type->element_count == 16;
+                        }
+                    }
+                    BUSTER_TEST(arguments, folded && bound);
+                    IrFunction* main_function = c_test_find_ir_function(module, S8("main"));
+                    if (BUSTER_REQUIRE(arguments, main_function != 0))
+                    {
+                        BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, main_function, S8("next")) == 0);
+                        BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, main_function, S8("pick")) == 0);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    // Both cases would append a synthetic/qualified type on the direct path.
+    // Snapshot spare rows as well as header counts and pointers.
+    String8 probes[] = {
+        S8("union U { int x __attribute__((aligned(16))); } u; enum { P = __alignof__((&u)->x) }; int f(void) { return P; }"),
+        S8("union U { int x __attribute__((aligned(16))); }; const union U groups[2]; enum { P = __alignof__(groups[0].x) }; int f(void) { return P; }"),
+        S8("struct I { int x __attribute__((aligned(16))); }; struct O { struct I i; }; const struct O o; enum { P = __alignof__(o.i.x) }; int f(void) { return P; }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(probes); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, probes[index], (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count, probes[index]);
+        u32 start = UINT32_MAX;
+        for (u32 token = 0; token < tokens.token_count && start == UINT32_MAX; token += 1)
+        {
+            if (tokens.tokens[token].kind == C_TOKEN_IDENTIFIER &&
+                string_equal(c_token_spelling(tokens.spelling_base, tokens.tokens[token]), S8("__alignof__"))) start = token + 2;
+        }
+        u32 close = start;
+        u32 depth = 1;
+        while (close < tokens.token_count && depth)
+        {
+            CToken token = tokens.tokens[close];
+            if (token.kind == C_TOKEN_PUNCTUATOR)
+            {
+                if (token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS) depth += 1;
+                else if (token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS) depth -= 1;
+            }
+            if (depth) close += 1;
+        }
+        if (BUSTER_REQUIRE(arguments, start < close && close < tokens.token_count))
+        {
+            for (u32 repeat = 0; repeat < 2; repeat += 1)
+            {
+                CTestMemberAlignmentQuery query = c_test_member_alignment_query(temporary.arena, tokens, &parsed, (CScopeId){.value = 0}, start, close);
+                BUSTER_TEST(arguments, query.valid && query.alignment == 16 && query.model_unchanged);
+            }
+        }
+        scratch_end(temporary);
+    }
+    String8 rejected[] = {
+        S8("struct S { int x __attribute__((aligned(16))); } s; _Static_assert(__alignof__(s.x) == 4, \"wrong member value\"); int f(void) { return 0; }"),
+        S8("struct S { int x : 3; } s; int f(void) { return __alignof__(s.x); }"),
+        S8("struct A { int x __attribute__((aligned(64))); } a;"
+           "struct B { int x __attribute__((aligned(__alignof__(a.x)))); } b;"
+           "struct C { int x __attribute__((aligned(__alignof__(b.x)))); } c;"
+           "struct D { int x __attribute__((aligned(__alignof__(c.x)))); } d;"
+           "struct E { int x __attribute__((aligned(__alignof__(d.x)))); } e;"
+           "struct F { int x __attribute__((aligned(__alignof__(e.x)))); } f;"
+           "int g(void) { return __alignof__(f.x); }"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "_Static_assert(__alignof__(_Generic(0, int: 1, default: s).x) == 16, \"selected scalar has no member\");"),
+        S8("struct S { int x __attribute__((aligned(16))); }; struct S *pick(int);"
+           "_Static_assert(__alignof__(pick()->x) == 16, \"missing argument\");"),
+        S8("struct S { int x __attribute__((aligned(16))); }; struct S *pick(int);"
+           "enum { E = __alignof__(pick()->x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); }; struct S *pick(int);"
+           "_Static_assert(__alignof__(pick(1, 2)->x) == 16, \"extra argument\");"),
+        S8("struct S { int x __attribute__((aligned(16))); }; struct S *pick(int);"
+           "enum { E = __alignof__(pick(1, 2)->x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "_Static_assert(__alignof__((++s).x) == 16, \"aggregate update is invalid\");"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "enum { E = __alignof__((++s).x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "_Static_assert(__alignof__((s++).x) == 16, \"aggregate update is invalid\");"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "enum { E = __alignof__((s++).x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "_Static_assert(__alignof__((0, s++).x) == 16, \"aggregate update is invalid\");"),
+        S8("struct S { int x __attribute__((aligned(16))); } s;"
+           "enum { E = __alignof__((0, s++).x) };"),
+        S8("struct S { int x __attribute__((aligned(16))); };"
+           "_Static_assert(__alignof__((((struct S){0})++).x) == 16, \"aggregate update is invalid\");"),
+        S8("struct S { int x __attribute__((aligned(16))); };"
+           "enum { E = __alignof__((((struct S){0})++).x) };"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessOptions options = {.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17};
+            CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[index], options);
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CIRLowerResult refused = c_analyze_with_options(temporary.arena, S8("alignof-member-refused.c"), tokens, syntax, target_native,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            String8 context = string_format(temporary.arena, S8("member refusal {u32} form={u32} diagnostics={u32} program={u32} certified={u32}: {S8}"),
+                index, form, refused.diagnostic_count, (u32)(refused.program != 0), (u32)refused.canonical_ir_certified, rejected[index]);
+            BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && refused.diagnostic_count &&
+                !refused.canonical_ir_certified && (index == 1 || !refused.program), context);
+            // A refused chain must clear its thread's sticky refusal.
+            CPreprocessResult good = c_preprocess(temporary.arena, probes[0], options);
+            CParserResult good_syntax = c_parse_ast(temporary.arena, good);
+            CIRLowerResult accepted = c_analyze_with_options(temporary.arena, S8("alignof-member-after-refusal.c"), good, good_syntax, target_native,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, !good.diagnostic_count && !good_syntax.diagnostic_count && !accepted.diagnostic_count &&
+                accepted.program && accepted.canonical_ir_certified);
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = buster_test_temporary_path(arguments->arena, S8("alignof-member"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("alignof-member-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
+                        form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 context = string_format(temporary.arena, S8("member alignment {S8} {S8} form={u32}: {S8}"),
+                        dialects[dialect], modes[mode], form, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, context);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS, context);
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // `void` is one byte in both layout engines, and an object of it is still
 // refused. GNU gives `void` a size so that a `void *` steps by bytes, and both
 // reference compilers fold `sizeof(void)`, `sizeof(const void)` and
@@ -32481,6 +32827,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     BUSTER_TEST_FIXTURE(arguments, c_test_alignof_object);
+    BUSTER_TEST_FIXTURE(arguments, c_test_alignof_member);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
