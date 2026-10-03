@@ -38,9 +38,11 @@ The native MIR selectors and direct emitters form matching selector/key images
 at the existing SWITCH boundary. Their 32/64-bit machine comparisons clear any
 extension beyond a narrower semantic width; 32-bit selectors compare at
 32 bits, and 64-bit selectors preserve the full image. Source keys and targets
-remain unchanged. LLVM's typed case constants and eBPF's existing image
-normalization use the same equality. Remaining Wasm normalization and runtime
-verification are tracked in [#2385](https://github.com/buster14a/buster/issues/2385).
+remain unchanged. LLVM's typed case constants, eBPF's image normalization and
+the direct Wasm emitter use the same equality. Wasm compares zero-extended
+selector-width images in its existing i32/i64 carrier, masking raw keys at
+the SWITCH boundary independently of signedness
+([#2385](https://github.com/buster14a/buster/issues/2385)).
 
 Registered `codegen_test_canonical_switch_key_images` redirects a lowered C
 SWITCH to its original typed ARGUMENT, bypassing C's integer promotion. It
@@ -50,6 +52,24 @@ cover singleton aliases, low/full-width all-ones keys, positive/default controls
 and a distinct high 64-bit key. Unsanitized desktop runs call the emitted
 function through a matching host C signature and check integer bit-vector
 expectations; sanitizer/mobile runs retain validation and emission controls.
+
+### Direct Wasm SWITCH execution
+
+Registered `compiler_driver_test_wasm_switch_images` commits typed ARGUMENT and
+SWITCH rows directly, preserving narrow types without C integer promotions.
+Signed/unsigned 8/16/32/64-bit functions cover raw singleton aliases,
+low/full-width all-ones keys, multiple distinct cases, shared destinations and
+the final default. The 64-bit control distinguishes 7 from `0x100000007`.
+Canonical preparation validates the module before emission; snapshots require
+the source selector, raw keys and target order to remain unchanged.
+
+Each Wasm32/Wasm64 module is emitted twice and must be byte-identical. An inline
+Node oracle uses independent BigInt bit-vector equality, thirteen literal
+expectations, exhaustive 8-bit inputs, wider boundaries, signed images and dirty
+carrier bits. Each pointer-width run requires 8,845 export calls. The existing
+bounded Node runner requires a normal zero exit, empty stderr and the exact
+terminal summary. SHA-256 and before/after file comparisons bind execution to
+the compiler's original bytes. Missing Node reports an execution skip.
 
 ## Scalar binary operation families
 

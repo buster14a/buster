@@ -9,6 +9,8 @@
 // definitions, and wasm64_fe_emit_wasi_start writes the adapter.
 // wasm64_fe_emit_instruction keeps scalar bit counts at their semantic width,
 // with zero extended operands, CLZ padding bias and a narrow CTZ zero sentinel.
+// wasm64_fe_emit_switch compares zero-extended selector-width images without
+// changing the caller's case keys or targets.
 // Local aggregate snapshots use private shadow-stack slots. Their SSA locals
 // carry slot addresses; loads copy immediately, so later stores cannot change
 // an earlier value. Function ABIs and block parameters remain scalar-only.
@@ -2971,19 +2973,24 @@ static void wasm64_fe_emit_call(Wasm64FunctionEmitter* emitter, IrInstruction* i
 static void wasm64_fe_emit_switch(Wasm64FunctionEmitter* emitter, IrBlock* predecessor, IrInstruction* instruction)
 {
     IrType* switched_type = wasm64_fe_value_ir_type(emitter, instruction->operands[0]);
+    u32 width = wasm64_integer_bits(switched_type);
+    u64 mask = width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
     Wasm64ValType valtype = 0;
     wasm64_valtype_for_type(emitter->context, switched_type, false, &valtype);
     for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
     {
-        wasm64_fe_emit_value(emitter, instruction->operands[0]);
+        // SWITCH equality is modulo the declared width, even for a signed
+        // argument with dirty carrier bits or a raw singleton key alias.
+        wasm64_fe_emit_integer_value(emitter, instruction->operands[0], false);
+        u64 key = instruction->immediates[case_index] & mask;
         if (valtype == WASM64_VALTYPE_I64)
         {
-            wasm64_fe_i64_const(emitter, (s64)instruction->immediates[case_index]);
+            wasm64_fe_i64_const(emitter, (s64)key);
             wasm64_fe_u8(emitter, 0x51); // i64.eq
         }
         else
         {
-            wasm64_fe_i32_const(emitter, (s32)(u32)instruction->immediates[case_index]);
+            wasm64_fe_i32_const(emitter, (s32)(u32)key);
             wasm64_fe_u8(emitter, 0x46); // i32.eq
         }
         wasm64_fe_u8(emitter, 0x04); // if
