@@ -170,6 +170,99 @@ class LifecycleCaptureTests(unittest.TestCase):
             self.assertEqual(fields["helper_error"], "none", diagnostic)
         return result, fields, prefix
 
+    def test_keeper_protocol_exit_skips_finalization_without_accepting_failed_release(self):
+        specification = importlib.util.spec_from_file_location("capture_release_control", HELPER)
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        original_popen = module.subprocess.Popen
+        delayed_completions = []
+        for mode in ("python-finalization", "direct-exit", "before-ack-hang", "nonzero-after-ack"):
+            with self.subTest(mode=mode):
+                prefix = self.root / ("release-%s" % mode)
+                entered = Path(str(prefix) + ".delay-entered")
+                completed = Path(str(prefix) + ".delay-completed")
+                owned = []
+                # Only the keeper child registers this finite teardown. Replacing
+                # its direct exit with SystemExit restores the old finalization
+                # path; this does not identify the native CI delay's cause.
+                keeper_code = '''import atexit,importlib.util,os,sys,time
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('actual_keeper',sys.argv[1])
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+mode=sys.argv[2]
+entered,completed=map(Path,sys.argv[3:5])
+def finite_delay():
+    entered.touch()
+    time.sleep(2)
+    completed.touch()
+atexit.register(finite_delay)
+if mode=='python-finalization':
+    def python_finalization(status):
+        raise SystemExit(status)
+    m.os._exit=python_finalization
+elif mode=='before-ack-hang':
+    original_write=m.os.write
+    def delayed_ack(fd,payload):
+        if payload==b'released\\n': finite_delay()
+        return original_write(fd,payload)
+    m.os.write=delayed_ack
+elif mode=='nonzero-after-ack':
+    original_exit=m.os._exit
+    m.os._exit=lambda status:original_exit(99)
+sys.exit(m.main(['--keeper',*sys.argv[5:]]))
+'''
+
+                def popen_control(arguments, **options):
+                    if len(arguments) > 2 and arguments[2] == "--keeper":
+                        arguments = [sys.executable, "-c", keeper_code, str(HELPER), mode,
+                                     str(entered), str(completed), *arguments[3:]]
+                    process = original_popen(arguments, **options)
+                    owned.append(process)
+                    return process
+
+                supervisor = module.Supervisor(prefix, 2, 13,
+                    [sys.executable, "-c", "import os;os.write(1,b'payload\\n')"])
+                try:
+                    # Production retains its ten-second grace. Only these
+                    # finite fault controls shorten the release-join clock.
+                    with mock.patch.object(module, "KILL_GRACE_NS", 500_000_000), \
+                            mock.patch.object(module.subprocess, "Popen", side_effect=popen_control):
+                        result = supervisor.run()
+                finally:
+                    if supervisor.group_authority:
+                        supervisor.final_cleanup(time.monotonic_ns())
+                    for process in owned:
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait(timeout=2)
+                fields = supervisor.facts
+                diagnostic = "mode=%s result=%r supervisor=%r" % (mode, result, fields)
+                expected = {"python-finalization": (1, 137, 1, 1, 1),
+                            "direct-exit": (0, 0, 0, 1, 0),
+                            "before-ack-hang": (1, 137, 1, 0, 1),
+                            "nonzero-after-ack": (1, 99, 1, 1, 0)}[mode]
+                actual = (result, fields["keeper_status"], fields["cleanup_status"],
+                          fields["keeper_control_eof_ack"], fields["keeper_kill_attempted"])
+                self.assertEqual(actual, expected, diagnostic)
+                self.assertEqual(fields["keeper_kind"], "signal" if expected[1] == 137 else "exit", diagnostic)
+                self.assertEqual(fields["helper_error"], "none", diagnostic)
+                for key in ("command_status", "native_status", "capture_status", "deadline_reached",
+                            "term_group_attempted", "kill_group_attempted", "term_native_attempted",
+                            "kill_native_attempted"):
+                    self.assertEqual(fields[key], 0, diagnostic)
+                for key in ("capture_eof", "native_reaped", "keeper_reaped", "group_authority_released"):
+                    self.assertEqual(fields[key], 1, diagnostic)
+                self.assertEqual(fields["keeper_release"], "control-eof", diagnostic)
+                self.assertEqual(Path(str(prefix) + ".log").read_bytes(), b"payload\n", diagnostic)
+                self.assertTrue(all(process.returncode is not None for process in owned), diagnostic)
+                self.assertEqual(entered.exists(), mode in ("python-finalization", "before-ack-hang"), diagnostic)
+                self.assertFalse(completed.exists(), diagnostic)
+                delayed_completions.append(completed)
+        # The injected delays are finite. A receipt without owned cleanup could
+        # let either delayed marker appear after the test's immediate check.
+        time.sleep(2.1)
+        self.assertTrue(all(not marker.exists() for marker in delayed_completions))
+
     def test_keeper_exit_before_ready_is_startup_refusal_not_native_cleanup(self):
         for keeper_exit in (0, 99):
             with self.subTest(keeper_exit=keeper_exit):

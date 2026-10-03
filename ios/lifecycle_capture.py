@@ -214,7 +214,10 @@ def keeper_main(ready_fd, control_fd):
     os.close(control_fd)
     os.write(ready_fd, b"released\n")
     os.close(ready_fd)
-    return 0
+    # This dedicated keeper owns no payload or buffered output. Its complete
+    # protocol and descriptor cleanup must lead directly to the real zero exit,
+    # without an interpreter-finalization tail inside the bounded release join.
+    os._exit(0)
 
 
 class Supervisor:

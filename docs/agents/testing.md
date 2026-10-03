@@ -215,8 +215,16 @@
   cleanup and unknown reaps remain failures, rather than synchronized-cleanup
   claims. Ordinary EOF releases only the keeper and does not prove silent
   descendants are gone. Named receipts retain dispatches, authority release,
-  native/keeper reaps and keeper control-EOF acknowledgement. Probe failure does
-  not establish an app crash.
+  native/keeper reaps and keeper control-EOF acknowledgement. After writing that
+  acknowledgement and closing its private descriptors, the dedicated keeper
+  exits directly with zero; it owns no payload or buffered output requiring
+  interpreter finalization. The owner still requires both the exact
+  acknowledgement and a real zero reap within the existing release bound.
+  A finite injected finalization delay reproduces acknowledgement plus keeper
+  SIGKILL/cleanup failure, while the direct exit succeeds; before-acknowledgement
+  hangs and abnormal exits still fail. This control establishes the reachable
+  finalization tail, not the cause or acknowledgement timing of a native probe
+  failure. Probe failure does not establish an app crash.
   `bash ios/launch_diagnostics_mock_test.sh` runs the existing attached-monitor
   controls, `python3 ios/lifecycle_capture_test.py -v` and the caller-clock
   controls in `python3 ios/lifecycle_capture_bridge_test.py -v`. They cover
