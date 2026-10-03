@@ -855,8 +855,8 @@ RETIREMENT_PLAN_KEYS = {"modes", "required_cells", "pairs", "target_minutes_per_
 RETIREMENT_CELL_KEYS = {"cell", "kind", "extra_args", "status", "note", "directory", "summary", "summary_schema", "baseline", "candidate",
                         "complete_pairs", "outputs_identical", "checks", "diagnostics", "outcome"}
 RETIREMENT_CHECK_KEYS = {"label", "kind", "ratio", "ci_low", "ci_high", "ci_coverage", "n", "a_value", "b_value", "limit", "outcome", "reason"}
-COMPILER_CHECKS = {"compiler_wall_time", "peak_rss", "code_bytes", "runs_succeeded", "deterministic"}
-RUNTIME_CHECKS = {"generated_runtime", "generated_compilers_agree", "runs_succeeded", "deterministic"}
+COMPILER_CHECKS = {"compiler_wall_time", "peak_rss", "code_bytes", "runs_succeeded", "deterministic", "measurement_complete", "measurement_stable"}
+RUNTIME_CHECKS = {"generated_runtime", "generated_compilers_agree", "runs_succeeded", "deterministic", "measurement_complete", "measurement_stable"}
 COMPARE_METRIC_KEYS = {"unit", "direction", "label", "n", "a_median", "b_median", "a_min", "b_min", "a_mad", "b_mad", "delta", "ratio",
                        "ci_low", "ci_high", "ci_coverage", "geomean_ratio", "bootstrap_ci_low", "bootstrap_ci_high",
                        "ratio_of_medians", "min_ratio", "change_percent", "outcome", "note"}
@@ -1054,9 +1054,9 @@ class CompareFlowTests(Fakes, unittest.TestCase):
         self.assertTrue(report.startswith("# A/B compile-time comparison\n\n**Candidate is SLOWER"))
         self.assertIn("| analysis | 30.00 | 25.00 | -5.00 | 0.8333 |", report)
         self.assertIn("## Why: symbol share movers, sampling", report)
-        before = open(os.path.join(output, "summary.json")).read()
+        before = lab.read_text(os.path.join(output, "summary.json"))
         self.assertEqual(lab.render_compare(output), report)
-        self.assertEqual(open(os.path.join(output, "summary.json")).read(), before)
+        self.assertEqual(lab.read_text(os.path.join(output, "summary.json")), before)
 
     @unittest.skipIf(not sys.platform.startswith("linux"), "wait4 ru_maxrss and an ELF interpreter")
     def test_peak_rss_and_code_bytes(self):
@@ -1411,6 +1411,14 @@ class CodeBytesTests(unittest.TestCase):
         code = lab.code_sections(self.write(elf_fixture(sections=[(".data", 1, 0x3, 8)])))
         self.assertEqual((code["code_bytes"], code["sections"]), (0, []))
 
+    def test_executable_payload_must_be_inside_file(self):
+        data = bytearray(elf_fixture())
+        section_table = struct.unpack_from("<Q", data, 40)[0]
+        struct.pack_into("<Q", data, section_table + 64 + 24, len(data) + 1)
+        code = lab.code_sections(self.write(data))
+        self.assertIsNone(code["code_bytes"])
+        self.assertEqual(code["reason"], "executable section outside the file")
+
     def test_unsupported_and_malformed_are_na(self):
         for data, fmt_name, reason in ((b"\xcf\xfa\xed\xfe" + b"\0" * 60, "mach-o", "no validated Mach-O"),
                                        (b"MZ" + b"\0" * 62, "pe", "no validated PE"), (b"#!/bin/sh\n", "unknown", "not an ELF"),
@@ -1447,13 +1455,27 @@ class PeakRssTests(unittest.TestCase):
         self.assertGreaterEqual(rss, 48 << 20)
         self.assertLess(rss, harness + (200 << 20))
 
-    # The child absorbs the harness's own high-water RSS at exec, so that
-    # mark (returned beside the value) is a floor of every measurement.
-    def test_harness_high_water_is_a_floor(self):
+    # Record current residence; previous large allocations have been released
+    # before spawn and must not discard later low-memory measurements.
+    def test_harness_resident_footprint_is_recorded(self):
+        before = lab.harness_resident_bytes()
         status, _, _, rss, harness = self.run_child(["true"])
         self.assertEqual(status, 0)
         self.assertGreater(harness, 0)
-        self.assertGreaterEqual(rss, harness * 0.9)
+        self.assertAlmostEqual(harness / before, 1.0, delta=0.1)
+        self.assertGreater(rss, 0)
+
+    def test_success_without_new_output_is_rejected(self):
+        root = tempfile.mkdtemp(prefix="uarch-lab-no-output-")
+        self.addCleanup(shutil.rmtree, root, True)
+        output = os.path.join(root, "out.exe")
+        with open(output, "w") as handle:
+            handle.write("previous result")
+        measured = lab.Lab(root, repo_root=root)
+        status, _, err = measured.run_command([sys.executable, "-c", "pass", "-o", output])
+        self.assertEqual(status, 1)
+        self.assertIn("did not create", err)
+        self.assertFalse(os.path.exists(output))
 
     # The maximum over the waited tree: a shell parent that reaps a large
     # child reports the child's high-water mark (the perf-wrapper case).
@@ -1468,6 +1490,18 @@ class PeakRssTests(unittest.TestCase):
         self.assertEqual(status, 124)
         self.assertTrue(err.endswith(b"timeout\n"))
         self.assertEqual(self.run_child(["/nonexistent/uarch-lab-binary"])[0], 127)
+
+    def test_timeout_terminates_descendants(self):
+        child = "import subprocess,time; p=subprocess.Popen(['sleep','60']); print(p.pid,flush=True); time.sleep(60)"
+        status, out, _, _, _ = self.run_child([sys.executable, "-c", child], timeout=0.5)
+        self.assertEqual(status, 124)
+        pid = int(out.strip())
+        try:
+            with open("/proc/%d/stat" % pid) as handle:
+                state = handle.read().split()[2]
+            self.assertEqual(state, "Z", "a live descendant survived the timeout")
+        except FileNotFoundError:
+            pass
 
     def test_rss_value_needs_a_clear_margin_over_the_wrapper(self):
         run = {"maxrss_bytes": 300 << 20, "wrapper_rss_bytes": 12 << 20, "harness_rss_bytes": 40 << 20}
@@ -1487,7 +1521,8 @@ def interval_row(ratio, low, high, n=20):
 
 def cell_summary(wall=(1.0, 0.99, 1.01), rss=(1.0, 0.999, 1.001), code=(1000, 1005), deterministic=True, failed=0, identical=True):
     variant = {"path": "/x/ide", "sha256": "0" * 64, "runs": 20, "failed": failed, "deterministic": deterministic}
-    return {"schema": lab.COMPARE_SCHEMA, "host": {"cpu_model": "fake"}, "warnings": [], "plan": {"complete_pairs": 20},
+    return {"schema": lab.COMPARE_SCHEMA, "host": {"cpu_model": "fake"}, "warnings": [],
+            "plan": {"pairs": 20, "complete_pairs": 20, "fresh_copy": True}, "steps": {"timed": "ok"}, "checks": {},
             "baseline": dict(variant, deterministic=True), "candidate": variant, "outputs_identical": identical,
             "metrics": {"wall": interval_row(*wall), "peak_rss": interval_row(*rss) if rss else lab.compare_series([], "bytes", "lower", 1)},
             "code_bytes": {"a_value": code[0], "b_value": code[1], "ratio": code[1] / code[0] if code[0] and code[1] is not None else None,
@@ -1495,6 +1530,20 @@ def cell_summary(wall=(1.0, 0.99, 1.01), rss=(1.0, 0.999, 1.001), code=(1000, 10
 
 
 class RetirementLimitTests(unittest.TestCase):
+    def test_incomplete_or_unstable_series_cannot_pass(self):
+        summary = cell_summary()
+        summary["steps"]["timed"] = "failed"
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", summary)), "INCONCLUSIVE")
+        summary = cell_summary()
+        summary["plan"]["pairs"] = 100
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", summary)), "INCONCLUSIVE")
+        summary = cell_summary()
+        summary["metrics"]["peak_rss"]["n"] = 6
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", summary)), "INCONCLUSIVE")
+        summary = cell_summary()
+        summary["checks"]["drift"] = {"flag": True}
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", summary)), "INCONCLUSIVE")
+
     def test_interval_outcomes(self):
         self.assertEqual(lab.limit_outcome(0.98, 1.05, 1.05)[0], "PASS")
         self.assertEqual(lab.limit_outcome(1.0501, 1.07, 1.05)[0], "FAIL")

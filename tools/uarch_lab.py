@@ -19,7 +19,10 @@ renders `report.md` and `summary.json` from those raw files alone, so
         [--profile-steps topdown,sampling] [--sudo] [--seed N] \\
         [--min-effect PCT] [--no-fresh-copy] [--require-identical-output] \\
         [--perf PATH] [-- extra compile args]
-    python3 tools/uarch_lab.py report DIR [--perf PATH]     (run or compare)
+    python3 tools/uarch_lab.py retirement --baseline A_IDE --candidate B_IDE \\
+        --repo-root . --cpu 2 --output /tmp/retirement \\
+        [--target-minutes-per-cell 12 | --pairs N] [--modes none,mir-stack,fast,quality]
+    python3 tools/uarch_lab.py report DIR [--perf PATH]     (run, compare or retirement)
 
 Steps (each writes DIR/<step>/ and one report section; any can be skipped):
 
@@ -137,6 +140,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import statistics
 import struct
 import subprocess
@@ -144,10 +148,6 @@ import sys
 import tempfile
 import threading
 import time
-try:
-    import resource
-except ImportError:  # not POSIX: no peak RSS
-    resource = None
 
 STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "micro")
 DEFAULT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
@@ -214,9 +214,9 @@ COMPARE_METRICS = (("wall", "s", "lower", "wall time (harness span)"), ("task_cl
                    ("page_faults", "count", "lower", "page faults"), ("minor_faults", "count", "lower", "minor faults"),
                    ("major_faults", "count", "lower", "major faults"), ("peak_rss", "bytes", "lower", "peak RSS (wait4 ru_maxrss)"))
 # Peak RSS (run_measured, rss_value): a run's ru_maxrss is the maximum of the
-# harness's own high-water RSS (inherited at exec), the taskset/perf process
+# harness's resident RSS inherited at spawn, the taskset/perf process
 # and every descendant it reaped, so it is the compiler's only when clearly
-# above both the harness's high-water mark at spawn and perf's own floor
+# above both the harness's resident footprint at spawn and perf's own floor
 # (probe_workload measures `perf stat -- true`); a value within this factor of
 # the larger is NA.
 RSS_WRAPPER_MARGIN = 1.5
@@ -951,9 +951,21 @@ class Lab:
     def run_command(self, argv, log=None, timeout=COMMAND_TIMEOUT, stdout_path=None):
         """Run argv in the repository root; returns (exit status, stdout, stderr).
         last_elapsed is its monotonic span; last_maxrss and last_harness_rss
-        are run_measured's peak RSS and harness floor in bytes (or None)."""
+        are run_measured's peak RSS and resident harness floor in bytes (or None)."""
+        output = None
+        if "-o" in argv:
+            output = argv[argv.index("-o") + 1]
+            # perf's own -o is followed by -- and a compiler -o. Remove only
+            # the final requested artifact, never a retained reference.
+            if "--" in argv:
+                workload = argv[argv.index("--") + 1:]
+                output = workload[workload.index("-o") + 1] if "-o" in workload else None
+            if output and os.path.isfile(output):
+                os.remove(output)
         started = time.monotonic()
         status, out, err, self.last_maxrss, self.last_harness_rss = run_measured(argv, self.repo_root, self.environment, timeout)
+        if status == 0 and output and not os.path.isfile(output):
+            status, err = 1, err + b"\ncompiler did not create the requested output\n"
         self.last_elapsed = time.monotonic() - started
         out_text = out.decode("utf-8", "replace")
         err_text = err.decode("utf-8", "replace")
@@ -978,33 +990,52 @@ def maxrss_bytes(kilobytes_or_bytes):
     return kilobytes_or_bytes * (1 if sys.platform == "darwin" else 1024)
 
 
+def harness_resident_bytes():
+    """Current Linux resident footprint inherited by a spawned child.
+    A parent's historical ru_maxrss is not inherited by all spawn strategies;
+    using it rejects valid samples after large temporary allocations."""
+    value = None
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/self/statm") as handle:
+                value = int(handle.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+        except (OSError, ValueError, IndexError):
+            pass
+    return value
+
+
 def run_measured(argv, cwd, environment, timeout):
     """(exit status, stdout bytes, stderr bytes, peak RSS bytes, harness
-    high-water RSS bytes) of argv; both RSS values None where unsupported.
+    resident RSS bytes) of argv; both RSS values None where unsupported.
 
     Peak RSS is ru_maxrss from os.wait4 on the direct child.  At reap Linux
     reports the largest of that process's own high-water RSS and the ru_maxrss
     of every descendant it waited for; it is a maximum, never a sum.  The
-    process's own mark survives exec, and at exec it absorbs the high-water
-    mark of the memory it replaces -- for a vfork/posix_spawn child, the
-    parent's, so the harness's own high-water RSS at spawn (returned
-    second) is a floor of every value (measured: a harness that once held
-    300 MB reports at least 300 MB for `true`).  Under `taskset -c N perf
+    process's own mark survives exec. Spawn strategies can inherit the
+    parent's current resident footprint, but not necessarily its historical
+    high-water mark. The resident footprint at spawn is returned second.
+    Under `taskset -c N perf
     stat -- ide ...` the value is max(harness, perf's own RSS, the compiler's
     RSS over all its threads); rss_value keeps only values clearly above the
     first two.  Output goes to temporary files, so a chatty child cannot
     block on a full pipe."""
-    harness = maxrss_bytes(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) if resource else None
+    harness = harness_resident_bytes()
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
-            process = subprocess.Popen(argv, cwd=cwd, env=environment, stdout=out, stderr=err)
+            process = subprocess.Popen(argv, cwd=cwd, env=environment, stdout=out, stderr=err, start_new_session=os.name == "posix")
         except FileNotFoundError as error:
             return 127, b"", str(error).encode(), None, harness
         expired = []
 
         def expire():
             expired.append(True)
-            process.kill()
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
         timer = threading.Timer(timeout, expire)
         timer.start()
         try:
@@ -1016,7 +1047,7 @@ def run_measured(argv, cwd, environment, timeout):
                 process.wait()
                 rss = None
         except BaseException:
-            process.kill()
+            expire()
             process.wait()
             raise
         finally:
@@ -1082,7 +1113,7 @@ def code_sections(path):
     else are NA with a reason (#511: no validated parser, and whole-file size
     is never substituted); file_bytes stays diagnostic.  Only the header,
     section table and section-name table are read (elf_code_sections), so
-    the harness's own peak RSS (a floor of every measured run) stays small."""
+    the harness's resident footprint stays small."""
     result = {"format": None, "code_bytes": None, "file_bytes": None, "sections": [], "reason": None}
     try:
         with open(path, "rb") as handle:
@@ -1138,8 +1169,12 @@ def elf_code_sections(handle, header_bytes, result):
         handle.seek(sections[shstrndx][3])
         names = handle.read(sections[shstrndx][4])
     total = 0
-    for name, kind, flags, _, length in sections:
+    for name, kind, flags, offset, length in sections:
         if flags & SHF_EXECINSTR and kind != SHT_NOBITS:
+            if offset + length > size:
+                result["reason"] = "executable section outside the file"
+                result["sections"] = []
+                return
             total += length
             label = "#%d" % name
             if names is not None and name < len(names):
@@ -1669,7 +1704,7 @@ def run_metrics(run):
 
 def rss_floor(run):
     """The larger of the two non-compiler terms in a run's maxrss_bytes: the
-    harness's high-water RSS at spawn and the perf wrapper's own (probe), or
+    harness's resident RSS at spawn and the perf wrapper's own (probe), or
     None when either is unknown."""
     harness, wrapper = positive(run.get("harness_rss_bytes")), positive(run.get("wrapper_rss_bytes"))
     return max(harness, wrapper) if harness is not None and wrapper is not None else None
@@ -3276,8 +3311,10 @@ def exact_outcome(value, limit, note=None):
     return ("PASS", "%.6f <= %g" % (value, limit)) if value <= limit else ("FAIL", "%.6f > %g" % (value, limit))
 
 
-def interval_check(row, limit, label):
+def interval_check(row, limit, label, expected_pairs=None):
     outcome, reason = limit_outcome(row and row.get("ci_low"), row and row.get("ci_high"), limit)
+    if not expected_pairs or not row or row.get("n") != expected_pairs:
+        outcome, reason = "INCONCLUSIVE", "metric population is incomplete (%s of %s planned pairs)" % (row and row.get("n"), expected_pairs)
     return {"label": label, "kind": "interval", "ratio": row and row.get("ratio"), "ci_low": row and row.get("ci_low"),
             "ci_high": row and row.get("ci_high"), "ci_coverage": row and row.get("ci_coverage"), "n": row and row.get("n"),
             "a_value": row and row.get("a_median"), "b_value": row and row.get("b_median"), "limit": limit,
@@ -3298,7 +3335,16 @@ def variant_checks(summary):
     ran = all(info.get("runs") for info in roles)
     failed = [label for (_, label), info in zip(RETIREMENT_ROLES, roles) if info.get("failed")]
     unstable = [label for (_, label), info in zip(RETIREMENT_ROLES, roles) if info.get("runs") and not info.get("deterministic")]
-    return {"runs_succeeded": correctness_check("every timed run succeeded", None if not ran else not failed,
+    plan = summary.get("plan") or {}
+    expected = plan.get("pairs")
+    complete = (summary.get("steps") or {}).get("timed") == "ok" and bool(expected) and plan.get("complete_pairs") == expected and all(
+        info.get("runs") == expected for info in roles) and plan.get("fresh_copy") is True
+    flags = [name for name, check in (summary.get("checks") or {}).items() if check.get("flag")]
+    return {"measurement_complete": correctness_check("planned timed series completed with fresh copies", True if complete else None,
+                                                      "all planned pairs retained" if complete else "timed stage, pair counts or fresh-copy evidence incomplete"),
+            "measurement_stable": correctness_check("order and drift checks have no flags", None if flags else True,
+                                                    "flagged: " + ", ".join(flags) if flags else "no order or drift flags"),
+            "runs_succeeded": correctness_check("every timed run succeeded", None if not ran else not failed,
                                                 "no timed runs" if not ran else "failed runs: " + ", ".join(failed) if failed else "all runs exited 0"),
             "deterministic": correctness_check("outputs deterministic", None if not ran else not unstable,
                                                "no timed runs" if not ran else "nondeterministic: " + ", ".join(unstable) if unstable
@@ -3308,17 +3354,18 @@ def variant_checks(summary):
 def cell_checks(kind, summary):
     """{check name: check} for one cell from its compare summary.json."""
     metrics = summary.get("metrics") or {}
+    expected_pairs = (summary.get("plan") or {}).get("pairs")
     checks = {}
     if kind == "compiler":
         code = summary.get("code_bytes") or {}
-        checks["compiler_wall_time"] = interval_check(metrics.get("wall"), RETIREMENT_LIMITS["compiler_wall_time"], "compiler wall time")
-        checks["peak_rss"] = interval_check(metrics.get("peak_rss"), RETIREMENT_LIMITS["peak_rss"], "compiler peak RSS")
+        checks["compiler_wall_time"] = interval_check(metrics.get("wall"), RETIREMENT_LIMITS["compiler_wall_time"], "compiler wall time", expected_pairs)
+        checks["peak_rss"] = interval_check(metrics.get("peak_rss"), RETIREMENT_LIMITS["peak_rss"], "compiler peak RSS", expected_pairs)
         outcome, reason = exact_outcome(code.get("ratio"), RETIREMENT_LIMITS["code_bytes"], code.get("note"))
         checks["code_bytes"] = {"label": "generated code bytes", "kind": "exact", "ratio": code.get("ratio"), "ci_low": None, "ci_high": None,
                                 "ci_coverage": None, "n": None, "a_value": code.get("a_value"), "b_value": code.get("b_value"),
                                 "limit": RETIREMENT_LIMITS["code_bytes"], "outcome": outcome, "reason": reason}
     else:
-        checks["generated_runtime"] = interval_check(metrics.get("wall"), RETIREMENT_LIMITS["generated_runtime"], "generated-program runtime")
+        checks["generated_runtime"] = interval_check(metrics.get("wall"), RETIREMENT_LIMITS["generated_runtime"], "generated-program runtime", expected_pairs)
         identical = summary.get("outputs_identical")
         checks["generated_compilers_agree"] = correctness_check(
             "generated compilers agree", identical,
@@ -3415,17 +3462,22 @@ def command_retirement(arguments):
     if arguments.pairs is not None and arguments.pairs < 1:
         sys.exit("uarch_lab: --pairs must be at least 1")
     directory = os.path.abspath(arguments.output)
+    if os.path.isdir(directory) and os.listdir(directory):
+        sys.exit("uarch_lab: retirement --output must be a new or empty directory; retain prior attempts separately")
     os.makedirs(directory, exist_ok=True)
-    for stale in ("retirement.json", "retirement.md"):
-        if os.path.exists(os.path.join(directory, stale)):
-            os.remove(os.path.join(directory, stale))
-    binaries = {}
+    binaries, frozen_binaries = {}, {}
     for role, label in RETIREMENT_ROLES:
         path = os.path.abspath(getattr(arguments, role))
         if not os.path.isfile(path):
             sys.exit("uarch_lab: no %s binary at %s" % (role, path))
         binaries[role] = {"path": path, "sha256": sha256_file(path), "size_bytes": os.path.getsize(path),
                           "revision": getattr(arguments, role + "_rev"), "label": label}
+        frozen = os.path.join(directory, "inputs", role, "ide")
+        os.makedirs(os.path.dirname(frozen))
+        fresh_binary_copy(path, frozen)
+        if sha256_file(frozen) != binaries[role]["sha256"]:
+            sys.exit("uarch_lab: %s binary changed while freezing the campaign" % role)
+        frozen_binaries[role] = frozen
     cells = retirement_cells(arguments)
     per_cell = "%d pairs (--pairs)" % arguments.pairs if arguments.pairs is not None else "about %g min" % arguments.target_minutes_per_cell
     estimate = None if arguments.pairs is not None else len(cells) * arguments.target_minutes_per_cell
@@ -3433,7 +3485,8 @@ def command_retirement(arguments):
               "repo_root": os.path.abspath(arguments.repo_root), "cpu": arguments.cpu if arguments.cpu >= 0 else None,
               "perf": arguments.perf, "modes": modes, "pairs": arguments.pairs, "target_minutes_per_cell": arguments.target_minutes_per_cell,
               "estimated_minutes": estimate, "seed": arguments.seed, "warmups": arguments.warmups, "profile_steps": arguments.profile_steps,
-              "sudo": arguments.sudo, "cells": [{"cell": name, "kind": kind, "extra": extra, "status": "not run", "note": ""}
+              "sudo": arguments.sudo, "frozen_binaries": frozen_binaries,
+              "cells": [{"cell": name, "kind": kind, "extra": extra, "status": "not run", "note": ""}
                                                 for name, kind, extra in cells], "stage1": {}}
     write_json(os.path.join(directory, "retirement-config.json"), config)
     print("uarch_lab: retirement gate (#512, %s) in %s\nuarch_lab: plan: %d cells x %s%s:" % (
@@ -3445,8 +3498,8 @@ def command_retirement(arguments):
     started = time.monotonic()
     for entry in config["cells"]:
         if entry["kind"] == "compiler":
-            entry["status"], entry["note"] = run_cell(directory, entry["cell"], binaries["baseline"]["path"],
-                                                      binaries["candidate"]["path"], entry["extra"], arguments)
+            entry["status"], entry["note"] = run_cell(directory, entry["cell"], frozen_binaries["baseline"],
+                                                      frozen_binaries["candidate"], entry["extra"], arguments)
         elif RUNTIME_SOURCE_MODE not in modes:
             entry["note"] = "needs the %s cell (--modes)" % RUNTIME_SOURCE_MODE
         else:
