@@ -703,7 +703,7 @@ class BootReadinessContinuationTest(unittest.TestCase):
     def invoke(
         self, mode: str, *, continuation: bool = True,
         hosted: bool = True, explicit: bool = False, empty_capture: bool = False,
-        malformed_capture: bool = False,
+        malformed_capture: bool = False, capture_helper_binding: Path | None = None,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix="buster-ios-readiness-") as temporary:
             state = Path(temporary)
@@ -719,7 +719,9 @@ class BootReadinessContinuationTest(unittest.TestCase):
                 python.write_text(
                     '#!/usr/bin/env bash\n'
                     'set -euo pipefail\n'
-                    'if [[ ${1:-} == */lifecycle_capture.py ]]; then\n'
+                    'helper=${1:-}\n'
+                    'if [[ $helper == -S ]]; then helper=${2:-}; fi\n'
+                    'if [[ $helper == "$BUSTER_BOOT_TEST_EXPECTED_HELPER" ]]; then\n'
                     '    prefix= previous=\n'
                     '    for argument in "$@"; do\n'
                     '        if [[ $previous == --prefix ]]; then prefix=$argument; break; fi\n'
@@ -776,6 +778,8 @@ class BootReadinessContinuationTest(unittest.TestCase):
             })
             if empty_capture or malformed_capture:
                 env["BUSTER_BOOT_TEST_REAL_PYTHON"] = shutil.which("python3") or "python3"
+                env["BUSTER_BOOT_TEST_EXPECTED_HELPER"] = str(
+                    capture_helper_binding or ROOT / "ios/lifecycle_capture.py")
                 env["BUSTER_BOOT_TEST_CAPTURE_FAULT"] = "empty" if empty_capture else "malformed"
             if continuation:
                 env["BUSTER_IOS_BOOT_CONTINUATION_SECONDS"] = "1"
@@ -917,6 +921,25 @@ class BootReadinessContinuationTest(unittest.TestCase):
                 commands = "\n".join(result["commands"])
                 self.assertNotIn("simctl install", commands)
                 self.assertNotIn("simctl launch", commands)
+
+    def test_capture_fault_requires_exact_helper_identity_and_preserves_nonmatching_invocation(self) -> None:
+        # The same basename under another path grants no corruption authority.
+        # The real owner still receives its original -S, arguments and descriptors.
+        result = self.invoke("success", explicit=True, empty_capture=True,
+                             capture_helper_binding=ROOT / "different owner/lifecycle_capture.py")
+        self.assertEqual(result["status"], 0, result["output"])
+        evidence = result["evidence"]
+        phase = evidence["boot.attempt-1.bootstatus.status.log"]
+        self.assertIn("outcome=success status=0 native_status=0 capture_status=0", phase)
+        self.assertIn("capture_receipt=complete", phase)
+        self.assertIn("helper_status=0 supervisor_valid=1 deadline_reached=0 cleanup_status=0", phase)
+        self.assertRegex(evidence["boot.attempt-1.bootstatus.log.capture-status.log"],
+            r"\ABUSTER_IOS_CAPTURE total_bytes=[0-9]+ retained_bytes=[0-9]+ truncated=[01]\n\Z")
+        self.assertNotIn("boot.attempt-1.bootstatus.log.capture-before-fixture.log", evidence)
+        self.assertNotIn("boot.attempt-1.bootstatus.log.capture-fixture.log", evidence)
+        self.assertIn("BUSTER_IOS_RESULT: SUCCESS", result["output"])
+        self.assertTrue(any(line.startswith("simctl install ") for line in result["commands"]))
+        self.assertTrue(any(line.startswith("simctl launch ") for line in result["commands"]))
 
 
 if __name__ == "__main__":
