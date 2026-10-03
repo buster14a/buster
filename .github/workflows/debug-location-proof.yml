@@ -23,7 +23,7 @@ jobs:
           path: proof-carrier
           persist-credentials: false
 
-      - name: Initialize proof evidence and install GDB
+      - name: Initialize proof evidence and install diagnostic tools
         id: install_gdb
         if: ${{ !cancelled() }}
         shell: bash
@@ -32,7 +32,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/2528-proof"
           exec > >(tee "$RUNNER_TEMP/2528-proof/install-tools.log") 2>&1
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends gdb
+          sudo apt-get install --yes --no-install-recommends gdb ripgrep
 
       - name: Validate fixed revisions and installed tools
         id: fixed_tools
