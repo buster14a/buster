@@ -77,8 +77,11 @@ Probes and warm-ups still run the binary in place.  `perf record` then skips
 the build-id cache and the reports are derived while the copy exists.
 
 `compare` runs both compilers on the same frozen source with the same command:
-each is probed (capabilities detected per binary), warmed up and checked for
-byte-identical output across its own runs, then timed in paired ABBA blocks
+both are probed before warm-up (capabilities detected per binary). Phase
+metrics are collected in warm-ups and timed pairs only when both accept
+`-fmetrics-out`; otherwise neither receives it. The collection policy and
+per-binary capabilities are retained separately. Each is warmed up and checked
+for byte-identical output across its own runs, then timed in paired ABBA blocks
 (A,B then B,A) under `perf stat`; the pair count is --pairs or is fixed once
 after a 2-pair pilot block (choose_pair_count).  Per metric it reports the
 median per-pair ratio B/A with an exact sign-test 95% CI (sign_test_rank), a
@@ -1250,7 +1253,8 @@ def discover_groups(text, limit=16):
 
 
 def compile_flags(lab, metrics_path):
-    return ["-fmetrics-out=" + metrics_path] if metrics_path and lab.meta["capabilities"].get("metrics_out") else []
+    enabled = lab.meta.get("collection", {}).get("metrics_out", lab.meta["capabilities"].get("metrics_out"))
+    return ["-fmetrics-out=" + metrics_path] if metrics_path and enabled else []
 
 
 def estimate_other_compiles(groups, skip, sudo):
@@ -2755,10 +2759,9 @@ def compare_labs(arguments, output, cpu, extra):
 
 
 def prepare_variant(lab, warmups):
-    """Capability probes and warm-up; the warm-up output becomes the variant's
-    reference for the determinism check."""
+    """Warm up after both probes and the shared collection policy are saved;
+    the warm-up output becomes the variant's determinism reference."""
     out = os.path.join(lab.output, "out.exe")
-    probe_workload(lab, lab.output, out)
     for index in range(warmups):
         status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(lab.output, "warmup.ccmetrics"))),
                                          log=os.path.join(lab.output, "warmup-%d.log" % index))
@@ -2881,6 +2884,16 @@ def command_compare(arguments):
 
     def prepare():
         for key in ("a", "b"):
+            probe_workload(labs[key], labs[key].output, os.path.join(labs[key].output, "out.exe"))
+        unsupported = [role for key, role in VARIANTS if not labs[key].meta["capabilities"].get("metrics_out")]
+        enabled = not unsupported
+        meta["phase_metrics"] = {"enabled": enabled, "reason": "both compilers support -fmetrics-out" if enabled else
+                                 "%s %s not support -fmetrics-out" % (" and ".join(unsupported), "do" if len(unsupported) > 1 else "does")}
+        for key in ("a", "b"):
+            labs[key].meta["collection"] = {"metrics_out": enabled}
+            labs[key].save_meta()
+        save_compare_meta(directory, meta)
+        for key in ("a", "b"):
             prepare_variant(labs[key], arguments.warmups)
         identical = filecmp.cmp(os.path.join(labs["a"].output, "reference.exe"), os.path.join(labs["b"].output, "reference.exe"), shallow=False)
         meta["outputs_identical"] = identical
@@ -2994,8 +3007,11 @@ def compare_warnings(variants, outputs_identical, metrics, checks, meta):
         if info["runs"] and not info["deterministic"]:
             warnings.append("%s: nondeterministic output (%d of %d successful runs byte-identical to its warm-up output)" % (
                 role, info["identical_runs"], info["runs"] - info["failed"]))
-        if not info["metrics_out"]:
+        if info.get("metrics_out_enabled") is not False and not info["metrics_out"]:
             warnings.append("%s: no measured -fmetrics-out record, so no phase comparison" % role)
+    phase_metrics = meta.get("phase_metrics", {})
+    if phase_metrics.get("enabled") is False:
+        warnings.append("phase metrics collection disabled for both variants: " + phase_metrics["reason"])
     if outputs_identical is False:
         warnings.append("baseline and candidate outputs differ (expected for a code-generation change; a pure refactor should be identical)")
     config = meta.get("config", {})
@@ -3091,12 +3107,15 @@ def compare_summary(directory):
     for key, role in VARIANTS:
         own = [run for run in runs if run["variant"] == key]
         good = [run for run in own if run["exit"] == 0]
-        capabilities = load_meta(os.path.join(directory, key)).get("capabilities", {})
+        own_meta = load_meta(os.path.join(directory, key))
+        capabilities = own_meta.get("capabilities", {})
         info = meta.get("variants", {}).get(key, {})
         variants[role] = {"path": info.get("ide"), "sha256": info.get("sha256"), "size_bytes": info.get("size_bytes"),
                           "runs": len(own), "failed": len(own) - len(good), "identical_runs": sum(bool(run["identical"]) for run in good),
                           "deterministic": bool(good) and all(run["identical"] for run in good),
                           "metrics_out": bool(capabilities.get("metrics_out_measured")),
+                          "metrics_out_supported": capabilities.get("metrics_out"),
+                          "metrics_out_enabled": own_meta.get("collection", {}).get("metrics_out"),
                           "source_metrics": bool(capabilities.get("source_metrics"))}
     references = [os.path.join(directory, key, "reference.exe") for key, _ in VARIANTS]
     outputs_identical = filecmp.cmp(*references, shallow=False) if all(map(os.path.isfile, references)) else meta.get("outputs_identical")
@@ -3115,6 +3134,7 @@ def compare_summary(directory):
     return {"schema": COMPARE_SCHEMA, "directory": directory, "command": config.get("command"), "repo_root": config.get("repo_root"),
             "cpu": config.get("cpu"), "host": host_facts(os.path.join(directory, "a")),
             "baseline": variants["baseline"], "candidate": variants["candidate"], "outputs_identical": outputs_identical,
+            "phase_metrics": meta.get("phase_metrics", {"enabled": None, "reason": "collection policy not recorded (older comparison)"}),
             "code_bytes": code,
             "plan": dict(meta.get("plan") or {}, seed=seed, confidence=CONFIDENCE, bootstrap_resamples=BOOTSTRAP_RESAMPLES,
                          complete_pairs=len(pairs), fresh_copy=bool(config.get("fresh_copy"))),
@@ -3177,10 +3197,14 @@ def compare_markdown(summary):
     lines = ["# A/B compile-time comparison", "", "**%s**" % verdict["text"], ""]
     for role in ("baseline", "candidate"):
         info = summary[role]
-        lines.append("- %s (%s): `%s` sha256 `%s`; %d runs, %d failed, %s; phases %s" % (
+        lines.append("- %s (%s): `%s` sha256 `%s`; %d runs, %d failed, %s; -fmetrics-out support %s, enabled collection %s" % (
             role, "A" if role == "baseline" else "B", info["path"], info["sha256"], info["runs"], info["failed"],
             "deterministic output" if info["deterministic"] else "**nondeterministic output**",
-            "measured (-fmetrics-out)" if info["metrics_out"] else "NA"))
+            {True: "yes", False: "no", None: "unknown"}[info.get("metrics_out_supported")],
+            {True: "yes", False: "no", None: "unknown"}[info.get("metrics_out_enabled")]))
+    phase_metrics = summary["phase_metrics"]
+    lines.append("- phase metrics collection: %s; %s" % (
+        {True: "enabled", False: "disabled", None: "unknown"}[phase_metrics["enabled"]], phase_metrics["reason"]))
     code = summary.get("code_bytes") or {}
     lines += ["- outputs of A and B: %s" % {True: "byte-identical", False: "differ", None: "NA"}[summary["outputs_identical"]],
               "- generated code bytes (executable sections, exact): A %s, B %s, B/A %s%s" % (
@@ -3220,7 +3244,8 @@ def compare_markdown(summary):
                          "NA" if row["delta"] is None else "%+.2f" % row["delta"]] + ratio_cells(row) + [row["outcome"]]
                         for phase, row in summary["phases"].items()])
     else:
-        lines.append("NA -- a variant wrote no measured `-fmetrics-out` record.")
+        lines.append("NA -- phase metrics collection disabled for both variants: %s." % phase_metrics["reason"] if phase_metrics["enabled"] is False else
+                     "NA -- a variant wrote no measured `-fmetrics-out` record.")
     lines += ["", "## Checks", ""]
     for check in summary["checks"].values():
         parts = ", ".join("%s n=%d median %s CI %s" % (part["label"], part["n"], fmt(part["median"], ".4f"),
