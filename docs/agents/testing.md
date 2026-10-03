@@ -676,6 +676,30 @@ against the original returned bytes after execution. The source and oracle are
 generated inline, leaving the frozen support inventory unchanged. Existing
 stack-reservation and memory-hint regressions remain required.
 
+## Direct canonical Wasm bit counts
+
+`compiler_driver_test_wasm_bit_counts` constructs CLZ, CTZ and population-count
+functions directly in canonical IR, so C integer promotions cannot hide a
+narrow backend defect. The block-row protocol commits each argument, unary
+operation and return; canonical preparation validates the module before each
+pointer-width emitter run. Signed and unsigned widths 7, 8, 16, 24, 32, 33, 48
+and 64 separate semantic width from the i32/i64 carrier.
+
+An inline Node oracle checks twelve literal expectations, exhausts both 7- and
+8-bit bit patterns, and checks zero, all ones, sign boundaries, alternating
+patterns, every single bit and its complement at larger widths. Dirty carrier
+bits separately check normalization. Each pointer-size run makes 5,352 actual
+export calls; zero CLZ/CTZ results use the canonical width convention, and
+32/64-bit controls retain full-carrier behavior. The oracle loops over the
+semantic bits instead of calling a host count intrinsic.
+
+Repeated emission must be byte-identical. The consumed module SHA-256 and
+before/after artifact comparisons prove that Node receives the original bytes.
+Normal zero exit, empty stderr and the exact terminal summary are required
+through the existing bounded Node runner. Missing Node is reported as an
+execution skip, not an engine pass. The script is inline; frozen Wasm oracles,
+startup shims and support inventory stay untouched.
+
 ## Node-backed Wasm oracle deadlines
 
 `compiler_driver_test_wasm_integers` runs the frozen integer oracle and the
