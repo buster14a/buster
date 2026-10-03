@@ -19954,7 +19954,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_generic_string_subscript_source(Arena* arena,
                 source, expressions[shape], prefix, shape, prefix, shape, expected, expressions[shape], expected);
         }
     }
-    source = string_format(arena, S8("{S8}int main(void) { return effects; }\n"), source);
+    source = string_format(arena, S8("{S8}int main(void) {{ return effects; }\n"), source);
     return source;
 }
 
