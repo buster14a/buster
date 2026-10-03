@@ -30,6 +30,11 @@
 #include <buster/lib/time.h>
 #include <buster/lib/x86_64.h>
 
+// One canonical input serves standalone reference compilation and embedded
+// tests; mobile test staging does not need to carry this private source file.
+#define BUSTER_QUALITY_SWITCH_FIXTURE(...) BUSTER_GLOBAL_LOCAL char8 const machine_quality_switch_source[] = #__VA_ARGS__;
+#include <buster/tests/compiler/codegen/fixtures/quality_switch_cfg.c>
+
 // Size census for the hot records the register-allocator project depends
 // on. The machine rows are all-integer and hold everywhere; the typed IR and
 // codegen records carry pointers, so their checks apply to 64-bit builds
@@ -3951,6 +3956,271 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_dynamic_stack(UnitTestArgume
             }
         }
         scratch_end(temporary);
+    }
+    return result;
+}
+
+// Fixed MIR layout owns the backward-edge oracle; C selection is free to
+// place source labels in a different order. Duplicate cases/defaults retain
+// their predecessor multiplicity, while loop closure merges their spans.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_backward_switch_cfg(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineTargetDescription const* descriptions[] = {machine_target_x86_64(), machine_target_aarch64()};
+    enum { VALUE_COUNT = 8 };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(descriptions); target_index += 1)
+    {
+        for (u32 variant = 0; variant < 2; variant += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            MachineTargetDescription const* description = descriptions[target_index];
+            MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+            MachineRef values[VALUE_COUNT];
+            u32 physical_argument = target_index == 0 ? (u32)MACHINE_X64_RDI : (u32)MACHINE_A64_X0;
+            MachineRef argument = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, physical_argument);
+            u16 store_opcode = target_index == 0 ? MACHINE_X64_STORE_FRAME64 : MACHINE_A64_STORE_FRAME64;
+            u16 return_opcode = target_index == 0 ? MACHINE_X64_RET : MACHINE_A64_RET;
+            machine_builder_block_begin(&builder);
+            for (u32 value = 0; value < VALUE_COUNT; value += 1)
+            {
+                u32 index = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+                    .definition_point = machine_point_make(value, MACHINE_POINT_AFTER),
+                    .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID});
+                values[value] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, index);
+                machine_builder_instruction(&builder, (MachineInstruction){.opcode = description->copy_opcode,
+                    .operands = {values[value], argument}});
+            }
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = description->unconditional_branch_opcode,
+                .operands = {machine_ref_make(MACHINE_REF_BLOCK, 3)}});
+            machine_builder_block_end(&builder, (MachineBlock){0});
+            machine_builder_edge(&builder, (MachineEdge){.source_block = 0, .destination_block = 3});
+            for (u32 block = 1; block < 3; block += 1)
+            {
+                machine_builder_block_begin(&builder);
+                for (u32 value = 0; value < VALUE_COUNT; value += 1)
+                {
+                    machine_builder_instruction(&builder, (MachineInstruction){.opcode = store_opcode,
+                        .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, value), values[value]}});
+                }
+                machine_builder_instruction(&builder, (MachineInstruction){.opcode = description->unconditional_branch_opcode,
+                    .operands = {machine_ref_make(MACHINE_REF_BLOCK, 3)}});
+                machine_builder_block_end(&builder, (MachineBlock){0});
+                machine_builder_edge(&builder, (MachineEdge){.source_block = block, .destination_block = 3});
+            }
+            machine_builder_block_begin(&builder);
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = description->switch_opcode,
+                .operands = {argument, machine_ref_make(MACHINE_REF_BLOCK, variant ? 1 : 4)}, .flags = 4});
+            machine_builder_block_end(&builder, (MachineBlock){0});
+            for (u32 destination = 1; destination < 5; destination += 1)
+            {
+                if (destination != 3)
+                {
+                    machine_builder_edge(&builder, (MachineEdge){.source_block = 3, .destination_block = destination});
+                }
+            }
+            machine_builder_block_begin(&builder);
+            machine_builder_instruction(&builder, (MachineInstruction){.opcode = return_opcode});
+            machine_builder_block_end(&builder, (MachineBlock){0});
+            MachineFunction function = machine_function_builder_finish(arena, &builder);
+            function.target = description;
+            function.switch_case_count = 4;
+            function.switch_cases = arena_allocate(arena, MachineSwitchCase, function.switch_case_count);
+            u32 destinations[] = {1, 1, 2, 4};
+            for (u32 index = 0; index < function.switch_case_count; index += 1)
+            {
+                function.switch_cases[index] = (MachineSwitchCase){.value = index, .target_block = destinations[index], .compare_width = 64};
+            }
+            function.stack_slot_count = VALUE_COUNT;
+            function.stack_slot_sizes = arena_allocate(arena, u32, VALUE_COUNT);
+            function.stack_slot_alignments = arena_allocate(arena, u32, VALUE_COUNT);
+            for (u32 slot = 0; slot < VALUE_COUNT; slot += 1)
+            {
+                function.stack_slot_sizes[slot] = 8;
+                function.stack_slot_alignments[slot] = 8;
+            }
+            if (BUSTER_REQUIRE(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE))
+            {
+                MachineFastPrepass prepass = machine_fast_prepass_build(arena, &function, true);
+                if (BUSTER_REQUIRE(arguments, prepass.valid && prepass.loop_span_count == 1))
+                {
+                    // Only the switch contributes backward edges: the three
+                    // JMPs go forward to dispatch block 3.
+                    BUSTER_TEST(arguments, (u32)(prepass.loop_spans[0] >> 32) == function.blocks[1].first_instruction);
+                    BUSTER_TEST(arguments, (u32)prepass.loop_spans[0] == function.blocks[3].first_instruction);
+                    BUSTER_TEST(arguments, prepass.predecessor_offsets[2] - prepass.predecessor_offsets[1] == (variant ? 3u : 2u));
+                    BUSTER_TEST(arguments, prepass.predecessor_offsets[5] - prepass.predecessor_offsets[4] == (variant ? 1u : 2u));
+                }
+                for (u32 mode = 0; mode < 3; mode += 1)
+                {
+#if BUSTER_BENCH_ALLOCATIONS
+                    MachineQualityCensus before = machine_quality_census_snapshot();
+#endif
+                    MachineStackPlacement placement = mode == 0 ? machine_stack_placement_build(arena, &function) :
+                        mode == 1 ? machine_fast_placement_build(arena, &function) : machine_quality_placement_build(arena, &function);
+                    if (BUSTER_REQUIRE(arguments, placement.valid))
+                    {
+                        BUSTER_TEST(arguments, placement.split_register_count == 0);
+                        MachineEncodeResult encoded = target_index == 0 ? machine_encode_x86_64(arena, &function, &placement) :
+                            machine_encode_aarch64(arena, &function, &placement);
+                        BUSTER_TEST(arguments, encoded.valid);
+                    }
+                    if (mode == 2)
+                    {
+                        BUSTER_TEST(arguments, function.blocks[0].frequency_class == 0 && function.blocks[1].frequency_class == 1 &&
+                            function.blocks[2].frequency_class == 2 && function.blocks[3].frequency_class == 2 &&
+                            function.blocks[4].frequency_class == 0);
+#if BUSTER_BENCH_ALLOCATIONS
+                        MachineQualityCensus after = machine_quality_census_snapshot();
+                        BUSTER_TEST(arguments, after.prepassed_functions - before.prepassed_functions == 1);
+                        BUSTER_TEST(arguments, after.switch_fallback_functions == before.switch_fallback_functions);
+                        // Escaping copies spill at definition and reload at
+                        // both case blocks, so actual global-region planning
+                        // runs; this is not merely an empty-candidate switch.
+                        BUSTER_TEST(arguments, after.candidates > before.candidates && after.candidate_region_cells > before.candidate_region_cells);
+#endif
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_switch_cfg(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(machine_quality_switch_source);
+    String8 names[] = {S8("quality_switch_cfg"), S8("quality_switch_forward"), S8("quality_switch_default_only")};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    BUSTER_TEST(arguments, source.length != 0);
+    for (u32 target_index = 0; source.length && target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("quality-switch-cfg.c"), source, target,
+                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
+            {
+                IrModule* module = program->modules;
+                IrFunction* function = machine_test_ir_function_find(module, names[0]);
+                if (BUSTER_REQUIRE(arguments, function != 0))
+                {
+                    MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                    if (BUSTER_REQUIRE(arguments, selected.supported &&
+                        machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE))
+                    {
+                        MachineFunction* machine = &selected.function;
+                        for (u32 block_index = 0; block_index < machine->block_count; block_index += 1)
+                        {
+                            MachineBlock* block = machine->blocks + block_index;
+                            block->frequency_class = 0;
+                        }
+                        // C labels do not constrain selected block layout. The
+                        // separate synthetic fixture owns table-backedge goldens.
+                        BUSTER_TEST(arguments, machine->switch_case_count > 0);
+#if BUSTER_BENCH_ALLOCATIONS
+                        MachineQualityCensus before = machine_quality_census_snapshot();
+#endif
+                        MachineStackPlacement placement = machine_quality_placement_build(temporary.arena, machine);
+                        BUSTER_TEST(arguments, placement.valid);
+#if BUSTER_BENCH_ALLOCATIONS
+                        MachineQualityCensus after = machine_quality_census_snapshot();
+                        BUSTER_TEST(arguments, after.prepassed_functions - before.prepassed_functions == 1);
+                        BUSTER_TEST(arguments, after.switch_fallback_functions == before.switch_fallback_functions);
+#endif
+                        // The old blanket FAST return never stamped frequency:
+                        // this detects allocator refusal even without counters.
+                        u32 loop_blocks = 0;
+                        for (u32 block_index = 0; block_index < machine->block_count; block_index += 1)
+                        {
+                            loop_blocks += machine->blocks[block_index].frequency_class != 0;
+                        }
+                        BUSTER_TEST(arguments, loop_blocks > 0);
+                        // Reject malformed ranges/targets at the existing MIR
+                        // validation boundary, before frequency or placement.
+                        if (BUSTER_REQUIRE(arguments, machine->switch_case_count != 0))
+                        {
+                            u32 saved_target = machine->switch_cases[0].target_block;
+                            machine->switch_cases[0].target_block = machine->block_count;
+                            BUSTER_TEST(arguments, machine_verify_function(machine).error == MACHINE_VERIFY_EDGE_RANGE);
+                            machine->switch_cases[0].target_block = saved_target;
+                        }
+                    }
+                }
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && BUSTER_LINUX && !BUSTER_SANITIZE
+                    bool native = (BUSTER_CPU_ARCH_X86_64 && target_index == 0) || (BUSTER_CPU_ARCH_AARCH64 && target_index == 1);
+                    if (native && generated.error == CODEGEN_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, generated.relocation_count == 0);
+                        CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                        if (BUSTER_REQUIRE(arguments, executable.address != 0))
+                        {
+                            for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                            {
+                                u32 offset = machine_test_module_offset(&generated, module, names[name_index]);
+                                if (BUSTER_REQUIRE(arguments, offset != UINT32_MAX))
+                                {
+                                    typedef u64 LoopCall(u32, u32);
+                                    typedef u64 ForwardCall(u32, u64);
+                                    LoopCall* loop_call = 0;
+                                    ForwardCall* forward_call = 0;
+                                    void* address = (u8*)executable.address + offset;
+                                    memcpy(&loop_call, &address, sizeof(loop_call));
+                                    memcpy(&forward_call, &address, sizeof(forward_call));
+                                    for (u32 key = 0; key < 128; key += 1)
+                                    {
+                                        for (u32 probe = 0; probe < 17; probe += 1)
+                                        {
+                                            u64 expected = key;
+                                            u64 argument = probe;
+                                            if (name_index == 0)
+                                            {
+                                                // Closed per-destination sums:
+                                                // shared cases 0/1, case 4's
+                                                // fallthrough and the default.
+                                                u32 sums[] = {15, 15, 18, 21, 32, 29, 24, 24};
+                                                for (u32 round = 0; round < probe; round += 1)
+                                                {
+                                                    expected += 3u * key + sums[(key + round) & 7];
+                                                }
+                                            }
+                                            else
+                                            {
+                                                argument = UINT64_C(0xfedcba9876543210) + probe;
+                                                expected = name_index == 2 ? argument + 11 : key == 0 ? argument + 3 :
+                                                    key == 1 || key == 99 ? argument ^ 5 : key == 2 ? argument * 7 :
+                                                    key == 3 ? argument - 9 : argument + 11;
+                                            }
+                                            u64 actual = name_index == 0 ? loop_call(key, probe) : forward_call(key, argument);
+                                            BUSTER_TEST_RAW(arguments, actual == expected, names[name_index]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        codegen_release_executable(executable);
+                    }
+#endif
+                }
+            }
+            scratch_end(temporary);
+        }
     }
     return result;
 }
@@ -8287,6 +8557,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_hints);
     BUSTER_TEST_FIXTURE(arguments, machine_test_clear_instruction_cache);
     BUSTER_TEST_FIXTURE(arguments, machine_test_unsigned_switch);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_switch_cfg);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_backward_switch_cfg);
     BUSTER_TEST_FIXTURE(arguments, machine_test_disconnected_dominance);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_storage_reuse);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_address_rematerialization);

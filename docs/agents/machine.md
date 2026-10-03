@@ -216,6 +216,22 @@ fixture as well as compiling both architectures.
   opcode classifiers. The [metadata ownership inventory](../machine-metadata-ownership.md)
   documents every shared record's producer, consumer, publication and invalidation.
   Explicit barrier/vector membership is not a latency or hazard model.
+- QUALITY switch functions use the same placement path: the shared prepass
+  supplies loop spans and complete predecessor adjacency for block operands,
+  switch tables (including duplicate/default destinations), indirect branches
+  and asm-goto. Split entry/exit analysis consumes that adjacency, with entry
+  installs restricted to forward unconditional branches; ambiguous entries and
+  landing pads with predecessors outside the region remain ineligible. The
+  verified synthetic MIR fixture fixes table backedges and duplicate/default
+  predecessor counts independently of selector layout. The C switch fixture
+  covers loops, shared destinations, fallthrough, default-only switches, all
+  allocators and both frontend memory forms.
+  Its private input lives at
+  `src/buster/tests/compiler/codegen/fixtures/quality_switch_cfg.c`; the
+  registered machine module stringifies those same C tokens into its compiler
+  input, preserving the separately approved frozen `tests/` retirement corpus
+  and running on mobile without a separately staged source file. Directly
+  compiling the private input keeps its ordinary C function definitions.
 - QUALITY placement accumulates exact u64 weighted traffic for values and loop
   regions, including split-boundary costs. A u32 edit count and maximum weight
   4096 bound a traffic sum below 2^44. The heap preserves its strict-greater tie
