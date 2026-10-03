@@ -304,13 +304,17 @@ struct MachineX64Selector
 // The reference form a symbol takes in this module. An undefined ELF
 // function uses the PLT even in the default model, so an external linker can
 // place the -c object in a PIE. Under -fPIC, any interposable function uses
-// the PLT and any interposable address uses the GOT.
+// the PLT and any interposable address uses the GOT. Linux undefined
+// default-visible weak function addresses also use the GOT in the default
+// model so an absent provider stays zero; direct calls retain their PLT form.
 BUSTER_GLOBAL_LOCAL u8 machine_x64_symbol_reference(MachineX64Selector* selector, IrSymbolId symbol, bool call_site)
 {
     IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
     bool elf_external_call = call_site && record && !record->is_definition &&
                              object_format_for_target(selector->target) == OBJECT_FORMAT_ELF64;
-    bool indirect = elf_external_call ||
+    bool weak_function_address = !call_site && selector->target.os == OPERATING_SYSTEM_LINUX && record &&
+                                 record->kind == IR_SYMBOL_FUNCTION && !record->is_definition && record->is_weak && !record->is_hidden;
+    bool indirect = elf_external_call || weak_function_address ||
                     (selector->position_independent && ir_symbol_is_interposable(record));
     return (u8)(!indirect ? MACHINE_SYMBOL_REFERENCE_DIRECT : call_site ? MACHINE_SYMBOL_REFERENCE_PLT : MACHINE_SYMBOL_REFERENCE_GOT);
 }

@@ -387,6 +387,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   pointer tables, protected call-only functions, weak-present/absent functions
   and imported data. Both frontend forms and all four allocators execute PIC
   and non-PIC forms under lazy/eager binding and default/preloaded definitions.
+  In the default Linux x86-64 code model, undefined default-visible weak
+  function addresses use GOT references in both the canonical and MIR
+  emitters; direct calls retain PLT32. The existing weak/null runtime fixture
+  keeps its default flags and assertions. Foreign or handwritten direct weak
+  address relocations still receive the named representability refusal.
 - **A C library keeps some of its own names out of its shared object**, and
   this linker imports from the shared object alone, so it has to supply the
   rest itself. glibc puts `atexit` and `at_quick_exit` in libc_nonshared.a as

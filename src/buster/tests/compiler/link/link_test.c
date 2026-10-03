@@ -9212,7 +9212,16 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
-    NativeExecutableLinkResult unresolved_native = link_native_executable(arguments->arena, &permitted.object, (NativeExecutableLinkOptions){0});
+    ObjectFile imported_call_object = permitted.object;
+    ObjectRelocation imported_call = imported_call_object.relocations[0];
+    if (imported_call_object.target.cpu_arch == CPU_ARCH_X86_64 && imported_call_object.target.os == OPERATING_SYSTEM_LINUX)
+    {
+        // This fixture's e8 instruction states a call to unknown metadata,
+        // which must retain its explicit ELF PLT reference contract.
+        imported_call.kind = OBJECT_RELOCATION_X86_64_PLT32;
+        imported_call_object.relocations = &imported_call;
+    }
+    NativeExecutableLinkResult unresolved_native = link_native_executable(arguments->arena, &imported_call_object, (NativeExecutableLinkOptions){0});
     BUSTER_TEST(arguments, unresolved_native.error == LINK_ERROR_NONE);
     u8 libc_main_text[] = {
         0x48, 0x83, 0xec, 0x08, 0xbf, 0xd6, 0xff, 0xff, 0xff, 0xe8, 0, 0, 0, 0, 0x83, 0xe8, 42, 0x48, 0x83, 0xc4, 0x08, 0xc3,
