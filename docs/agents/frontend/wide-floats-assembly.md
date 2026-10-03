@@ -262,6 +262,14 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   emission copies through x87 and clears padding; MIR copies the ten payload
   bytes directly, preserving payload/sign and making no padding promise.
   An opaque aggregate reads back through the ordinary eightbyte path.
+  MEMORY-class f80 aggregates larger than sixteen bytes use the MIR overflow
+  copy of their complete storage image; member types do not impose a separate
+  size limit in the frontend or its semantic-only lowering mirror.
+  `compiler_driver_test_sysv_wide_aggregate_va_arg` covers seven 32/48-byte
+  layouts, register pools available/exhausted, sixteen-byte overflow alignment,
+  following arguments and `va_copy`, with the configured host and available Linux GCC in both call directions in
+  MIR-stack, FAST and QUALITY, both C forms and PIC/non-PIC. The direct `none`
+  emitter's larger-aggregate limitation remains tracked in #1264/#2390.
   `tests/basic_c_va_arg_long_double.c` pins both under all four
   allocators, including a read through a `va_list *` and one past a `va_copy`
   — the spellings musl's `pop_arg` uses. Strict MIR selection, allocation and

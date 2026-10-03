@@ -26628,7 +26628,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                         ir_abi_convention_for_target(preprocess.target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
                         target_data_layout(preprocess.target).long_double_type.bit_width == 80 && !value.is_atomic &&
                         value.kind != C_TYPE_LONG_DOUBLE_COMPLEX &&
-                        c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment) && size <= 16;
+                        c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment);
                     supported |= !value.is_atomic && c_ir_target_supports_f128_transport(preprocess.target) &&
                                  (value.kind == C_TYPE_LONG_DOUBLE || value.kind == C_TYPE_LONG_DOUBLE_COMPLEX || value.kind == C_TYPE_STRUCT ||
                                   value.kind == C_TYPE_UNION || value.kind == C_TYPE_ARRAY);
