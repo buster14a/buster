@@ -203,6 +203,14 @@ fixture as well as compiling both architectures.
   opcode classifiers. The [metadata ownership inventory](../machine-metadata-ownership.md)
   documents every shared record's producer, consumer, publication and invalidation.
   Explicit barrier/vector membership is not a latency or hazard model.
+- QUALITY switch functions use the same placement path: the shared prepass
+  supplies loop spans and complete predecessor adjacency for block operands,
+  switch tables (including duplicate/default destinations), indirect branches
+  and asm-goto. Split entry/exit analysis consumes that adjacency, with entry
+  installs restricted to forward unconditional branches; ambiguous entries and
+  landing pads with predecessors outside the region remain ineligible. The
+  switch CFG fixture covers table backedges, shared destinations, fallthrough,
+  default-only switches, all allocators and both frontend memory forms.
 - QUALITY placement accumulates exact u64 weighted traffic for values and loop
   regions, including split-boundary costs. A u32 edit count and maximum weight
   4096 bound a traffic sum below 2^44. The heap preserves its strict-greater tie
