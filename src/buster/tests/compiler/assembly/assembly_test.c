@@ -3298,13 +3298,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_quoted_instruction_symbols(Unit
             unit.relocations[1].symbol < unit.symbol_count &&
             string_equal(unit.symbols[unit.relocations[1].symbol].name, S8("observe")));
     }
+    // ELF automatically uses PLT for visible undefined calls. Hidden literal
+    // names distinguish that policy from an explicit modifier outside quotes.
     String8 plt_sources[] = {
         S8(".intel_syntax noprefix\n.text\ncall \"quote_observer\"@PLT+8\n"),
         S8(".att_syntax prefix\n.text\ncall \"quote_observer\"@plt+8\n"),
         S8(".intel_syntax noprefix\n.text\ncall \"1f\"@PLT\n"),
         S8(".att_syntax prefix\n.text\ncall \"1f\"@PLT\n"),
-        S8(".intel_syntax noprefix\n.text\ncall \"literal@PLT\"\n"),
-        S8(".att_syntax prefix\n.text\ncall \"literal@PLT\"\n"),
+        S8(".intel_syntax noprefix\n.text\n.hidden \"literal@PLT\"\ncall \"literal@PLT\"\n"),
+        S8(".att_syntax prefix\n.text\n.hidden \"literal@PLT\"\ncall \"literal@PLT\"\n"),
     };
     String8 plt_names[] = {S8("quote_observer"), S8("quote_observer"), S8("1f"), S8("1f"), S8("literal@PLT"), S8("literal@PLT")};
     u8 const call_bytes[] = {0xe8, 0, 0, 0, 0};
@@ -3315,11 +3317,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_quoted_instruction_symbols(Unit
             assembly_test_bytes_equal(plt.sections[0].data, call_bytes, sizeof(call_bytes)), plt_sources[index]);
         if (!plt.diagnostic_count && plt.relocation_count == 1)
         {
-            BUSTER_TEST(arguments, plt.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+            BUSTER_TEST_RAW(arguments, plt.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
                 plt.relocations[0].offset == 1 && plt.relocations[0].addend == (index < 2 ? 4 : -4) &&
                 plt.relocations[0].plt == (index < 4) && plt.relocations[0].x86_branch &&
                 plt.relocations[0].symbol < plt.symbol_count &&
-                string_equal(plt.symbols[plt.relocations[0].symbol].name, plt_names[index]));
+                string_equal(plt.symbols[plt.relocations[0].symbol].name, plt_names[index]), plt_sources[index]);
         }
     }
     String8 const bad_modifiers[] = {S8("call \"\"@PLT"), S8("call \"g\"@GOTPCREL"), S8("call \"g\"@PLT@PLT")};
