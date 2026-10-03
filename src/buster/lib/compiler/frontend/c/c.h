@@ -35,8 +35,9 @@ typedef enum CTokenKind
 // Every punctuator the lexer can produce, so that recognizing one is a scalar
 // compare instead of a string compare.  The declaration order is the lexer's
 // maximal-munch scan order: a spelling must precede every spelling it starts
-// with.  Digraphs stay distinct from the punctuators they spell, because
-// callers ask about a spelling and never about a meaning.
+// with. Digraph ids identify spellings while scanning; published tokens and
+// shape sidecars carry the equivalent ordinary punctuator id. Their spelling
+// offsets and lengths still preserve the source bytes for #, ## and printing.
 typedef enum CPunctuator
 {
     C_PUNCTUATOR_NONE,

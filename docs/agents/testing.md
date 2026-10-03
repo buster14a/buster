@@ -53,6 +53,20 @@
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
+- The Linux x86-64 parameter-alignment driver regression uses a separately
+  host-compiled caller and observer with the Buster-compiled callee at every
+  registered optimization level and allocator. Its expanded caller, callee
+  and header are private fixture inputs under
+  `src/buster/tests/compiler/driver/fixtures/parameter_alignment/`; the frozen
+  `tests/basic_c_parameter_alignment*` corpus stays byte-for-byte unchanged.
+  The existing host observer remains shared because its ABI is unchanged.
+  These files are loaded by the registered driver test, not compiled as test
+  modules. The regression asserts the selected
+  allocator after parsing, verifies every function's intended canonical or
+  machine path without native fallback, and executes aligned
+  parameter reads/writes after integer, vector and combined bank exhaustion.
+  Volatile caller objects independently check that callee writes stay in the
+  callee's by-value copies.
 - Dormant `.bbb` fixtures remain under `tests/` as preservation material. Do
   not register, compile, parse, benchmark, package, or execute them in the
   default build or CI until the custom frontend is deliberately reactivated.
@@ -222,7 +236,10 @@
   records, including matching helper/invocation statuses. Private fixed-order
   Bash `SECONDS` stages observe setup, monitor launch, interpreter handoff and
   publication without changing either clock or authorizing admission. Builtin
-  path trimming and caller writes remove known external launches; a retained
+  path trimming and caller writes remove known external launches. The seven
+  private IPC endpoints use the same fresh generation directory as the receipts,
+  removing a redundant directory-process launch before monitor/helper startup;
+  the existing clocks and descriptor protocol are unchanged. A retained
   late-start failure does not establish the cause of its post-setup delay or
   a hosted speed improvement. Startup refusal preserves any already observed
   command-monitor deadline even when the caller is then lost.
@@ -230,6 +247,10 @@
   [`-S`](https://docs.python.org/3/using/cmdline.html#cmdoption-S), which disables
   automatic [`site`](https://docs.python.org/3/library/site.html) initialization
   and its customization hooks. Payload arguments and environment are unchanged.
+  The dedicated keeper enters its unchanged ready/control/acknowledgment protocol
+  after importing only `os`, `signal` and `sys`; owner-only imports are skipped.
+  Its two private descriptor arguments are validated before descriptor access.
+  Imported-module and owner entry paths retain their ordinary initialization.
   A finite thirteen-second site hook remains unentered while both roles complete
   and are reaped; separate retained counterfactuals show this is a reachable
   startup delay class, not the established cause of the hosted late-start failure.

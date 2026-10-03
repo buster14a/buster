@@ -21,6 +21,8 @@
 // Layout, in file order; each anchor is a definition to search for:
 //   assembly_space .. assembly_symbol_intern       builder plumbing, labels,
 //                                                  symbol interning
+//   assembly_unquoted_character,                   quoted symbol spelling
+//   assembly_symbol_spelling                       and syntax punctuation
 //   assembly_expression_parse,                     constant/symbol expression
 //   assembly_expression_merge                      evaluation
 //   assembly_register_parse,                       operand parsing for both
@@ -576,6 +578,7 @@ struct AssemblyBuilder
     u64 output_count;
     bool private_inline_labels;
     bool unit_control_relocations;
+    bool inline_assembly;
     // The metadata parser reports this transient semantic fact to the outer
     // source adapter when a feature-gated typed decorator candidate is the
     // authoritative form.  It prevents the handwritten INVALID_OPERANDS
@@ -632,10 +635,19 @@ BUSTER_GLOBAL_LOCAL AssemblyOperandSplitStatus assembly_operand_split_next(Strin
     u64 operand_end = operand_start;
     char8 delimiter_stack[ASSEMBLY_OPERAND_DELIMITER_CAPACITY] = {0};
     u32 delimiter_count = 0;
+    bool quoted = false;
     while (operand_end < text.length)
     {
         char8 character = text.pointer[operand_end];
-        if (character == '(' || character == '[' || character == '{')
+        if (quoted && character == '\\' && operand_end + 1 < text.length)
+        {
+            operand_end += 1;
+        }
+        else if (character == '"')
+        {
+            quoted = !quoted;
+        }
+        else if (!quoted && (character == '(' || character == '[' || character == '{'))
         {
             if (delimiter_count == BUSTER_ARRAY_LENGTH(delimiter_stack))
             {
@@ -643,7 +655,7 @@ BUSTER_GLOBAL_LOCAL AssemblyOperandSplitStatus assembly_operand_split_next(Strin
             }
             delimiter_stack[delimiter_count++] = character;
         }
-        else if (character == ')' || character == ']' || character == '}')
+        else if (!quoted && (character == ')' || character == ']' || character == '}'))
         {
             char8 expected = character == ')' ? '(' : character == ']' ? '[' : '{';
             if (!delimiter_count || delimiter_stack[delimiter_count - 1] != expected)
@@ -652,13 +664,13 @@ BUSTER_GLOBAL_LOCAL AssemblyOperandSplitStatus assembly_operand_split_next(Strin
             }
             delimiter_count -= 1;
         }
-        else if (character == ',' && !delimiter_count)
+        else if (!quoted && character == ',' && !delimiter_count)
         {
             break;
         }
         operand_end += 1;
     }
-    if (delimiter_count)
+    if (delimiter_count || quoted)
     {
         return ASSEMBLY_OPERAND_SPLIT_INVALID;
     }
@@ -698,13 +710,58 @@ BUSTER_GLOBAL_LOCAL bool assembly_identifier(String8 string)
     return true;
 }
 
+// Syntax punctuation inside a quoted symbol belongs to its name. Keep the
+// spelling between quotes unchanged, matching assembly_unit's symbol table.
+BUSTER_GLOBAL_LOCAL u64 assembly_unquoted_character(String8 text, u64 start, String8 characters)
+{
+    u64 result = text.length;
+    bool quoted = false;
+    for (u64 index = start; index < text.length && result == text.length; index += 1)
+    {
+        char8 character = text.pointer[index];
+        if (quoted && character == '\\' && index + 1 < text.length)
+        {
+            index += 1;
+        }
+        else if (character == '"')
+        {
+            quoted = !quoted;
+        }
+        else if (!quoted)
+        {
+            for (u64 candidate = 0; candidate < characters.length; candidate += 1)
+            {
+                if (character == characters.pointer[candidate])
+                {
+                    result = index;
+                    break;
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_symbol_spelling(String8* name)
+{
+    bool result;
+    if (name->length >= 2 && name->pointer[0] == '"' && name->pointer[name->length - 1] == '"')
+    {
+        *name = string_slice(*name, 1, name->length - 1);
+        result = name->length != 0 && string_first_code_unit(*name, '"') == BUSTER_STRING_NO_MATCH;
+    }
+    else
+    {
+        result = assembly_identifier(*name);
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u64 assembly_leading_label_colon(String8 statement)
 {
-    u64 token_end = 0;
-    while (token_end < statement.length && !assembly_space(statement.pointer[token_end]) && statement.pointer[token_end] != ':')
-    {
-        token_end += 1;
-    }
+    u64 token_end = assembly_unquoted_character(statement, 0, S8(" \t\r:"));
     if (token_end < statement.length && statement.pointer[token_end] == ':')
     {
         return token_end;
@@ -1064,17 +1121,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_expression_parse(AssemblyBuilder* builder, Str
         result->addend = folded;
         return true;
     }
-    u64 operator_index = text.length;
-    for (u64 index = 1; index < text.length; index += 1)
-    {
-        if (text.pointer[index] == '+' || text.pointer[index] == '-')
-        {
-            operator_index = index;
-            break;
-        }
-    }
+    u64 operator_index = assembly_unquoted_character(text, 0, S8("+-"));
     String8 name = assembly_trim((String8){.pointer = text.pointer, .length = operator_index});
-    if (!assembly_identifier(name))
+    if (!assembly_symbol_spelling(&name))
     {
         return false;
     }
@@ -1443,7 +1492,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_expression_merge(AssemblyBuilder* builder, Ass
 
 BUSTER_GLOBAL_LOCAL String8 assembly_x86_memory_strip_segment(String8 text, AssemblySyntax syntax, AssemblyMemory* result)
 {
-    u64 colon = string_first_code_unit(text, ':');
+    u64 colon = assembly_unquoted_character(text, 0, S8(":"));
     if (colon < text.length)
     {
         u8 segment = 0;
@@ -1489,11 +1538,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_intel(AssemblyBuilder* builde
         }
     }
     text = assembly_x86_memory_strip_segment(text, ASSEMBLY_SYNTAX_INTEL, result);
-    if (text.length < 2 || text.pointer[0] != '[' || text.pointer[text.length - 1] != ']')
+    u64 open = assembly_unquoted_character(text, 0, S8("["));
+    String8 displacement = assembly_trim(string_slice(text, 0, open));
+    if (text.length < 2 || open >= text.length || text.pointer[text.length - 1] != ']' ||
+        (displacement.length && !assembly_expression_merge(builder, &result->displacement, displacement, false)))
     {
         return false;
     }
-    text = assembly_trim(string_slice(text, 1, text.length - 1));
+    text = assembly_trim(string_slice(text, open + 1, text.length - 1));
     if (!text.length)
     {
         return false;
@@ -1512,17 +1564,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_intel(AssemblyBuilder* builde
             subtract = text.pointer[cursor] == '-';
             cursor += 1;
         }
-        u64 end = cursor;
-        while (end < text.length && text.pointer[end] != '+' && text.pointer[end] != '-')
-        {
-            end += 1;
-        }
+        u64 end = assembly_unquoted_character(text, cursor, S8("+-"));
         String8 term = assembly_trim(string_slice(text, cursor, end));
         if (!term.length)
         {
             return false;
         }
-        u64 star = string_first_code_unit(term, '*');
+        u64 star = assembly_unquoted_character(term, 0, S8("*"));
         AssemblyRegister reg = {0};
         if (star < term.length)
         {
@@ -1603,9 +1651,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_att(AssemblyBuilder* builder,
     // The base/index group is the trailing parenthesized one, not the first:
     // a displacement may itself be parenthesized, as in `(-1-2)(%rdi,%rdx)`.
     u64 open = BUSTER_STRING_NO_MATCH;
-    for (u64 index = text.length; index && open == BUSTER_STRING_NO_MATCH; index -= 1)
+    u64 group = assembly_unquoted_character(text, 0, S8("("));
+    while (group < text.length)
     {
-        open = text.pointer[index - 1] == '(' ? index - 1 : open;
+        open = group;
+        group = assembly_unquoted_character(text, group + 1, S8("("));
     }
     if (open == BUSTER_STRING_NO_MATCH)
     {
@@ -4407,7 +4457,8 @@ BUSTER_GLOBAL_LOCAL u16 assembly_x86_instruction_vector_width(AssemblyInstructio
 BUSTER_GLOBAL_LOCAL bool assembly_x86_operand_decorators_parse(String8* text, AssemblySyntax syntax, AssemblyOperand* operand,
                                                                bool* no_flags)
 {
-    u64 first_brace = string_first_code_unit(*text, '{');
+    u64 first_brace = assembly_unquoted_character(*text, 0, S8("{"));
+    if (first_brace == text->length) first_brace = BUSTER_STRING_NO_MATCH;
     if (first_brace != BUSTER_STRING_NO_MATCH)
     {
         String8 core = assembly_trim(string_slice(*text, 0, first_brace));
@@ -8741,6 +8792,18 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_append_avx10_aliases(Target targe
     }
 }
 
+BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_append_inline_features(AssemblyBuilder* builder, String8 mnemonic, u32 operand_count,
+                                                                      String8* names, u32* count, u32 capacity)
+{
+    // The explicit zero-operand template owns the CPU availability contract.
+    // Keep the existing XED row, operand validation, and emitter authoritative;
+    // this token authorizes only RDTSCP, never a target-wide feature default.
+    if (builder->inline_assembly && !operand_count && assembly_word_equal(mnemonic, S8("RDTSCP")))
+    {
+        assembly_x86_metadata_append_feature(names, count, capacity, S8("RDTSCP"));
+    }
+}
+
 BUSTER_GLOBAL_LOCAL u8 assembly_x86_metadata_physical_class(AssemblyRegisterClass class)
 {
     return class == ASSEMBLY_REGISTER_GPR       ? BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR
@@ -10772,8 +10835,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         attributes.sae = true;
         attributes.decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ROUNDING | BUSTER_X86_METADATA_DECORATOR_SAE;
     }
-    String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
+    String8 feature_names[TARGET_CPU_FEATURE_COUNT + 1] = {0};
     u32 feature_count = assembly_x86_metadata_feature_names(target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+    assembly_x86_metadata_append_inline_features(builder, mnemonic, operand_count, feature_names, &feature_count,
+                                                   BUSTER_ARRAY_LENGTH(feature_names));
     assembly_x86_metadata_append_avx10_aliases(target, feature_names, &feature_count, BUSTER_ARRAY_LENGTH(feature_names), physical,
                                                 operand_count);
     // XED classifies a subset of legacy MMX rows under SSE2MMX even though
@@ -11555,10 +11620,19 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
         }
         String8 original = {.pointer = source.pointer + source_cursor, .length = line_end - source_cursor};
         u64 comment = original.length;
+        bool quoted = false;
         for (u64 index = 0; index < original.length; index += 1)
         {
-            if (original.pointer[index] == ';' || (syntax == ASSEMBLY_SYNTAX_ATT && original.pointer[index] == '#') ||
-                (original.pointer[index] == '/' && index + 1 < original.length && original.pointer[index + 1] == '/'))
+            if (quoted && original.pointer[index] == '\\' && index + 1 < original.length)
+            {
+                index += 1;
+            }
+            else if (original.pointer[index] == '"')
+            {
+                quoted = !quoted;
+            }
+            else if (!quoted && (original.pointer[index] == ';' || (syntax == ASSEMBLY_SYNTAX_ATT && original.pointer[index] == '#') ||
+                (original.pointer[index] == '/' && index + 1 < original.length && original.pointer[index + 1] == '/')))
             {
                 comment = index;
                 break;
@@ -11615,7 +11689,7 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
             if (colon < statement.length && !segment_override && !segment_colon_error)
             {
                 String8 label = assembly_trim((String8){.pointer = statement.pointer, .length = colon});
-                if (!assembly_identifier(label))
+                if (!assembly_symbol_spelling(&label))
                 {
                     assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, line, column, (u32)label.length, S8("invalid label"));
                 }
@@ -11941,8 +12015,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_local_relocation(AssemblyBuilder*
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, AssemblyInstruction* instruction)
 {
-    String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
+    String8 feature_names[TARGET_CPU_FEATURE_COUNT + 1] = {0};
     u32 feature_count = assembly_x86_metadata_feature_names(builder->target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+    assembly_x86_metadata_append_inline_features(builder, instruction->metadata_mnemonic, instruction->metadata_operand_count,
+                                                   feature_names, &feature_count, BUSTER_ARRAY_LENGTH(feature_names));
     BusterX86MetadataPhysicalOperand operands[ASSEMBLY_MAX_OPERANDS] = {0};
     if (instruction->metadata_operand_count > BUSTER_ARRAY_LENGTH(operands))
     {
@@ -12581,6 +12657,7 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
         .target = options.target,
         .private_inline_labels = options.private_inline_labels,
         .unit_control_relocations = options.unit_control_relocations,
+        .inline_assembly = options.inline_assembly,
         // A small set of source aliases (currently WAIT-prefixed x87 FINIT
         // and FCLEX) expands into multiple metadata instructions.
         .instruction_capacity = line_count * 2,

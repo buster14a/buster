@@ -163,6 +163,19 @@ fixture as well as compiling both architectures.
   variadic signature checks the general incoming-address expansion past 4095
   bytes. Darwin callers extend narrow integer register arguments to 32 bits
   before physical-register staging, as required by its public ABI.
+- x86-64 variadic calls with a tail reuse selector-owned shape and placement
+  rows. Capacity grows to exactly the current call's argument count; fixed
+  calls and tail-free variadic calls borrow the signature plan and request no
+  such rows. Every growth corresponds to an old per-call request, bounding
+  cumulative logical bytes by the old sum even for increasing arities. Each
+  call copies its fixed prefix and replaces its active tail records before
+  synchronous staging; MIR retains no workspace pointers. Failed planning
+  never stages partially classified rows. `machine_test_x64_variadic_workspace`
+  checks long-short-long shape changes, changed fixed prefixes, direct/indirect
+  calls, SysV AL counts and stack releases. The registered driver fixture
+  checks all four allocators and both frontend forms on five x86-64 targets,
+  with matching desktop SysV hosts executing against foreign `va_arg` probes.
+  This storage bound is not a measured compile-time or RSS speedup.
 - The x86-64 encoder applies the verified local rewrites of the
   [machine rewrite campaign](../machine-rewrite-campaign.md), each an encoding
   choice under a precondition it decides locally: frame chunks use disp8
@@ -851,6 +864,18 @@ fixture as well as compiling both architectures.
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
   sequence too (`link_elf_relax_local_dynamic`).
+
+The x86 inline-assembly vocabulary admits zero-operand `rdtsc` and `rdtscp`
+through the shared assembler. `AssemblyEncodeOptions.inline_assembly` supplies
+the existing RDTSCP metadata row's feature token only for that zero-operand
+instruction; standalone and module-level assembly keep target feature gating.
+GNU fixed outputs or explicit clobbers name
+RAX/RDX and, for RDTSCP, RCX; ordinary transaction staging preserves live
+values and captures the declared 32-bit outputs. Memory and flags effects
+remain source-declared. `machine_test_x64_inline_timestamps` checks exact
+instruction bytes, output registers, clobbers and rejected operand forms
+across native targets, frontend forms and allocator modes. Runtime availability
+and ordering of timestamp reads remain the caller's responsibility.
 
 ## Wide integer conversion rounding
 

@@ -35,8 +35,12 @@
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
 // compiler_driver_elf_library_roots shares target/sysroot search roots between
 // export discovery and static-library lookup; explicit -L roots come first.
+// compiler_driver_elf_linker_script classifies located requested scripts for
+// explicit refusal; no script contents are evaluated or skipped as absent.
 // compiler_driver_elf_compiler_runtime adds existing libgcc_s on demand for
 // unresolved half/quad helper calls after explicit library exports are known.
+// compiler_driver_publish_slices preserves atomic artifacts and write failures;
+// execute_invocation normalizes textual -o - before choosing a pipeline.
 
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
@@ -2239,6 +2243,7 @@ struct CompilerDriverDynamicLibraries
     // loader, and a configure script reads the successful link as the
     // library existing.  Empty when every requested library was found.
     String8 missing_request;
+    String8 unsupported_script_path;
     String8 missing_runtime_symbol;
     String8 runtime_failure_library;
 };
@@ -2717,16 +2722,73 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, Compiler
     return root_count;
 }
 
+// GNU ld scripts use C comments as whitespace. Only the initial command is
+// recognized here: the driver diagnoses unsupported input, never evaluates it.
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_linker_script_skip_trivia(ByteSlice bytes, u64 cursor)
+{
+    bool scanning = true;
+    while (scanning && cursor < bytes.length)
+    {
+        u8 byte = bytes.pointer[cursor];
+        if (byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n' || byte == '\v' || byte == '\f')
+        {
+            cursor += 1;
+        }
+        else if (byte == '/' && bytes.length - cursor >= 2 && bytes.pointer[cursor + 1] == '*')
+        {
+            cursor += 2;
+            while (bytes.length - cursor >= 2 && !(bytes.pointer[cursor] == '*' && bytes.pointer[cursor + 1] == '/'))
+            {
+                cursor += 1;
+            }
+            cursor = bytes.length - cursor >= 2 ? cursor + 2 : bytes.length;
+        }
+        else
+        {
+            scanning = false;
+        }
+    }
+    return cursor;
+}
+
+bool compiler_driver_elf_linker_script(ByteSlice bytes)
+{
+    static String8 const commands[] = {
+        S8_INITIALIZER("INPUT"), S8_INITIALIZER("GROUP"), S8_INITIALIZER("AS_NEEDED"),
+        S8_INITIALIZER("OUTPUT_FORMAT"), S8_INITIALIZER("OUTPUT_ARCH"), S8_INITIALIZER("SEARCH_DIR"),
+    };
+    bool result = false;
+    if (bytes.pointer)
+    {
+        u64 cursor = compiler_driver_linker_script_skip_trivia(bytes, 0);
+        u64 start = cursor;
+        while (cursor < bytes.length && ((bytes.pointer[cursor] >= 'A' && bytes.pointer[cursor] <= 'Z') || bytes.pointer[cursor] == '_'))
+        {
+            cursor += 1;
+        }
+        String8 command = {.pointer = (char8*)bytes.pointer + start, .length = cursor - start};
+        bool recognized = false;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(commands); index += 1)
+        {
+            recognized |= string_equal(command, commands[index]);
+        }
+        cursor = compiler_driver_linker_script_skip_trivia(bytes, cursor);
+        result = recognized && cursor < bytes.length && bytes.pointer[cursor] == '(';
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
-                                                             NativeDynamicLibrary* library, FileMapRead* export_map)
+                                                             NativeDynamicLibrary* library, FileMapRead* export_map, String8* script_path)
 {
     u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
     String8 roots[7];
     u32 root_count = compiler_driver_elf_library_roots(arena, invocation, roots);
     *export_map = (FileMapRead){0};
     bool found = false;
+    bool script_found = false;
     u32 candidate_count = invocation.library_path_count + root_count + 1;
-    for (u32 path_index = 0; !found && path_index < candidate_count; path_index += 1)
+    for (u32 path_index = 0; !found && !script_found && path_index < candidate_count; path_index += 1)
     {
         // Every candidate is zero-terminated: os_file_open takes the path as a
         // C string, and the bare library name is one this driver built with a
@@ -2738,6 +2800,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
                            : string_duplicate_arena(arena, library->name, true);
         FileMapRead file = file_map_read(arena, path, (FileReadOptions){0});
         found = file.bytes.pointer && compiler_driver_elf_dynamic_symbols(arena, file.bytes, machine, collect_data, library);
+        script_found = script_path && !found && compiler_driver_elf_linker_script(file.bytes);
+        if (script_found && script_path)
+        {
+            *script_path = path;
+        }
         if (found)
         {
             *export_map = file;
@@ -2858,7 +2925,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_compiler_runtime(Arena* arena, Comp
                 NativeDynamicLibrary* runtime = libraries->pointer + runtime_index;
                 *runtime = (NativeDynamicLibrary){.name = S8("libgcc_s.so.1")};
                 FileMapRead* export_map = libraries->export_maps + libraries->export_map_count;
-                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map);
+                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map, 0);
                 libraries->export_map_count += export_map->bytes.pointer != 0;
                 provider = runtime;
                 provided = compiler_driver_elf_library_helper_provider(runtime, symbol->name);
@@ -3027,12 +3094,13 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         result.export_maps = arena_allocate(arena, FileMapRead, count + 2);
         result.runtime.name = S8("libc.so.6");
         FileMapRead* export_map = result.export_maps + result.export_map_count;
-        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map);
+        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map, 0);
         result.export_map_count += export_map->bytes.pointer != 0;
         for (u32 index = 0; index < count; index += 1)
         {
             export_map = result.export_maps + result.export_map_count;
-            compiler_driver_elf_library_exports(arena, invocation, imports_data, &libraries[index], export_map);
+            String8 script_path = {0};
+            compiler_driver_elf_library_exports(arena, invocation, imports_data, &libraries[index], export_map, &script_path);
             result.export_map_count += export_map->bytes.pointer != 0;
             // The scan walked every search directory the loader would, so a
             // library it did not find is one the produced executable could
@@ -3042,6 +3110,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             if (!libraries[index].exports_known && requests[index].length && !result.missing_request.length)
             {
                 result.missing_request = requests[index];
+                result.unsupported_script_path = script_path;
             }
         }
     }
@@ -3453,25 +3522,58 @@ BUSTER_GLOBAL_LOCAL LlvmBitcodeOptions compiler_driver_llvm_bitcode_options(Targ
     };
 }
 
+// Compiler artifacts retain regular-file atomic publication. Stream destinations
+// use the file layer's direct write path; every refusal names its destination.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_write_failure(Arena* arena, String8 path, FilePublishResult published)
+{
+    String8 reason = published.status == FILE_PUBLISH_UNSUPPORTED_DESTINATION
+                         ? S8("symbolic links/reparse points, directories and non-stream special destinations are refused")
+                     : published.error.v ? string_format(arena, S8("{EOs}"), published.error)
+                                         : S8("incomplete output publication");
+    if (published.status == FILE_PUBLISH_UNSUPPORTED_DESTINATION && published.error.v)
+    {
+        reason = string_format(arena, S8("{S8} ({EOs})"), reason, published.error);
+    }
+    return string_format(arena, S8("could not write {S8}: {S8}"), path, reason);
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_publish_slices(Arena* arena, String8 path, ByteSlice const* slices, u64 slice_count, CompilerDriverResult* result)
+{
+    FilePublishResult published = file_publish_slices_checked(path, slices, slice_count, (OpenPermissions){.read = 1, .write = 1});
+    bool success = published.status == FILE_PUBLISH_PUBLISHED;
+    if (!success)
+    {
+        result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
+        result->diagnostic = compiler_driver_write_failure(arena, path, published);
+    }
+    return success;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_publish(Arena* arena, String8 path, ByteSlice bytes, CompilerDriverResult* result)
+{
+    return compiler_driver_publish_slices(arena, path, &bytes, 1, result);
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_llvm_bitcode_path(Arena* arena, String8 input)
 {
+    u64 name = 0;
     u64 extension = input.length;
     for (u64 index = input.length; index != 0; index -= 1)
     {
         char8 byte = input.pointer[index - 1];
-        if (byte == '.')
+        if (byte == '.' && extension == input.length)
         {
             extension = index - 1;
-            break;
         }
         if (byte == '/' || byte == '\\')
         {
+            name = index;
             break;
         }
     }
     return string_format_z(arena, S8("{S8}.bc"), (String8){
-                                                        .pointer = input.pointer,
-                                                        .length = extension,
+                                                        .pointer = input.pointer + name,
+                                                        .length = extension - name,
                                                     });
 }
 
@@ -3494,10 +3596,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, Compil
     }
     result->has_llvm_bitcode = true;
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_llvm_bitcode_path(arena, invocation.input_paths[0]);
-    if (!file_publish(output, artifact.bytes))
+    if (!compiler_driver_publish(arena, output, artifact.bytes, result))
     {
-        result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
-        result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
         return false;
     }
     return true;
@@ -3549,10 +3649,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
                      : invocation.action == COMPILER_DRIVER_ACTION_OBJECT
                          ? compiler_driver_default_wasm_path(arena, invocation.input_paths[0])
                          : S8("a.wasm");
-    if (!file_publish(output, artifact.bytes))
+    if (!compiler_driver_publish(arena, output, artifact.bytes, result))
     {
-        result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
-        result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
         return false;
     }
     return true;
@@ -3571,12 +3669,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_write_spirv(Arena* arena, CompilerDrive
     {
         String8 output = invocation.output_path.length ? invocation.output_path
                           : string_format_z(arena, S8("{S8}.spv"), invocation.input_paths[0]);
-        if (!file_publish(output, artifact.bytes))
-        {
-            result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
-            result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
-        }
-        else
+        if (compiler_driver_publish(arena, output, artifact.bytes, result))
         {
             result->has_spirv = true;
         }
@@ -3605,10 +3698,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
                      : invocation.action == COMPILER_DRIVER_ACTION_OBJECT
                          ? compiler_driver_default_object_path(arena, invocation.input_paths[0])
                          : S8("a.o");
-    if (!file_publish(output, artifact.bytes))
+    if (!compiler_driver_publish(arena, output, artifact.bytes, result))
     {
-        result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
-        result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
         return false;
     }
     return true;
@@ -3620,11 +3711,22 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
 // failed artifact write names the operating-system error that refused it.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link)
 {
-    String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION
-                       ? S8(" (a position-independent image needs objects compiled with -fPIC)")
-                   : link.error == LINK_ERROR_FILE_WRITE && link.write_error.v ? string_format(arena, S8(" ({EOs})"), link.write_error)
-                                                                               : S8("");
-    return string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
+    String8 diagnostic;
+    if (link.error == LINK_ERROR_FILE_WRITE)
+    {
+        String8 path = link.symbol.length ? link.symbol : invocation.output_path;
+        diagnostic = compiler_driver_write_failure(arena, path, (FilePublishResult){
+            .error = link.write_error,
+            .status = link.write_unsupported_destination ? FILE_PUBLISH_UNSUPPORTED_DESTINATION : FILE_PUBLISH_FAILED,
+        });
+    }
+    else
+    {
+        String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION
+                           ? S8(" (a position-independent image needs objects compiled with -fPIC)") : S8("");
+        diagnostic = string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
+    }
+    return diagnostic;
 }
 
 // What a finished object becomes: textual assembly for -S, a written object
@@ -3643,10 +3745,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
             result->diagnostic = S8("could not format native object as textual assembly");
             return;
         }
-        if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result->output)))
+        if (invocation.output_path.length)
         {
-            result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
-            result->diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
+            compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result->output), result);
         }
         return;
     }
@@ -3676,11 +3777,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
         u32 slice_count = 0;
         ByteSlice* slices = object_artifact_slices(arena, artifact, &slice_count);
-        if (!file_publish_slices(output, slices, slice_count))
-        {
-            result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
-            result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
-        }
+        compiler_driver_publish_slices(arena, output, slices, slice_count, result);
         return;
     }
     ObjectFile link_inputs[3] = {object};
@@ -3721,7 +3818,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     if (dynamic_libraries.missing_request.length)
     {
         result->error = COMPILER_DRIVER_ERROR_LINK;
-        result->diagnostic = string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        result->diagnostic = dynamic_libraries.unsupported_script_path.length
+                                 ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
+                                                 dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
+                                 : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
         compiler_driver_dynamic_libraries_release(&dynamic_libraries);
         return;
     }
@@ -3933,10 +4033,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single
         // An assembly unit is already what the preprocessor would have
         // produced, so -E hands the text back unchanged.
         result.output = string_duplicate_arena(arena, source, false);
-        if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        if (invocation.output_path.length)
         {
-            result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
-            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
+            compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output), &result);
         }
         file_map_unmap(source_file);
         return result;
@@ -4039,10 +4138,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         result.output = source;
-        if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        if (invocation.output_path.length)
         {
-            result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
-            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
+            compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output), &result);
         }
         return result;
     }
@@ -4133,10 +4231,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         result.output = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
-        if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        if (invocation.output_path.length)
         {
-            result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
-            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
+            compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output), &result);
         }
         goto end;
     }
@@ -4758,6 +4855,21 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = S8("bootstrap traces require exactly one native C input and object or executable output");
         goto finish;
     }
+    if (string_equal(invocation.output_path, S8("-")))
+    {
+        bool text_output = !invocation.emit_llvm_bitcode &&
+                           (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY);
+        if (!text_output || invocation.input_count > 1)
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = text_output ? S8("cannot specify -o with multiple input files")
+                                            : S8("-o - is supported only for preprocessing and textual assembly output");
+            goto finish;
+        }
+        // Embedding callers retain text; the CLI writes it to stdout. GPU text
+        // follows its existing capture-output path through the same convention.
+        invocation.output_path = (String8){0};
+    }
     if (invocation.has_gpu_target)
     {
         result = compiler_driver_execute_gpu(arena, invocation, &warnings);
@@ -4888,13 +5000,15 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         goto finish;
     }
     if ((invocation.emit_llvm_bitcode || invocation.action == COMPILER_DRIVER_ACTION_OBJECT ||
-         invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY || invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY) &&
+         invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY || invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS ||
+         invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY) &&
         invocation.output_path.length)
     {
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         result.diagnostic = invocation.emit_llvm_bitcode                         ? S8("cannot specify -o with -emit-llvm and multiple input files")
                              : invocation.action == COMPILER_DRIVER_ACTION_OBJECT ? S8("cannot specify -o with -c and multiple input files")
                              : invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ? S8("cannot specify -o with -S and multiple input files")
+                             : invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS ? S8("cannot specify -o with -E and multiple input files")
                                                                                      : S8("cannot specify -o with -fsyntax-only and multiple input files");
         goto finish;
     }
@@ -5398,10 +5512,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                               .length = invocation.input_count,
                                           },
                                           false);
-        if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        if (invocation.output_path.length)
         {
-            result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
-            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
+            compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output), &result);
         }
         goto finish;
     }
@@ -5440,7 +5553,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (dynamic_libraries.missing_request.length)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        result.diagnostic = dynamic_libraries.unsupported_script_path.length
+                                ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
+                                                dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
+                                : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
         compiler_driver_dynamic_libraries_release(&dynamic_libraries);
         goto finish;
     }
