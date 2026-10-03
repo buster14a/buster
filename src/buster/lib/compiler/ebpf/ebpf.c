@@ -1501,7 +1501,7 @@ static void ebpf_fe_emit_prologue(EbpfFunctionEmitter* emitter)
             }
             else
             {
-                ebpf_fe_normalize(emitter, EBPF_REG_0, type, type->kind == IR_TYPE_INTEGER && type->is_signed);
+                ebpf_fe_normalize(emitter, EBPF_REG_0, type, type->is_signed);
             }
             incoming = EBPF_REG_0;
         }
