@@ -3943,93 +3943,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitT
     return result;
 }
 
-// Flag-less DWARF section names must survive the driver conversion as
-// nonallocated PROGBITS sections, observed from serialized ELF headers.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bare_dwarf_sections(UnitTestArguments* arguments)
-{
-    UnitTestResult result = {0};
-    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-    Arena* arena = temporary.arena;
-    static const struct
-    {
-        String8 name;
-        ObjectSectionKind kind;
-    } rows[] = {
-        {S8_INITIALIZER(".debug_info"), OBJECT_SECTION_DEBUG_INFO},
-        {S8_INITIALIZER(".debug_abbrev"), OBJECT_SECTION_DEBUG_ABBREV},
-        {S8_INITIALIZER(".debug_line"), OBJECT_SECTION_DEBUG_LINE},
-        {S8_INITIALIZER(".debug_str"), OBJECT_SECTION_DEBUG_STR},
-        {S8_INITIALIZER(".debug_loc"), OBJECT_SECTION_DEBUG_LOC},
-        {S8_INITIALIZER(".debug_ranges"), OBJECT_SECTION_DEBUG_RANGES},
-        {S8_INITIALIZER(".debug_addr"), OBJECT_SECTION_DEBUG_ADDR},
-        {S8_INITIALIZER(".debug_str_offsets"), OBJECT_SECTION_DEBUG_STR_OFFSETS},
-        {S8_INITIALIZER(".debug_line_str"), OBJECT_SECTION_DEBUG_LINE_STR},
-        {S8_INITIALIZER(".debug_rnglists"), OBJECT_SECTION_DEBUG_RNGLISTS},
-        {S8_INITIALIZER(".debug_loclists"), OBJECT_SECTION_DEBUG_LOCLISTS},
-    };
-    String8 source = S8("");
-    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
-    {
-        source = string_format(arena, S8("{S8}.section {S8}\n.byte {u32}\n"), source, rows[row].name, row + 1);
-    }
-    source = string_format(arena, S8("{S8}.section .debug_addr\n.balign 8\n.quad external\n"), source);
-    String8 input = buster_test_temporary_path(arena, S8("bare-dwarf-sections"), S8(".s"));
-    String8 output = buster_test_temporary_path(arena, S8("bare-dwarf-sections"), S8(".o"));
-    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
-    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
-    {
-        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
-        {
-            String8 command[] = {S8("-target"), targets[target], S8("-c"), input, S8("-o"), output};
-            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
-                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
-            if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
-            {
-                BUSTER_TEST(arguments, compiled.object.section_count == BUSTER_ARRAY_LENGTH(rows) && compiled.object.relocation_count == 1);
-                if (compiled.object.relocation_count == 1)
-                {
-                    ObjectRelocation relocation = compiled.object.relocations[0];
-                    BUSTER_TEST(arguments, relocation.section < compiled.object.section_count &&
-                        compiled.object.sections[relocation.section].kind == OBJECT_SECTION_DEBUG_ADDR && relocation.offset == 8 &&
-                        relocation.addend == 0 && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
-                        relocation.symbol < compiled.object.symbol_count &&
-                        string_equal(compiled.object.symbols[relocation.symbol].name, S8("external")));
-                }
-                FileMapRead map = file_map_read(arena, output, (FileReadOptions){0});
-                ObjectFile read = object_read(arena, map.bytes, compiled.object.target);
-                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE);
-                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
-                {
-                    u32 type = 0;
-                    u64 flags = UINT64_MAX;
-                    BUSTER_TEST(arguments, compiler_driver_test_elf_section_header(map.bytes, rows[row].name, &type, &flags) &&
-                                           type == 1 && flags == 0);
-                    u64 expected_length = rows[row].kind == OBJECT_SECTION_DEBUG_ADDR ? 16u : 1u;
-                    u32 expected_alignment = rows[row].kind == OBJECT_SECTION_DEBUG_ADDR ? 8u : 1u;
-                    if (row < compiled.object.section_count)
-                    {
-                        ObjectSection section = compiled.object.sections[row];
-                        BUSTER_TEST(arguments, section.kind == rows[row].kind && string_equal(section.name, rows[row].name) &&
-                                               section.alignment == expected_alignment && section.data.length == expected_length &&
-                                               section.data.pointer[0] == row + 1);
-                    }
-                    BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && rows[row].kind < read.section_count);
-                    if (read.error == OBJECT_ERROR_NONE && rows[row].kind < read.section_count)
-                    {
-                        ObjectSection section = read.sections[rows[row].kind];
-                        BUSTER_TEST(arguments, section.alignment == expected_alignment && section.data.length == expected_length &&
-                                               section.data.pointer[0] == row + 1);
-                    }
-                }
-                file_map_unmap(map);
-            }
-        }
-    }
-    scratch_end(temporary);
-    return result;
-}
-
 // Assemble through both suffix inference and explicit -x selection, serialize
 // the objects, and compare the complete text against independent literal words.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_statements(UnitTestArguments* arguments)
@@ -16641,6 +16554,93 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_elf_section_hea
         }
     }
 
+    return result;
+}
+
+// Flag-less DWARF section names must survive the driver conversion as
+// nonallocated PROGBITS sections, observed from serialized ELF headers.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bare_dwarf_sections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    static const struct
+    {
+        String8 name;
+        ObjectSectionKind kind;
+    } rows[] = {
+        {S8_INITIALIZER(".debug_info"), OBJECT_SECTION_DEBUG_INFO},
+        {S8_INITIALIZER(".debug_abbrev"), OBJECT_SECTION_DEBUG_ABBREV},
+        {S8_INITIALIZER(".debug_line"), OBJECT_SECTION_DEBUG_LINE},
+        {S8_INITIALIZER(".debug_str"), OBJECT_SECTION_DEBUG_STR},
+        {S8_INITIALIZER(".debug_loc"), OBJECT_SECTION_DEBUG_LOC},
+        {S8_INITIALIZER(".debug_ranges"), OBJECT_SECTION_DEBUG_RANGES},
+        {S8_INITIALIZER(".debug_addr"), OBJECT_SECTION_DEBUG_ADDR},
+        {S8_INITIALIZER(".debug_str_offsets"), OBJECT_SECTION_DEBUG_STR_OFFSETS},
+        {S8_INITIALIZER(".debug_line_str"), OBJECT_SECTION_DEBUG_LINE_STR},
+        {S8_INITIALIZER(".debug_rnglists"), OBJECT_SECTION_DEBUG_RNGLISTS},
+        {S8_INITIALIZER(".debug_loclists"), OBJECT_SECTION_DEBUG_LOCLISTS},
+    };
+    String8 source = S8("");
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+    {
+        source = string_format(arena, S8("{S8}.section {S8}\n.byte {u32}\n"), source, rows[row].name, row + 1);
+    }
+    source = string_format(arena, S8("{S8}.section .debug_addr\n.balign 8\n.quad external\n"), source);
+    String8 input = buster_test_temporary_path(arena, S8("bare-dwarf-sections"), S8(".s"));
+    String8 output = buster_test_temporary_path(arena, S8("bare-dwarf-sections"), S8(".o"));
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            String8 command[] = {S8("-target"), targets[target], S8("-c"), input, S8("-o"), output};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+            {
+                BUSTER_TEST(arguments, compiled.object.section_count == BUSTER_ARRAY_LENGTH(rows) && compiled.object.relocation_count == 1);
+                if (compiled.object.relocation_count == 1)
+                {
+                    ObjectRelocation relocation = compiled.object.relocations[0];
+                    BUSTER_TEST(arguments, relocation.section < compiled.object.section_count &&
+                        compiled.object.sections[relocation.section].kind == OBJECT_SECTION_DEBUG_ADDR && relocation.offset == 8 &&
+                        relocation.addend == 0 && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                        relocation.symbol < compiled.object.symbol_count &&
+                        string_equal(compiled.object.symbols[relocation.symbol].name, S8("external")));
+                }
+                FileMapRead map = file_map_read(arena, output, (FileReadOptions){0});
+                ObjectFile read = object_read(arena, map.bytes, compiled.object.target);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE);
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+                {
+                    u32 type = 0;
+                    u64 flags = UINT64_MAX;
+                    BUSTER_TEST(arguments, compiler_driver_test_elf_section_header(map.bytes, rows[row].name, &type, &flags) &&
+                                           type == 1 && flags == 0);
+                    u64 expected_length = rows[row].kind == OBJECT_SECTION_DEBUG_ADDR ? 16u : 1u;
+                    u32 expected_alignment = rows[row].kind == OBJECT_SECTION_DEBUG_ADDR ? 8u : 1u;
+                    if (row < compiled.object.section_count)
+                    {
+                        ObjectSection section = compiled.object.sections[row];
+                        BUSTER_TEST(arguments, section.kind == rows[row].kind && string_equal(section.name, rows[row].name) &&
+                                               section.alignment == expected_alignment && section.data.length == expected_length &&
+                                               section.data.pointer[0] == row + 1);
+                    }
+                    BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && rows[row].kind < read.section_count);
+                    if (read.error == OBJECT_ERROR_NONE && rows[row].kind < read.section_count)
+                    {
+                        ObjectSection section = read.sections[rows[row].kind];
+                        BUSTER_TEST(arguments, section.alignment == expected_alignment && section.data.length == expected_length &&
+                                               section.data.pointer[0] == row + 1);
+                    }
+                }
+                file_map_unmap(map);
+            }
+        }
+    }
+    scratch_end(temporary);
     return result;
 }
 
