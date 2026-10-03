@@ -909,7 +909,7 @@ class CompareStatisticsTests(unittest.TestCase):
         self.assertEqual(lab.compare_verdict(metrics, None)["outcome"], "inconclusive")
         metrics["wall"] = lab.compare_series(paired_sample(30, 0.95, 1), "s", "lower", 1, time_metric=True)
         self.assertTrue(lab.compare_verdict(metrics, None)["text"].startswith(
-            "Candidate is FASTER: wall time B/A 0.9499 (-5.01%), 95% CI [0.9481, 0.9516] over 30 pairs, beyond the 1% practical floor."))
+            "Candidate is FASTER: wall time B/A 0.9499 (-5.01%), 95% CI [0.9481, 0.9516] over 30 pairs, beyond the 0.5% practical floor."))
 
     def test_proxy_alone_is_not_a_win(self):
         metrics = {name: lab.compare_series(paired_sample(30, 1.0, 11), "s", "lower", 1, time_metric=True) for name in COMPARE_METRIC_NAMES}
@@ -1277,6 +1277,26 @@ class CliTests(unittest.TestCase):
         for arguments in ([], ["run"], ["compare"], ["report"]):
             result = subprocess.run([sys.executable, script] + arguments + ["--help"], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, (arguments, result.stderr))
+
+
+
+class Lab4ReviewTests(unittest.TestCase):
+    # LAB4: adjacent unsymbolised addresses of one routine moved together and
+    # each read "exceeds bound"; they are now one row per binary.
+    def test_unresolved_addresses_collapse_per_binary(self):
+        shares = {"libc.so.6 0x18f622": 3.57, "libc.so.6 0x18f628": 3.50, "[unknown] 0xffffffff85a85cd7": 1.0,
+                  "c_lex_dispatch": 39.91, "ide 0x18f5ce": 0.5}
+        collapsed = lab.collapse_unresolved(shares)
+        self.assertAlmostEqual(collapsed["libc.so.6 (unresolved addresses)"], 7.07)
+        self.assertEqual(collapsed["[unknown] (unresolved addresses)"], 1.0)
+        self.assertEqual(collapsed["ide (unresolved addresses)"], 0.5)
+        self.assertEqual(collapsed["c_lex_dispatch"], 39.91)
+
+    # LAB4: an estimate that rounds to zero printed as "-0".
+    def test_no_negative_zero_estimate(self):
+        self.assertEqual(lab.whole_or_zero(-0.3), 0.0)
+        self.assertEqual(str(lab.whole_or_zero(-0.0)), "0.0")
+        self.assertEqual(lab.whole_or_zero(-80.0), -80.0)
 
 
 if __name__ == "__main__":

@@ -597,9 +597,11 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    cannot re-derive missing IBS reports of such a run later.
 3. Read the first line of `report.md` or `verdict` in `summary.json`. Every
    outcome is judged against the practical floor `--min-effect` (default
-   1.0%, `verdict.min_effect_percent`):
+   0.5%, `verdict.min_effect_percent`; LAB4's A/A with fresh copies measured
+   B/A 0.9995 with 95% CI [0.9986, 1.0003], so 0.5% is about six times the
+   interval's half-width on that host):
    - `faster`/`slower`: the whole 95% CI of wall-time B/A lies beyond the
-     floor (for 1%: `ci_high < 0.99` or `ci_low > 1.01`). The ratio is the
+     floor (for 0.5%: `ci_high < 0.995` or `ci_low > 1.005`). The ratio is the
      median of per-pair ratios; its CI comes from sign-test order statistics
      (exact and distribution-free; it assumes only independent pairs and needs
      at least 6). A seeded bootstrap CI of the geometric mean is the

@@ -80,7 +80,7 @@ byte-identical output across its own runs, then timed in paired ABBA blocks
 after a 2-pair pilot block (choose_pair_count).  Per metric it reports the
 median per-pair ratio B/A with an exact sign-test 95% CI (sign_test_rank), a
 seeded bootstrap CI of the geometric mean, and min-vs-min; the verdict is
-wall time alone against a practical floor (--min-effect, default 1%): faster /
+wall time alone against a practical floor (--min-effect, default 0.5%): faster /
 slower when the whole CI lies beyond it, below-floor when the CI excludes 1.0
 but reaches inside it, else no detectable difference, with order-effect and
 drift checks and a warning when identical instruction counts take different
@@ -221,8 +221,10 @@ SYMBOL_MOVERS = 10
 # Practical-effect floor (--min-effect, percent): a time CI that excludes 1.0
 # but reaches inside +/-floor is "below-floor", not faster/slower.  LAB3 (#36,
 # Zen 5) measured a stable 0.50% wall offset between two byte-identical copies
-# of one binary that the pair-to-pair CI (+/-0.09%) did not cover.
-DEFAULT_MIN_EFFECT = 1.0
+# of one binary that the pair-to-pair CI (+/-0.09%) did not cover; LAB4, with
+# a fresh binary copy per run, measured A/A 0.9995 [0.9986, 1.0003].  The 0.5%
+# default floor is about six times that interval's half-width.
+DEFAULT_MIN_EFFECT = 0.5
 # instructions:u B/A this close to 1 counts as identical work (instance warning).
 IDENTICAL_WORK = 1e-6
 # Count metrics whose ratio of medians and median of per-pair ratios differ by
@@ -241,7 +243,7 @@ COMPARE_METHOD = {
     "bootstrap": "percentile bootstrap 95% CI of the geometric-mean ratio, resampling pairs with the recorded seed (cross-check)",
     "verdict": "wall time (harness span) only: faster/slower when its whole CI lies beyond 1 -/+ the practical floor; below-floor "
                "when the CI excludes 1.0 but reaches inside the floor; no detectable difference when it contains 1.0",
-    "floor": "--min-effect percent (default 1.0) applies to every time and counter outcome except instructions (exact); "
+    "floor": "--min-effect percent (default 0.5) applies to every time and counter outcome except instructions (exact); "
              "LAB3 measured a 0.5% per-binary-instance offset in A/A that the pair-to-pair CI does not cover",
     "fresh_copy": "each timed run and profile capture executes a new read/write copy of its binary (new inode, fsync'd) that is "
                   "deleted afterwards, so page-cache placement varies per run instead of biasing one variant (--no-fresh-copy disables)",
@@ -2228,6 +2230,27 @@ def symbol_shares(text):
     return shares
 
 
+UNRESOLVED_SYMBOL = re.compile(r"^(\S+) 0x[0-9a-f]+$")
+
+
+def collapse_unresolved(shares):
+    """Sum the shares of unresolved addresses per binary (`libc.so.6 0x18f622`,
+    `[unknown] 0x...`) into one `<binary> (unresolved addresses)` row.  Adjacent
+    addresses of one unsymbolised routine move together, so diffing them one
+    by one makes a single shift look like several independent movers (LAB4)."""
+    collapsed = {}
+    for symbol, share in shares.items():
+        match = UNRESOLVED_SYMBOL.match(symbol)
+        key = "%s (unresolved addresses)" % match.group(1) if match else symbol
+        collapsed[key] = (collapsed.get(key) or 0.0) + share if share is not None else collapsed.get(key)
+    return collapsed
+
+
+def whole_or_zero(value):
+    """An event-count estimate that rounds to zero is zero, never `-0`."""
+    return 0.0 if abs(value) < 0.5 else value
+
+
 def symbol_movers(a_text, b_text, limit=SYMBOL_MOVERS, min_samples=MIN_MOVER_SAMPLES):
     """Symbols whose sample share moved most from A to B.  A symbol absent
     from one report was below its --percent-limit there (share None, counted
@@ -2238,7 +2261,7 @@ def symbol_movers(a_text, b_text, limit=SYMBOL_MOVERS, min_samples=MIN_MOVER_SAM
     needs |delta| > MOVER_BOUND_FACTOR x noise (`beyond_noise`: > 1x).  A
     capture pair with fewer than min_samples samples on either side is
     `reliable` False and lists no movers."""
-    a_shares, b_shares = symbol_shares(a_text), symbol_shares(b_text)
+    a_shares, b_shares = collapse_unresolved(symbol_shares(a_text)), collapse_unresolved(symbol_shares(b_text))
     a_count, b_count = event_count(a_text), event_count(b_text)
     a_samples, b_samples = sample_count(a_text), sample_count(b_text)
     reliable = bool(a_samples and b_samples and min(a_samples, b_samples) >= min_samples)
@@ -2256,7 +2279,7 @@ def symbol_movers(a_text, b_text, limit=SYMBOL_MOVERS, min_samples=MIN_MOVER_SAM
                      "beyond_noise": None if noise is None else abs(delta) > noise,
                      "exceeds_bound": None if noise is None else abs(delta) > MOVER_BOUND_FACTOR * noise,
                      "a_estimate": a_estimate, "b_estimate": b_estimate,
-                     "delta_estimate": (b_estimate or 0.0) - (a_estimate or 0.0) if a_count and b_count else None})
+                     "delta_estimate": whole_or_zero((b_estimate or 0.0) - (a_estimate or 0.0)) if a_count and b_count else None})
     rows.sort(key=lambda row: (-abs(row["delta_share"]), row["symbol"]))
     note = None if reliable else "too few samples: shares unreliable (A %s, B %s; at least %d per capture needed)" % (
         fmt(a_samples), fmt(b_samples), min_samples)
