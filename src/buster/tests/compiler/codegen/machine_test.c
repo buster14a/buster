@@ -4367,7 +4367,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_timestamps(UnitTestAr
     {
         AssemblyEncodeResult encoded = assembly_encode(arguments->arena, assembler_rejected[invalid],
             (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT, .inline_assembly = true});
-        BUSTER_TEST_RAW(arguments, encoded.diagnostic_count != 0 && encoded.bytes.length == 0, assembler_rejected[invalid]);
+        BUSTER_TEST_RAW(arguments, encoded.diagnostic_count != 0, assembler_rejected[invalid]);
+        if (invalid >= 2 && encoded.diagnostic_count)
+        {
+            BUSTER_TEST_RAW(arguments, encoded.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                encoded.diagnostics[0].line == (invalid == 3 ? 2u : 1u), assembler_rejected[invalid]);
+        }
+        // Raw assembly retains earlier valid instructions on a later source
+        // diagnostic. Both inline codegen callers reject the whole template
+        // using diagnostic_count, so only the valid RDTSCP prefix may remain.
+        if (invalid == 3)
+        {
+            BUSTER_TEST_RAW(arguments, encoded.bytes.length == bytes[1].length &&
+                memcmp(encoded.bytes.pointer, bytes[1].pointer, bytes[1].length) == 0, assembler_rejected[invalid]);
+        }
+        else
+        {
+            BUSTER_TEST_RAW(arguments, encoded.bytes.length == 0, assembler_rejected[invalid]);
+        }
     }
     String8 rejected[] = {S8("rdtsc %eax"), S8("rdtscp $1"), S8("rdtscx")};
     for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(rejected); invalid += 1)
