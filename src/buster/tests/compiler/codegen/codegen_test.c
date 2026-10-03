@@ -1588,7 +1588,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_block_local_storage(UnitTe
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         String8 row = rows[shape];
-        String8 source = {.pointer = arena_allocate(temporary.arena, u8, prefix.length + REPETITIONS * row.length + suffix.length),
+        String8 source = {.pointer = arena_allocate(temporary.arena, char8, prefix.length + REPETITIONS * row.length + suffix.length),
                           .length = prefix.length + REPETITIONS * row.length + suffix.length};
         memcpy(source.pointer, prefix.pointer, prefix.length);
         for (u32 repetition = 0; repetition < REPETITIONS; repetition += 1)
