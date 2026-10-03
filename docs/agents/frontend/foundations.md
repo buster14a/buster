@@ -1260,9 +1260,17 @@ The supported contracts are explicit, not selected by the host compiler:
   outside `int` gives **all** members its enum type. An all-small list keeps
   `int` enumerators. Fixed-underlying enum members have the enum type both
   during the list and after completion, including narrow bases.
+- Windows uses the MSVC ABI for an enum without an explicit base: its
+  compatible type and completed members are signed `int`. Explicit
+  initializer ICEs convert to that 32-bit type before the next initializer
+  observes them, including unsigned and 128-bit values. An implicit
+  successor retains its declaration-point value/type until completion, when
+  its published value converts to `int`. Explicit fixed bases keep their
+  declared type and representability rules. MinGW environment modeling is
+  separately tracked in #1492.
 
-Ordinary compatible-type selection considers both full-width signed-magnitude
-limits. It chooses an unsigned type for an entirely nonnegative range, or a
+Outside the MSVC rule, ordinary compatible-type selection considers both
+full-width signed-magnitude limits. It chooses an unsigned type for an entirely nonnegative range, or a
 signed type when negative values occur, trying int, long, long long and the
 supported 128-bit extension in rank order. Widths come from the target, not the
 host: the same 2^32 value therefore selects unsigned long on LP64 and unsigned
@@ -1354,7 +1362,20 @@ member bounds keep their bindings. A header that defines no tag opens no scope.
 `compiler_driver_test_scoped_constant_execution` cover this (#1304).
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
-Windows x86-64, and validates canonical IR in both frontend SSA forms.
+Windows x86-64. `c_test_msvc_enum_abi` pins the MSVC ordinary/fixed distinction,
+unsigned/wide narrowing, declaration-point and completed values, record offsets,
+canonical parameter/return width and sign, and an 18-word constant data image on
+Windows x86-64/AArch64 with Linux/macOS neighbors in both frontend forms. Its
+literal Windows expectations were independently verified with Clang 23.1.1
+targeting `*-pc-windows-msvc` in GNU17/GNU23. The policy also follows
+[LLVM 21.1.8's enum declaration and completion rules](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/clang/lib/Sema/SemaDecl.cpp).
+LLVM uses `Apache-2.0 WITH LLVM-exception`; no implementation is imported.
+
+The generic wide-enum fixtures retain their non-Windows oracles. Their Windows
+branches pin MSVC values/types; wide Windows bit-field neighbors use explicit
+fixed bases because ordinary MSVC enums supply a 32-bit signed storage type.
+
+It also validates canonical IR in both frontend SSA forms.
 `c_test_fixed_and_wide_enumerator_types` covers narrow fixed bases, preserved
 128-bit references and signed magnitudes. On Linux x86-64,
 `c_test_enumerator_type_differential` executes the same assertion-bearing source

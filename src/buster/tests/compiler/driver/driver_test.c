@@ -15155,7 +15155,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_dynamic_tls(UnitTe
         for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(variants); variant += 1)
         {
             String8 object_path = string_format_z(arena, S8("{S8}/foreign-{u32}-{u32}.o"), directory, compiler, variant);
-            String8 compile[] = {compilers[compiler], S8("-O2"), S8("-fPIC"), variants[variant], S8("-c"), S8("-o"), object_path, foreign_path};
+            String8 compile[] = {compilers[compiler], S8("-O2"), S8("-fPIC"), S8("-gz=none"), variants[variant], S8("-c"), S8("-o"), object_path, foreign_path};
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0}, (SliceString8){0},
                                                         (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             bool compiled = spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;

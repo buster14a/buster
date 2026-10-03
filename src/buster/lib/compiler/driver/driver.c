@@ -54,6 +54,9 @@
 // compiler_driver_publish_slices preserves atomic artifacts and write failures;
 // execute_invocation normalizes textual -o - before choosing a pipeline.
 
+// compiler_driver_elf_shared_is_incompatible keeps alien shared candidates
+// from hiding usable archives during that ordered search.
+
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/driver/codegen_configurations.h>
@@ -3209,6 +3212,20 @@ BUSTER_GLOBAL_LOCAL CPreprocessorDefinition compiler_driver_c_definition(String8
     };
 }
 
+// An ELF64 shared header with a foreign machine cannot satisfy this target.
+// Leave unrecognized/malformed files to export discovery's existing refusal
+// instead of silently treating them as a missing shared-library candidate.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_shared_is_incompatible(ByteSlice bytes, Target target)
+{
+    u16 type = 0;
+    u16 machine = 0;
+    bool recognized = target.os == OPERATING_SYSTEM_LINUX && bytes.length >= 64 &&
+                      memcmp(bytes.pointer, "\x7f" "ELF", 4) == 0 && bytes.pointer[4] == 2 && bytes.pointer[5] == 1 && bytes.pointer[6] == 1 &&
+                      compiler_driver_read_u16(bytes, 16, &type) && type == 3 && compiler_driver_read_u16(bytes, 18, &machine);
+    u16 expected = target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
+    return recognized && machine != expected;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, CompilerDriverInvocation invocation, String8 requested, bool* found,
                                                                   String8* path_out, FileMapRead* map_out)
 {
@@ -3237,7 +3254,7 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
             String8 shared_path = string_format_z(arena, S8("{S8}/{S8}"), root, shared_name);
             FileMapRead shared_map = file_map_read(arena, shared_path, (FileReadOptions){0});
             ByteSlice shared = shared_map.bytes;
-            if (shared.pointer)
+            if (shared.pointer && !compiler_driver_elf_shared_is_incompatible(shared, invocation.target))
             {
                 file_map_unmap(shared_map);
                 return result;
