@@ -151,6 +151,71 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
     }
 
     {
+        char8 haystack_buffer[160];
+        char8 needle_buffer[64];
+        u64 state = 0x9e3779b97f4a7c15ull;
+        bool all_match = true;
+
+        for (u64 iteration = 0; iteration < 4000; iteration += 1)
+        {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            u64 alphabet = 1 + (state % 3);
+            u64 haystack_length = (state >> 8) % BUSTER_ARRAY_LENGTH(haystack_buffer);
+            u64 needle_length = 1 + ((state >> 24) % BUSTER_ARRAY_LENGTH(needle_buffer));
+
+            for (u64 i = 0; i < haystack_length; i += 1)
+            {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                haystack_buffer[i] = (char8)(state % alphabet);
+            }
+
+            if ((iteration & 1) && needle_length <= haystack_length)
+            {
+                u64 start = (state >> 32) % (haystack_length - needle_length + 1);
+                memcpy(needle_buffer, haystack_buffer + start, needle_length);
+                needle_buffer[(state >> 40) % needle_length] ^= (char8)((iteration & 2) >> 1);
+            }
+            else
+            {
+                for (u64 i = 0; i < needle_length; i += 1)
+                {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    needle_buffer[i] = (char8)(state % alphabet);
+                }
+            }
+
+            String8 haystack = {.pointer = haystack_buffer, .length = haystack_length};
+            String8 needle = {.pointer = needle_buffer, .length = needle_length};
+            u64 expected = BUSTER_STRING_NO_MATCH;
+            if (needle_length <= haystack_length)
+            {
+                for (u64 i = 0; i + needle_length <= haystack_length; i += 1)
+                {
+                    if (memcmp(haystack_buffer + i, needle_buffer, needle_length) == 0)
+                    {
+                        expected = i;
+                        break;
+                    }
+                }
+            }
+
+            all_match = all_match && string_first_sequence(haystack, needle) == expected;
+        }
+
+        BUSTER_TEST(arguments, all_match);
+        BUSTER_TEST(arguments, string_first_sequence(S8("abc"), S8("")) == 0);
+        BUSTER_TEST(arguments, string_first_sequence(S8("aaaaaaaaaaaaaaaaaaaab"), S8("aaaaaaaaaaaaaaaaaaaaab")) == BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"), S8("aaaaaaaaaaaaaaaaaaab")) == 20);
+        BUSTER_TEST(arguments, string_first_sequence(S8("xyzabcabcabcabcabcabcabd!"), S8("abcabcabcabcabcabd")) == 6);
+    }
+
+    {
         String8 empty = {0};
         String8 invalid = {.length = 1};
         String8 x8 = S8("x");

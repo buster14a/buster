@@ -1566,6 +1566,144 @@ void string_print(String8 format, ...)
     va_end(variable_arguments);
 }
 
+#define STRING_FIRST_SEQUENCE_TWO_WAY_THRESHOLD (16)
+
+// Crochemore-Perrin two-way search: O(N + M) comparisons, O(1) memory.
+BUSTER_GLOBAL_LOCAL u64 string_first_sequence_two_way(String8 s, String8 sub)
+{
+    const u8* restrict haystack = (const u8*)s.pointer;
+    const u8* restrict needle = (const u8*)sub.pointer;
+    s64 l = (s64)sub.length;
+
+    s64 ip = -1;
+    s64 jp = 0;
+    s64 k = 1;
+    s64 p = 1;
+    while (jp + k < l)
+    {
+        if (needle[ip + k] == needle[jp + k])
+        {
+            if (k == p)
+            {
+                jp += p;
+                k = 1;
+            }
+            else
+            {
+                k += 1;
+            }
+        }
+        else if (needle[ip + k] > needle[jp + k])
+        {
+            jp += k;
+            k = 1;
+            p = jp - ip;
+        }
+        else
+        {
+            ip = jp;
+            jp += 1;
+            k = 1;
+            p = 1;
+        }
+    }
+    s64 ms = ip;
+    s64 p0 = p;
+
+    ip = -1;
+    jp = 0;
+    k = 1;
+    p = 1;
+    while (jp + k < l)
+    {
+        if (needle[ip + k] == needle[jp + k])
+        {
+            if (k == p)
+            {
+                jp += p;
+                k = 1;
+            }
+            else
+            {
+                k += 1;
+            }
+        }
+        else if (needle[ip + k] < needle[jp + k])
+        {
+            jp += k;
+            k = 1;
+            p = jp - ip;
+        }
+        else
+        {
+            ip = jp;
+            jp += 1;
+            k = 1;
+            p = 1;
+        }
+    }
+
+    if (ip > ms)
+    {
+        ms = ip;
+    }
+    else
+    {
+        p = p0;
+    }
+
+    s64 mem0;
+    if (!memory_compare(needle, needle + p, (u64)(ms + 1)))
+    {
+        mem0 = 0;
+        p = BUSTER_MAX(ms, l - ms - 1) + 1;
+    }
+    else
+    {
+        mem0 = l - p;
+    }
+
+    u64 result = BUSTER_STRING_NO_MATCH;
+    s64 mem = 0;
+    s64 position = 0;
+    s64 haystack_length = (s64)s.length;
+
+    while (haystack_length - position >= l)
+    {
+        const u8* h = haystack + position;
+        k = BUSTER_MAX(ms + 1, mem);
+        while (k < l && needle[k] == h[k])
+        {
+            k += 1;
+        }
+
+        if (k < l)
+        {
+            position += k - ms;
+            mem = 0;
+        }
+        else
+        {
+            k = ms + 1;
+            while (k > mem && needle[k - 1] == h[k - 1])
+            {
+                k -= 1;
+            }
+
+            if (k <= mem)
+            {
+                result = (u64)position;
+                break;
+            }
+
+            position += p;
+            mem = mem0;
+        }
+    }
+
+    return result;
+}
+
 u64 string_first_sequence(String8 s, String8 sub)
 {
     u64 result = BUSTER_STRING_NO_MATCH;
@@ -1573,6 +1711,10 @@ u64 string_first_sequence(String8 s, String8 sub)
     if (sub.length == 0)
     {
         result = 0;
+    }
+    else if (s.length >= sub.length && sub.length > STRING_FIRST_SEQUENCE_TWO_WAY_THRESHOLD)
+    {
+        result = string_first_sequence_two_way(s, sub);
     }
     else if (s.length >= sub.length)
     {
