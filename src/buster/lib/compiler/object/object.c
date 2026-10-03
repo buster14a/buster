@@ -5658,11 +5658,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     {
                         if (target.cpu_arch == CPU_ARCH_X86_64)
                         {
-                            // R_X86_64_PLT32 reads back as a plain rel32: a
-                            // call through a PLT entry and a direct call
-                            // resolve identically here, and only the writer
-                            // has to keep the distinction (a shared link
-                            // refuses PC32 against an undefined function).
+                            // PLT32 states an explicit PLT reference. PC32
+                            // can expose a function's address, which needs
+                            // canonical-address handling rather than a thunk.
+                            // Preserve this distinction through object reads.
                             // The four GOT families stay distinct: a
                             // GOTPCRELX is a GOTPCREL the producer promises is
                             // relaxable, and the two X spellings differ in
@@ -5671,7 +5670,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             // there, so neither survives being collapsed.
                             kind = relocation_type == 1                           ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 24                        ? OBJECT_RELOCATION_X86_64_PC64
-                                   : relocation_type == 2 || relocation_type == 4 ? OBJECT_RELOCATION_X86_64_PC32
+                                   : relocation_type == 2                         ? OBJECT_RELOCATION_X86_64_PC32
+                                   : relocation_type == 4                         ? OBJECT_RELOCATION_X86_64_PLT32
                                    : relocation_type == 9                         ? OBJECT_RELOCATION_X86_64_GOTPCREL
                                    : relocation_type == 41                        ? OBJECT_RELOCATION_X86_64_GOTPCRELX
                                    : relocation_type == 42                        ? OBJECT_RELOCATION_X86_64_REX_GOTPCRELX
@@ -5852,7 +5852,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 }
                                 addend = (s64)(s32)stored;
                             }
-                            else if (kind == OBJECT_RELOCATION_X86_64_PC32 || object_relocation_kind_is_x86_got(kind) ||
+                            else if (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 || object_relocation_kind_is_x86_got(kind) ||
                                      kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                                      kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
                                      kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 ||
@@ -14855,7 +14855,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                 break;
             }
             u8* target = (u8*)address + section_offsets[symbol->section] + symbol->value;
-            if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
+            if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32)
             {
                 s64 displacement = 0;
                 if (!object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||

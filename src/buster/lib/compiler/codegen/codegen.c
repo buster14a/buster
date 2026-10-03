@@ -14705,8 +14705,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             // definition that replaces this one replaces it
                             // here too. `mov` and `lea` take the same
                             // rip-relative operand, so only the mnemonic and
-                            // the relocation family differ.
-                            bool got_indirect = position_independent && ir_symbol_is_interposable(symbol);
+                            // the relocation family differ. Linux undefined
+                            // default-visible weak function addresses also
+                            // need a GOT value in the default model: a PLT
+                            // address cannot preserve an absent provider's zero.
+                            bool weak_function_address = target.os == OPERATING_SYSTEM_LINUX && symbol &&
+                                                         symbol->kind == IR_SYMBOL_FUNCTION && !symbol->is_definition &&
+                                                         symbol->is_weak && !symbol->is_hidden;
+                            bool got_indirect = weak_function_address || (position_independent && ir_symbol_is_interposable(symbol));
                             BusterX86MetadataPhysicalOperand address_operands[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
                                 codegen_canonical_x64_metadata_rip_relative(64, 0),
