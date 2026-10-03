@@ -113,11 +113,13 @@ jobs:
         run: |
           set -euo pipefail
           /bin/bash --version
+          # Each owned child expands its repository and log paths after startup.
+          # shellcheck disable=SC2016
           exec python3 ios/monitor_groups.py \
-            'python3 ios/hosted_signing_budget_test.py 2>&1 | tee "$RUNNER_TEMP/ios-signing-budget.log"' \
-            'bash ios/install_lifecycle_test.sh 2>&1 | tee "$RUNNER_TEMP/ios-install-lifecycle.log"
-          /bin/bash ios/launch_diagnostics_mock_test.sh 2>&1 | tee "$RUNNER_TEMP/ios-launch-diagnostics.log"
-          bash tests/mobile_ci_scripts_test.sh 2>&1 | tee "$RUNNER_TEMP/mobile-lifecycle.log"'
+            'python3 "$BUSTER_MOBILE_TEST_REPO_ROOT/ios/hosted_signing_budget_test.py" 2>&1 | tee "$RUNNER_TEMP/ios-signing-budget.log"' \
+            'bash "$BUSTER_MOBILE_TEST_REPO_ROOT/ios/install_lifecycle_test.sh" 2>&1 | tee "$RUNNER_TEMP/ios-install-lifecycle.log"' \
+            '/bin/bash "$BUSTER_MOBILE_TEST_REPO_ROOT/ios/launch_diagnostics_mock_test.sh" 2>&1 | tee "$RUNNER_TEMP/ios-launch-diagnostics.log"' \
+            'bash "$BUSTER_MOBILE_TEST_REPO_ROOT/tests/mobile_ci_scripts_test.sh" 2>&1 | tee "$RUNNER_TEMP/mobile-lifecycle.log"'
       - name: Exercise Android monitor and batch status attribution
         id: android_status
         if: ${{ !cancelled() && steps.lifecycle.outcome == 'success' }}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Own the hosted signing group beside the sequential mobile lifecycle group.
+"""Own the four independent hosted mobile fixture groups.
 
 Each direct session-leader anchor retains its group until final dispatch. Its
 private pipe reports payload status without reaping the anchor. Cancellation
@@ -19,7 +19,8 @@ import time
 TERM_GRACE_SECONDS = 1
 KILL_REAP_SECONDS = 1
 STATUS_LIMIT = 256
-ROLES = ("signing", "lifecycle")
+ROLES = ("signing", "install", "attached", "shared")
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class GroupError(RuntimeError):
@@ -65,10 +66,17 @@ def start_group(role, command, evidence_root, groups):
     read_fd = write_fd = None
     try:
         read_fd, write_fd = os.pipe()
-        environment = dict(os.environ, BUSTER_MOBILE_TEST_EVIDENCE_DIR=str(evidence_root / role))
+        role_root = evidence_root / role
+        working = role_root / "work"
+        temporary = role_root / "tmp"
+        working.mkdir(parents=True, exist_ok=True)
+        temporary.mkdir(parents=True, exist_ok=True)
+        environment = dict(os.environ, BUSTER_MOBILE_TEST_EVIDENCE_DIR=str(role_root),
+                           BUSTER_MOBILE_TEST_REPO_ROOT=str(ROOT), TMPDIR=str(temporary))
         process = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "--anchor", str(write_fd), command],
-            stdin=subprocess.DEVNULL, env=environment, pass_fds=(write_fd,), start_new_session=True,
+            stdin=subprocess.DEVNULL, env=environment, cwd=working,
+            pass_fds=(write_fd,), start_new_session=True,
         )
         groups[role] = {"process": process, "pid": process.pid, "fd": read_fd,
                         "bytes": bytearray(), "status": None}
@@ -117,7 +125,7 @@ def close_groups(groups, term_first):
                 errors.append(role + " TERM dispatch: " + str(error))
         time.sleep(TERM_GRACE_SECONDS)
     for role, group in groups.items():
-        # No poll/wait/communicate has released either direct anchor yet.
+        # No poll/wait/communicate has released any direct anchor yet.
         try:
             os.killpg(group["pid"], signal.SIGKILL)
         except OSError as error:
@@ -141,17 +149,19 @@ def main():
     cancelled = False
     previous = {signum: signal.signal(signum, cancel) for signum in (signal.SIGINT, signal.SIGTERM)}
     try:
-        if len(sys.argv) != 3:
-            raise GroupError("usage: monitor_groups.py SIGNING_COMMAND LIFECYCLE_COMMAND")
-        temporary = Path(os.environ["RUNNER_TEMP"])
+        if len(sys.argv) != len(ROLES) + 1:
+            raise GroupError("usage: monitor_groups.py SIGNING_COMMAND INSTALL_COMMAND ATTACHED_COMMAND SHARED_COMMAND")
+        temporary = Path(os.environ["RUNNER_TEMP"]).resolve()
         for role, command in zip(ROLES, sys.argv[1:]):
             start_group(role, command, temporary / "mobile-lifecycle-evidence", groups)
         collect_statuses(groups)
-        signing, lifecycle = (groups[role]["status"] for role in ROLES)
-        line = "IOS_LIFECYCLE_GROUPS signing_status=%d lifecycle_status=%d\n" % (signing, lifecycle)
+        line = "IOS_LIFECYCLE_GROUPS " + " ".join("%s_status=%d" % (role, groups[role]["status"]) for role in ROLES) + "\n"
         print(line, end="", flush=True)
         (temporary / "ios-lifecycle-groups.log").write_text(line)
-        result = signing if signing else lifecycle
+        result = 0
+        for role in ROLES:
+            if groups[role]["status"] and result == 0:
+                result = groups[role]["status"]
         completed = True
     except Cancelled as error:
         result = error.status

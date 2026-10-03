@@ -228,19 +228,23 @@
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim
   CoreSimulator descendants are contained by a group.
-  The ten-minute hosted fixture job runs the independent signing suite beside
-  the sequential install/capture/caller/attached-monitor/shared lifecycle chain.
-  `ios/monitor_groups.py` gives each group a separate evidence root and an
-  immediately owned session-leader anchor. Private pipes retain both payload
-  statuses without reaping either anchor; final group KILL precedes individual
-  anchor waits and either payload failure is propagated. INT/TERM retains
+  The ten-minute hosted fixture job runs four independent signing, install,
+  attached-monitor and shared-mobile groups concurrently. The attached group
+  retains its capture/caller/mock sequence; the shared group retains its asset
+  graphs/mobile cases/legacy monitor sequence. `ios/monitor_groups.py` gives each
+  group separate evidence, temporary and working directories plus an immediately
+  owned session-leader anchor. Payloads use absolute repository script paths.
+  Private pipes retain all four payload statuses without reaping any anchor;
+  final group KILL precedes individual anchor waits and the first nonzero status
+  in the fixed role order is propagated. INT/TERM retains
   status 130/143 through one-second TERM grace, final KILL and one absolute
-  one-second reap bound while both anchors remain owned. Android controls
-  begin only after both groups
-  pass. `python3 ios/monitor_workflow_test.py -v` exercises the actual extracted
-  workflow with finite leaf fixtures for overlap, chain failures, independent
-  waits, cancellation and conditional GNU availability. The frozen shared
-  mobile fixture and all command/capture/job deadlines remain unchanged.
+  one-second reap bound while all anchors remain owned. Android controls begin
+  only after all four groups pass. `python3 ios/monitor_workflow_test.py -v`
+  exercises the actual extracted
+  workflow with finite leaf fixtures for four-way overlap, directory isolation,
+  individual/multiple failures, independent waits, cancellation and conditional
+  GNU availability. The frozen shared mobile fixture and all command/capture/job
+  deadlines remain unchanged.
   `bash ios/launch_diagnostics_simulator_test.sh` uses a synthetic timed-out
   payload with real CoreSimulator boot, probes and shutdown on hosted macOS
   ARM64. The mobile lifecycle workflow retains actual probe availability and
