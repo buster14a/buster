@@ -643,6 +643,75 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_delete(legacy_temporary));
     }
 
+    // An API-built invocation meets the same request rules as argv. Each leg
+    // adds one option to a valid prebuilt SPIR-V copy; argv and the directly
+    // mutated invocation must refuse it alike before the output is touched.
+    {
+        u8 spirv_data[] = {0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x00, 0x00};
+        u8 sentinel_data[] = {'s', 'e', 'n', 't', 'i', 'n', 'e', 'l'};
+        ByteSlice spirv = (ByteSlice)BUSTER_ARRAY_TO_SLICE(spirv_data);
+        ByteSlice sentinel = (ByteSlice)BUSTER_ARRAY_TO_SLICE(sentinel_data);
+        String8 input = buster_test_temporary_path(arena, S8("gpu-request-input"), S8(".spv"));
+        String8 output = buster_test_temporary_path(arena, S8("gpu-request-output"), S8(".spv"));
+        String8 native_input = buster_test_temporary_path(arena, S8("gpu-request-native"), S8(".c"));
+        String8 library = S8("m");
+        BUSTER_TEST(arguments, file_write(input, spirv));
+        BUSTER_TEST(arguments, file_write(output, sentinel));
+        BUSTER_TEST(arguments, file_write(native_input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int request_value(void) { return 1; }\n"))));
+
+        String8 valid_command[] = {S8("--target=spirv64"), S8("-c"), input, S8("-o"), output};
+        CompilerDriverInvocation valid = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(valid_command));
+        BUSTER_TEST_RAW(arguments, valid.error == COMPILER_DRIVER_ERROR_NONE && valid.has_gpu_target, valid.diagnostic);
+        String8 leg_options[] = {S8("-emit-llvm"), S8("-fverify-codegen"), S8("-lm")};
+        for (u32 leg = 0; leg < BUSTER_ARRAY_LENGTH(leg_options); leg += 1)
+        {
+            String8 command[] = {S8("--target=spirv64"), leg_options[leg], S8("-c"), input, S8("-o"), output};
+            CompilerDriverInvocation argv = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            CompilerDriverInvocation request = valid;
+            if (leg == 0)
+            {
+                request.emit_llvm_bitcode = true;
+            }
+            else if (leg == 1)
+            {
+                request.verify_codegen = true;
+            }
+            else
+            {
+                request.libraries = &library;
+                request.library_count = 1;
+            }
+            CompilerDriverResult refused = compiler_driver_execute_invocation(arena, request);
+            BUSTER_TEST_RAW(arguments, argv.error == COMPILER_DRIVER_ERROR_ARGUMENT, leg_options[leg]);
+            BUSTER_TEST_RAW(arguments, refused.error == argv.error && !refused.has_gpu, refused.diagnostic);
+            BUSTER_STRING_TEST(arguments, refused.diagnostic, argv.diagnostic);
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, sentinel));
+        }
+
+        // Native code-generation policy: verification has nothing to verify
+        // under -fsyntax-only, whichever entry point carries the request.
+        String8 syntax_command[] = {S8("-nostdinc"), S8("-fsyntax-only"), native_input};
+        String8 verify_command[] = {S8("-nostdinc"), S8("-fsyntax-only"), S8("-fverify-codegen"), native_input};
+        CompilerDriverInvocation syntax = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command));
+        CompilerDriverInvocation verify_argv = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(verify_command));
+        BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE, syntax.diagnostic);
+        BUSTER_TEST(arguments, verify_argv.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        CompilerDriverInvocation verify_request = syntax;
+        verify_request.verify_codegen = true;
+        CompilerDriverResult verify_refused = compiler_driver_execute_invocation(arena, verify_request);
+        BUSTER_TEST_RAW(arguments, verify_refused.error == verify_argv.error, verify_refused.diagnostic);
+        BUSTER_STRING_TEST(arguments, verify_refused.diagnostic, verify_argv.diagnostic);
+        CompilerDriverResult syntax_result = compiler_driver_execute_invocation(arena, syntax);
+        BUSTER_TEST_RAW(arguments, syntax_result.error == COMPILER_DRIVER_ERROR_NONE, syntax_result.diagnostic);
+
+        CompilerDriverResult published = compiler_driver_execute_invocation(arena, valid);
+        BUSTER_TEST_RAW(arguments, published.error == COMPILER_DRIVER_ERROR_NONE && published.has_gpu, published.diagnostic);
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, spirv));
+        BUSTER_TEST(arguments, os_file_delete(input));
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, os_file_delete(native_input));
+    }
+
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     // A private executable shell script is a deterministic fake external
     // tool. Its sleep child must be terminated with the complete process group.
