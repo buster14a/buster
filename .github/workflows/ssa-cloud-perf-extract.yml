@@ -1,0 +1,33 @@
+name: Disposable SSA cloud evidence extraction
+
+on:
+  push:
+    branches: [codex/2437-cloud-perf-extract]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: disposable-2437-cloud-perf-extract-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  extraction:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify the immutable original artifact and retain its text evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/ssa_cloud_perf_extract.py --output cloud-perf-text-evidence
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ssa-cloud-perf-text-37116754332-1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: cloud-perf-text-evidence
+          retention-days: 14
+          if-no-files-found: warn
