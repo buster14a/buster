@@ -116,6 +116,12 @@ fixture as well as compiling both architectures.
   impossible X16/SP pointer aliases fail before writing a prefix. Registered
   large-copy tests cross 32 KiB/64 KiB, both C forms and every allocator, with
   native Unix AArch64 byte/guard verification in addition to encoding checks.
+- Boolean-to-i128 casts zero-extend the existing eight-bit Boolean image into
+  the low limb and clear the high limb, for signed and unsigned destinations.
+  The canonical conversion remains ZERO_EXTEND only; semantic width one must
+  not become an encoder operand width. `machine_test_boolean_i128_cast` checks
+  actual canonical casts, both frontend forms, all allocators and six desktop
+  generation targets, with matching-host full-limb and guard observations.
 - Native i128 block parameters expand to two general-register MIR parameters.
   The selector allocates pair mappings only for functions with wide joins and
   snapshots each incoming instruction result at its definition. Entry stores
