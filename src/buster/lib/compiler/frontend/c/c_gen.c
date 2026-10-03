@@ -14163,6 +14163,7 @@ typedef enum CIrLowerFrameStage
     C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_ROOT,
     C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_TASK,
     C_IR_LOWER_STAGE_CONDITIONAL_CONDITION,
+    C_IR_LOWER_STAGE_CONDITIONAL_OMITTED_VALUE,
     C_IR_LOWER_STAGE_EXPRESSION_VALUE,
     C_IR_LOWER_STAGE_EXPRESSION_VOID_ASSIGNMENT,
     C_IR_LOWER_STAGE_EXPRESSION_CONDITION,
@@ -14718,6 +14719,9 @@ struct CIrLowerFrame
             IrTypeId type;
             IrBlockId final_block;
             IrBlockId leaf_continuation;
+            IrBlockId omitted_true_block;
+            IrBlockId omitted_false_block;
+            IrBlockId omitted_merge_block;
             IrSourceRange source;
             u32 start;
             u32 end;
@@ -31071,6 +31075,17 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         u32 conditional_end = 0;
         if (c_ir_root_conditional(builder, task.start, task.end, &conditional_start, &conditional_question, &conditional_colon, &conditional_end))
         {
+            if (c_preprocess_dialect_is_gnu(builder->preprocess.dialect) && conditional_colon == conditional_question + 1)
+            {
+                frame->as.condition.leaf_true_block = task.true_block;
+                frame->as.condition.leaf_false_block = task.false_block;
+                frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_CHILD;
+                if (!c_ir_lower_conditional_value_frame_push(builder, task.start, task.end))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                }
+                return;
+            }
             if (frame->as.condition.task_count + 3 > capacity)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -32549,7 +32564,8 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
             }
             else
             {
-                if (found_question == start || found_question + 1 == index || index + 1 == end)
+                if (found_question == start ||
+                    (found_question + 1 == index && !c_preprocess_dialect_is_gnu(builder->preprocess.dialect)) || index + 1 == end)
                 {
                     return false;
                 }
@@ -32746,7 +32762,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             }
             if (compound_type.value != IR_ID_UNDERLYING_INVALID)
             {
-                return compound_type;
+                return c_ir_sizeof_operand_decay(builder, compound_type);
             }
         }
     }
@@ -33586,11 +33602,13 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
     {
         return c_ir_predict_nonconditional_expression_type_attempt(builder, start, end);
     }
-    (void)expression_start;
+    bool omitted = c_preprocess_dialect_is_gnu(builder->preprocess.dialect) && colon == question + 1;
+    u32 true_start = omitted ? expression_start : question + 1;
+    u32 true_end = omitted ? question : colon;
     IrTypeId true_type = IR_TYPE_ID_INVALID;
     IrTypeId false_type = IR_TYPE_ID_INVALID;
     IrTypeId result = IR_TYPE_ID_INVALID;
-    if (!c_ir_query_prediction(builder, question + 1, colon, &true_type) && builder->queries->has_request)
+    if (!c_ir_query_prediction(builder, true_start, true_end, &true_type) && builder->queries->has_request)
     {
         return IR_TYPE_ID_INVALID;
     }
@@ -33598,7 +33616,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
     {
         return IR_TYPE_ID_INVALID;
     }
-    if (!c_ir_query_conditional_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end, &result) &&
+    if (!c_ir_query_conditional_type(builder, true_type, false_type, true_start, true_end, colon + 1, expression_end, &result) &&
         builder->queries->has_request)
     {
         return IR_TYPE_ID_INVALID;
@@ -33686,6 +33704,38 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         }
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     }
+    else if (frame->stage == C_IR_LOWER_STAGE_CONDITIONAL_OMITTED_VALUE)
+    {
+        IrValueId captured = machine->child_result.value;
+        if (!machine->child_result.success || captured.value >= builder->function->value_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        captured = c_ir_decay_array_value_if_needed(builder, captured, frame->as.conditional.source);
+        IrValueId condition = captured.value < builder->function->value_count
+                                  ? c_ir_truth_value(builder, captured, frame->as.conditional.source) : IR_VALUE_ID_INVALID;
+        IrBlockId targets[2] = {frame->as.conditional.omitted_true_block, frame->as.conditional.omitted_false_block};
+        if (condition.value == IR_ID_UNDERLYING_INVALID ||
+            !c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.conditional.source) ||
+            !c_ir_switch_block(builder, frame->as.conditional.omitted_true_block))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        // The first operand already ran. Its original value supplies the
+        // true arm; the ordinary store owns the common-type conversion.
+        c_ir_vla_conditional_shape(builder, frame->as.conditional.place, captured);
+        if (!c_ir_emit_store_place(builder, frame->as.conditional.place, frame->as.conditional.type, captured,
+                                   frame->as.conditional.source) ||
+            !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &frame->as.conditional.omitted_merge_block, 1,
+                            frame->as.conditional.source))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+    }
     else if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
         u32 expression_start = 0;
@@ -33703,11 +33753,14 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             }
             return;
         }
-        IrTypeId true_type = c_ir_predict_expression_type(builder, question + 1, colon);
+        bool omitted = c_preprocess_dialect_is_gnu(builder->preprocess.dialect) && colon == question + 1;
+        u32 true_start = omitted ? expression_start : question + 1;
+        u32 true_end = omitted ? question : colon;
+        IrTypeId true_type = c_ir_predict_expression_type(builder, true_start, true_end);
         IrTypeId false_type = c_ir_predict_expression_type(builder, colon + 1, expression_end);
         IrType* true_type_value = ir_type_from_id(&builder->program->types, true_type);
         IrType* false_type_value = ir_type_from_id(&builder->program->types, false_type);
-        IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end);
+        IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, true_start, true_end, colon + 1, expression_end);
         if (result_type.value == IR_ID_UNDERLYING_INVALID)
         {
             builder->failure_message =
@@ -33719,6 +33772,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         frame->as.conditional.source =
             c_ir_token_source_range(builder, builder->preprocess.tokens[expression_start]);
         frame->as.conditional.type = result_type;
+        frame->as.conditional.start = expression_start;
+        frame->as.conditional.end = expression_end;
         IrType* result_type_value = ir_type_from_id(&builder->program->types, result_type);
         bool result_is_void = result_type_value && result_type_value->kind == IR_TYPE_VOID;
         frame->as.conditional.place = result_is_void ? IR_VALUE_ID_INVALID : c_ir_emit_temporary(builder, result_type, frame->as.conditional.source);
@@ -33812,6 +33867,22 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
             }
             return;
         }
+        bool omitted = c_preprocess_dialect_is_gnu(builder->preprocess.dialect) && nested_colon == nested_question + 1;
+        if (omitted && (nested_start != frame->as.conditional.start || nested_end != frame->as.conditional.end))
+        {
+            // A nested omitted conditional has its own common branch type.
+            // Let an explicit child frame complete that conversion before
+            // the enclosing conditional converts the resulting value.
+            frame->as.conditional.leaf_start = nested_start;
+            frame->as.conditional.leaf_end = nested_end;
+            frame->as.conditional.leaf_continuation = task.as.selection.continuation;
+            frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_TASK;
+            if (!c_ir_lower_conditional_value_frame_push(builder, nested_start, nested_end))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
         IrBlockId true_block = c_ir_block_create(builder);
         IrBlockId false_block = c_ir_block_create(builder);
         IrBlockId merge_block = c_ir_block_create(builder);
@@ -33839,6 +33910,19 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                     .source = task.as.selection.source,
                 },
         };
+        if (omitted)
+        {
+            frame->as.conditional.omitted_true_block = true_block;
+            frame->as.conditional.omitted_false_block = false_block;
+            frame->as.conditional.omitted_merge_block = merge_block;
+            frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_OMITTED_VALUE;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){.kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                               .as.expression = {.start = nested_start, .end = nested_question}}))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
         frame->as.conditional.tasks[frame->as.conditional.task_count++] = (CIrLowerFrame){
             .kind = C_IR_LOWER_FRAME_SELECTION_EXPRESSION,
             .as.selection =
@@ -48910,7 +48994,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 if (!c_ir_constant_apply_operator(builder, operators[--operator_count], values, &value_count)) return false;
             }
             operators[operator_count++] = (CIrConstantOperator){.operation = C_CONDITIONAL_QUESTION};
-            expect_operand = true;
+            bool omitted = c_preprocess_dialect_is_gnu(builder->preprocess.dialect) && index + 1 < end &&
+                           c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_COLON);
+            if (omitted)
+            {
+                if (!value_count || value_count >= capacity) return false;
+                values[value_count] = values[value_count - 1];
+                value_count += 1;
+            }
+            expect_operand = !omitted;
             continue;
         }
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
