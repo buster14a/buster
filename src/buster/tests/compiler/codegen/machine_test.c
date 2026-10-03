@@ -2988,6 +2988,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_storage_reuse(UnitTestArgu
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
+
+    // Empty selector populations include both no slots and untouched slots.
+    // An unknown memory certificate makes touched slots fixed as well. These
+    // functions use physical registers only, so no spill home can hide a slot
+    // layout error behind allocator-created storage.
+    for (u32 target_index = 0; target_index < 2; target_index += 1)
+    {
+        bool aarch64 = target_index != 0;
+        u16 move = (u16)(aarch64 ? MACHINE_A64_MOV_RR : MACHINE_X64_MOV_RR);
+        u16 store = (u16)(aarch64 ? MACHINE_A64_STORE_FRAME64 : MACHINE_X64_STORE_FRAME64);
+        u16 return_opcode = (u16)(aarch64 ? MACHINE_A64_RET : MACHINE_X64_RET);
+        u32 physical = aarch64 ? (u32)MACHINE_A64_X0 : (u32)MACHINE_X64_RAX;
+        MachineRef physical_ref = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, physical);
+        for (u32 empty_case = 0; empty_case < 3; empty_case += 1)
+        {
+            MachineFunctionBuilder empty_builder = machine_function_builder_begin(arena);
+            machine_builder_block_begin(&empty_builder);
+            machine_builder_instruction(&empty_builder, (MachineInstruction){.opcode = move,
+                                                                               .operands = {physical_ref, physical_ref}});
+            for (u32 slot = 0; empty_case == 2 && slot < 2; slot += 1)
+            {
+                machine_builder_instruction(&empty_builder,
+                    (MachineInstruction){.opcode = store,
+                                         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot), physical_ref}});
+            }
+            machine_builder_instruction(&empty_builder, (MachineInstruction){.opcode = return_opcode});
+            machine_builder_block_end(&empty_builder, (MachineBlock){0});
+            MachineFunction empty_function = machine_function_builder_finish(arena, &empty_builder);
+            empty_function.target = aarch64 ? machine_target_aarch64() : machine_target_x86_64();
+            u32 empty_sizes[] = {8, 8};
+            u32 empty_alignments[] = {8, 8};
+            u8 empty_memory_flags[] = {0, 0};
+            empty_function.stack_slot_count = empty_case ? 2u : 0u;
+            empty_function.stack_slot_sizes = empty_case ? empty_sizes : 0;
+            empty_function.stack_slot_alignments = empty_case ? empty_alignments : 0;
+            empty_function.stack_slot_memory_flags = empty_case == 2 ? empty_memory_flags : 0;
+            BUSTER_TEST(arguments, machine_verify_function(&empty_function).error == MACHINE_VERIFY_NONE);
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                MachineStackPlacement empty_reference = {0};
+                MachineEncodeResult empty_reference_code = {0};
+                for (u32 certified = 0; certified < 2; certified += 1)
+                {
+                    empty_function.returns_twice_absence_certified = certified != 0;
+                    MachineStackPlacement empty_placement = mode == 0
+                                                               ? machine_fast_placement_build(arena, &empty_function)
+                                                               : machine_quality_placement_build(arena, &empty_function);
+                    BUSTER_TEST(arguments, empty_placement.valid);
+                    if (empty_placement.valid)
+                    {
+                        BUSTER_TEST(arguments, empty_placement.frame_size == (empty_case ? 16u : 0u));
+                        BUSTER_TEST(arguments, empty_placement.callee_saved_mask == 0 && empty_placement.edit_count == 0);
+                        BUSTER_TEST(arguments, empty_placement.reload_count == 0 && empty_placement.spill_count == 0 &&
+                                                   empty_placement.copy_count == 0 && empty_placement.rematerialize_count == 0);
+                        for (u32 slot = 0; slot < empty_function.stack_slot_count; slot += 1)
+                        {
+                            BUSTER_TEST(arguments, empty_placement.stack_slot_offsets[slot] == 8u * (slot + 1u));
+                        }
+                        MachineEncodeResult empty_code = aarch64
+                                                             ? machine_encode_aarch64(arena, &empty_function, &empty_placement)
+                                                             : machine_encode_x86_64(arena, &empty_function, &empty_placement);
+                        BUSTER_TEST(arguments, empty_code.valid);
+                        if (certified)
+                        {
+                            BUSTER_TEST(arguments, empty_reference.valid && empty_reference_code.valid);
+                            if (empty_reference.valid && empty_reference_code.valid && empty_code.valid)
+                            {
+                                BUSTER_TEST(arguments, empty_placement.frame_size == empty_reference.frame_size &&
+                                                           empty_placement.edge_copy_temporary_offset == empty_reference.edge_copy_temporary_offset &&
+                                                           empty_placement.incoming_base == empty_reference.incoming_base);
+                                for (u32 row = 0; row < empty_function.instruction_count; row += 1)
+                                {
+                                    for (u32 operand = 0; operand < MACHINE_INSTRUCTION_OPERAND_COUNT; operand += 1)
+                                    {
+                                        u32 index = row * MACHINE_INSTRUCTION_OPERAND_COUNT + operand;
+                                        BUSTER_TEST(arguments, empty_placement.operand_registers[index] == empty_reference.operand_registers[index]);
+                                    }
+                                }
+                                BUSTER_TEST(arguments, empty_code.byte_count == empty_reference_code.byte_count);
+                                for (u32 byte = 0; empty_code.valid && empty_reference_code.valid &&
+                                                   byte < empty_code.byte_count && byte < empty_reference_code.byte_count; byte += 1)
+                                {
+                                    BUSTER_TEST(arguments, empty_code.bytes[byte] == empty_reference_code.bytes[byte]);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            empty_reference = empty_placement;
+                            empty_reference_code = empty_code;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     u32 slot_count = 4;
     u32 value_count = 5;
     MachineFunctionBuilder builder = machine_function_builder_begin(arena);
