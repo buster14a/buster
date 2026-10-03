@@ -9209,6 +9209,173 @@ BUSTER_GLOBAL_LOCAL void c_test_ucn_release(CPreprocessResult* preprocess)
     }
 }
 
+// Digraph meaning belongs in token ids; physical spelling remains independent.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_digraphs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 spellings[] = {S8("<:"), S8(":>"), S8("<%"), S8("%>"), S8("%:"), S8("%:%:"),
+        S8("%:%:"), S8("%:"), S8("\"<:%>\""), S8("'<'")};
+    CPunctuator punctuators[] = {C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET, C_PUNCTUATOR_LEFT_BRACE,
+        C_PUNCTUATOR_RIGHT_BRACE, C_PUNCTUATOR_HASH, C_PUNCTUATOR_HASH_HASH, C_PUNCTUATOR_HASH_HASH, C_PUNCTUATOR_HASH,
+        C_PUNCTUATOR_NONE, C_PUNCTUATOR_NONE};
+    String8 tail = S8("<: :> <% %> %: %:%: %:%:%: \"<:%>\" '<' /* <: %:%: */");
+    for (u32 phase = 0; phase < 64; phase += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        char8* bytes = arena_allocate(temporary.arena, char8, phase + tail.length);
+        memset(bytes, ' ', phase);
+        memcpy(bytes + phase, tail.pointer, tail.length);
+        String8 source = {bytes, phase + tail.length};
+        CLexResult actual = c_lex(temporary.arena, source);
+        CLexResult reference = c_lex_reference(temporary.arena, source);
+        BUSTER_TEST(arguments, c_test_lex_results_agree(actual, reference));
+        BUSTER_TEST(arguments, actual.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, actual.token_count == BUSTER_ARRAY_LENGTH(spellings) + 1 && actual.token_shapes != 0))
+        {
+            u32 physical = phase;
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(spellings); index += 1)
+            {
+                CToken token = actual.tokens[index];
+                CTokenKind kind = index < 8 ? C_TOKEN_PUNCTUATOR : index == 8 ? C_TOKEN_STRING_LITERAL : C_TOKEN_CHARACTER_LITERAL;
+                BUSTER_TEST(arguments, token.kind == kind && token.punctuator == punctuators[index]);
+                BUSTER_TEST(arguments, actual.token_shapes[index] == c_token_shape_from_fields(kind, punctuators[index]));
+                BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, token), spellings[index]);
+                CSourceLocation location = c_lex_token_location(&actual, token);
+                BUSTER_TEST(arguments, token.offset == physical && token.length == spellings[index].length);
+                BUSTER_TEST(arguments, location.offset == physical && location.line == 1 && location.column == physical + 1);
+                physical += (u32)spellings[index].length + (index == 6 ? 0 : 1);
+            }
+            BUSTER_TEST(arguments, actual.tokens[BUSTER_ARRAY_LENGTH(spellings)].kind == C_TOKEN_END_OF_FILE);
+        }
+        scratch_end(temporary);
+    }
+
+    struct
+    {
+        String8 source;
+        String8 expected;
+    } macros[] = {
+        {S8("%:define X 4\nX\n"), S8("4")},
+        {S8("%:define CAT(a,b) a %:%: b\nCAT(x,y)\n"), S8("xy")},
+        {S8("%:define RAW(x) %:x\nRAW(<:) RAW(:>) RAW(<%) RAW(%>) RAW(%:) RAW(%:%:)\n"),
+            S8("\"<:\" \":>\" \"<%\" \"%>\" \"%:\" \"%:%:\"")},
+        {S8("#define CAT(a,b) a##b\nCAT(<,:) CAT(:,>) CAT(<,%) CAT(%,>) CAT(%,:) CAT(%:,%:)\n"),
+            S8("<: :> <% %> %: %:%:")},
+        {S8("%:if 0\nignored\n%:elif 1\n7\n%:else\nignored\n%:endif\n"), S8("7")},
+        {S8("#define ID(x) x\nID(%) ID(:) ID(<) ID(:) ID(%:) ID(%:)\n"), S8("% : < : %: %:")},
+        {S8("\"<:%>\" /* %:define BAD 9 */\n"), S8("\"<:%>\"")},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU89, C_PREPROCESS_DIALECT_C99, C_PREPROCESS_DIALECT_GNU99,
+        C_PREPROCESS_DIALECT_C11, C_PREPROCESS_DIALECT_GNU11, C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
+        C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(macros); test += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult actual = c_preprocess(temporary.arena, macros[test].source,
+                (CPreprocessOptions){.dialect = dialects[dialect], .source_path = S8("digraph-macros.c")});
+            CLexResult expected = c_lex(temporary.arena, macros[test].expected);
+            BUSTER_TEST_RAW(arguments, actual.diagnostic_count == 0, macros[test].source);
+            if (BUSTER_REQUIRE(arguments, actual.token_count == expected.token_count && actual.tokens && expected.tokens))
+            {
+                for (u64 index = 0; index < actual.token_count; index += 1)
+                {
+                    BUSTER_TEST(arguments, actual.tokens[index].kind == expected.tokens[index].kind &&
+                        actual.tokens[index].punctuator == expected.tokens[index].punctuator);
+                    BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[index]),
+                        c_token_spelling(expected.spelling_base, expected.tokens[index]));
+                }
+                if (test == 5)
+                {
+                    BUSTER_TEST(arguments, c_token_requires_separator(actual.tokens[0], S8("%"), actual.tokens[1], S8(":")));
+                    BUSTER_TEST(arguments, c_token_requires_separator(actual.tokens[2], S8("<"), actual.tokens[3], S8(":")));
+                    BUSTER_TEST(arguments, c_token_requires_separator(actual.tokens[4], S8("%:"), actual.tokens[5], S8("%:")));
+                    BUSTER_TEST(arguments, !c_token_requires_separator(actual.tokens[4], S8("%:"), actual.tokens[5], S8("#")));
+                    BUSTER_TEST(arguments, c_token_requires_separator(actual.tokens[4], S8("#"), actual.tokens[5], S8("#")));
+                    BUSTER_TEST(arguments, !c_token_requires_separator(actual.tokens[4], S8("#"), actual.tokens[5], S8("%:")));
+                }
+            }
+            c_test_ucn_release(&actual);
+            scratch_end(temporary);
+        }
+    }
+
+    String8 program = S8(
+        "%:define X 4\n"
+        "%:define CAT(a,b) a %:%: b\n"
+        "%:define STR(x) %:x\n"
+        "static int CAT(x,y) = 5;\n"
+        "int main(void) <% int a<:2:> = <%1,2%>;\n"
+        "const char *s = STR(<:);\n"
+        "return a<:1:> != 2 || X != 4 || xy != 5 || sizeof(STR(abc)) != 4 ||\n"
+        "s<:0:> != '<' || s<:1:> != ':' || s<:2:> != 0 || sizeof(\"<:%>\") != 5; %>\n");
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 boundary = 0; boundary < 2; boundary += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 input = boundary == 0 ? program : S8("int main(void) <% int a<:2:> = <%1,2%>; return a<:1:> != 2; %>\n");
+            CPreprocessResult tokens = c_preprocess(temporary.arena, input,
+                (CPreprocessOptions){.dialect = dialects[dialect], .already_preprocessed = boundary != 0,
+                    .source_path = S8("digraph-program.c"), .target = target_native, .data_layout = target_data_layout(target_native)});
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0))
+            {
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+                if (BUSTER_REQUIRE(arguments, parsed.diagnostic_count == 0))
+                {
+                    for (u32 form = 0; form < 2; form += 1)
+                    {
+                        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("digraph-program.c"), tokens, parsed,
+                            target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                        if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+                        {
+                            IrModule* module = &lowered.program->modules[0];
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                            BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("main")) != 0);
+                        }
+                    }
+                }
+            }
+            c_test_ucn_release(&tokens);
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = buster_test_temporary_path(arguments->arena, S8("digraph-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program))))
+    {
+        String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("digraph-runtime-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=c17"), forms[form], S8("-fregister-allocator=fast"),
+                S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
+
 // Macros see canonical identity but # and ## still see original spellings.
 // Final canonical bytes are stamped back to the unshortened source positions.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_preprocess(UnitTestArguments* arguments)
@@ -33069,6 +33236,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_source_utf8);
     BUSTER_TEST_FIXTURE(arguments, c_test_ucn_lex);
     BUSTER_TEST_FIXTURE(arguments, c_test_ucn_preprocess);
+    BUSTER_TEST_FIXTURE(arguments, c_test_digraphs);
     BUSTER_TEST_FIXTURE(arguments, c_test_ucn_semantic);
     BUSTER_TEST_FIXTURE(arguments, c_test_ucn_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_differential);
