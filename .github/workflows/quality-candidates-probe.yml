@@ -1,0 +1,202 @@
+name: QUALITY candidate selection research
+
+on:
+  push:
+    branches: [codex/313-candidate-measurement]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality313-research-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      BASELINE_SHA: 97fb07f42b432864bee9fd38b70eb69b15252991
+      CANDIDATE_SHA: 735d270728441245c5a1d1721220c16408b101b9
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: packet
+          persist-credentials: false
+      - name: Compile the C-only packet and freeze stress inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/bin evidence/frozen evidence/samples evidence/diagnostic evidence/build
+          clang --version > evidence/clang.txt
+          uname -a > evidence/uname.txt
+          lscpu > evidence/lscpu.txt
+          git -C packet rev-parse HEAD 'HEAD^{tree}' > evidence/packet-revision.txt
+          sha256sum packet/tools/quality313_probe/*.c > evidence/packet-sources.sha256
+          clang -O2 -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char packet/tools/quality313_probe/generate.c -o evidence/bin/generate
+          clang -O2 -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char packet/tools/quality313_probe/collect.c -o evidence/bin/collect
+          clang -O2 -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char -c packet/tools/quality313_probe/driver.c -o evidence/bin/driver.o
+          evidence/bin/generate evidence/frozen
+          sha256sum evidence/frozen/*.c > evidence/frozen-inputs.sha256
+          printf '%s\n' 'Fixed shapes: late-hot, early-hot, equal-forward, equal-reverse; 4097 logical values.' 'Fixed paired samples: 12 alternating A/B pairs after one retained warmup pair per shape/mode/operation.' 'Compile wall/RSS includes fork/exec/wait; runtime probe_ns covers 256 probe calls only. No timing threshold or automatic retry.' > evidence/plan.txt
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.BASELINE_SHA }}
+          path: subject
+          persist-credentials: false
+      - name: Build and freeze trusted baseline in the shared build path
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -x
+          cd subject
+          git rev-parse HEAD 'HEAD^{tree}' > ../evidence/build/baseline-revision.txt
+          test "$(git rev-parse HEAD)" = "$BASELINE_SHA"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/quality313-build"
+          "$RUNNER_TEMP/quality313-build" generate --build-directory build/quality313-probe --config Release --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF -DCMAKE_LINKER_TYPE=DEFAULT
+          "$RUNNER_TEMP/quality313-build" build --build-directory build/quality313-probe --config Release -t ide -- -j2
+          cp build/quality313-probe/Release/ide ../evidence/bin/ide-baseline
+          cp build/quality313-probe/CMakeCache.txt ../evidence/build/baseline-CMakeCache.txt
+          cp build/quality313-probe/compile_commands.json ../evidence/build/baseline-compile_commands.json
+          git diff --exit-code
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: subject
+          persist-credentials: false
+      - name: Build and freeze trusted candidate in the same shared build path
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -x
+          cd subject
+          git rev-parse HEAD 'HEAD^{tree}' > ../evidence/build/candidate-revision.txt
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/quality313-build"
+          "$RUNNER_TEMP/quality313-build" generate --build-directory build/quality313-probe --config Release --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF -DCMAKE_LINKER_TYPE=DEFAULT
+          "$RUNNER_TEMP/quality313-build" build --build-directory build/quality313-probe --config Release -t ide -- -j2
+          cp build/quality313-probe/Release/ide ../evidence/bin/ide-candidate
+          cp build/quality313-probe/CMakeCache.txt ../evidence/build/candidate-CMakeCache.txt
+          cp build/quality313-probe/compile_commands.json ../evidence/build/candidate-compile_commands.json
+          sha256sum ../evidence/bin/ide-* > ../evidence/compiler-identities.sha256
+          git diff --exit-code
+      - name: Fixed compile and initialized generated-runtime comparisons
+        id: timings
+        shell: bash
+        run: |
+          set -uo pipefail
+          set -x
+          failures=0
+          for shape in late-hot early-hot equal-forward equal-reverse; do
+            for mode in none fast quality; do
+              if evidence/bin/collect compile "$GITHUB_WORKSPACE/evidence/samples/$shape" "$mode" "$GITHUB_WORKSPACE/evidence/bin/ide-baseline" "$GITHUB_WORKSPACE/evidence/bin/ide-candidate" "$GITHUB_WORKSPACE/evidence/frozen/$shape.c"; then
+                printf 'compile %s %s pass\n' "$shape" "$mode" >> evidence/status.txt
+              else
+                printf 'compile %s %s failed\n' "$shape" "$mode" >> evidence/status.txt
+                failures=$((failures + 1))
+              fi
+              linked=1
+              for variant in 0 1; do
+                if clang evidence/bin/driver.o "evidence/samples/$shape-$mode-v$variant.o" -o "evidence/samples/$shape-$mode-v$variant.exe"; then
+                  if ! llvm-size "evidence/samples/$shape-$mode-v$variant.o" "evidence/samples/$shape-$mode-v$variant.exe" >> evidence/code-bytes.txt; then
+                    printf 'code-bytes %s %s %s failed\n' "$shape" "$mode" "$variant" >> evidence/status.txt
+                    failures=$((failures + 1))
+                  fi
+                  if ! sha256sum "evidence/samples/$shape-$mode-v$variant.o" "evidence/samples/$shape-$mode-v$variant.exe" >> evidence/generated-identities.sha256; then
+                    printf 'generated-identities %s %s %s failed\n' "$shape" "$mode" "$variant" >> evidence/status.txt
+                    failures=$((failures + 1))
+                  fi
+                else
+                  linked=0
+                  failures=$((failures + 1))
+                fi
+              done
+              if test "$linked" = 1; then
+                if evidence/bin/collect runtime "$GITHUB_WORKSPACE/evidence/samples/$shape" "$mode" "$GITHUB_WORKSPACE/evidence/samples/$shape-$mode-v0.exe" "$GITHUB_WORKSPACE/evidence/samples/$shape-$mode-v1.exe"; then
+                  printf 'runtime %s %s pass\n' "$shape" "$mode" >> evidence/status.txt
+                else
+                  printf 'runtime %s %s failed\n' "$shape" "$mode" >> evidence/status.txt
+                  failures=$((failures + 1))
+                fi
+              fi
+            done
+          done
+          printf 'timing-or-oracle-failures=%s\n' "$failures" >> evidence/status.txt
+          test "$failures" = 0
+      - name: Build the separate candidate allocation census compiler
+        id: diagnostic
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -x
+          cd subject
+          # All ordinary compilers have been frozen; this selected tree is idle.
+          "$RUNNER_TEMP/quality313-build" generate --build-directory build/quality313-probe --config Release --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=ON -DCMAKE_LINKER_TYPE=DEFAULT
+          "$RUNNER_TEMP/quality313-build" build --build-directory build/quality313-probe --config Release -t ide -- -j2
+          cp build/quality313-probe/Release/ide ../evidence/bin/ide-census
+          cp build/quality313-probe/CMakeCache.txt ../evidence/build/census-CMakeCache.txt
+          cp build/quality313-probe/compile_commands.json ../evidence/build/census-compile_commands.json
+          sha256sum ../evidence/bin/ide-census >> ../evidence/compiler-identities.sha256
+          git diff --exit-code
+      - name: Explicit QUALITY census and untimed exact allocator counters
+        if: ${{ !cancelled() && steps.diagnostic.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          set -x
+          failures=0
+          for shape in late-hot early-hot equal-forward equal-reverse; do
+            source="$GITHUB_WORKSPACE/evidence/frozen/$shape.c"
+            for variant in baseline candidate; do
+              if "evidence/bin/ide-$variant" cc -target x86_64-unknown-linux -g0 -O0 -fregister-allocator=quality -fno-machine-fallback -nostdinc -v -c "$source" -o "evidence/diagnostic/$shape-$variant.o" > "evidence/diagnostic/$shape-$variant.stdout" 2> "evidence/diagnostic/$shape-$variant.stderr"; then
+                printf 'verbose %s %s pass\n' "$shape" "$variant" >> evidence/status.txt
+              else
+                printf 'verbose %s %s failed\n' "$shape" "$variant" >> evidence/status.txt
+                failures=$((failures + 1))
+              fi
+            done
+            if BUSTER_ALLOCATION_CENSUS=1 evidence/bin/ide-census cc -target x86_64-unknown-linux -g0 -O0 -fregister-allocator=quality -fno-machine-fallback -nostdinc -fsource-metrics="evidence/diagnostic/$shape.metrics" -c "$source" -o "evidence/diagnostic/$shape-census.o" > "evidence/diagnostic/$shape-census.stdout" 2> "evidence/diagnostic/$shape-census.stderr"; then
+              if cmp "evidence/diagnostic/$shape-census.o" "evidence/samples/$shape-quality-v1.o"; then
+                printf 'census-output %s identical\n' "$shape" >> evidence/status.txt
+              else
+                printf 'census-output %s different\n' "$shape" >> evidence/status.txt
+                failures=$((failures + 1))
+              fi
+            else
+              printf 'census %s failed\n' "$shape" >> evidence/status.txt
+              failures=$((failures + 1))
+            fi
+          done
+          # The previous automatic unity census selected FAST and reported zero
+          # QUALITY invocations. These explicit QUALITY cells observe actual
+          # current candidate-source incidence, separately from stress timing.
+          for frontend in direct memory; do
+            flags=()
+            if test "$frontend" = memory; then flags=(-fno-frontend-ssa); fi
+            if (cd subject && BUSTER_ALLOCATION_CENSUS=1 "$GITHUB_WORKSPACE/evidence/bin/ide-census" cc -Isrc -Ibuild/quality313-probe/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_BENCH_ALLOCATIONS=0 -g0 -c -fregister-allocator=quality -fno-machine-fallback "${flags[@]}" -fsource-metrics="$GITHUB_WORKSPACE/evidence/diagnostic/unity-$frontend.metrics" src/buster/apps/ide/ide.c -o "$GITHUB_WORKSPACE/evidence/diagnostic/unity-$frontend.o") > "evidence/diagnostic/unity-$frontend.stdout" 2> "evidence/diagnostic/unity-$frontend.stderr"; then
+              printf 'unity-census %s pass\n' "$frontend" >> evidence/status.txt
+            else
+              printf 'unity-census %s failed\n' "$frontend" >> evidence/status.txt
+              failures=$((failures + 1))
+            fi
+          done
+          if ! sha256sum evidence/diagnostic/*.o > evidence/diagnostic-identities.sha256; then
+            printf 'diagnostic-identities failed\n' >> evidence/status.txt
+            failures=$((failures + 1))
+          fi
+          printf 'diagnostic-failures=%s\n' "$failures" >> evidence/status.txt
+          test "$failures" = 0
+      - name: Publish evidence scope
+        if: always()
+        shell: bash
+        run: |
+          printf '## QUALITY #313 research\n\nPinned baseline: `%s`; pinned candidate: `%s`. Standard hosted runner; no dedicated-host acceptance. Raw records retain every fixed sample and failure. Missing or zero cap hits establish no synthetic benefit in real code. No speedup, equivalence, runtime or profitability verdict is inferred from workflow success.\n\n' "$BASELINE_SHA" "$CANDIDATE_SHA" >> "$GITHUB_STEP_SUMMARY"
+          if test -f evidence/status.txt; then cat evidence/status.txt >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: quality313-research-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: warn
