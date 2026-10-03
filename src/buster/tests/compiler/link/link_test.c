@@ -5167,7 +5167,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_function_addresses(UnitTestArgu
     NativeImageKind image_kinds[] = {NATIVE_IMAGE_PIE, NATIVE_IMAGE_SHARED};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(image_kinds); index += 1)
     {
-        options.image_kind = image_kinds[index];
+        options.image_kind = (u8)image_kinds[index];
         NativeExecutableLinkResult refused = link_native_executable(arena, &object, options);
         BUSTER_TEST(arguments, refused.error == LINK_ERROR_RELOCATION && string_equal(refused.symbol, S8("target")) && !refused.executable.length);
     }
