@@ -415,7 +415,10 @@ class ContractTests(unittest.TestCase):
                        contract.PROPOSED_SUPPORT_CONTRACT_SHA256,
                        contract.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
                        contract.BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
-                       contract.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256):
+                       contract.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
+                       contract.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
+                       contract.MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+                       contract.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256):
             with self.subTest(digest=digest):
                 manifest["support_contract_sha256"] = digest
                 self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),

@@ -144,6 +144,23 @@ run_case() {
     assert_file_contains 'fake install stdout:' "$state/console.Debug.log.install.log"
     assert_file_contains 'fake install stderr: lifecycle diagnostic' "$state/console.Debug.log.install.log"
 
+    if [[ $case_name == timeout ]]; then
+        # The controlled hang is an actual TERM exit under an expired command
+        # deadline; complete capture and released ownership remain separate facts.
+        assert_file_contains 'capture_receipt=complete' "$state/console.Debug.log.install.status.log"
+        assert_file_contains 'BUSTER_IOS_SUPERVISOR_GATE helper_status=124 supervisor_valid=1 deadline_reached=1 cleanup_status=0' \
+            "$state/console.Debug.log.install.status.log"
+        assert_file_contains 'command_status=124 native_status=143 capture_status=0' \
+            "$state/console.Debug.log.install.supervisor-status.log"
+        assert_file_contains 'deadline_reached=1 capture_eof=1 capture_eof_late=0 cleanup_status=0 native_kind=signal' \
+            "$state/console.Debug.log.install.supervisor-status.log"
+        assert_file_contains 'keeper_reaped=1 native_reaped=1 group_authority_released=1' \
+            "$state/console.Debug.log.install.supervisor-status.log"
+    elif [[ $case_name == native-124 ]]; then
+        assert_file_contains 'deadline_reached=0' "$state/console.Debug.log.install.supervisor-status.log"
+        assert_file_contains 'native_kind=exit' "$state/console.Debug.log.install.supervisor-status.log"
+    fi
+
     if [[ $case_name != success ]]; then
         expected_launches=1
         assert_file_contains "failed to install iOS Debug app bundle (outcome=$expected_outcome)" "$state/run.log"
@@ -164,4 +181,4 @@ run_case() {
 run_case success 0 success 0 0
 run_case reject 1 command-failure 8 8
 run_case native-124 1 command-failure 124 124
-run_case timeout 1 timeout 124 unavailable
+run_case timeout 1 timeout 124 143
