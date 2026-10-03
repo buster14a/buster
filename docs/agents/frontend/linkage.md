@@ -20,6 +20,35 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   (GitHub #363); object parsing alone is not runtime-unwind evidence.
   Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
   saves, and keeps saved-register offsets separate from stack-allocation sizes.
+- **Executable TLS definitions participate in dynamic lookup.** Fixed-address
+  Linux x86-64/AArch64 executables and x86-64 PIEs export public `.tdata` and
+  `.tbss` definitions requested by a linked DSO, or all public TLS definitions
+  under `-rdynamic`. Their dynamic symbols carry `STT_TLS`, their loaded
+  section index and size, and an offset in the module's TLS block: initialized
+  data first, then zero-fill at its required alignment. A runtime image address
+  cannot serve as that offset. Fixed images reuse `link_elf_thread_local_offset`
+  and the packed loaded-section map shared with the section table. The TLS
+  block starts at the maximum `.tdata`/`.tbss` alignment so that each section's
+  address agrees with its block-relative symbol offsets. Fixed writers align
+  both TLS class starts by final virtual address, including an alignment larger
+  than the image base; file-offset alignment alone leaves the base's residue. Local-exec relocations
+  round the whole block to that same alignment before computing x86-64 TP
+  offsets. AArch64 places its block after the 16-byte TCB rounded to this
+  alignment before adding the module offset and relocation addend.
+  The PIE emitter uses the same map, including copy-created `.bss` and omitted
+  empty sections. Hidden definitions remain private, undefined hidden references
+  fail, and TLS/non-TLS object identities retain their mismatch diagnostic.
+  `compiler_driver_tls_export_tests` uses a configured host-built DSO to read
+  and modify both initialized and zero-fill executable TLS. Source/object,
+  fixed/PIE, and demand/`-rdynamic` routes have host-linker/runtime controls
+  and independent raw ELF checks for type, binding, visibility, section index,
+  size, block-relative value, initialized bytes and `PT_TLS` bounds. Sole-class
+  `.tdata`/`.tbss` controls check `p_align`, `sh_addralign`, initialized-template
+  load coverage and native DSO/local-exec pointer identity at 32 bytes and
+  8 MiB; weak definitions preserve binding 2. An unused
+  public TLS symbol distinguishes demand export from `-rdynamic`; a hidden
+  definition stays absent in both modes. Linux AArch64 covers its supported
+  fixed-address routes; other image writers retain their existing TLS scope.
 - **Program-symbol identity crosses the object boundary.**
   `object_from_canonical_codegen_module` resolves a relocation's `IrSymbolId`
   through `entry_by_symbol`. Entries map to their own index; globals and
