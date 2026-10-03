@@ -382,7 +382,8 @@ class ArchivedReplayTests(unittest.TestCase):
                        materializer.PROPOSED_SUPPORT_CONTRACT_SHA256,
                        materializer.MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
                        materializer.BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
-                       materializer.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256))
+                       materializer.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
+                       materializer.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256))
         with self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
             materializer.materialize(self.manifest, self.root, self.root / "wrong-contract")
         self.assertFalse((self.root / "wrong-contract").exists())
@@ -414,6 +415,21 @@ class ArchivedReplayTests(unittest.TestCase):
         retired = b"\n".join([lines[0], *sorted(lines[1:])]) + b"\n"
         self.assertEqual(digest(retired), materializer.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256)
         self.assertEqual(after.count(b"\n"), retired.count(b"\n"))
+
+    def test_aligned_typedef_successor_changes_only_validation_fixture_row(self):
+        data = (Path(__file__).resolve().parents[1] /
+                "docs/native-retirement-support-v1.tsv").read_bytes()
+        prefix = b"tests/basic_c_ir_validation_values.c\tsubject\tsupported-object-zero-fallback\t"
+        rows = [row for row in data.splitlines() if row.startswith(prefix)]
+        self.assertEqual(len(rows), 1)
+        predecessor = prefix + b"3124\t9ed89c0ff3750cb6c9bc66a894fc617c15cde5732c857e5b9cccf55ddf233080"
+        successor = prefix + b"3241\t8c565e3b33d5630695289da2aa0030423dc833c9dfc4346d2b67d5165df89e65"
+        self.assertEqual(rows[0], predecessor)
+        after = data.replace(predecessor, successor)
+        self.assertEqual(digest(data), materializer.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256)
+        self.assertEqual(digest(after), materializer.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256)
+        self.assertEqual(len(data), len(after))
+        self.assertEqual(data.count(b"\n"), after.count(b"\n"))
 
     def test_fixture_drift_rejects_publication(self):
         pin = digest(self.contract.read_bytes())

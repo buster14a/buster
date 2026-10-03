@@ -134,6 +134,8 @@ MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256 = "434ef9a356cd11e7af0b37907172becf173a685
 BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256 = "6d975980cc6df4945334fc2846dac8e03a1480a6c65e516db37be8adbccf1106"
 # #1836 successor: #1835 plus archiving the retired bridge under tests/retired/.
 RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256 = "5834270ef2b01798b25547751fd91631295a84ccb23116bf1502d8bae0c0b115"
+# #2203 successor: #1836 with only the aligned-typedef validation fixture row updated.
+ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256 = "7d4e4ed4fc74ff57eb3005550457751cc8841f113277c116d67fb1358da09d51"
 NETWORK_PROVENANCE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*:|[^/\\:@]+@[^/\\:]+:|[^/\\:]+:[^/\\].*)",
     re.IGNORECASE,
@@ -900,7 +902,8 @@ def _verify_archived_fixture_inputs(replay, source_root):
             APPLE_CI_SUPPORT_CONTRACT_SHA256, PROPOSED_SUPPORT_CONTRACT_SHA256,
             MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
             BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
-            RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256):
+            RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
+            ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256):
         _fail("archived replay support contract identity mismatch")
     approved = {}
     try:

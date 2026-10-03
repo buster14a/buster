@@ -150,6 +150,8 @@ MAIN_CI_REUSE_SUPPORT_DECLARATION_SHA256 = "434ef9a356cd11e7af0b37907172becf173a
 BOOTSTRAP_WORKFLOW_SUPPORT_DECLARATION_SHA256 = "6d975980cc6df4945334fc2846dac8e03a1480a6c65e516db37be8adbccf1106"
 # #1836 successor: #1835 plus archiving the retired bridge under tests/retired/.
 RETIRED_BRIDGE_SUPPORT_DECLARATION_SHA256 = "5834270ef2b01798b25547751fd91631295a84ccb23116bf1502d8bae0c0b115"
+# #2203 successor: #1836 with only the aligned-typedef validation fixture row updated.
+ALIGNED_TYPEDEF_SUPPORT_DECLARATION_SHA256 = "7d4e4ed4fc74ff57eb3005550457751cc8841f113277c116d67fb1358da09d51"
 SUPPORT_DECLARATION_FIELDS = ["path", "role", "compile_obligation", "bytes", "sha256"]
 INPUT_FIELDS = ["path", "role", "compile_obligation", "bytes", "buster_hash_64",
                 "sha256", "fixture_recipe", "fixture_flags"]
@@ -1660,7 +1662,8 @@ def _check_support_output(root, binding, row_data, native_target=None):
                              PROPOSED_SUPPORT_DECLARATION_SHA256,
                              MAIN_CI_REUSE_SUPPORT_DECLARATION_SHA256,
                              BOOTSTRAP_WORKFLOW_SUPPORT_DECLARATION_SHA256,
-                             RETIRED_BRIDGE_SUPPORT_DECLARATION_SHA256):
+                             RETIRED_BRIDGE_SUPPORT_DECLARATION_SHA256,
+                             ALIGNED_TYPEDEF_SUPPORT_DECLARATION_SHA256):
         _fail("#508 support declaration digest is not the approved immutable input")
     declaration_data = _evidence_bytes(root, support_declaration,
                                        "support.files.support_declaration")
