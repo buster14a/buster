@@ -182,6 +182,29 @@ platform guards retain their existing policy. Run the registered module with
 
 ## Stack scope validation
 
+Fixed-size canonical locals, aggregate ABI conversion/result storage, bit-field
+aggregate construction storage and variadic-list temporaries allocate once in
+the LLVM function entry block, after entry PHIs and before stack saves. Their
+loads, stores, zero initialization and calls retain their canonical positions.
+Dynamic `STACK_ALLOCATE` records remain at their original block positions;
+scoped stack restore therefore releases dynamic storage without invalidating
+fixed slots. Stable slot numbering and each instruction's slot consumption are
+checked separately from its value-producing records.
+
+The registered `llvm_bitcode_test_fixed_allocas` independently reads original
+binary records to check allocation block positions for both frontend forms on
+six native target triples. Fixed local/bit-field subjects and x86-64 ABI/list
+subjects require every allocation in entry; a loop combining fixed and dynamic
+arrays requires exactly one allocation outside entry. Repeated artifacts and
+source/output readbacks retain byte equality. Linux x86-64/AArch64 Clang
+controls consume the original C and bitcode at `-O0`/`-O2`; the separate observer
+checks 65,536 iterations of 256-byte storage and cycling bit-field values.
+Linux x86-64 also checks direct and indirect aggregate ABI temporaries,
+aggregate definitions, compound bit-field values and copied variadic lists.
+Consumer processes have 30-second deadlines, bounded capture and stop further
+admission if process-tree ownership or cleanup fails. Hosted execution is
+required to establish results; registration alone is not passing evidence.
+
 `llvm_bitcode_tests` checks two saves, dynamic allocations and void restores
 in one canonical function, including a saved token passed through a block
 parameter. It compares repeated output byte for byte and rejects a malformed
