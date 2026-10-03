@@ -641,7 +641,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_align(AssemblyUnitBuilder* buil
     {
         return false;
     }
-    bool power = string_equal(directive, S8(".p2align"));
+    // GNU as reads `.align` as a byte count on x86 ELF but as a power of two
+    // on AArch64, where it is the same directive as `.p2align`.
+    bool power = string_equal(directive, S8(".p2align")) || (string_equal(directive, S8(".align")) && builder->target.cpu_arch == CPU_ARCH_AARCH64);
     s64 requested = 0;
     if (!assembly_unit_evaluate_absolute(builder, parts[0], &requested) || requested < 0 || requested > (power ? 20 : 1 << 20))
     {
@@ -740,6 +742,36 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_relocation_append(AssemblyUnitBuilder* bu
     return true;
 }
 
+// Byte width of an integer data directive, or zero for any other spelling.
+// GNU as gives `.word` the target's word: 16 bits on x86, 32 on AArch64,
+// which also spells 16 bits `.hword` and 64 bits `.xword`/`.dword`.
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_integer_directive_width(Target target, String8 directive)
+{
+    bool aarch64 = target.cpu_arch == CPU_ARCH_AARCH64;
+    u32 width = 0;
+    if (string_equal(directive, S8(".byte")))
+    {
+        width = 1;
+    }
+    else if (string_equal(directive, S8(".short")) || string_equal(directive, S8(".hword")) || string_equal(directive, S8(".value")))
+    {
+        width = 2;
+    }
+    else if (string_equal(directive, S8(".word")))
+    {
+        width = aarch64 ? 4 : 2;
+    }
+    else if (string_equal(directive, S8(".long")) || string_equal(directive, S8(".int")))
+    {
+        width = 4;
+    }
+    else if (string_equal(directive, S8(".quad")) || (aarch64 && (string_equal(directive, S8(".xword")) || string_equal(directive, S8(".dword")))))
+    {
+        width = 8;
+    }
+    return width;
+}
+
 // Retain data expressions until labels and binding directives are complete.
 // Bytes reserve their final positions now; materialization evaluates each
 // expression at its own field offset, so forward differences need no pass
@@ -834,7 +866,20 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_materialize_integers(AssemblyUnitBuilder*
             valid = kind != ASSEMBLY_RELOCATION_COUNT && symbol != UINT32_MAX &&
                     assembly_unit_relocation_append(builder, symbol, integer.offset, addend, kind);
         }
-        else if (valid)
+        else if (valid && integer.width < 8)
+        {
+            // Accept either a signed or an unsigned reading of the field and
+            // refuse anything wider, as llvm-mc does: those bits would be
+            // lost, which GNU as only warns about.
+            s64 limit = (s64)1 << (integer.width * 8);
+            if (value.constant < -(limit >> 1) || value.constant >= limit)
+            {
+                assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("value does not fit directive {S8}"),
+                                                integer.directive);
+                valid = false;
+            }
+        }
+        if (valid && !value.has_symbol)
         {
             ByteSlice bytes = builder->result.sections[integer.section].data;
             for (u32 byte = 0; byte < integer.width; byte += 1)
@@ -970,22 +1015,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
     {
         return assembly_unit_directive_zero(builder, operands);
     }
-    if (string_equal(directive, S8(".byte")))
+    u32 width = assembly_unit_integer_directive_width(builder->target, directive);
+    if (width)
     {
-        return assembly_unit_directive_integer(builder, 1, directive, operands);
-    }
-    if (string_equal(directive, S8(".short")) || string_equal(directive, S8(".word")) || string_equal(directive, S8(".hword")) ||
-        string_equal(directive, S8(".value")))
-    {
-        return assembly_unit_directive_integer(builder, 2, directive, operands);
-    }
-    if (string_equal(directive, S8(".long")) || string_equal(directive, S8(".int")))
-    {
-        return assembly_unit_directive_integer(builder, 4, directive, operands);
-    }
-    if (string_equal(directive, S8(".quad")))
-    {
-        return assembly_unit_directive_integer(builder, 8, directive, operands);
+        return assembly_unit_directive_integer(builder, width, directive, operands);
     }
     if (string_equal(directive, S8(".ascii")))
     {
