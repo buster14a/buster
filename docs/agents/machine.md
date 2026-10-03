@@ -814,8 +814,11 @@ fixture as well as compiling both architectures.
   undefined x86-64 ELF functions use `R_X86_64_PLT32` even in the default
   model so external linkers can put `-c` objects in PIE executables; under
   `-fPIC`, a call to any interposable symbol also uses PLT32. Internal and
-  hidden symbols keep the rip-relative form, and a thread-local address is
-  the thread-local model's to pick -- `codegen_thread_local_model` reads the
+  hidden symbols keep the rip-relative form. On Linux x86-64, an undefined
+  default-visible weak function address uses GOTPCREL even in the default
+  model, so an absent provider stays zero and a present provider retains its
+  actual function address; its direct calls still use PLT32. A thread-local
+  address is the thread-local model's to pick -- `codegen_thread_local_model` reads the
   same flag and answers general-dynamic under it. The canonical emitter and
   machine path make the same call/address distinctions, so the four
   allocators cannot disagree. One object-writer decision follows from the

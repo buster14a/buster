@@ -284,7 +284,8 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_uses_function_thunk(ObjectRelocationKind
 BUSTER_GLOBAL_LOCAL bool jit_relocation_is_supported(ObjectRelocationKind kind, CpuArch arch)
 {
     return kind == OBJECT_RELOCATION_ABSOLUTE64 ||
-           ((kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S) && arch == CPU_ARCH_X86_64) ||
+           ((kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+             kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S) && arch == CPU_ARCH_X86_64) ||
            ((kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
              kind == OBJECT_RELOCATION_AARCH64_PREL32 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
              kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
@@ -539,7 +540,7 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
             }
         }
         u8* patch = (u8*)program->section_addresses[relocation->section] + relocation->offset;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32)
         {
             s64 displacement = 0;
             if (!jit_address_difference(target, (u64)(uintptr_t)patch, relocation->addend, &displacement) || displacement < INT32_MIN ||

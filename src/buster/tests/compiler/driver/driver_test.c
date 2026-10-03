@@ -12768,6 +12768,217 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_header(Arena* arena, String8
     return valid;
 }
 
+// Independent provider function-pointer identity, including protected/weak
+// definitions, call-only imports, data copies and preload interposition.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_imported_function_addresses(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 directory = buster_test_temporary_path(arena, S8("buster-function-addresses"), S8(""));
+    os_make_directory(directory);
+    String8 provider_source = string_format_z(arena, S8("{S8}/provider.c"), directory);
+    String8 preload_source = string_format_z(arena, S8("{S8}/preload.c"), directory);
+    String8 main_source = string_format_z(arena, S8("{S8}/main.c"), directory);
+    String8 pic_source = string_format_z(arena, S8("{S8}/pic-main.c"), directory);
+    String8 weak_reference_source = string_format_z(arena, S8("{S8}/weak-reference.c"), directory);
+    String8 refused_source = string_format_z(arena, S8("{S8}/protected-address.c"), directory);
+    String8 provider_path = string_format_z(arena, S8("{S8}/libfunctionidentity.so"), directory);
+    String8 preload_path = string_format_z(arena, S8("{S8}/libfunctionpreload.so"), directory);
+    String8 provider = S8(
+        "typedef int (*Function)(int);\n"
+        "int identity_target(int value) { return value + 7; }\n"
+        "Function identity_target_address(void) { return identity_target; }\n"
+        "__attribute__((visibility(\"protected\"))) int identity_protected(int value) { return value + 9; }\n"
+        "Function identity_protected_address(void) { return identity_protected; }\n"
+        "int identity_weak(int value) { return value + 11; }\n"
+        "Function identity_weak_address(void) { return identity_weak; }\n"
+        "__attribute__((visibility(\"protected\"))) int identity_call_only(int value) { return value + 13; }\n"
+        "int identity_data = 41;\n"
+        "int* identity_data_address(void) { return &identity_data; }\n");
+    String8 main_prefix = S8(
+        "typedef int (*Function)(int);\n"
+        "int identity_target(int);\n"
+        "Function identity_target_address(void);\n"
+        "int identity_protected(int);\n"
+        "Function identity_protected_address(void);\n"
+        "int identity_weak(int) __attribute__((weak));\n"
+        "Function identity_weak_address(void);\n"
+        "int identity_missing(int) __attribute__((weak));\n"
+        "int identity_call_only(int);\n"
+        "extern int identity_data;\n"
+        "int* identity_data_address(void);\n"
+        "Function identity_saved = identity_target;\n"
+        "Function identity_protected_saved = identity_protected;\n"
+        "Function identity_weak_saved = identity_weak;\n"
+        "Function identity_missing_saved = identity_missing;\n"
+        "Function const identity_table[3] = {identity_target, identity_protected, identity_weak};\n"
+        "int main(int argc, char** argv)\n"
+        "{\n"
+        "    (void)argv;\n"
+        "    int expected = argc == 2 ? 22 : 12;\n"
+        "    int failed = identity_saved != identity_target_address();\n"
+        "    failed |= identity_target != identity_saved;\n"
+        "    failed |= identity_protected_saved != identity_protected_address();\n"
+        "    failed |= identity_weak_saved != identity_weak_address();\n"
+        "    failed |= identity_missing_saved != 0;\n"
+        "    failed |= identity_weak != identity_weak_saved;\n"
+        "    failed |= identity_missing != 0;\n"
+        "    failed |= identity_table[0] != identity_saved;\n"
+        "    failed |= identity_table[1] != identity_protected_saved;\n"
+        "    failed |= identity_table[2] != identity_weak_saved;\n"
+        "    failed |= identity_saved(5) != expected;\n"
+        "    failed |= identity_target(5) != expected;\n"
+        "    failed |= identity_protected_saved(5) != 14;\n"
+        "    failed |= identity_weak_saved(5) != 16;\n"
+        "    failed |= identity_call_only(5) != 18;\n"
+        "    failed |= identity_data != 41 || identity_data_address() != &identity_data;\n"
+        "    identity_data += 1;\n"
+        "    failed |= *identity_data_address() != 42;\n");
+    String8 main_suffix = S8("    return failed;\n}\n");
+    String8 pic_extra = S8("    failed |= identity_protected != identity_protected_saved;\n");
+    String8 main_text = string_format(arena, S8("{S8}{S8}"), main_prefix, main_suffix);
+    String8 pic_text = string_format(arena, S8("{S8}{S8}{S8}"), main_prefix, pic_extra, main_suffix);
+    String8 refused = S8("typedef int (*Function)(int);\n"
+                         "int identity_protected(int);\n"
+                         "Function identity_protected_address(void);\n"
+                         "int main(void) { return identity_protected != identity_protected_address(); }\n");
+    String8 preload = S8("int identity_target(int value) { return value + 17; }\n");
+    String8 weak_reference = S8(
+        "typedef int (*Function)(int);\n"
+        "int weak_reference_target(int) __attribute__((weak));\n"
+        "int strong_reference_target(int);\n"
+        "__attribute__((noinline)) static int local_reference_target(int value) { return value; }\n"
+        "Function weak_reference_address(void) { return weak_reference_target; }\n"
+        "Function strong_reference_address(void) { return strong_reference_target; }\n"
+        "Function local_reference_address(void) { return local_reference_target; }\n"
+        "int weak_reference_call(int value) { return weak_reference_target(value); }\n"
+        "int strong_reference_call(int value) { return strong_reference_target(value); }\n");
+    bool written = file_write(provider_source, BUSTER_SLICE_TO_BYTE_SLICE(provider)) &&
+                   file_write(preload_source, BUSTER_SLICE_TO_BYTE_SLICE(preload)) &&
+                   file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(main_text)) &&
+                   file_write(pic_source, BUSTER_SLICE_TO_BYTE_SLICE(pic_text)) &&
+                   file_write(weak_reference_source, BUSTER_SLICE_TO_BYTE_SLICE(weak_reference)) &&
+                   file_write(refused_source, BUSTER_SLICE_TO_BYTE_SLICE(refused));
+    BUSTER_TEST(arguments, written);
+    String8 provider_command[] = {S8("-shared"), S8("-fPIC"), S8("-O2"), S8("-o"), provider_path, provider_source};
+    String8 preload_command[] = {S8("-shared"), S8("-fPIC"), S8("-O2"), S8("-o"), preload_path, preload_source};
+    bool providers_built = written && compiler_driver_test_image_host_compile(arena, provider_command, BUSTER_ARRAY_LENGTH(provider_command)) &&
+                           compiler_driver_test_image_host_compile(arena, preload_command, BUSTER_ARRAY_LENGTH(preload_command));
+    BUSTER_TEST(arguments, providers_built);
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    // In the default code model, weak undefined function addresses need a
+    // GOT value while their direct calls retain PLT32. Strong/local address
+    // controls and a zero-fallback requirement cover both production emitters.
+    for (u32 variant = 0; written && variant < 8; variant += 1)
+    {
+        u32 allocator = variant / 2;
+        String8 path = string_format_z(arena, S8("{S8}/weak-reference-{u32}.o"), directory, variant);
+        String8 command[] = {S8("-c"), S8("-g0"), modes[allocator], frontends[variant & 1],
+                             allocator ? S8("-fno-machine-fallback") : S8("-g0"), S8("-fverify-codegen"),
+                             S8("-o"), path, weak_reference_source};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        bool ready = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object && compiled.object.error == OBJECT_ERROR_NONE;
+        if (!ready) arguments->show(arguments, S8("weak function reference variant {u32}: {S8}\n"), variant, compiled.diagnostic);
+        BUSTER_TEST(arguments, ready);
+        if (ready)
+        {
+            bool weak_got = false;
+            bool weak_plt = false;
+            bool weak_direct = false;
+            bool strong_direct = false;
+            bool strong_plt = false;
+            bool local_direct = false;
+            bool local_got = false;
+            ObjectSymbol const* weak_symbol = compiler_driver_test_object_symbol(&compiled.object, S8("weak_reference_target"));
+            BUSTER_TEST(arguments, weak_symbol && weak_symbol->weak && weak_symbol->section == OBJECT_SECTION_UNDEFINED &&
+                                   weak_symbol->kind == OBJECT_SYMBOL_FUNCTION);
+            for (u32 index = 0; index < compiled.object.relocation_count; index += 1)
+            {
+                ObjectRelocation const* relocation = compiled.object.relocations + index;
+                if (relocation->section != OBJECT_SECTION_TEXT || relocation->symbol >= compiled.object.symbol_count) continue;
+                String8 name = compiled.object.symbols[relocation->symbol].name;
+                if (string_equal(name, S8("weak_reference_target")))
+                {
+                    weak_got |= object_relocation_kind_is_x86_got(relocation->kind);
+                    weak_plt |= relocation->kind == OBJECT_RELOCATION_X86_64_PLT32;
+                    weak_direct |= relocation->kind == OBJECT_RELOCATION_X86_64_PC32;
+                }
+                else if (string_equal(name, S8("strong_reference_target")))
+                {
+                    strong_direct |= relocation->kind == OBJECT_RELOCATION_X86_64_PC32;
+                    strong_plt |= relocation->kind == OBJECT_RELOCATION_X86_64_PLT32;
+                }
+                else if (string_equal(name, S8("local_reference_target")))
+                {
+                    local_direct |= relocation->kind == OBJECT_RELOCATION_X86_64_PC32;
+                    local_got |= object_relocation_kind_is_x86_got(relocation->kind);
+                }
+            }
+            BUSTER_TEST(arguments, weak_got && weak_plt && !weak_direct && strong_direct && strong_plt && local_direct && !local_got);
+            BUSTER_TEST(arguments, !allocator || compiled.codegen_statistics.fallback_function_count == 0);
+        }
+    }
+    ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
+    String8 keys[] = {S8("LD_LIBRARY_PATH"), S8("LD_BIND_NOW"), S8("LD_PRELOAD")};
+    for (u32 variant = 0; providers_built && variant < 18; variant += 1)
+    {
+        bool reference = variant >= 16;
+        bool pic = (variant & 1) != 0;
+        String8 path = string_format_z(arena, S8("{S8}/image-{u32}"), directory, variant);
+        bool linked = false;
+        if (reference)
+        {
+            String8 command[] = {S8("-no-pie"), pic ? S8("-fPIC") : S8("-fPIE"), S8("-o"), path,
+                                 pic ? pic_source : main_source, S8("-L"), directory, S8("-lfunctionidentity")};
+            linked = compiler_driver_test_image_host_compile(arena, command, BUSTER_ARRAY_LENGTH(command));
+        }
+        else
+        {
+            String8 command[] = {S8("-g0"), S8("-no-pie"), pic ? S8("-fPIC") : S8("-fno-pic"),
+                                 modes[variant / 4], frontends[(variant / 2) & 1], S8("-fverify-codegen"), S8("-o"), path,
+                                 pic ? pic_source : main_source, S8("-L"), directory, S8("-lfunctionidentity")};
+            CompilerDriverResult built = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            linked = built.error == COMPILER_DRIVER_ERROR_NONE;
+            if (!linked) arguments->show(arguments, S8("function identity variant {u32}: {S8}\n"), variant, built.diagnostic);
+        }
+        BUSTER_TEST(arguments, linked);
+        for (u32 eager = 0; linked && eager < 2; eager += 1)
+        {
+            for (u32 interposed = 0; interposed < 2; interposed += 1)
+            {
+                String8 command[] = {path, S8("preloaded")};
+                String8 values[] = {directory, eager ? S8("1") : S8(""), interposed ? preload_path : S8("")};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = interposed ? 2 : 1},
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(values), capture);
+                ProcessWaitResult wait = spawn.handle ? os_process_wait_deadline(arena, spawn, 60000000) : (ProcessWaitResult){0};
+                bool passed = spawn.handle && !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS;
+                if (!passed) arguments->show(arguments, S8("function identity variant {u32} eager={u32} preload={u32} status={u32:x}\n"),
+                                             variant, eager, interposed, wait.platform_status);
+                BUSTER_TEST(arguments, passed);
+            }
+        }
+    }
+    if (providers_built)
+    {
+        String8 refused_path = string_format_z(arena, S8("{S8}/refused"), directory);
+        String8 command[] = {S8("-g0"), S8("-fno-pic"), S8("-o"), refused_path, refused_source,
+                             S8("-L"), directory, S8("-lfunctionidentity")};
+        CompilerDriverResult built = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, built.error != COMPILER_DRIVER_ERROR_NONE &&
+                               string_first_sequence(built.diagnostic, S8("identity_protected")) < built.diagnostic.length);
+        BUSTER_TEST(arguments, !file_read(arena, refused_path, (FileReadOptions){0}).pointer);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+
 // `-shared` and `-pie` end to end (issue 1604): Buster's shared object is
 // loaded by the system loader through dlopen, linked by both Buster and the
 // host toolchain's GNU ld -- as a PIE, whose imported data then reaches the
@@ -17272,6 +17483,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_untyped_function_imports);
 #endif
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_imported_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_position_independent_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_dynamic_tls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_link_tls_sites);
