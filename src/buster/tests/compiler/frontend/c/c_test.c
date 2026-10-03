@@ -3006,7 +3006,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_static_aggregates(UnitTestArgume
 // __func__, __FUNCTION__ and __PRETTY_FUNCTION__ each lower to a read-only
 // char array holding the enclosing function's name and a terminator. The
 // names straddle the narrow decoder's 64-byte window and include UTF-8, and
-// one function names itself twice to get two distinct owned globals.
+// one function names itself twice while sharing its implicit static array.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_name_literals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3030,7 +3030,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_name_literals(UnitTestArgumen
     names[utf8_index + 3] = S8("s");
     expected_counts[utf8_index] = 1;
     expected_counts[utf8_index + 1] = 1;
-    expected_counts[utf8_index + 2] = 2;
+    expected_counts[utf8_index + 2] = 1;
     expected_counts[utf8_index + 3] = 1;
     String8 const bodies[] = {
         S8("(void) { return __func__; }\n"),
@@ -3100,7 +3100,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_name_literals(UnitTestArgumen
         BUSTER_TEST(arguments, unmatched == 0);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
         {
-            BUSTER_TEST(arguments, found_counts[name_index] >= expected_counts[name_index]);
+            BUSTER_TEST(arguments, found_counts[name_index] == expected_counts[name_index]);
         }
         BUSTER_TEST(arguments, ir.canonical_ir_certified);
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);

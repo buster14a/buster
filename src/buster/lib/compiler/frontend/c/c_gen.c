@@ -22,6 +22,9 @@
 // restoration use the checked ir_block_* primitives, and
 // c_ir_finish_construction rejects a function with a refused row or an open
 // block.
+// c_ir_string_object shares typed static storage between literal operands and
+// runtime places; c_ir_static_compound_literal_object guards the new general
+// compound-address materialization entry while retaining legacy shortcuts.
 // c_ir_constant_truth certifies a scalar value before truth consumers fold;
 // its UNKNOWN outcome is distinct from a known false value.
 //
@@ -2731,6 +2734,11 @@ struct CIntegerIrBuilder
     IrProgram* program;
     IrModule* module;
     IrFunction* function;
+    // One implicit static __func__ object per function, shared by constants
+    // and runtime uses. Zero means it has not been materialized yet.
+    u32 function_name_symbol_plus_one;
+    // Guards only materialization entered through a general constant operand.
+    bool static_literal_object_active;
     // Narrow bit-fields can need a promotion fact absent from
     // their canonical type. Allocate lazily; ordinary functions pay no table.
     u8* bit_field_promotions;
@@ -13515,103 +13523,101 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_character(CIntegerIrBuilder* builder, CTok
     return result;
 }
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_string_contents_typed(CIntegerIrBuilder* builder, CToken token, CIrDecodedString decoded, IrTypeId requested_type)
+// A literal's static object is independent of whether its address is needed
+// by a constant initializer or by a runtime GLOBAL instruction.
+BUSTER_C_INTERNAL CIrConstantValue c_ir_string_object(CIntegerIrBuilder* builder, CToken token, CIrDecodedString decoded,
+                                                       IrTypeId requested_type)
 {
-    if (!builder->module || decoded.element_count == UINT64_MAX || !decoded.element_width)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    u64 element_count = decoded.element_count + 1;
-    if (element_count > UINT64_MAX / decoded.element_width)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    u64 byte_length = element_count * decoded.element_width;
-    IrTypeId element_type = builder->scalar_types[decoded.element_kind];
+    CIrConstantValue result = {.type = IR_TYPE_ID_INVALID, .symbol = IR_SYMBOL_ID_INVALID};
+    bool valid = builder->module && decoded.element_kind < C_TYPE_COUNT && decoded.element_count != UINT64_MAX && decoded.element_width;
+    u64 element_count = valid ? decoded.element_count + 1 : 0;
+    valid = valid && element_count <= UINT64_MAX / decoded.element_width;
+    u64 byte_length = valid ? element_count * decoded.element_width : 0;
+    IrTypeId element_type = valid ? builder->scalar_types[decoded.element_kind] : IR_TYPE_ID_INVALID;
     IrType* literal_element = ir_type_from_id(&builder->program->types, element_type);
-    if (!literal_element || literal_element->kind != IR_TYPE_INTEGER || literal_element->bit_width != decoded.element_width * 8)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
+    valid = valid && literal_element && literal_element->kind == IR_TYPE_INTEGER && literal_element->bit_width == decoded.element_width * 8;
     IrTypeId array_type = IR_TYPE_ID_INVALID;
     IrType* requested = ir_type_from_id(&builder->program->types, requested_type);
-    if (requested && requested->kind == IR_TYPE_ARRAY)
+    if (valid && requested && requested->kind == IR_TYPE_ARRAY)
     {
         IrType* element = ir_type_from_id(&builder->program->types, requested->element_type);
-        if (!element || element->kind != IR_TYPE_INTEGER || element->bit_width != decoded.element_width * 8 || decoded.element_count > requested->element_count)
+        valid = element && element->kind == IR_TYPE_INTEGER && element->bit_width == decoded.element_width * 8 &&
+                decoded.element_count <= requested->element_count && requested->element_count <= UINT64_MAX / decoded.element_width;
+        if (valid)
         {
-            return IR_VALUE_ID_INVALID;
+            element_count = requested->element_count;
+            byte_length = element_count * decoded.element_width;
+            array_type = requested_type;
         }
-        element_count = requested->element_count;
-        if (element_count > UINT64_MAX / decoded.element_width)
+    }
+    valid = valid && decoded.bytes.length <= byte_length && (!decoded.bytes.length || decoded.bytes.pointer);
+    if (valid)
+    {
+        u8* bytes = arena_allocate_zeroed(builder->arena, u8, byte_length ? byte_length : 1);
+        valid = bytes != 0;
+        if (valid && decoded.bytes.length)
         {
-            return IR_VALUE_ID_INVALID;
+            memcpy(bytes, decoded.bytes.pointer, decoded.bytes.length);
         }
-        byte_length = element_count * decoded.element_width;
-        array_type = requested_type;
+        if (valid && array_type.value == IR_ID_UNDERLYING_INVALID)
+        {
+            array_type = ir_program_add_type(builder->program, (IrType){
+                .name = S8("C string literal"),
+                .element_type = element_type,
+                .return_type = IR_TYPE_ID_INVALID,
+                .layout = {.size = byte_length, .alignment = literal_element->layout.alignment, .resolved = true},
+                .kind = IR_TYPE_ARRAY,
+                .element_count = element_count,
+            });
+        }
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        String8 name = string_format(builder->arena, S8(".L.cstr.{u32}"), builder->program->symbols.count);
+        IrSymbolId symbol = valid && array_type.value != IR_ID_UNDERLYING_INVALID
+            ? ir_program_add_symbol(builder->program, (IrSymbol){
+                .name = name, .link_name = name, .source = source, .type = array_type,
+                .kind = IR_SYMBOL_DATA, .linkage = IR_LINKAGE_INTERNAL, .is_definition = true,
+            }) : IR_SYMBOL_ID_INVALID;
+        if (symbol.value != IR_ID_UNDERLYING_INVALID && ir_module_add_global(builder->arena, builder->module, (IrGlobal){
+                .bytes = {.pointer = bytes, .length = byte_length},
+                .symbol = symbol, .initializer_symbol = IR_SYMBOL_ID_INVALID, .type = array_type,
+                .source = source, .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES, .is_read_only = true,
+            }))
+        {
+            result = (CIrConstantValue){.type = array_type, .symbol = symbol, .kind = C_IR_CONSTANT_LVALUE};
+        }
     }
-    u8* bytes = arena_allocate_zeroed(builder->arena, u8, byte_length);
-    if (decoded.bytes.length)
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_literal_object(CIntegerIrBuilder* builder, CToken token, CIrConstantValue object,
+                                                      IrTypeId requested_type)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    if (builder->function && object.kind == C_IR_CONSTANT_LVALUE)
     {
-        memcpy(bytes, decoded.bytes.pointer, decoded.bytes.length);
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        IrValueId place = ir_function_add_value(builder->arena, builder->function, (IrValue){
+            .canonical_type = object.type, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_PLACE,
+        });
+        IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_GLOBAL, object.type);
+        instruction.symbol = object.symbol;
+        instruction.result = place;
+        IrInstructionId appended = c_ir_append_instruction(builder, instruction, source);
+        if (place.value != IR_ID_UNDERLYING_INVALID && appended.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrType* requested = ir_type_from_id(&builder->program->types, requested_type);
+            result = requested && requested->kind == IR_TYPE_ARRAY
+                ? c_ir_emit_load_place_raw(builder, place, object.type, source) : place;
+        }
     }
-    if (array_type.value == IR_ID_UNDERLYING_INVALID)
-    {
-        array_type = ir_program_add_type(builder->program, (IrType){
-                                                               .name = S8("C string literal"),
-                                                               .element_type = element_type,
-                                                               .return_type = IR_TYPE_ID_INVALID,
-                                                               .layout =
-                                                                   {
-                                                                       .size = byte_length,
-                                                                       .alignment = literal_element->layout.alignment,
-                                                                       .resolved = true,
-                                                                   },
-                                                               .kind = IR_TYPE_ARRAY,
-                                                               .element_count = element_count,
-                                                           });
-    }
-    String8 name = string_format(builder->arena, S8(".L.cstr.{u32}"), builder->program->symbols.count);
-    IrSourceRange source = c_ir_token_source_range(builder, token);
-    IrSymbolId symbol = ir_program_add_symbol(builder->program, (IrSymbol){
-                                                                    .name = name,
-                                                                    .link_name = name,
-                                                                    .source = source,
-                                                                    .type = array_type,
-                                                                    .kind = IR_SYMBOL_DATA,
-                                                                    .linkage = IR_LINKAGE_INTERNAL,
-                                                                    .is_definition = true,
-                                                                });
-    ir_module_add_global(builder->arena, builder->module,
-                         (IrGlobal){
-                             .bytes =
-                                 {
-                                     .pointer = bytes,
-                                     .length = byte_length,
-                                 },
-                             .symbol = symbol,
-                             .initializer_symbol = IR_SYMBOL_ID_INVALID,
-                             .type = array_type,
-                             .source = source,
-                             .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
-                             .is_read_only = true,
-                         });
-    IrValueId place = ir_function_add_value(builder->arena, builder->function,
-                                            (IrValue){
-                                                .canonical_type = array_type,
-                                                .definition = IR_INSTRUCTION_ID_INVALID,
-                                                .category = IR_VALUE_PLACE,
-                                            });
-    IrSourceRange instruction_source = source;
-    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_GLOBAL, array_type);
-    instruction.symbol = symbol;
-    instruction.result = place;
-    c_ir_append_instruction(builder, instruction, instruction_source);
-    if (requested && requested->kind == IR_TYPE_ARRAY)
-    {
-        return c_ir_emit_load_place_raw(builder, place, array_type, source);
-    }
-    return place;
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_string_contents_typed(CIntegerIrBuilder* builder, CToken token, CIrDecodedString decoded, IrTypeId requested_type)
+{
+    CIrConstantValue object = c_ir_string_object(builder, token, decoded, requested_type);
+    IrValueId result = c_ir_emit_literal_object(builder, token, object, requested_type);
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_string_range_typed(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId requested_type)
@@ -13634,44 +13640,67 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_string_range_typed(CIntegerIrBuilder* buil
 // function's name. The lexer admits no backslash in an identifier, and the
 // narrow decoder copies every other byte through unchanged, so a
 // backslash-free name already is the decoded contents: describe it in place
-// and let c_ir_emit_string_contents_typed copy it into the owned global, with
+// and let c_ir_string_object copy it into the owned global, with
 // no quoted copy and no decode buffer. A name that does hold a backslash
 // keeps the quoted round-trip and its escape grammar.
+BUSTER_C_INTERNAL CIrConstantValue c_ir_function_name_object(CIntegerIrBuilder* builder, CToken token)
+{
+    CIrConstantValue result = {.type = IR_TYPE_ID_INVALID, .symbol = IR_SYMBOL_ID_INVALID};
+    IrSymbolId cached = {.value = builder->function_name_symbol_plus_one - 1};
+    IrSymbol* symbol = builder->function_name_symbol_plus_one ? ir_symbol_from_id(&builder->program->symbols, cached) : 0;
+    if (symbol)
+    {
+        result = (CIrConstantValue){.type = symbol->type, .symbol = cached, .kind = C_IR_CONSTANT_LVALUE};
+    }
+    else if (builder->function)
+    {
+        String8 name = builder->function->name;
+        CIrDecodedString decoded = {
+            .bytes =
+                {
+                    .pointer = (u8*)name.pointer,
+                    .length = name.length,
+                },
+            .element_count = name.length,
+            .element_width = 1,
+            .element_kind = C_TYPE_CHAR,
+            .encoding = C_IR_STRING_ENCODING_ORDINARY,
+        };
+        bool described = true;
+        if (string_first_code_unit(name, '\\') != BUSTER_STRING_NO_MATCH)
+        {
+            // The quoted name lives outside the spelling space, so decode it
+            // through a detached one-token view; the original token keeps
+            // carrying the source range.
+            String8 quoted = string_format(builder->arena, S8("\"{S8}\""), name);
+            CToken quoted_token = {
+                .length = c_token_length_field(quoted.length),
+                .kind = C_TOKEN_STRING_LITERAL,
+            };
+            CPreprocessResult quoted_preprocess = {
+                .tokens = &quoted_token,
+                .spelling_base = quoted.pointer,
+                .token_count = 1,
+                .dialect = builder->preprocess.dialect,
+            };
+            described = c_ir_decode_string_literal_range_for_target(builder->arena, quoted_preprocess, builder->target, 0, 1, builder->parse.string_literals, &decoded);
+        }
+        if (described)
+        {
+            result = c_ir_string_object(builder, token, decoded, IR_TYPE_ID_INVALID);
+            if (result.kind == C_IR_CONSTANT_LVALUE)
+            {
+                builder->function_name_symbol_plus_one = result.symbol.value + 1;
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_function_name(CIntegerIrBuilder* builder, CToken token)
 {
-    String8 name = builder->function->name;
-    CIrDecodedString decoded = {
-        .bytes =
-            {
-                .pointer = (u8*)name.pointer,
-                .length = name.length,
-            },
-        .element_count = name.length,
-        .element_width = 1,
-        .element_kind = C_TYPE_CHAR,
-        .encoding = C_IR_STRING_ENCODING_ORDINARY,
-    };
-    bool described = true;
-    if (string_first_code_unit(name, '\\') != BUSTER_STRING_NO_MATCH)
-    {
-        // The quoted name lives outside the spelling space, so decode it
-        // through a detached one-token view; the original token keeps
-        // carrying the source range.
-        String8 quoted = string_format(builder->arena, S8("\"{S8}\""), name);
-        CToken quoted_token = {
-            .length = c_token_length_field(quoted.length),
-            .kind = C_TOKEN_STRING_LITERAL,
-        };
-        CPreprocessResult quoted_preprocess = {
-            .tokens = &quoted_token,
-            .spelling_base = quoted.pointer,
-            .token_count = 1,
-            .dialect = builder->preprocess.dialect,
-        };
-        described = c_ir_decode_string_literal_range_for_target(builder->arena, quoted_preprocess, builder->target, 0, 1, builder->parse.string_literals, &decoded);
-    }
-    IrValueId result = described ? c_ir_emit_string_contents_typed(builder, token, decoded, IR_TYPE_ID_INVALID) : IR_VALUE_ID_INVALID;
-
+    CIrConstantValue object = c_ir_function_name_object(builder, token);
+    IrValueId result = c_ir_emit_literal_object(builder, token, object, IR_TYPE_ID_INVALID);
     return result;
 }
 
@@ -25180,6 +25209,8 @@ BUSTER_C_INTERNAL bool c_ir_compound_literal_element_count_attempt(CIntegerIrBui
     return count != 0;
 }
 
+BUSTER_C_INTERNAL bool c_ir_string_array_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded);
+
 BUSTER_C_INTERNAL IrTypeId c_ir_compound_literal_type_attempt(CIntegerIrBuilder* builder, u32 type_start, u32 type_end, u32 initializer_open,
                                                                  u32 initializer_close)
 {
@@ -25205,8 +25236,25 @@ BUSTER_C_INTERNAL IrTypeId c_ir_compound_literal_type_attempt(CIntegerIrBuilder*
         return IR_TYPE_ID_INVALID;
     }
     u64 element_count = 0;
+    u32 string_end = initializer_close;
+    if (string_end > initializer_open + 1 && c_token_is_punctuator(&builder->preprocess.tokens[string_end - 1], C_PUNCTUATOR_COMMA))
+    {
+        string_end -= 1;
+    }
+    bool string_body = initializer_open + 1 < string_end &&
+                       c_ir_tokens_are_string_literals(builder->preprocess, initializer_open + 1, string_end);
+    CIrDecodedString decoded = {0};
+    bool completed_string = string_body && element.value != IR_ID_UNDERLYING_INVALID &&
+        c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target,
+            initializer_open + 1, string_end, builder->parse.string_literals, &decoded) &&
+        c_ir_string_array_element_compatible(builder, element, decoded) && decoded.element_count != UINT64_MAX;
+    if (completed_string)
+    {
+        element_count = decoded.element_count + 1;
+    }
     IrTypeId result;
-    if (element.value == IR_ID_UNDERLYING_INVALID || !c_ir_query_compound_element_count(builder, initializer_open, initializer_close, &element_count))
+    if (element.value == IR_ID_UNDERLYING_INVALID ||
+        (!completed_string && !c_ir_query_compound_element_count(builder, initializer_open, initializer_close, &element_count)))
     {
         result = IR_TYPE_ID_INVALID;
     }
@@ -25614,8 +25662,6 @@ BUSTER_C_INTERNAL bool c_ir_array_designator_has_range(CIntegerIrBuilder* builde
     }
     return false;
 }
-
-BUSTER_C_INTERNAL bool c_ir_string_array_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded);
 
 // Unnamed bit-fields are padding, while anonymous structs/unions still consume
 // an initializer. Keep the cursor in field indices so each padding field is
@@ -45552,6 +45598,81 @@ void c_test_initializer_relocation_replay(Arena* arena, u32 pointer_size, u64 by
 // `functional/pthread_cancel-points`, whose last scenario passes `&(int){0}`
 // as its argument.  Inside a function body the same literal has automatic
 // storage duration, and there the address is rejected rather than folded.
+// The general operand route may enter the existing initializer folder once.
+// Nested compound objects on that route are refused before another entry;
+// legacy whole-address callers retain their existing path.
+BUSTER_C_INTERNAL CIrConstantValue c_ir_static_compound_literal_object(CIntegerIrBuilder* builder, u32 type_start, u32 open,
+                                                                        u32 close, IrTypeId literal_type, bool guarded)
+{
+    CIrConstantValue result = {.type = IR_TYPE_ID_INVALID, .symbol = IR_SYMBOL_ID_INVALID};
+    IrType* literal = ir_type_from_id(&builder->program->types, literal_type);
+    bool previous = builder->static_literal_object_active;
+    bool valid = literal && literal->layout.resolved && !builder->function && !previous;
+    if (builder->function)
+    {
+        // A general operand query can be a benign __builtin_constant_p probe.
+        // Decline it without poisoning later runtime lowering. The legacy
+        // static-initializer shortcut retains its named storage-duration error.
+        if (!guarded)
+        {
+            c_ir_constant_initializer_fail(builder,
+                S8("a compound literal inside a function body has automatic storage duration, so its address is not a constant expression"), type_start - 1);
+        }
+    }
+    else if (previous)
+    {
+        c_ir_constant_initializer_fail(builder,
+            S8("nested compound literal objects in a general static address expression are not supported"), type_start - 1);
+    }
+    else if (!literal || !literal->layout.resolved)
+    {
+        c_ir_constant_initializer_fail(builder, S8("cannot resolve the type of a compound literal in a static initializer"), type_start - 1);
+    }
+    if (valid)
+    {
+        builder->static_literal_object_active = guarded;
+        u32 relocation_capacity = 0;
+        valid = c_ir_constant_initializer_relocation_capacity(builder, literal->layout.size, (u64)close + 1 - open, &relocation_capacity);
+        if (!valid)
+        {
+            c_ir_constant_initializer_fail(builder, S8("compound literal initializer nesting exceeds its capacity"), open);
+        }
+        u8* bytes = valid ? arena_allocate(builder->arena, u8, literal->layout.size ? literal->layout.size : 1) : 0;
+        IrGlobalRelocation* relocations = valid ? arena_allocate(builder->arena, IrGlobalRelocation, relocation_capacity) : 0;
+        u32 relocation_count = 0;
+        valid = valid && bytes && relocations;
+        bool aggregate = literal->kind == IR_TYPE_ARRAY || literal->kind == IR_TYPE_VECTOR ||
+                         literal->kind == IR_TYPE_STRUCT || literal->kind == IR_TYPE_UNION;
+        if (valid)
+        {
+            memset(bytes, 0, literal->layout.size);
+            valid = aggregate
+                ? c_ir_constant_initializer_bytes(builder, open, close + 1, literal_type, bytes, literal->layout.size,
+                    relocations, &relocation_count, relocation_capacity)
+                : c_ir_constant_initializer_bytes_legacy(builder, open, close + 1, literal_type, bytes, literal->layout.size,
+                    0, relocations, &relocation_count, relocation_capacity);
+        }
+        String8 name = valid ? string_format(builder->arena, S8(".L.compoundliteral.{u32}"), builder->program->symbols.count) : (String8){0};
+        IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[type_start - 1]);
+        IrSymbolId symbol = valid ? ir_program_add_symbol(builder->program, (IrSymbol){
+            .name = name, .link_name = name, .source = source, .type = literal_type,
+            .kind = IR_SYMBOL_DATA, .linkage = IR_LINKAGE_INTERNAL, .is_definition = true,
+        }) : IR_SYMBOL_ID_INVALID;
+        // Compound literals remain writable objects with distinct occurrences.
+        if (symbol.value != IR_ID_UNDERLYING_INVALID && ir_module_add_global(builder->arena, builder->module, (IrGlobal){
+                .bytes = {.pointer = bytes, .length = literal->layout.size}, .relocations = relocations,
+                .symbol = symbol, .initializer_symbol = IR_SYMBOL_ID_INVALID, .type = literal_type, .source = source,
+                .relocation_count = relocation_count, .alignment = literal->layout.alignment,
+                .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
+            }))
+        {
+            result = (CIrConstantValue){.type = literal_type, .symbol = symbol, .kind = C_IR_CONSTANT_LVALUE};
+        }
+    }
+    builder->static_literal_object_active = previous;
+    return result;
+}
+
 BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(CIntegerIrBuilder* builder, u32 start, u32 end, IrSymbolId* symbol_out,
                                                                                s64* addend_out)
 {
@@ -45580,9 +45701,8 @@ BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(
     // one steps aside rather than claiming a shape it does not handle.
     if (compound_literal && (address_of || (literal && literal->kind == IR_TYPE_ARRAY)))
     {
-        // From here the element is the address of a compound literal, so every
-        // way out is a refusal that names itself rather than a fall-through to
-        // the shapes the caller tries next.
+        // Invalid storage and subobject walks remain named refusals.
+        // A trailing operator steps aside for the typed constant folder.
         result = C_IR_STATIC_COMPOUND_LITERAL_REJECTED;
         if (builder->function)
         {
@@ -45676,8 +45796,9 @@ BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(
                 }
                 else
                 {
-                    c_ir_constant_initializer_fail(
-                        builder, S8("only a member designator or a constant subscript after a compound literal is folded in a static initializer"), index);
+                    // Arithmetic and grouped postfix tails use the shared
+                    // typed folder; this shortcut owns only its completed walk.
+                    result = C_IR_STATIC_COMPOUND_LITERAL_ABSENT;
                     walked = false;
                 }
             }
@@ -45692,69 +45813,15 @@ BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(
                 c_ir_constant_initializer_fail(builder, S8("a subscripted compound literal without an '&' is a value rather than an address"), close + 1);
                 walked = false;
             }
-            u32 relocation_capacity = 0;
-            if (walked && !c_ir_constant_initializer_relocation_capacity(builder, literal->layout.size, (u64)close + 1 - open, &relocation_capacity))
+            if (walked)
             {
-                c_ir_constant_initializer_fail(builder, S8("compound literal initializer nesting exceeds its capacity"), open);
-                walked = false;
-            }
-            u8* literal_bytes = walked ? arena_allocate(builder->arena, u8, literal->layout.size ? literal->layout.size : 1) : 0;
-            IrGlobalRelocation* literal_relocations = walked ? arena_allocate(builder->arena, IrGlobalRelocation, relocation_capacity) : 0;
-            u32 literal_relocation_count = 0;
-            // The designator machine holds only aggregates; a scalar literal
-            // keeps the brace-stripping folder, which is the same split
-            // c_ir_global_initializer makes for the object being initialized.
-            bool aggregate =
-                literal->kind == IR_TYPE_ARRAY || literal->kind == IR_TYPE_VECTOR || literal->kind == IR_TYPE_STRUCT || literal->kind == IR_TYPE_UNION;
-            if (literal_bytes && literal_relocations)
-            {
-                memset(literal_bytes, 0, literal->layout.size);
-                walked = aggregate ? c_ir_constant_initializer_bytes(builder, open, close + 1, literal_type, literal_bytes, literal->layout.size,
-                                                                     literal_relocations, &literal_relocation_count, relocation_capacity)
-                                   : c_ir_constant_initializer_bytes_legacy(builder, open, close + 1, literal_type, literal_bytes,
-                                                                            literal->layout.size, 0, literal_relocations, &literal_relocation_count,
-                                                                            relocation_capacity);
-            }
-            else
-            {
-                walked = false;
-            }
-            String8 literal_name = walked ? string_format(builder->arena, S8(".L.compoundliteral.{u32}"), program->symbols.count) : (String8){0};
-            IrSourceRange source = c_ir_site_source_range(c_preprocess_token_site(&preprocess, preprocess.tokens[cursor]),
-                                                          c_token_length(preprocess.spelling_base, preprocess.tokens[cursor]));
-            IrSymbolId literal_symbol = walked ? ir_program_add_symbol(program, (IrSymbol){
-                                                                                   .name = literal_name,
-                                                                                   .link_name = literal_name,
-                                                                                   .source = source,
-                                                                                   .type = literal_type,
-                                                                                   .kind = IR_SYMBOL_DATA,
-                                                                                   .linkage = IR_LINKAGE_INTERNAL,
-                                                                                   .is_definition = true,
-                                                                               })
-                                               : IR_SYMBOL_ID_INVALID;
-            // The object is writable: a compound literal is an ordinary object,
-            // and a program may store through the pointer it took the address
-            // of.
-            if (literal_symbol.value != IR_ID_UNDERLYING_INVALID && ir_module_add_global(builder->arena, builder->module,
-                                                                                         (IrGlobal){
-                                                                                             .bytes =
-                                                                                                 {
-                                                                                                     .pointer = literal_bytes,
-                                                                                                     .length = literal->layout.size,
-                                                                                                 },
-                                                                                             .relocations = literal_relocations,
-                                                                                             .symbol = literal_symbol,
-                                                                                             .initializer_symbol = IR_SYMBOL_ID_INVALID,
-                                                                                             .type = literal_type,
-                                                                                             .source = source,
-                                                                                             .relocation_count = literal_relocation_count,
-                                                                                             .alignment = literal->layout.alignment,
-                                                                                             .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
-                                                                                         }))
-            {
-                *symbol_out = literal_symbol;
-                *addend_out = addend;
-                result = C_IR_STATIC_COMPOUND_LITERAL_FOLDED;
+                CIrConstantValue object = c_ir_static_compound_literal_object(builder, cursor + 1, open, close, literal_type, false);
+                if (object.kind == C_IR_CONSTANT_LVALUE)
+                {
+                    *symbol_out = object.symbol;
+                    *addend_out = addend;
+                    result = C_IR_STATIC_COMPOUND_LITERAL_FOLDED;
+                }
             }
         }
     }
@@ -46141,6 +46208,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_from_global(CIntegerIrBuilder* builder, IrS
 BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 token_index, CIrConstantValue* result)
 {
     CToken token = builder->preprocess.tokens[token_index];
+    if (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__func__")))
+    {
+        *result = c_ir_function_name_object(builder, token);
+        return result->kind == C_IR_CONSTANT_LVALUE;
+    }
     if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("false"))))
     {
         *result = c_ir_constant_integer(builder->bool_type, string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")));
@@ -48507,6 +48579,29 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 expect_operand = false;
                 continue;
             }
+            if (token.kind == C_TOKEN_STRING_LITERAL)
+            {
+                u32 literal_end = index + 1;
+                while (literal_end < end && builder->preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+                {
+                    literal_end += 1;
+                }
+                CIrDecodedString decoded = {0};
+                if (!c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target,
+                    index, literal_end, builder->parse.string_literals, &decoded))
+                {
+                    return false;
+                }
+                CIrConstantValue object = c_ir_string_object(builder, token, decoded, IR_TYPE_ID_INVALID);
+                if (value_count >= capacity || object.kind != C_IR_CONSTANT_LVALUE)
+                {
+                    return false;
+                }
+                values[value_count++] = object;
+                expect_operand = false;
+                index = literal_end - 1;
+                continue;
+            }
             if (token.kind == C_TOKEN_CHARACTER_LITERAL)
             {
                 u64 character = 0;
@@ -48729,31 +48824,51 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                                             c_token_is_punctuator(&builder->preprocess.tokens[literal_open], C_PUNCTUATOR_LEFT_BRACE)
                                         ? c_ir_matching_delimiter_cached(builder, literal_open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE)
                                         : UINT32_MAX;
-                // The body this arm folds is one expression with an optional
-                // trailing comma, at a scalar type.  Every other shape the
-                // construct takes -- the C23 empty literal, a string, an
-                // 80-bit x87 value that carries more significand than this
-                // evaluator's `f64`, an aggregate -- is not a
-                // CIrConstantValue at all, and
-                // c_ir_initializer_narrow_compound_literal_value is what folds
-                // those; leaving them alone here is what keeps them reaching
-                // it.
+                // Scalar values keep their typed body query and conversion.
+                // Addressed scalars and aggregates export a static object
+                // lvalue; the existing operators then select subobjects and
+                // apply pointer casts and byte addends. Wide scalar values
+                // keep the initializer folder that carries their full image.
                 u32 literal_value_end = literal_close;
                 if (literal_close < end && literal_value_end > literal_open + 1 &&
                     c_token_is_punctuator(&builder->preprocess.tokens[literal_value_end - 1], C_PUNCTUATOR_COMMA))
                 {
                     literal_value_end -= 1;
                 }
-                if (literal_close < end && literal_open + 1 < literal_value_end &&
-                    !c_initializer_has_top_level_comma(builder->preprocess.tokens, literal_open + 1, literal_value_end))
+                IrTypeId literal_type = IR_TYPE_ID_INVALID;
+                IrType* literal = 0;
+                if (literal_close < end)
                 {
-                    IrTypeId literal_type = IR_TYPE_ID_INVALID;
                     if (!c_ir_query_compound_type(builder, index + 1, close, literal_open, literal_close, &literal_type))
                     {
                         return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count,
                                                               operator_count);
                     }
-                    IrType* literal = ir_type_from_id(&builder->program->types, literal_type);
+                    literal = ir_type_from_id(&builder->program->types, literal_type);
+                    u32 prefix = operator_count;
+                    while (prefix && operators[prefix - 1].operation == C_CONDITIONAL_OPEN)
+                    {
+                        prefix -= 1;
+                    }
+                    bool address = prefix && operators[prefix - 1].operation == C_CONDITIONAL_ADDRESS_OF;
+                    bool aggregate = literal && (literal->kind == IR_TYPE_ARRAY || literal->kind == IR_TYPE_VECTOR ||
+                        literal->kind == IR_TYPE_STRUCT || literal->kind == IR_TYPE_UNION);
+                    if (aggregate || address)
+                    {
+                        CIrConstantValue object = c_ir_static_compound_literal_object(builder, index + 1, literal_open, literal_close, literal_type, true);
+                        if (value_count >= capacity || object.kind != C_IR_CONSTANT_LVALUE)
+                        {
+                            return false;
+                        }
+                        values[value_count++] = object;
+                        expect_operand = false;
+                        index = literal_close;
+                        continue;
+                    }
+                }
+                if (literal_close < end && literal_open + 1 < literal_value_end &&
+                    !c_initializer_has_top_level_comma(builder->preprocess.tokens, literal_open + 1, literal_value_end))
+                {
                     bool scalar_literal = literal && literal->layout.resolved &&
                                           (literal->kind == IR_TYPE_POINTER || (literal->kind == IR_TYPE_FLOAT && literal->bit_width <= 64) ||
                                            c_ir_constant_type_is_integer(literal));
@@ -49290,56 +49405,13 @@ BUSTER_C_INTERNAL bool c_ir_global_string_pointer_initializer(CIntegerIrBuilder*
     {
         return false;
     }
-    u64 length = element_count * decoded.element_width;
-    u8* bytes = arena_allocate_zeroed(builder->arena, u8, length);
-    if (decoded.bytes.length)
-    {
-        memcpy(bytes, decoded.bytes.pointer, decoded.bytes.length);
-    }
-    IrTypeId literal_type = ir_program_add_type(builder->program, (IrType){
-                                                                               .name = S8("C string literal"),
-                                                                           .element_type = literal_element_type,
-                                                                           .return_type = IR_TYPE_ID_INVALID,
-                                                                           .layout =
-                                                                               {
-                                                                                   .size = length,
-                                                                                   .alignment = literal_element->layout.alignment,
-                                                                                   .resolved = true,
-                                                                               },
-                                                                           .kind = IR_TYPE_ARRAY,
-                                                                           .element_count = element_count,
-                                                                       });
-    String8 literal_name = string_format(builder->arena, S8(".L.cstr.{u32}"), builder->program->symbols.count);
-    CToken token = preprocess.tokens[literal_start];
-    IrSourceRange literal_source = c_ir_token_source_range(builder, token);
-    IrSymbolId literal_symbol = ir_program_add_symbol(builder->program, (IrSymbol){
-                                                                               .name = literal_name,
-                                                                               .link_name = literal_name,
-                                                                               .source = literal_source,
-                                                                               .type = literal_type,
-                                                                               .kind = IR_SYMBOL_DATA,
-                                                                               .linkage = IR_LINKAGE_INTERNAL,
-                                                                               .is_definition = true,
-                                                                           });
-    if (literal_symbol.value == IR_ID_UNDERLYING_INVALID || !ir_module_add_global(builder->arena, builder->module,
-                                                                                   (IrGlobal){
-                                                                                       .bytes =
-                                                                                           {
-                                                                                               .pointer = bytes,
-                                                                                               .length = length,
-                                                                                           },
-                                                                                       .symbol = literal_symbol,
-                                                                                       .initializer_symbol = IR_SYMBOL_ID_INVALID,
-                                                                                       .type = literal_type,
-                                                                                       .source = literal_source,
-                                                                                       .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
-                                                                                       .is_read_only = true,
-                                                                                   }))
+    CIrConstantValue object = c_ir_string_object(builder, preprocess.tokens[literal_start], decoded, IR_TYPE_ID_INVALID);
+    if (object.kind != C_IR_CONSTANT_LVALUE)
     {
         return false;
     }
     global->initializer_kind = IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
-    global->initializer_symbol = literal_symbol;
+    global->initializer_symbol = object.symbol;
     return true;
 }
 
