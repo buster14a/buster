@@ -1997,6 +1997,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_native_failure_publication(UnitT
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_expanded_label_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    // The projection inputs are function scratch. Its output belongs to the
+    // module arena and must remain readable by the later relocation loop.
+    u64 retained_start = arguments->arena->position;
+    u32* retained_offsets = arena_allocate(arguments->arena, u32, 3);
+    TemporalArena projection_scratch = scratch_begin(&arguments->arena, 1);
+    IrFunction canonical = {.block_count = 3};
+    MachineSelectResult selected = {.function = {.block_count = 5}};
+    MachineEncodeResult encoded = {0};
+    selected.canonical_block_entries = arena_allocate(projection_scratch.arena, u32, 3);
+    encoded.block_offsets = arena_allocate(projection_scratch.arena, u32, 5);
+    for (u32 block = 0; block < 5; block += 1) { encoded.block_offsets[block] = 11u * (block + 1u); }
+    selected.canonical_block_entries[0] = 4;
+    selected.canonical_block_entries[1] = 0;
+    selected.canonical_block_entries[2] = 2;
+    BUSTER_TEST(arguments, codegen_machine_canonical_block_offsets(retained_offsets, &canonical, &selected, &encoded));
+    scratch_end(projection_scratch);
+    TemporalArena poison_scratch = scratch_begin(&arguments->arena, 1);
+    u32* poison = arena_allocate(poison_scratch.arena, u32, 8);
+    memset(poison, 0xa5, sizeof(u32) * 8u);
+    BUSTER_TEST(arguments, retained_offsets[0] == 55 && retained_offsets[1] == 11 && retained_offsets[2] == 33);
+    scratch_end(poison_scratch);
+    arena_set_position(arguments->arena, retained_start);
     String8 source = S8("unsigned long long probe(unsigned long long high, unsigned long long divisor) { "
         "static void *targets[] = {&&first, &&second}; "
         "unsigned __int128 value = ((unsigned __int128)high << 64) | 17; "

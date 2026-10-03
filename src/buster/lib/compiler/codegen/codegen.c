@@ -7835,26 +7835,26 @@ BUSTER_GLOBAL_LOCAL CodegenError codegen_plan_module_capacity(IrProgram* program
 
 // Global label initializers name canonical blocks. Encoded offsets instead
 // name MIR blocks, whose IDs change when selection expands rows or emits the
-// canonical entry first. Retain the selector's projection before scratch ends.
-BUSTER_GLOBAL_LOCAL u32* codegen_machine_canonical_block_offsets(Arena* arena, IrFunction* function, MachineSelectResult* selected,
+// canonical entry first. The caller owns retained output storage; only the
+// selector map and encoded offsets may belong to the current function scratch.
+BUSTER_GLOBAL_LOCAL bool codegen_machine_canonical_block_offsets(u32* offsets, IrFunction* function, MachineSelectResult* selected,
                                                                  MachineEncodeResult* encoded)
 {
-    u32* offsets = 0;
-    if (encoded->block_offsets && function->block_count <= selected->function.block_count)
+    bool result = offsets && encoded->block_offsets && function->block_count <= selected->function.block_count;
+    if (result)
     {
-        offsets = arena_allocate(arena, u32, function->block_count);
         for (u32 block = 0; block < function->block_count; block += 1)
         {
             u32 machine_block = selected->canonical_block_entries ? selected->canonical_block_entries[block] : block;
             if (machine_block >= selected->function.block_count)
             {
-                offsets = 0;
+                result = false;
                 break;
             }
             offsets[block] = encoded->block_offsets[machine_block];
         }
     }
-    return offsets;
+    return result;
 }
 
 // One generation of the whole module -- globals, functions and global assembly
@@ -8126,7 +8126,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         u32 unwind_action_capacity = 0;
         u32 machine_simd_operation_count = 0;
         u32 machine_stack_frame_size = 0;
-        u32* machine_block_offsets = 0;
+        // Label relocations are resolved after machine_scratch is released.
+        u32* machine_block_offsets = label_address_relocation_count ? arena_allocate(arena, u32, function->block_count) : 0;
         bool machine_function_emitted = false;
         CodegenFallbackReason fallback_reason = CODEGEN_FALLBACK_TARGET_EXCLUDED;
         IrOpcode fallback_opcode = IR_OPCODE_COUNT;
@@ -8568,8 +8569,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 machine_function_emitted = true;
                                 if (label_address_relocation_count)
                                 {
-                                    machine_block_offsets = codegen_machine_canonical_block_offsets(machine_scratch.arena, function, &selected, &encoded);
-                                    if (!machine_block_offsets)
+                                    if (!codegen_machine_canonical_block_offsets(machine_block_offsets, function, &selected, &encoded))
                                     {
                                         result.error = CODEGEN_ERROR_INVALID_IR;
                                         scratch_end(machine_scratch);
@@ -8768,8 +8768,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 machine_function_emitted = true;
                                 if (label_address_relocation_count)
                                 {
-                                    machine_block_offsets = codegen_machine_canonical_block_offsets(machine_scratch.arena, function, &selected, &encoded);
-                                    if (!machine_block_offsets)
+                                    if (!codegen_machine_canonical_block_offsets(machine_block_offsets, function, &selected, &encoded))
                                     {
                                         result.error = CODEGEN_ERROR_INVALID_IR;
                                         scratch_end(machine_scratch);
