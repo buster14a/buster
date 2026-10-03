@@ -275,10 +275,10 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_is_tls(ObjectRelocationKind kind)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool jit_relocation_uses_function_thunk(ObjectRelocationKind kind)
+BUSTER_GLOBAL_LOCAL bool jit_relocation_uses_function_thunk(ObjectRelocationKind kind, ObjectSectionKind source_kind)
 {
-    return kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 || kind == OBJECT_RELOCATION_AARCH64_CALL26 ||
-           kind == OBJECT_RELOCATION_AARCH64_JUMP26;
+    return (kind == OBJECT_RELOCATION_X86_64_PC32 && source_kind == OBJECT_SECTION_TEXT) || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+           kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26;
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_relocation_is_supported(ObjectRelocationKind kind, CpuArch arch)
@@ -499,7 +499,7 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
                 return false;
             }
             target = (u64)(uintptr_t)binding->address;
-            if (jit_relocation_uses_function_thunk(relocation->kind) && symbol->kind == OBJECT_SYMBOL_FUNCTION)
+            if (jit_relocation_uses_function_thunk(relocation->kind, source->kind) && symbol->kind == OBJECT_SYMBOL_FUNCTION)
             {
                 u64 thunk_index = thunk_indices[relocation->symbol];
                 if (thunk_index == UINT32_MAX)
@@ -818,7 +818,7 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         }
         ObjectSymbol const* symbol = object->symbols + relocation->symbol;
         bool call_import = symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_FUNCTION &&
-                           jit_relocation_uses_function_thunk(relocation->kind);
+                           jit_relocation_uses_function_thunk(relocation->kind, object->sections[relocation->section].kind);
         if (call_import)
         {
             thunk_indices[relocation->symbol] = 0;
