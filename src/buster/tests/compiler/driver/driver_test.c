@@ -2667,6 +2667,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("typedef union { void *p; char *c; } U __attribute__((transparent_union)); void consume(U); int g(int *p) { consume(p); return 0; }\n"), true, true},
         {S8("int f(int); int g(void) { return sizeof(f()); }\n"), false},
         {S8("int f(void); int g(void) { return sizeof(f(1)); }\n"), false},
+        // Scalar fabs builtins keep their declared result/parameter types.
+        {S8("double g(int x) { return __builtin_fabs(x); }\n"), true},
+        {S8("float g(double x) { return __builtin_fabsf(x); }\n"), true},
+        {S8("double g(float x) { return __builtin_fabs(x); }\n"), true},
+        {S8("double g(_Bool x) { return __builtin_fabs(x); }\n"), true},
+        {S8("float g(float _Complex x) { return __builtin_fabsf(x); }\n"), true},
+        {S8("double g(void) { return __builtin_fabs(); }\n"), false, false, S8("takes exactly one argument")},
+        {S8("float g(void) { return __builtin_fabsf(1,2); }\n"), false, false, S8("takes exactly one argument")},
+        {S8("float g(void) { return __builtin_fabsf(); }\n"), false, false, S8("takes exactly one argument")},
+        {S8("double g(void) { return __builtin_fabs(1,2); }\n"), false, false, S8("takes exactly one argument")},
+        {S8("double g(int *x) { return __builtin_fabs(x); }\n"), false, false, S8("requires one arithmetic scalar argument")},
+        {S8("struct S { int x; }; float g(struct S x) { return __builtin_fabsf(x); }\n"), false, false, S8("requires one arithmetic scalar argument")},
+        {S8("typedef float V __attribute__((vector_size(16))); float g(V x) { return __builtin_fabsf(x); }\n"), false, true, S8("requires one arithmetic scalar argument")},
+        {S8("typedef double V __attribute__((vector_size(16))); double g(V x) { return __builtin_fabs(x); }\n"), false, true, S8("requires one arithmetic scalar argument")},
+        {S8("void v(void); double g(void) { return __builtin_fabs(v()); }\n"), false},
         {S8("int f(int, ...); int g(void) { return sizeof(f()); }\n"), false},
         {S8("int g(int (*p)(int)) { return sizeof(p()); }\n"), false},
         {S8("int g(void) { const int x = 1; x = 2; return x; }\n"), false},
@@ -25530,6 +25545,102 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     }
                     scratch_end(fixture_temporary);
                 }
+            }
+        }
+    }
+    // #1391: execute advertised fabs builtins without a libm link. Explicit
+    // images check sign-only changes even for signaling NaNs and subnormals.
+    String8 c_fabs_source = S8(
+        "#if !__has_builtin(__builtin_fabs) || !__has_builtin(__builtin_fabsf)\n"
+        "#error fabs builtins must be advertised\n"
+        "#endif\n"
+        "_Static_assert(sizeof(__builtin_fabs(1)) == sizeof(double), \"double result\");\n"
+        "_Static_assert(sizeof(__builtin_fabsf(1)) == sizeof(float), \"float result\");\n"
+        "union F32 { float f; unsigned int u; };\n"
+        "union F64 { double f; unsigned long long u; };\n"
+        "struct Bits32 { unsigned int input, expected; };\n"
+        "struct Bits64 { unsigned long long input, expected; };\n"
+        "static const struct Bits32 cases32[] = {\n"
+        " {0x80000000u,0u}, {0u,0u}, {0xbfc00000u,0x3fc00000u}, {0x3fc00000u,0x3fc00000u},\n"
+        " {0xff800000u,0x7f800000u}, {0x7f800000u,0x7f800000u},\n"
+        " {0xffc12345u,0x7fc12345u}, {0x7fc12345u,0x7fc12345u},\n"
+        " {0xff812345u,0x7f812345u}, {0x7f812345u,0x7f812345u},\n"
+        " {0x80000001u,1u}, {0x007fffffu,0x007fffffu}, {0xff7fffffu,0x7f7fffffu}\n"
+        "};\n"
+        "static const struct Bits64 cases64[] = {\n"
+        " {0x8000000000000000ull,0ull}, {0ull,0ull}, {0xbff8000000000000ull,0x3ff8000000000000ull},\n"
+        " {0x3ff8000000000000ull,0x3ff8000000000000ull},\n"
+        " {0xfff0000000000000ull,0x7ff0000000000000ull}, {0x7ff0000000000000ull,0x7ff0000000000000ull},\n"
+        " {0xfff8123456789abcull,0x7ff8123456789abcull}, {0x7ff8123456789abcull,0x7ff8123456789abcull},\n"
+        " {0xfff0123456789abcull,0x7ff0123456789abcull}, {0x7ff0123456789abcull,0x7ff0123456789abcull},\n"
+        " {0x8000000000000001ull,1ull}, {0x000fffffffffffffull,0x000fffffffffffffull},\n"
+        " {0xffefffffffffffffull,0x7fefffffffffffffull}\n"
+        "};\n"
+        "static volatile float input32;\n"
+        "static volatile double input64;\n"
+        "static int calls;\n"
+        "static float next32(void) { calls++; return -2.5f; }\n"
+        "static double next64(void) { calls++; return -3.5; }\n"
+        "int main(void) {\n"
+        " for (unsigned i=0; i<sizeof(cases32)/sizeof(cases32[0]); i++) {\n"
+        "  union F32 value; value.u=cases32[i].input; input32=value.f;\n"
+        "  value.f=__builtin_fabsf(input32);\n"
+        "  if (value.u != cases32[i].expected) return 1;\n"
+        " }\n"
+        " for (unsigned i=0; i<sizeof(cases64)/sizeof(cases64[0]); i++) {\n"
+        "  union F64 value; value.u=cases64[i].input; input64=value.f;\n"
+        "  value.f=__builtin_fabs(input64);\n"
+        "  if (value.u != cases64[i].expected) return 2;\n"
+        " }\n"
+        " volatile int integer=-16777217;\n"
+        " union F32 rounded; rounded.f=__builtin_fabsf(integer);\n"
+        " if (rounded.u != 0x4b800000u) return 3;\n"
+        " union F64 exact; exact.f=__builtin_fabs(integer);\n"
+        " if (exact.u != 0x4170000010000000ull) return 4;\n"
+        " volatile _Bool boolean=1;\n"
+        " if (__builtin_fabs(boolean) != 1.0 || __builtin_fabsf(boolean) != 1.0f) return 5;\n"
+        " input32=-2.5f; input64=-3.5;\n"
+        " if (__builtin_fabs(input32) != 2.5 || __builtin_fabsf(input64) != 3.5f) return 6;\n"
+        " if (__builtin_fabsf(next32()) != 2.5f || __builtin_fabs(__builtin_fabs(next64())) != 3.5 || calls != 2) return 7;\n"
+        " return 0;\n"
+        "}\n"
+        "\n"
+    );
+    for (u32 fabs_frontend_index = 0; fabs_frontend_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); fabs_frontend_index += 1)
+    {
+        for (u32 fabs_allocator_index = 0; fabs_allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); fabs_allocator_index += 1)
+        {
+            for (u32 fabs_optimization_index = 0; fabs_optimization_index < BUSTER_ARRAY_LENGTH(c_designator_optimizations); fabs_optimization_index += 1)
+            {
+                TemporalArena fabs_temporary = scratch_begin(&arguments->arena, 1);
+                String8 fabs_path = buster_test_temporary_path(fabs_temporary.arena, S8("buster-c-fabs"),
+                    string_format(fabs_temporary.arena, S8("-{u32}-{u32}-{u32}"), fabs_frontend_index, fabs_allocator_index, fabs_optimization_index));
+                String8 fabs_source_path = string_format_z(fabs_temporary.arena, S8("{S8}.c"), fabs_path);
+                BUSTER_TEST(arguments, file_write(fabs_source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_fabs_source)));
+                bool fabs_native_allocator = !string_equal(c_lz4_regression_allocators[fabs_allocator_index], S8("-fregister-allocator=none"));
+                String8 fabs_command_line[] = {
+                    S8("-std=c17"), c_designator_optimizations[fabs_optimization_index], c_flat_initializer_frontends[fabs_frontend_index],
+                    c_lz4_regression_allocators[fabs_allocator_index], S8("-fverify-codegen"),
+                    fabs_native_allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                    S8("-o"), fabs_path, fabs_source_path,
+                };
+                CompilerDriverResult fabs_compiled = compiler_driver_execute_invocation(fabs_temporary.arena,
+                    compiler_driver_parse_arguments(fabs_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fabs_command_line)));
+                BUSTER_TEST_RAW(arguments, fabs_compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(fabs_temporary.arena, S8("{S8} {S8}: {S8}"), c_flat_initializer_frontends[fabs_frontend_index],
+                        c_lz4_regression_allocators[fabs_allocator_index], fabs_compiled.diagnostic));
+                if (fabs_compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 fabs_arguments[] = {fabs_path};
+                    ProcessSpawnResult fabs_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fabs_arguments),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, fabs_spawn.handle != 0);
+                    if (fabs_spawn.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_deadline(fabs_temporary.arena, fabs_spawn, 30000000).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(fabs_temporary);
             }
         }
     }

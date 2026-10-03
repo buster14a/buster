@@ -8,6 +8,16 @@ x87 and byte-eight bit 63 for binary128. It does not widen or narrow a value
 before observing the sign. This preserves signaling NaNs, signed zero and
 floating exception state. `basic_c_signbit_images.c` and its independent host
 observer cover those images across the native target/mode/frontend/PIC matrix.
+`__builtin_fabsf` and `__builtin_fabs` convert their one arithmetic scalar
+argument to the declared float/double parameter type, then clear the stored
+image's sign bit through canonical integer operations. Signed zero becomes
+positive zero; NaN payload and quiet/signaling bits survive without an
+arithmetic comparison or libm import. The registered embedded driver fixture
+executes explicit images, integer conversion and exactly-once calls in both
+frontend forms, all four allocators and O0/O2 without `-lm`. Arity and
+non-arithmetic/vector operands are diagnosed before lowering. `fabsl` remains
+separately tracked.
+
 AArch64 binary128 widening and scalar transport use ordinary MIR frame
 images; see the machine guide for their exact conversion and ABI-boundary
 checks. Binary128 arithmetic, comparison, truth conversion and rounding
