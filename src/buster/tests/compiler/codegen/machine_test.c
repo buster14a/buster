@@ -89,11 +89,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_traffic(UnitTestArgument
             heap[0] = heap[count];
             machine_quality_heap_sift(heap, count, 0);
         }
-        // Equal benefit uses increasing value ID even after root replacement.
+        // The existing strict-greater heap tie policy is deterministic but is
+        // not a stable sort: replacing the root with the last item gives 0,2,1.
         MachineQualityInterval ties[] = {{.virtual_register = 0, .weight = 7},
                                          {.virtual_register = 1, .weight = 7},
                                          {.virtual_register = 2, .weight = 7}};
-        u32 tie_expected[] = {0, 1, 2};
+        u32 tie_expected[] = {0, 2, 1};
         count = BUSTER_ARRAY_LENGTH(ties);
         machine_quality_heap_sift(ties, count, 0);
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(tie_expected); index += 1)
@@ -197,187 +198,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_traffic(UnitTestArgument
             BUSTER_TEST(arguments, ties[index].region == tie_regions[index]);
         }
     }
-    return result;
-}
-// An independent rank-count oracle supplies the expected top K for every
-// prefix. Input orders vary while value IDs and weights remain unchanged.
-BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_candidates(UnitTestArguments* arguments)
-{
-    UnitTestResult result = {0};
-    MachineQualityTraffic weights[] = {3, 7, UINT64_C(4294967296), 7, UINT64_C(4294967297), 3, 7, UINT64_C(17592186040320)};
-    for (u32 order = 0; order < 3; order += 1)
-    {
-        for (u32 limit = 0; limit <= BUSTER_ARRAY_LENGTH(weights); limit += 1)
-        {
-            MachineQualityInterval heap[BUSTER_ARRAY_LENGTH(weights) + 1];
-            heap[limit] = (MachineQualityInterval){.weight = UINT64_MAX, .virtual_register = UINT32_MAX};
-            u32 count = 0;
-            u32 seen = 0;
-            for (u32 input = 0; input < BUSTER_ARRAY_LENGTH(weights); input += 1)
-            {
-                u32 value = order == 0 ? input : order == 1 ? 7 - input : (input * 5 + 3) % 8;
-                seen |= 1u << value;
-                machine_quality_candidate_offer(heap, &count, limit, (MachineQualityInterval){
-                    .weight = weights[value], .virtual_register = value, .start = value * 3, .end = value * 3 + 2, .marginal = value & 1u});
-                BUSTER_TEST(arguments, count == BUSTER_MIN(input + 1, limit));
-                for (u32 probe = 0; probe < BUSTER_ARRAY_LENGTH(weights); probe += 1)
-                {
-                    u32 above = 0;
-                    for (u32 other = 0; other < BUSTER_ARRAY_LENGTH(weights); other += 1)
-                    {
-                        above += ((seen >> other) & 1u) && (weights[other] > weights[probe] ||
-                            (weights[other] == weights[probe] && other < probe));
-                    }
-                    bool expected = ((seen >> probe) & 1u) && above < limit;
-                    bool found = false;
-                    for (u32 slot = 0; slot < count; slot += 1)
-                    {
-                        if (heap[slot].virtual_register == probe)
-                        {
-                            found = true;
-                            BUSTER_TEST(arguments, heap[slot].weight == weights[probe] && heap[slot].start == probe * 3 &&
-                                heap[slot].end == probe * 3 + 2 && heap[slot].marginal == (probe & 1u));
-                        }
-                    }
-                    BUSTER_TEST(arguments, found == expected);
-                }
-                BUSTER_TEST(arguments, heap[limit].weight == UINT64_MAX && heap[limit].virtual_register == UINT32_MAX);
-            }
-            for (u32 root = count / 2; root > 0; root -= 1)
-            {
-                machine_quality_heap_sift(heap, count, root - 1);
-            }
-            u32 previous = UINT32_MAX;
-            while (count)
-            {
-                MachineQualityInterval candidate = heap[0];
-                if (previous != UINT32_MAX)
-                {
-                    BUSTER_TEST(arguments, weights[previous] > candidate.weight ||
-                        (weights[previous] == candidate.weight && previous < candidate.virtual_register));
-                }
-                previous = candidate.virtual_register;
-                count -= 1;
-                heap[0] = heap[count];
-                machine_quality_heap_sift(heap, count, 0);
-            }
-        }
-    }
-    u32 empty_count = 0;
-    BUSTER_TEST(arguments, !machine_quality_candidate_offer(0, &empty_count, 0, (MachineQualityInterval){0}) && !empty_count);
-
-    // Cross the real cap with equal-weight values, then admit a hotter late ID.
-    // Ascending and descending input must produce the same 4096-element set.
-    for (u32 order = 0; order < 2; order += 1)
-    {
-        MachineQualityInterval* heap = arena_allocate(arguments->arena, MachineQualityInterval, 4096);
-        u32 count = 0;
-        for (u32 input = 0; input < 4097; input += 1)
-        {
-            u32 value = order ? 4096 - input : input;
-            machine_quality_candidate_offer(heap, &count, 4096, (MachineQualityInterval){
-                .virtual_register = value, .weight = value == 4096 ? UINT64_C(4294967297) : 3});
-        }
-        BUSTER_TEST(arguments, count == 4096);
-        for (u32 root = count / 2; root > 0; root -= 1) machine_quality_heap_sift(heap, count, root - 1);
-        for (u32 index = 0; count; index += 1)
-        {
-            BUSTER_TEST(arguments, heap[0].virtual_register == (index ? index - 1 : 4096));
-            count -= 1;
-            heap[0] = heap[count];
-            machine_quality_heap_sift(heap, count, 0);
-        }
-    }
-    return result;
-}
-
-// 4096 short cold intervals each have three baseline spill/reload edits and
-// cannot pin across their physical definitions. The later hot interval has
-// eleven edits but leaves the callee-saved pin file untouched. A reloaded
-// unchanged value is clean: subsequent eviction needs no second spill.
-// This exercises
-// actual eligibility, capped admission, pin planning and FAST acceptance;
-// the former prefix policy left the hot value's traffic in the final plan.
-BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_late_candidate(UnitTestArguments* arguments)
-{
-    UnitTestResult result = {0};
-    TemporalArena temporary = arena_begin_temporal(arguments->arena);
-    Arena* arena = arguments->arena;
-    MachineTargetDescription const* target = machine_target_x86_64();
-    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
-    machine_builder_block_begin(&builder);
-    for (u32 value = 0; value < 4097; value += 1)
-    {
-        u32 definition = builder.instructions.total_count;
-        u32 registered = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
-            .definition_point = machine_point_make(definition, MACHINE_POINT_AFTER),
-            .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID});
-        BUSTER_TEST(arguments, registered == value);
-        MachineRef ref = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
-        machine_builder_instruction(&builder, (MachineInstruction){
-            .opcode = MACHINE_X64_LOAD_FRAME, .operands = {ref, machine_ref_make(MACHINE_REF_STACK_SLOT, 0)}});
-        u64 clobbers = target->allocatable_mask & (value == 4096 ? ~target->callee_saved_mask : UINT64_MAX);
-        for (u32 pass = 0; pass < (value == 4096 ? 10u : 2u); pass += 1)
-        {
-            for (u32 physical = 0; physical < target->register_count; physical += 1)
-            {
-                if ((clobbers >> physical) & 1u)
-                {
-                    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_MOV_RI,
-                        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, physical), machine_ref_make(MACHINE_REF_IMMEDIATE, 0)}});
-                }
-            }
-            machine_builder_instruction(&builder, (MachineInstruction){
-                .opcode = MACHINE_X64_STORE_FRAME64, .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, 0), ref}});
-        }
-    }
-    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
-    machine_builder_block_end(&builder, (MachineBlock){0});
-    MachineFunction function = machine_function_builder_finish(arena, &builder);
-    u32 slot_size = 8;
-    u32 slot_alignment = 8;
-    u64 immediate = 0;
-    function.target = target;
-    function.stack_slot_count = 1;
-    function.stack_slot_sizes = &slot_size;
-    function.stack_slot_alignments = &slot_alignment;
-    function.immediates = &immediate;
-    function.immediate_count = 1;
-    BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
-    MachineStackPlacement baseline = machine_fast_placement_build(arena, &function);
-#if BUSTER_BENCH_ALLOCATIONS
-    MachineQualityCensus before = machine_quality_census_snapshot();
-#endif
-    MachineStackPlacement placement = machine_quality_placement_build(arena, &function);
-#if BUSTER_BENCH_ALLOCATIONS
-    MachineQualityCensus after = machine_quality_census_snapshot();
-    BUSTER_TEST(arguments, after.candidate_eligible_values - before.candidate_eligible_values == 4097);
-    BUSTER_TEST(arguments, after.candidates - before.candidates == 4096);
-    BUSTER_TEST(arguments, after.candidate_excluded_values - before.candidate_excluded_values == 1);
-    BUSTER_TEST(arguments, after.candidate_excluded_traffic - before.candidate_excluded_traffic == 3);
-#endif
-    BUSTER_TEST(arguments, baseline.valid && placement.valid && placement.pinned_register_count >= 1);
-    u32 baseline_hot = 0;
-    u32 placed_hot = 0;
-    for (u32 plan = 0; plan < 2; plan += 1)
-    {
-        MachineStackPlacement* current = plan ? &placement : &baseline;
-        for (u32 edit = 0; edit < current->edit_count; edit += 1)
-        {
-            MachineEdit row = current->edits[edit];
-            if (row.subject == 4096 && (row.kind == MACHINE_EDIT_SPILL || row.kind == MACHINE_EDIT_RELOAD))
-            {
-                if (plan) placed_hot += 1;
-                else baseline_hot += 1;
-            }
-        }
-    }
-    BUSTER_TEST_RAW(arguments, baseline_hot == 11 && placed_hot == 0,
-        string_format(arena, S8("QUALITY late candidate baseline edits={u32} placed edits={u32}"), baseline_hot, placed_hot));
-    BUSTER_TEST(arguments, placement.reload_count + placement.spill_count + 11 == baseline.reload_count + baseline.spill_count);
-    MachineEncodeResult encoded = machine_encode_x86_64(arena, &function, &placement);
-    BUSTER_TEST(arguments, encoded.valid && encoded.byte_count != 0);
-    scratch_end(temporary);
     return result;
 }
 // Independent goldens correspond to x86_64_movabs_encoding_oracle.s. The
@@ -8161,8 +7981,6 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_sparse_work);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_candidates);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_late_candidate);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
     BUSTER_TEST_FIXTURE(arguments, machine_test_zero_idiom_flags);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_edges);

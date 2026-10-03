@@ -28,10 +28,6 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void machine_quality_traffi
     *traffic += weight;
 }
 
-// Appends until full, then retains the best limit entries in a worst-first
-// heap. Convert to best-first with machine_quality_heap_sift before popping.
-// A zero limit touches neither heap nor count. True means candidate retained.
-BUSTER_F_DECL bool machine_quality_candidate_offer(MachineQualityInterval* heap, u32* count, u32 limit, MachineQualityInterval candidate);
 BUSTER_F_DECL void machine_quality_heap_sift(MachineQualityInterval* heap, u32 count, u32 root);
 // previous_region is UINT32_MAX for the first query, otherwise a valid index
 // returned by the preceding query. UINT32_MAX also reports exhaustion.
@@ -79,9 +75,6 @@ BUSTER_F_DECL u32 machine_quality_region_row_build(MachineQualityRegionTraffic* 
     X(region_values_small_regions) \
     X(region_values_tiled_regions) \
     X(region_values_large_regions) \
-    X(candidate_eligible_values) \
-    X(candidate_excluded_values) \
-    X(candidate_excluded_traffic) \
     X(candidates) \
     X(candidate_cap_functions) \
     X(empty_candidate_functions) \
