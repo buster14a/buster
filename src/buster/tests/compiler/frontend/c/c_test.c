@@ -16917,6 +16917,288 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_call_arguments(UnitTestAr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_parts[] = {
+        S8("typedef int T;\nstatic int twice(int v) { return v * 2; }\n"),
+        S8("static int call(T (T));\nstatic int call(T fn(T)) { return fn(21); }\n"),
+        S8("static int take(T (T));\nstatic int take(int (*f)(int)) { return f(21); }\n"),
+        S8("static int preserve(T (T), int (*fn)(int)) { T r = fn(21); return r; }\n"),
+        S8("static int pointer(T (*)(T));\nstatic int pointer(int (*f)(int)) { return f(21); }\n"),
+        S8("static int nested(T (T (T)));\nstatic int nested(int (*f)(int (*)(int))) { return f(twice); }\n"),
+        S8("static int invoke(T f(T)) { return f(21); }\n"),
+        S8("static int wrapped(int ((T)));\nstatic int wrapped(int (*f)(int)) { return f(21); }\n"),
+        S8("static int deeper(T (((T))));\nstatic int deeper(int (*f)(int)) { return f(21); }\n"),
+        S8("static int (grouped)(T (T));\nstatic int (grouped)(int (*f)(int)) { return f(21); }\n"),
+        S8("typedef char C;\nstatic int character(int (C));\nstatic int character(int f(char)) { return f(21); }\nstatic int char_twice(char v) { return v * 2; }\n"),
+        S8("static int ordinary(int T) { return T; }\nstatic int qualified(const T T) { return T; }\nstatic int named_pointer(T (*T)(T)) { return T(21); }\n"),
+        S8("static int block(void) { T (x) = 5; return x; }\nstruct S { T T; };\nstatic int member(void) { struct S s = {7}; return s.T; }\n"),
+        S8("static int object_product(void) { int T = 3, x = 2; T * x; return T * x; }\n"),
+        S8("static int object_call(void) { int (*T)(int) = twice; return (T)(4); }\n"),
+        S8("static int size_product(void) { int p = 3; return sizeof (T) * p; }\n"),
+        S8("static int cast_type(void) { T value = (T)twice(21); return value; }\n"),
+        S8("static int typedef_loop(void) { int sum = 0; for (T i = 0; i != 3; i++) sum += i; return sum; }\n"),
+        S8("static int typedef_pointer_loop(void) { T values[2] = {4, 5}; int sum = 0; for (T *p = values, *previous = 0; p != values + 2; previous = p, p = p + 1) { if (previous && *previous != 4) return -1; sum += *p; } return sum; }\n"),
+        S8("static int shadow_loop(void) { int T = 0, sum = 0; for (T = 0; T != 3; T++) sum += T; return sum; }\n"),
+        S8("static int declared_shadow_loop(void) { int sum = 0; for (T T = 0; T != 3; T++) sum += T; return sum; }\n"),
+        S8("static int label(void) { goto T; T: return 9; }\nstatic int enumeration(void) { enum { T = 9 }; return T; }\n"),
+        S8("typedef void V;\nstatic int zero_parameter(int (V));\nstatic int zero_parameter(int (*f)(void)) { return f(); }\nstatic int forty_two(void) { return 42; }\n"),
+        S8("static int many(int ((((((((((((((((((((((((((((((((((((((((((((((((T)))))))))))))))))))))))))))))))))))))))))))))))));\nstatic int many(int (*f)(int)) { return f(21); }\n"),
+        S8("int main(void) { int failed = 0;\n"),
+        S8("failed |= call(twice) != 42 || take(twice) != 42 || preserve(twice, twice) != 42 || pointer(twice) != 42;\n"),
+        S8("failed |= nested(invoke) != 42 || wrapped(twice) != 42 || deeper(twice) != 42 || grouped(twice) != 42;\n"),
+        S8("failed |= character(char_twice) != 42 || ordinary(11) != 11 || qualified(13) != 13 || named_pointer(twice) != 42;\n"),
+        S8("failed |= block() != 5 || member() != 7 || object_product() != 6 || object_call() != 8 || size_product() != 12 || cast_type() != 42;\n"),
+        S8("failed |= label() != 9 || enumeration() != 9 || zero_parameter(forty_two) != 42 || many(twice) != 42;\n"),
+        S8("failed |= typedef_loop() != 3 || typedef_pointer_loop() != 9 || shadow_loop() != 3 || declared_shadow_loop() != 3;\nreturn failed; }\n"),
+    };
+    String8 source_text = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+    String8 invalid_source = S8("typedef int T;\nstatic int bad(T (T)) { return T; }\n");
+    struct
+    {
+        String8 label;
+        String8 source;
+        bool valid;
+    } cases[] = {
+        {S8("combined original controls"), source_text, true},
+        {S8("exact char typedef"), S8("typedef char T;\nstatic int call(int (T));\nstatic int twice(char v) { return v * 2; }\nstatic int call(int fn(char)) { return fn(21); }\nint main(void) { return call(twice) - 42; }\n"), true},
+        {S8("typedef body expression"), invalid_source, false},
+        {S8("parenthesized typedef expression"), S8("typedef int T;\nstatic int bad(T (T)) { return (T); }\n"), false},
+        {S8("unary typedef expression"), S8("typedef int T;\nstatic int bad(T (T)) { return +T; }\n"), false},
+        {S8("binary typedef expression"), S8("typedef int T;\nstatic int bad(T (T)) { return T + 1; }\n"), false},
+        {S8("cast typedef expression"), S8("typedef int T;\nstatic int bad(T (T)) { return (int)T; }\n"), false},
+        {S8("typedef loop condition"), S8("typedef int T;\nstatic int bad(T (T)) { for (; T;) {} return 0; }\n"), false},
+    };
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C11, C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+        {
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                for (u32 symbols = 0; symbols < 2; symbols += 1)
+                {
+                    for (u32 form = 0; form < 2; form += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        String8 label = string_format(temporary.arena, S8("{S8}: target={u32} dialect={u32} symbols={u32} frontend={u32}"),
+                            cases[case_index].label, target_index, dialect_index, symbols, form);
+                        Target target = targets[target_index];
+                        CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                            (CPreprocessOptions){.source_path = S8("parenthesized-typedef-parameters.c"), .target = target,
+                                .data_layout = target_data_layout(target), .dialect = dialects[dialect_index]});
+                        if (symbols)
+                        {
+                            for (u32 token = 0; token < tokens.token_count; token += 1)
+                                tokens.tokens[token].symbol = 0;
+                        }
+                        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count, label);
+                        CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                        BUSTER_TEST_RAW(arguments, (semantic.analysis_complete && !semantic.diagnostic_count) == cases[case_index].valid, label);
+                        if (cases[case_index].valid)
+                        {
+                            for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count; diagnostic += 1)
+                                BUSTER_TEST_RAW(arguments, false, semantic.diagnostics[diagnostic].message);
+                        }
+                        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("parenthesized-typedef-parameters.c"), tokens, syntax,
+                            target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == lowered.diagnostic_count, label);
+                        for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                        {
+                            CDiagnostic before = semantic.diagnostics[diagnostic];
+                            CDiagnostic after = lowered.diagnostics[diagnostic];
+                            BUSTER_TEST_RAW(arguments, before.kind == after.kind && before.severity == after.severity &&
+                                before.location.line == after.location.line && before.location.column == after.location.column, label);
+                            BUSTER_STRING_TEST(arguments, before.message, after.message);
+                        }
+                        BUSTER_TEST_RAW(arguments, (lowered.program && !lowered.diagnostic_count) == cases[case_index].valid, label);
+                        if (cases[case_index].valid)
+                        {
+                            for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                                BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[diagnostic].message);
+                        }
+                        if (cases[case_index].valid && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count != 0))
+                        {
+                            BUSTER_TEST_RAW(arguments, lowered.canonical_ir_certified && lowered.program->module_count != 0, label);
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                            if (case_index == 0)
+                            {
+                                u32 prototypes = 0;
+                                for (u32 declaration = 0; declaration < semantic.declaration_count; declaration += 1)
+                                {
+                                    CDeclaration item = semantic.declarations[declaration];
+                                    if (!item.body_token_count && (string_equal(item.name, S8("call")) || string_equal(item.name, S8("take")) ||
+                                        string_equal(item.name, S8("nested")) || string_equal(item.name, S8("wrapped")) || string_equal(item.name, S8("deeper"))))
+                                    {
+                                        if (BUSTER_REQUIRE(arguments, item.parameter_count == 1 && item.parameter_start < semantic.parameter_count))
+                                        {
+                                            CParameter parameter = semantic.parameters[item.parameter_start];
+                                            BUSTER_TEST_RAW(arguments, !parameter.name.length && parameter.symbol == 0, label);
+                                            if (BUSTER_REQUIRE(arguments, parameter.type.value < semantic.type_count))
+                                            {
+                                                CType pointer = semantic.types[parameter.type.value];
+                                                BUSTER_TEST_RAW(arguments, pointer.kind == C_TYPE_POINTER && pointer.element_type.value < semantic.type_count, label);
+                                                if (pointer.kind == C_TYPE_POINTER && pointer.element_type.value < semantic.type_count)
+                                                {
+                                                    CType function = semantic.types[pointer.element_type.value];
+                                                    BUSTER_TEST_RAW(arguments, function.kind == C_TYPE_FUNCTION && function.parameter_count == 1 &&
+                                                        !function.is_unprototyped && function.return_type.value < semantic.type_count, label);
+                                                    if (function.return_type.value < semantic.type_count)
+                                                        BUSTER_TEST_RAW(arguments, semantic.types[function.return_type.value].kind == C_TYPE_INT, label);
+                                                }
+                                            }
+                                        }
+                                        prototypes += 1;
+                                    }
+                                }
+                                BUSTER_TEST_RAW(arguments, prototypes == 5, label);
+                            }
+                        }
+                        else if (!cases[case_index].valid)
+                        {
+                            BUSTER_TEST_RAW(arguments, !lowered.program && semantic.diagnostic_count != 0, label);
+                            bool located = false;
+                            for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count; diagnostic += 1)
+                            {
+                                CDiagnostic report = semantic.diagnostics[diagnostic];
+                                located |= report.severity == C_DIAGNOSTIC_ERROR && report.location.line == 2 &&
+                                           string_first_sequence(report.message, S8("T")) != BUSTER_STRING_NO_MATCH;
+                            }
+                            BUSTER_TEST_RAW(arguments, located, label);
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 runtime_sources[] = {source_text, cases[1].source};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(runtime_sources); source_index += 1)
+    {
+        String8 source_path = buster_test_temporary_path(arguments->arena,
+            source_index ? S8("parenthesized-typedef-char") : S8("parenthesized-typedef-int"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(runtime_sources[source_index]))))
+        {
+            String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+            String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+            for (u32 optimization = 0; optimization < 2; optimization += 1)
+            {
+                for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                {
+                    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+                    {
+                        Arena* conflicts[] = {arguments->arena};
+                        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                        String8 output = buster_test_temporary_path(temporary.arena, S8("parenthesized-typedef-conversions-run"), S8(".exe"));
+                        String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], optimization == 0 ? S8("-O0") : S8("-O2"), S8("-fverify-codegen"), S8("-o"), output, source_path};
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        invocation.reject_machine_fallback = mode != 0;
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 run[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena, S8("parenthesized typedef {S8} {S8}: status={u32} timed_out={u32}"),
+                                        modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+            String8 references[] = {S8("gcc"), S8("clang")};
+            for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+            {
+                for (u32 optimization = 0; optimization < 2; optimization += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("parenthesized-typedef-reference"), S8(".exe"));
+                    if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                    {
+                        String8 command[] = {compiler, optimization == 0 ? S8("-O0") : S8("-O2"), S8("-std=gnu17"), S8("-fwrapv"), S8("-nostdinc"), S8("-o"), output, source_path};
+                        ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                  .use_process_environment = true, .search_path = true});
+                        if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                        {
+                            ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, 30000000);
+                            String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
+                            BUSTER_TEST_RAW(arguments, !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("parenthesized typedef oracle {S8} {S8}: status={u32} timeout={u32}\n{S8}"),
+                                    compiler, optimization == 0 ? S8("-O0") : S8("-O2"), compilation.platform_status, (u32)compilation.timed_out,
+                                    string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                            if (BUSTER_REQUIRE(arguments, !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS))
+                            {
+                                String8 run[] = {output};
+                                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                                {
+                                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                        string_format(temporary.arena, S8("parenthesized typedef oracle run {S8} {S8}: status={u32} timeout={u32}"),
+                                            compiler, optimization == 0 ? S8("-O0") : S8("-O2"), execution.platform_status, (u32)execution.timed_out));
+                                }
+                            }
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+            if (source_index == 0)
+            {
+                String8 invalid_path = buster_test_temporary_path(arguments->arena, S8("parenthesized-typedef-invalid"), S8(".c"));
+                if (BUSTER_REQUIRE(arguments, file_write(invalid_path, BUSTER_SLICE_TO_BYTE_SLICE(invalid_source))))
+                {
+                    for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                        if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                        {
+                            String8 command[] = {compiler, S8("-std=gnu17"), S8("-nostdinc"), S8("-fsyntax-only"), invalid_path};
+                            ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                                (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                      .use_process_environment = true, .search_path = true});
+                            if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                            {
+                                ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, 30000000);
+                                String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
+                                BUSTER_TEST_RAW(arguments, !compilation.timed_out && compilation.result != PROCESS_RESULT_SUCCESS &&
+                                    string_first_sequence(error, S8("T")) != BUSTER_STRING_NO_MATCH,
+                                    string_format(temporary.arena, S8("typedef-name expression refusal {S8}: status={u32} timeout={u32}\n{S8}"),
+                                        compiler, compilation.platform_status, (u32)compilation.timed_out,
+                                        string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+#endif
+        }
+    }
+#endif
+    return result;
+}
+
 // C23 records every `()` as a zero-parameter prototype. These expectations
 // cover the source constructors before lowering's dialect masks can hide one,
 // then check semantic rejection and independently validate accepted canonical IR.
@@ -34042,6 +34324,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_alignof_object);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
+    BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_typedef_parameters);
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);

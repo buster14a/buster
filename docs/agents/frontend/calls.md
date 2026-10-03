@@ -324,6 +324,29 @@ parameter derivations. A nested function-pointer parameter still introduces
 its own prototype scope. The syntax/object diagnostic-equivalence corpus
 checks rejection, legal neighbors and both frontend SSA forms.
 
+Parameter declarations give a visible typedef name priority over a parameter
+name in an ambiguous parenthesized group (C11 6.7.6.3p11). `T (T)` and
+`int (T)` derive an unnamed function parameter and then adjust it to a pointer;
+`T (T (T))` retains the inner function-parameter adjustment. Redundant abstract
+groups such as `int ((T))` carry that classification down the explicit type
+machine. Pointer-led named groups, `int T`, `const T T`, member names and
+ordinary block-scope shadowing keep their existing rules.
+
+A typedef remains a type in the function body. Checked expression leaf queries
+reject its use as a value, including within parentheses or operator operands;
+casts and type operands keep their type-name binding. The statement-expression
+walker recognizes typedef-led `for` initializer declarations in the enclosing
+scope and leaves their validation with the declaration owner.
+
+`c_test_parenthesized_typedef_parameters` checks the original prototype/body
+pairs, a char typedef, nested and deeply grouped abstract forms, retained
+typedef visibility, and rejected typedef-name expressions. Semantic-only and
+both canonical frontend forms check structured diagnostics on six native
+layouts in C11/GNU17/GNU23, with carried and zeroed symbol IDs. Embedded native
+sources exercise all four allocators at O0/O2 in both forms; hosted Linux x86-64
+GCC/Clang compile and execute the same original expected-value sources and
+independently reject the invalid typedef-name expression.
+
 ## GNU callback storage through void pointers
 
 In GNU dialects, native x86-64 and AArch64 Linux/macOS admit assignment,

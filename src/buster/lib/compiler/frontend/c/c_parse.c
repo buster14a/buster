@@ -5521,6 +5521,23 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 // A single token cannot contain a cast or an operator. Keep
                 // its existing leaf policy without another machine frame.
                 last = c_parse_expression_leaf_without_cast(arena, preprocess, result, scope, task->start, task->end);
+                if (machine->validate_expression_constraints && !machine->expression_constraint.length &&
+                    last.value >= result->type_count && first.kind == C_TOKEN_IDENTIFIER)
+                {
+                    // A typedef may be bound in a cast or a type operand, but
+                    // this task is an expression leaf and must name a value.
+                    u32 use = c_parse_identifier_use_index(result, task->start);
+                    CScopeId lookup_scope = scope.value == C_ID_UNDERLYING_INVALID && result->scope_count
+                        ? (CScopeId){.value = 0} : scope;
+                    CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[task->start]);
+                    if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF)
+                    {
+                        machine->expression_constraint = string_format(result->arena, S8("typedef name '{S8}' is not an expression"),
+                            c_token_spelling(preprocess.spelling_base, first));
+                        machine->expression_constraint_token = task->start;
+                    }
+                }
                 task_count -= 1;
                 continue;
             }
@@ -13489,6 +13506,42 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
     c_type_parse_frame_complete(machine, completion_type, completion_index, true);
 }
 
+// In a parameter declaration, a type-name-led group is an abstract function
+// declarator, not a redundantly parenthesized parameter name (C11 6.7.6.3p11).
+// A pointer-led group still declares its own name, even when that name hides
+// a typedef. Match scalar specifier lookup's fallback only for an unbound name.
+BUSTER_C_INTERNAL bool c_parse_parameter_function_list(CParseResult* result, CPreprocessResult preprocess, u32 open, u32 end)
+{
+    bool function_list = false;
+    while (open + 1 < end && c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        open += 1;
+    if (open + 1 < end && c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        preprocess.tokens[open + 1].kind == C_TOKEN_IDENTIFIER)
+    {
+        CToken token = preprocess.tokens[open + 1];
+        function_list = c_parse_type_word_for_dialect_token(preprocess, token);
+        if (!function_list)
+        {
+            CScopeId scope = result->binding_scope.value < result->scope_count ? result->binding_scope : (CScopeId){.value = 0};
+            CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+            if (entity.value == C_ID_UNDERLYING_INVALID)
+                entity = c_parse_lookup_typedef_name_token(result, preprocess.spelling_base, token, true);
+            function_list = entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+        }
+    }
+    return function_list;
+}
+
+BUSTER_C_INTERNAL CTypeParseFrameKind c_parse_parameter_group_kind(CPreprocessResult preprocess, u32 open, bool abstract_group)
+{
+    CTypeParseFrameKind kind = C_TYPE_PARSE_FRAME_PARENTHESIZED;
+    if (abstract_group)
+        kind = c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
+                   ? C_TYPE_PARSE_FRAME_PARAMETER_GROUP : C_TYPE_PARSE_FRAME_FUNCTION_SUFFIX;
+    return kind;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -13554,8 +13607,13 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
         if (frame->declarator_start < frame->end && c_token_is_punctuator(&preprocess.tokens[frame->declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 nested_name_index = 0;
-            bool nested_has_name = c_parse_parenthesized_declarator_name(preprocess, frame->declarator_start, frame->end, &nested_name_index);
-            if (!nested_has_name)
+            bool function_list = c_parse_parameter_function_list(result, preprocess, frame->declarator_start, frame->end);
+            bool nested_has_name = !function_list && c_parse_parenthesized_declarator_name(preprocess, frame->declarator_start, frame->end, &nested_name_index);
+            if (function_list)
+            {
+                nested_name_index = frame->declarator_start;
+            }
+            else if (!nested_has_name)
             {
                 u32 close_index = frame->declarator_start + 1;
                 CType ignored = {0};
@@ -13589,7 +13647,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
                                                       .end = frame->end,
                                                       .declarator_start = frame->declarator_start,
                                                       .name_index = nested_name_index,
-                                                      .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+                                                      .kind = c_parse_parameter_group_kind(preprocess, frame->declarator_start, function_list),
                                                       .has_name = nested_has_name,
                                                   }))
             {
@@ -13828,7 +13886,8 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                 nested_index += 1;
             }
         }
-        frame->nested = nested_index < frame->end && nested_index > frame->declarator_start + 1 &&
+        frame->nested = nested_index < frame->end &&
+                        (nested_index > frame->declarator_start + 1 || frame->kind == C_TYPE_PARSE_FRAME_PARAMETER_GROUP) &&
                         c_token_is_punctuator(&preprocess.tokens[nested_index], C_PUNCTUATOR_LEFT_PARENTHESIS);
         if (frame->nested)
         {
@@ -14079,7 +14138,12 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                 return;
             }
             u32 nested_name_index = 0;
-            bool nested_has_name = c_parse_parenthesized_declarator_name(preprocess, frame->nested_start, frame->close_index, &nested_name_index);
+            // Classification belongs to the outer parameter query. A redundant
+            // group cannot change it; retain the fact instead of rescanning
+            // every remaining group at each depth.
+            bool function_list = frame->kind == C_TYPE_PARSE_FRAME_PARAMETER_GROUP;
+            bool nested_has_name = !function_list &&
+                                   c_parse_parenthesized_declarator_name(preprocess, frame->nested_start, frame->close_index, &nested_name_index);
             frame->stage = C_TYPE_PARSE_STAGE_CHILD;
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = result,
@@ -14089,7 +14153,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                                                       .end = frame->close_index,
                                                       .declarator_start = frame->nested_start,
                                                       .name_index = nested_has_name ? nested_name_index : frame->nested_start,
-                                                      .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+                                                      .kind = c_parse_parameter_group_kind(preprocess, frame->nested_start, function_list),
                                                       .has_name = nested_has_name,
                                                   }))
             {
@@ -14128,6 +14192,41 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
     }
 }
 
+// An abstract function suffix uses the same reserved parameter ranges and
+// child frames as a grouped declarator, without a name or grouping pointer.
+BUSTER_C_INTERNAL void c_type_parse_function_suffix_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
+{
+    CParseResult* result = frame->result;
+    CPreprocessResult preprocess = *frame->preprocess;
+    bool valid = true;
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+    {
+        valid = frame->declarator_start < frame->end &&
+                c_token_is_punctuator(&preprocess.tokens[frame->declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (valid)
+        {
+            frame->close_index = c_parse_matching_delimiter_indexed(result, preprocess, frame->declarator_start);
+            valid = frame->close_index < frame->end;
+        }
+        if (valid)
+        {
+            frame->pointer_start = frame->declarator_start + 1;
+            frame->name_index = frame->pointer_start;
+            frame->parameter_start = result->parameter_count;
+            frame->written_parameter_count = 0;
+            result->parameter_count += c_parse_parameter_list_reserved_count(preprocess, frame->declarator_start, frame->end);
+            frame->segment_start = frame->declarator_start + 1;
+            frame->scan_index = frame->segment_start;
+            frame->depth = 1;
+            frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
+        }
+    }
+    if (valid)
+        c_type_parse_parenthesized_step(machine, frame);
+    else
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+}
+
 BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 frame_start)
 {
     WORK_LEDGER_RECORD(REDERIVE_TYPE_MACHINE_RUNS, 1);
@@ -14158,7 +14257,11 @@ BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 
             c_type_parse_aggregate_range_step(machine, frame);
             break;
         case C_TYPE_PARSE_FRAME_PARENTHESIZED:
+        case C_TYPE_PARSE_FRAME_PARAMETER_GROUP:
             c_type_parse_parenthesized_step(machine, frame);
+            break;
+        case C_TYPE_PARSE_FRAME_FUNCTION_SUFFIX:
+            c_type_parse_function_suffix_step(machine, frame);
             break;
         case C_TYPE_PARSE_FRAME_PARAMETER:
             c_type_parse_parameter_step(machine, frame);
@@ -15697,8 +15800,13 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     if (declarator_start < end && c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         u32 name_index = 0;
-        bool has_name = c_parse_parenthesized_declarator_name(preprocess, declarator_start, end, &name_index);
-        if (!has_name)
+        bool function_list = c_parse_parameter_function_list(result, preprocess, declarator_start, end);
+        bool has_name = !function_list && c_parse_parenthesized_declarator_name(preprocess, declarator_start, end, &name_index);
+        if (function_list)
+        {
+            name_index = declarator_start;
+        }
+        else if (!has_name)
         {
             u32 close_index = declarator_start + 1;
             CType ignored = {0};
@@ -15787,7 +15895,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachi
                                               .end = suffix_end,
                                               .declarator_start = declarator_start,
                                               .name_index = name_index,
-                                              .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+                                              .kind = c_parse_parameter_group_kind(preprocess, declarator_start, !has_name && name_index == declarator_start),
                                               .has_name = has_name,
                                           });
     if (pushed)
@@ -27273,7 +27381,9 @@ BUSTER_C_INTERNAL void c_parse_validate_statement_expression_range(CTypeParseMac
                 while (limit < close && c_token_is_punctuator(&preprocess.tokens[limit], C_PUNCTUATOR_COMMA))
                     limit = c_parse_constraint_expression_end(result, preprocess, limit + 1, close);
                 CTypeId type = C_TYPE_ID_INVALID;
-                bool declaration_part = for_loop && part_index == 0 && part < limit && c_parse_declaration_keyword_at(result, preprocess, part);
+                bool declaration_part = for_loop && part_index == 0 && part < limit &&
+                    (c_parse_declaration_keyword_at(result, preprocess, part) ||
+                     c_parse_type_start_token(result, preprocess, scope, preprocess.tokens[part]));
                 bool typed = !declaration_part && part < limit && c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess,
                     result, scope, part, limit, &type, diagnostic);
                 bool condition = !for_loop || part_index == 1;
