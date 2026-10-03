@@ -3220,15 +3220,23 @@ struct CodegenDebugLocationSink
 
 BUSTER_GLOBAL_LOCAL bool codegen_debug_locations_reserve(CodegenModule* result, CodegenDebugLocationSink* sink, u64 additional)
 {
-    u64 required = (u64)result->debug_location_count + additional;
-    bool reserved = required <= UINT32_MAX;
+    bool reserved = result->error == CODEGEN_ERROR_NONE && additional <= UINT32_MAX - result->debug_location_count;
+    u64 required = reserved ? (u64)result->debug_location_count + additional : 0;
     if (reserved && required > sink->capacity)
     {
-        reserved = sink->arena != 0;
+        u64 aligned_offset = 0;
+        reserved = sink->arena && sink->arena->position >= arena_minimum_position &&
+                   sink->arena->position <= sink->arena->reserved_size &&
+                   align_forward_checked(sink->arena->position, BUSTER_ALIGN_OF(DebugLocationSeed), &aligned_offset) &&
+                   aligned_offset <= sink->arena->reserved_size;
+        u64 available = reserved ? (sink->arena->reserved_size - aligned_offset) / sizeof(DebugLocationSeed) : 0;
+        reserved = reserved && required <= available;
         if (reserved)
         {
             u64 doubled = BUSTER_MAX((u64)sink->capacity * 2u, (u64)CODEGEN_DEBUG_LOCATION_SEED_MINIMUM);
-            u32 grown_capacity = (u32)BUSTER_MIN(BUSTER_MAX(required, doubled), (u64)UINT32_MAX);
+            // Doubling is speculative: if the actual records fit, do not
+            // refuse only because spare capacity would exceed this arena.
+            u32 grown_capacity = (u32)BUSTER_MIN(BUSTER_MAX(required, doubled), BUSTER_MIN(available, (u64)UINT32_MAX));
             DebugLocationSeed* grown = arena_allocate(sink->arena, DebugLocationSeed, grown_capacity);
             if (result->debug_location_count)
             {
@@ -3238,7 +3246,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_debug_locations_reserve(CodegenModule* result, 
             sink->capacity = grown_capacity;
         }
     }
-    if (!reserved)
+    if (!reserved && result->error == CODEGEN_ERROR_NONE)
     {
         result->error = CODEGEN_ERROR_CAPACITY;
     }
@@ -3295,7 +3303,7 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
             local_places[instruction->canonical_local.value] = instruction->result;
         }
     }
-    for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+    for (u32 local_index = 0; local_index < function->debug_local_count && result->error == CODEGEN_ERROR_NONE; local_index += 1)
     {
         IrDebugLocal* local = function->debug_locals + local_index;
         if (local->id.value == IR_ID_UNDERLYING_INVALID)
@@ -3325,7 +3333,7 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
         }
         if (!emitted && block_offsets)
         {
-            for (u32 ordinal = 0; ordinal < function->block_count; ordinal += 1)
+            for (u32 ordinal = 0; ordinal < function->block_count && result->error == CODEGEN_ERROR_NONE; ordinal += 1)
             {
                 u32 block_index = codegen_canonical_layout_block(function, ordinal);
                 IrBlock* block = function->blocks + block_index;
@@ -3359,7 +3367,7 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
                 emitted |= end > start;
             }
         }
-        if (!emitted)
+        if (!emitted && result->error == CODEGEN_ERROR_NONE)
         {
             codegen_canonical_location_append(result, sink, function->symbol, local->id, function_start, function_end,
                                               (DebugLocation){
@@ -11374,6 +11382,14 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations_dense(Arena* arena, Co
 }
 
 
+bool codegen_test_debug_locations_reserve(Arena* arena, CodegenModule* result, u32* capacity, u64 additional)
+{
+    CodegenDebugLocationSink sink = {.arena = arena, .capacity = *capacity};
+    bool reserved = codegen_debug_locations_reserve(result, &sink, additional);
+    *capacity = sink.capacity;
+    return reserved;
+}
+
 bool codegen_test_record_machine_locations(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
                                             MachineFunction const* function, MachineStackPlacement const* placement,
                                             u32 const* row_offsets, u32 function_start, u32 function_end, u32 frame_base_offset, Target target)
@@ -11749,11 +11765,11 @@ struct CodegenModuleCapacityPlan
     u64 stack_probe_capacity;
     u64 aligned_argument_capacity;
     u32 instruction_count;
-    u32 debug_location_capacity;
+    u8 reserved[4];
 };
 
 BUSTER_GLOBAL_LOCAL CodegenError codegen_plan_module_capacity(IrProgram* program, IrModule* module, CodegenSlotCost const* slot_costs,
-                                                           Target target, CodegenModuleOptions options, CodegenModuleCapacityPlan* plan_out)
+                                                           Target target, CodegenModuleCapacityPlan* plan_out)
 {
     CodegenError error = CODEGEN_ERROR_NONE;
     u64 assembly_capacity = 0;
@@ -11768,7 +11784,6 @@ BUSTER_GLOBAL_LOCAL CodegenError codegen_plan_module_capacity(IrProgram* program
         assembly_alignment_capacity += codegen_global_assembly_alignment_padding(module->assemblies[assembly_index].source);
     }
     u32 instruction_count = 0;
-    u64 debug_location_capacity_64 = 0;
     u64 stack_probe_capacity = 0;
     u64 aligned_argument_capacity = 0;
     // What the inline-assembly templates in this module can add to the
@@ -11793,19 +11808,6 @@ BUSTER_GLOBAL_LOCAL CodegenError codegen_plan_module_capacity(IrProgram* program
                 {
                     inline_assembly_capacity += ir_instruction_extra(function, (IrInstructionId){.value = instruction_index}).literal.length;
                 }
-            }
-        }
-        if (options.debug_info)
-        {
-            u64 local_capacity = function->debug_local_count ? function->debug_local_count : function->local_count;
-            // Exact bound for the canonical producer. The machine producer
-            // reserves its stronger post-selection local-record x row bound
-            // once the scheduled MIR row count is known.
-            debug_location_capacity_64 += local_capacity * ((u64)function->block_count + 1);
-            if (debug_location_capacity_64 > UINT32_MAX)
-            {
-                error = CODEGEN_ERROR_CAPACITY;
-                break;
             }
         }
         // The frame the function's canonical slots would take, walked from the
@@ -11884,7 +11886,6 @@ BUSTER_GLOBAL_LOCAL CodegenError codegen_plan_module_capacity(IrProgram* program
             .stack_probe_capacity = stack_probe_capacity,
             .aligned_argument_capacity = aligned_argument_capacity,
             .instruction_count = instruction_count,
-            .debug_location_capacity = (u32)debug_location_capacity_64,
         };
     }
     return error;
@@ -11926,7 +11927,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     }
     result.failed_phase = CODEGEN_PHASE_MODULE_PLANNING;
     CodegenModuleCapacityPlan plan = {0};
-    result.error = codegen_plan_module_capacity(program, module, slot_costs, target, options, &plan);
+    result.error = codegen_plan_module_capacity(program, module, slot_costs, target, &plan);
     if (result.error != CODEGEN_ERROR_NONE)
     {
         return result;
@@ -11940,7 +11941,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     u32 entry_capacity = module->function_count + (u32)BUSTER_MIN(assembly_capacity, UINT32_MAX - module->function_count);
     result.entries = arena_allocate(arena, CodegenModuleEntry, entry_capacity);
     result.functions = arena_allocate(arena, CodegenFunctionDescriptor, entry_capacity);
-    CodegenDebugLocationSink debug_location_sink = {.arena = arena, .capacity = plan.debug_location_capacity};
+    CodegenDebugLocationSink debug_location_sink = {.arena = arena};
     u32 global_relocation_count = 0;
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
@@ -12015,9 +12016,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     // unusable however much of it the arena would give. This is also what ends
     // the caller's retry: a scale that cannot fit stops here instead of
     // reporting the code buffer exhausted and being doubled again.
-    if (capacity > UINT32_MAX)
+    if (capacity > UINT32_MAX || (options.debug_info && !codegen_debug_locations_reserve(&result, &debug_location_sink, 1)))
     {
         result.error = CODEGEN_ERROR_CAPACITY;
+        if (capacity <= UINT32_MAX && module->function_count)
+        {
+            result.failed_function = (IrFunctionId){.value = 0};
+        }
         return result;
     }
     CodegenBuffer buffer = {
@@ -12037,7 +12042,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     // DWARF builder; doing it here is what lets the writer alias the array.
     u32 line_source_limit = BUSTER_MIN(program->sources.count, (u32)UINT16_MAX + 1);
     result.line_entries = options.debug_info ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
-    result.debug_locations = options.debug_info ? arena_allocate(arena, DebugLocationSeed, debug_location_sink.capacity) : 0;
     result.debug_info = options.debug_info;
     if (options.record_fallbacks && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
     {
@@ -24323,6 +24327,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         {
             codegen_record_canonical_locations(&result, function, value_offsets, block_offsets, descriptor->code_offset, (u32)buffer.count, target, frame_size,
                                                (s32)canonical_x64_frame_base_offset, &debug_location_sink);
+            if (result.error != CODEGEN_ERROR_NONE)
+            {
+                break;
+            }
         }
     }
     if (buffer.error == CODEGEN_ERROR_NONE && result.error == CODEGEN_ERROR_NONE)
@@ -24340,7 +24348,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     // A module whose functions name no section places its assembly here,
     // after every function; otherwise the assembly already went in before
     // the first function that does.
-    if (!function_order && !codegen_emit_module_assembly(arena, program, module, target, options, &buffer, &result, relocation_capacity,
+    if (!function_order && result.error == CODEGEN_ERROR_NONE &&
+        !codegen_emit_module_assembly(arena, program, module, target, options, &buffer, &result, relocation_capacity,
                                                          &x64_metadata_cache_tried))
     {
         return result;
@@ -24350,7 +24359,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         .length = buffer.count,
     };
     result.statistics.code_bytes = result.code.length;
-    result.error = buffer.error;
+    result.error = result.error == CODEGEN_ERROR_NONE ? buffer.error : result.error;
     if (result.error == CODEGEN_ERROR_NONE)
     {
         result.failed_phase = CODEGEN_PHASE_NONE;

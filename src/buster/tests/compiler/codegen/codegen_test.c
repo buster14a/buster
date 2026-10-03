@@ -1486,6 +1486,156 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_seed_sizing(UnitTe
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_seed_capacity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* seed_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(4), .flags.no_pool = true});
+    if (BUSTER_REQUIRE(arguments, seed_arena != 0))
+    {
+        CodegenModule module = {0};
+        u32 capacity = 0;
+        BUSTER_TEST(arguments, codegen_test_debug_locations_reserve(seed_arena, &module, &capacity, 1));
+        BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_NONE && module.debug_location_count == 0 && capacity == 256);
+        if (BUSTER_REQUIRE(arguments, module.debug_locations && capacity == 256))
+        {
+            memset(module.debug_locations, 0, (u64)capacity * sizeof(*module.debug_locations));
+            for (u32 index = 0; index < capacity; index += 1)
+            {
+                module.debug_locations[index].local.value = index;
+                module.debug_locations[index].start = index;
+                module.debug_locations[index].end = index + 1;
+                module.debug_locations[index].location.kind = DEBUG_LOCATION_UNAVAILABLE;
+            }
+            module.debug_location_count = capacity;
+            DebugLocationSeed* previous = module.debug_locations;
+            BUSTER_TEST(arguments, codegen_test_debug_locations_reserve(seed_arena, &module, &capacity, 1));
+            BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_NONE && capacity == 512 && module.debug_locations != previous);
+            BUSTER_TEST(arguments, module.debug_location_count == 256 && module.debug_locations[0].local.value == 0 &&
+                                   module.debug_locations[255].local.value == 255 && module.debug_locations[255].start == 255 &&
+                                   module.debug_locations[255].end == 256 &&
+                                   module.debug_locations[255].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+            u64 position = seed_arena->position;
+            previous = module.debug_locations;
+            BUSTER_TEST(arguments, !codegen_test_debug_locations_reserve(seed_arena, &module, &capacity, UINT64_MAX));
+            BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_CAPACITY && capacity == 512 && module.debug_locations == previous &&
+                                   module.debug_location_count == 256 && seed_arena->position == position);
+            module.error = CODEGEN_ERROR_NONE;
+            BUSTER_TEST(arguments, !codegen_test_debug_locations_reserve(seed_arena, &module, &capacity, UINT32_MAX));
+            BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_CAPACITY && seed_arena->position == position);
+            module.error = CODEGEN_ERROR_INVALID_IR;
+            BUSTER_TEST(arguments, !codegen_test_debug_locations_reserve(seed_arena, &module, &capacity, 0));
+            BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_INVALID_IR && seed_arena->position == position);
+        }
+        BUSTER_TEST(arguments, arena_destroy(seed_arena, 1));
+    }
+    for (u32 boundary = 0; boundary < 2; boundary += 1)
+    {
+        Arena* boundary_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(4), .initial_size = BUSTER_KB(4), .flags.no_pool = true});
+        if (BUSTER_REQUIRE(arguments, boundary_arena != 0))
+        {
+            DebugLocationSeed* seed = arena_allocate_zeroed(boundary_arena, DebugLocationSeed, 1);
+            seed->local.value = 17;
+            seed->start = 11;
+            seed->end = 29;
+            CodegenModule module = {.debug_locations = seed, .debug_location_count = 1};
+            u32 capacity = 1;
+            // The first case permits three complete records, fewer than the
+            // speculative minimum, but enough for the two actual records.
+            // The second is one byte short of an aligned two-record array.
+            u64 available = boundary ? 2 * sizeof(*seed) - 1 : 3 * sizeof(*seed);
+            u64 limit = boundary_arena->reserved_size - available;
+            arena_allocate_bytes(boundary_arena, limit - boundary_arena->position, 1);
+            u64 position = boundary_arena->position;
+            bool reserved = codegen_test_debug_locations_reserve(boundary_arena, &module, &capacity, 1);
+            if (!boundary)
+            {
+                BUSTER_TEST(arguments, reserved && module.error == CODEGEN_ERROR_NONE && capacity == 3);
+                BUSTER_TEST(arguments, module.debug_locations != seed && module.debug_location_count == 1 &&
+                                       module.debug_locations[0].local.value == 17 && module.debug_locations[0].start == 11 &&
+                                       module.debug_locations[0].end == 29 && seed->local.value == 17);
+                BUSTER_TEST(arguments, boundary_arena->position == boundary_arena->reserved_size);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, !reserved && module.error == CODEGEN_ERROR_CAPACITY && capacity == 1 &&
+                                       module.debug_locations == seed && module.debug_location_count == 1 && boundary_arena->position == position);
+            }
+            BUSTER_TEST(arguments, arena_destroy(boundary_arena, 1));
+        }
+    }
+    DebugLocationSeed fixed_seed = {0};
+    CodegenModule fixed = {.debug_locations = &fixed_seed, .debug_location_count = 1};
+    u32 fixed_capacity = 1;
+    BUSTER_TEST(arguments, codegen_test_debug_locations_reserve(0, &fixed, &fixed_capacity, 0));
+    BUSTER_TEST(arguments, !codegen_test_debug_locations_reserve(0, &fixed, &fixed_capacity, 1));
+    BUSTER_TEST(arguments, fixed.error == CODEGEN_ERROR_CAPACITY && fixed.debug_locations == &fixed_seed &&
+                           fixed.debug_location_count == 1 && fixed_capacity == 1);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_block_local_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { REPETITIONS = 256 };
+    String8 prefix = S8("int debug_blocks(int x) { int r=0;\n");
+    String8 suffix = S8("return r; }\n");
+    String8 rows[] = {
+        S8("for(int i=0;i<x;i++){r+=i^7;}\n"),
+        S8("if(x>7){int t=x^3;r+=t;}\n"),
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(rows); shape += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 row = rows[shape];
+        String8 source = {.pointer = arena_allocate(temporary.arena, u8, prefix.length + REPETITIONS * row.length + suffix.length),
+                          .length = prefix.length + REPETITIONS * row.length + suffix.length};
+        memcpy(source.pointer, prefix.pointer, prefix.length);
+        for (u32 repetition = 0; repetition < REPETITIONS; repetition += 1)
+        {
+            memcpy(source.pointer + prefix.length + repetition * row.length, row.pointer, row.length);
+        }
+        memcpy(source.pointer + prefix.length + REPETITIONS * row.length, suffix.pointer, suffix.length);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("debug-block-local-storage.c"), tokens, parsed, target);
+        if (BUSTER_REQUIRE(arguments, tokens.error_count == 0 && parsed.diagnostic_count == 0 &&
+                                     lowered.diagnostic_count == 0 && lowered.program))
+        {
+            IrModule* module = lowered.program->modules;
+            IrValidationResult validated = ir_validate_canonical_module(lowered.program, module);
+            if (BUSTER_REQUIRE(arguments, validated.error == IR_VALIDATION_NONE && module->function_count == 1))
+            {
+                IrFunction* function = module->functions;
+                u64 former_reservation = (u64)function->debug_local_count * ((u64)function->block_count + 1) * sizeof(DebugLocationSeed);
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    Arena* generation_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4), .initial_size = BUSTER_KB(4),
+                                                                           .flags.no_pool = true});
+                    if (BUSTER_REQUIRE(arguments, generation_arena != 0))
+                    {
+                        BUSTER_TEST(arguments, former_reservation > generation_arena->reserved_size);
+                        CodegenModule generated = codegen_generate_canonical_module(generation_arena, lowered.program, module, target,
+                            (CodegenModuleOptions){.debug_info = true, .assume_validated = true, .verify_invariants = true,
+                                                   .record_fallbacks = true, .register_allocator = (u8)mode});
+                        if (generated.error != CODEGEN_ERROR_NONE)
+                        {
+                            arguments->show(arguments, S8("DEBUG_SEEDS shape={u32}, allocator={u32}, error={u32}, arena_bytes={u64}\n"),
+                                            shape, mode, (u32)generated.error, generation_arena->position);
+                        }
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.debug_info && generated.code.length &&
+                                               generated.debug_locations && generated.debug_location_count >= REPETITIONS);
+                        BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+                        BUSTER_TEST(arguments, arena_destroy(generation_arena, 1));
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // The predicate bank leaves a MASK value no predicate edit names without a
 // frame home. Recording reports such a value unavailable wherever its frame
 // copy would be selected, keeps its register rows, and still rejects a home
@@ -2425,6 +2575,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult machine_debug_sizing = codegen_test_machine_debug_seed_sizing(arguments);
     result.succeeded_test_count += machine_debug_sizing.succeeded_test_count;
     result.test_count += machine_debug_sizing.test_count;
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_seed_capacity);
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_block_local_storage);
     UnitTestResult ebpf_scalars = codegen_test_ebpf_scalars(arguments);
     result.succeeded_test_count += ebpf_scalars.succeeded_test_count;
     result.test_count += ebpf_scalars.test_count;
