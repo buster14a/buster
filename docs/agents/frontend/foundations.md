@@ -354,11 +354,35 @@ without facts for identical bitcode and diagnostics.
   The returned signed magnitude, rank and target width survive the query;
   temporary type IDs do not. Qualified enum aliases read integer facts through
   their original tag even when the alias was created before its completion.
-  Existing enumerator folding retains the
-  `C_CONSTANT_EVALUATION_ENUM` compatibility mode on the declaration machine,
-  including its machineless `sizeof` path. Migrating that consumer requires
-  declaration-owned preparation of source-ordered operand facts; this stage
-  adds the protected query without changing enum admission or arithmetic.
+  Enumerator folding retains `C_CONSTANT_EVALUATION_ENUM` compatibility
+  arithmetic and successful machineless `sizeof` answers. A failed `sizeof`
+  expression leaf instead uses the protected TYPE reader over its original
+  token range and live declaration-point model, including read-only earlier
+  pending-enumerator facts. Only nonnegative, single-limb integer magnitude
+  leaves that private query; the outer leaf creates its own stable size type.
+  The live declaration machine never participates in the private frames.
+  This bounded caller declines type-name/function-valued operands, nested
+  `sizeof`/`_Alignof` and attributes before their type-only paths can hide an
+  unsupported operand. Existing TYPE consumers retain their default admission
+  policy. The broader ENUM migration still needs declaration-owned preparation
+  of source-ordered facts and stored-layout authority (#1258/#1247).
+  The registered `c_test_enum_sizeof_expression` regression checks #1258's
+  original five non-designator expression operands with independent fixed
+  integer values, grouping/pending-enumerator/unevaluated neighbors and both
+  canonical frontend forms on six desktop layouts in C17/GNU17. Its native
+  sibling checks volatile observations in all four allocators and both forms;
+  mandatory Linux GCC/Clang C17/GNU17 O0/O2 controls use the same fixed source.
+  Native execution covers 16 profiles (two dialects, four allocators, two forms),
+  separately from the eight optimized/unoptimized reference controls. Owned
+  process groups bound deadline cleanup; captured reference diagnostics reject
+  overflow/truncation and capture/tree-cleanup failures. Executable paths are
+  removed after every attempt, and the source is read back and removed.
+  Process failures and 30-second timeouts fail. The existing machineless
+  function-size divergence remains read-only evidence outside this partial
+  repair. Refused function-valued/type-name operands, including nested queries,
+  remain policy controls, not cross-compiler conformance claims. The broader
+  stored-layout and GNU function-alignment obligations remain open under
+  #1258/#1247; no issue completion is claimed.
   Its caller supplies the semantic model at the expression's declaration point.
   Scope alone cannot reconstruct earlier tag completeness from a finished unit;
   deferred consumers must retain the bindings and layout facts of their operands.

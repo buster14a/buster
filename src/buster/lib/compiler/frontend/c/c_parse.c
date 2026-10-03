@@ -1987,6 +1987,9 @@ BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_const
 BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                                        CScopeId scope, u32 start, u32 end, String8* syntax_error,
                                                                        u32* syntax_token);
+BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                                            CScopeId scope, u32 start, u32 end, bool sizeof_expression_query,
+                                                                            String8* syntax_error, u32* syntax_token);
 BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseResult* result, CPreprocessResult preprocess, u32 index, u32 end);
 
 BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
@@ -22400,6 +22403,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         u32 operand_start = start + 1;
         u32 operand_end = end;
         CTypeId type = C_TYPE_ID_INVALID;
+        bool refused = false;
         if (c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
             c_parse_matching_delimiter_indexed(result, preprocess, operand_start) + 1 == end)
         {
@@ -22437,25 +22441,35 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             {
                 type = C_TYPE_ID_INVALID;
             }
+            refused = machine->enum_sizeof_expression_query && type.value < result->type_count;
         }
-        if (machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_ENUM && type.value >= result->type_count)
+        if (!refused && machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_ENUM && type.value >= result->type_count)
         {
             c_parse_expression_type_query(machine, arena, preprocess, result, scope, operand_start, operand_end, &type);
         }
+        refused |= machine->enum_sizeof_expression_query && type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION;
         u64 size = 0;
         u32 alignment = 0;
         CTypeParseMachine* layout_machine = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE ? 0 : machine;
-        value.valid = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_ENUM
+        value.valid = !refused && (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_ENUM
             ? c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope, operand_start, operand_end, &size, &alignment)
-            : c_parse_type_layout(layout_machine, arena, preprocess, result, type, &size, &alignment);
-        if (!value.valid && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE)
+            : c_parse_type_layout(layout_machine, arena, preprocess, result, type, &size, &alignment));
+        if (!refused && !value.valid && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE)
         {
             // An earlier incomplete array's plain initializer may establish
             // its size before semantic completion publishes the inferred count.
             value.valid = c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope,
                                                                     operand_start, operand_end, &size, &alignment);
         }
-        if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION)
+        if (!value.valid && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_ENUM && string_equal(spelling, S8("sizeof")))
+        {
+            // The live declaration-point model owns earlier pending facts.
+            // A private TYPE machine returns only the size, never a type ID.
+            CIntegerConstant query = c_parse_type_integer_constant_query_core(arena, preprocess, result, scope, start, end, true, 0, 0);
+            value.valid = query.valid && !query.is_negative && !query.magnitude_high;
+            if (value.valid) size = query.magnitude;
+        }
+        if (!refused && type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION)
         {
             size = 1;
             alignment = 4;
@@ -22877,12 +22891,24 @@ BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseRes
     return supported;
 }
 
-BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+                                                                         bool sizeof_expression_query)
 {
     bool supported = true;
     for (u32 index = start; supported && index < end;)
     {
         u32 after = c_parse_skip_attributes(preprocess, index, end);
+        if (sizeof_expression_query)
+        {
+            // This partial enum fallback declines attributes and nested layout
+            // operators; type-only expression reads can hide their operands.
+            supported = after == index;
+            if (supported && index != start && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+            {
+                String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+                supported = !string_equal(spelling, S8("sizeof")) && !c_parse_alignof_word(spelling);
+            }
+        }
         if (after == index)
         {
             index += 1;
@@ -22912,9 +22938,9 @@ BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseRe
 // The caller supplies the semantic model at the expression's declaration point.
 // A full-unit model may contain later bindings and tag completions; deferred
 // consumers must freeze their operand facts before using this reader.
-BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                                       CScopeId scope, u32 start, u32 end, String8* syntax_error,
-                                                                       u32* syntax_token)
+BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                                            CScopeId scope, u32 start, u32 end, bool sizeof_expression_query,
+                                                                            String8* syntax_error, u32* syntax_token)
 {
     CIntegerConstant constant = {.type = C_TYPE_ID_INVALID};
     if (start < end && end <= preprocess.token_count && end - start <= UINT32_MAX - 16)
@@ -22987,7 +23013,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         query.expression_scalar_types = scalar_types;
         CTypeLayoutStatistics statistics = {0};
         query.type_layout_statistics = &statistics;
-        bool supported = c_parse_type_constant_vector_arguments_supported(&query, preprocess, start, end);
+        bool supported = c_parse_type_constant_vector_arguments_supported(&query, preprocess, start, end, sizeof_expression_query);
         bool single = end == start + 1;
         u32 capacity = single || !supported ? 0 : end - start + 16;
         CTypeParseMachine query_machine = {
@@ -23000,6 +23026,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
             .mutation_capacity = capacity,
             .expression_task_capacity = capacity,
             .constant_evaluation_mode = C_CONSTANT_EVALUATION_TYPE,
+            .enum_sizeof_expression_query = sizeof_expression_query,
         };
         u32 error_token = start;
         CParseResult syntax_checkpoint = query;
@@ -23024,6 +23051,13 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         scratch_end(model_temporary);
     }
     return constant;
+}
+
+BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                                       CScopeId scope, u32 start, u32 end, String8* syntax_error,
+                                                                       u32* syntax_token)
+{
+    return c_parse_type_integer_constant_query_core(arena, preprocess, result, scope, start, end, false, syntax_error, syntax_token);
 }
 
 BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_constant(Arena* arena,
