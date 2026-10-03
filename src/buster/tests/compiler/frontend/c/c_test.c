@@ -4202,8 +4202,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArgume
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(0, 0);
+    String8 untagged_sources[] = {
+        S8("typedef int Scalar; int object; int read(Scalar value) { return value + object; }"),
+        S8("struct { int value; } object; union { int left; long right; } choice; enum { CODE = 7 };\n"
+           "int read(void) { return object.value + choice.left + CODE; }"),
+    };
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(untagged_sources); source += 1)
+    {
+        CPreprocessResult untagged_tokens = c_preprocess(temporary.arena, untagged_sources[source], (CPreprocessOptions){0});
+        CParseResult untagged = c_parse(temporary.arena, untagged_tokens);
+        BUSTER_TEST(arguments, untagged_tokens.error_count == 0 && untagged.diagnostic_count == 0 && untagged.analysis_complete);
+        if (BUSTER_REQUIRE(arguments, untagged.aggregate_lookup != 0))
+        {
+            BUSTER_TEST(arguments, untagged.aggregate_lookup->slots == 0 && untagged.aggregate_lookup->slot_count == 0);
+            BUSTER_TEST(arguments, untagged.aggregate_lookup->fill == 0 && !untagged.aggregate_lookup->incomplete);
+        }
+    }
     CPreprocessResult tokens = c_preprocess(temporary.arena, S8(""), (CPreprocessOptions){0});
     CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, parse.aggregate_lookup->slots == 0 && parse.aggregate_lookup->slot_count == 0);
+    BUSTER_TEST(arguments, parse.aggregate_lookup->fill == 0 && !parse.aggregate_lookup->incomplete);
+#if BUSTER_BENCH_ALLOCATIONS
+    if (os_get_environment_variable(S8("BUSTER_AGGREGATE_CENSUS")).length)
+    {
+        arguments->show(arguments, S8("AGGREGATE_EMPTY_CENSUS slots={u32} row_bytes={u64} initial_array_bytes={u64}\n"),
+            parse.aggregate_lookup->slot_count, (u64)sizeof(CAggregateLookupSlot), (u64)sizeof(CAggregateLookupSlot) * 16384);
+    }
+#endif
     u32 counts[] = {8191, 8192, 8193, 12000, 16384, 16385};
     u32 maximum = counts[BUSTER_ARRAY_LENGTH(counts) - 1];
     String8* tags = arena_allocate(temporary.arena, String8, maximum);
@@ -4219,6 +4244,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArgume
             BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, tags[inserted], (CScopeId){0}).value == C_ID_UNDERLYING_INVALID);
             ids[inserted] = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = tags[inserted], .tag_scope = {0}});
             BUSTER_TEST(arguments, ids[inserted].value < parse.type_count);
+            if (!inserted)
+            {
+                BUSTER_TEST(arguments, parse.aggregate_lookup->slot_count == 16384 && parse.aggregate_lookup->fill == 1);
+            }
         }
         BUSTER_TEST(arguments, parse.aggregate_lookup->fill == count);
         BUSTER_TEST(arguments, parse.aggregate_lookup->slot_count >= 2 * count);
@@ -4388,6 +4417,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_identity(UnitTestArgu
     CTypeId duplicate = c_test_aggregate_lookup_add(&parse, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {1}});
     BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("Shared"), (CScopeId){1}).value == duplicate.value);
     BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&parse, C_TYPE_STRUCT, S8("NoRoom"), (CScopeId){0}).value < parse.type_count);
+    // Initial reservation failure has no old array to probe. Its fallback
+    // must still choose the nearest visible tag and the latest at equal depth.
+    CAggregateLookup failed_lookup = {0};
+    CParseResult no_room = {.aggregate_lookup = &failed_lookup, .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes),
+        .types = arena_allocate(temporary.arena, CType, 64), .type_capacity = 64};
+    CTypeId failed_outer = c_test_aggregate_lookup_add(&no_room, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {0}});
+    BUSTER_TEST(arguments, failed_lookup.incomplete && !failed_lookup.slots && !failed_lookup.slot_count && !failed_lookup.fill);
+    CTypeId failed_inner = c_test_aggregate_lookup_add(&no_room, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {1}});
+    CTypeId failed_sibling = c_test_aggregate_lookup_add(&no_room, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {3}});
+    CTypeId failed_duplicate = c_test_aggregate_lookup_add(&no_room, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Shared"), .tag_scope = {1}});
+    BUSTER_TEST(arguments, failed_outer.value < no_room.type_count && failed_inner.value < no_room.type_count &&
+        failed_sibling.value < no_room.type_count && failed_duplicate.value < no_room.type_count);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&no_room, C_TYPE_STRUCT, S8("Shared"), (CScopeId){0}).value == failed_outer.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&no_room, C_TYPE_STRUCT, S8("Shared"), (CScopeId){1}).value == failed_duplicate.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&no_room, C_TYPE_STRUCT, S8("Shared"), (CScopeId){2}).value == failed_duplicate.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&no_room, C_TYPE_STRUCT, S8("Shared"), (CScopeId){3}).value == failed_sibling.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&no_room, C_TYPE_STRUCT, S8("Shared"), C_SCOPE_ID_INVALID).value == failed_outer.value);
+    BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&no_room, C_TYPE_STRUCT, S8("Absent"), (CScopeId){2}).value == C_ID_UNDERLYING_INVALID);
+    bool decided = true;
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&no_room, C_TYPE_STRUCT, S8("Shared"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    BUSTER_TEST(arguments, c_test_aggregate_unique(&no_room, C_TYPE_STRUCT, S8("Absent"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+    BUSTER_TEST(arguments, !failed_lookup.slots && !failed_lookup.slot_count && !failed_lookup.fill);
     scratch_end(temporary);
     return result;
 }
@@ -4396,6 +4447,56 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_unique_search(UnitTestArgume
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(0, 0);
+    {
+        CAggregateLookup empty_lookup = {0};
+        CScope empty_scopes[] = {{.parent = C_SCOPE_ID_INVALID}};
+        CParseResult empty = {.arena = temporary.arena, .aggregate_lookup = &empty_lookup, .scopes = empty_scopes, .scope_count = 1,
+            .types = arena_allocate(temporary.arena, CType, 64), .type_capacity = 64};
+        CTypeKind kinds[] = {C_TYPE_STRUCT, C_TYPE_UNION, C_TYPE_ENUM};
+        bool decided = false;
+        for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+        {
+            BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&empty, kinds[kind], S8("Absent"), (CScopeId){0}).value == C_ID_UNDERLYING_INVALID);
+            BUSTER_TEST(arguments, c_test_aggregate_unique(&empty, kinds[kind], S8("Absent"), &decided).value == C_ID_UNDERLYING_INVALID && decided);
+        }
+        BUSTER_TEST(arguments, c_test_aggregate_unique(&empty, C_TYPE_STRUCT, (String8){0}, &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+        c_test_aggregate_lookup_add(&empty, (CType){.kind = C_TYPE_STRUCT});
+        c_test_aggregate_lookup_add(&empty, (CType){.kind = C_TYPE_STRUCT, .tag = S8("Alias"), .has_unqualified_type = true});
+        BUSTER_TEST(arguments, !empty_lookup.slots && !empty_lookup.slot_count && !empty_lookup.fill && !empty_lookup.incomplete);
+        CParseResult empty_checkpoint = empty;
+        // Reuse a poisoned slot-sized range: the initial reservation must
+        // clear its occupancy even though the stable header was already empty.
+        u64 slot_mark = temporary.arena->position;
+        CAggregateLookupSlot* dirty_slots = arena_allocate(temporary.arena, CAggregateLookupSlot, 16384);
+        memset(dirty_slots, 0xa5, sizeof(*dirty_slots) * 16384);
+        arena_set_position(temporary.arena, slot_mark);
+        CTypeId first = c_test_aggregate_lookup_add(&empty, (CType){.kind = C_TYPE_STRUCT, .tag = S8("First"), .tag_scope = {0}});
+        BUSTER_TEST(arguments, first.value < empty.type_count && empty_lookup.slots == dirty_slots && empty_lookup.slot_count == 16384);
+        BUSTER_TEST(arguments, empty_lookup.fill == 1 && !empty_lookup.incomplete);
+        if (BUSTER_REQUIRE(arguments, empty_lookup.slots != 0))
+        {
+            u32 used = 0;
+            for (u32 slot = 0; slot < empty_lookup.slot_count; slot += 1)
+            {
+                used += empty_lookup.slots[slot].used;
+            }
+            BUSTER_TEST(arguments, used == 1);
+        }
+        BUSTER_TEST(arguments, c_test_aggregate_unique(&empty, C_TYPE_STRUCT, S8("First"), &decided).value == first.value && decided);
+        BUSTER_TEST(arguments, c_test_aggregate_unique(&empty, C_TYPE_STRUCT, S8("Absent"), &decided).value == C_ID_UNDERLYING_INVALID && decided);
+        // Rollback of the first insertion retains the newly allocated array.
+        // Its stale row cannot certify a type that the checkpoint removed.
+        c_test_aggregate_lookup_rollback(&empty, empty_checkpoint);
+        BUSTER_TEST(arguments, empty.type_count == empty_checkpoint.type_count && empty.aggregate_lookup == &empty_lookup);
+        BUSTER_TEST(arguments, empty_lookup.slots == dirty_slots && empty_lookup.slot_count == 16384 && empty_lookup.fill == 1);
+        BUSTER_TEST(arguments, c_test_aggregate_lookup_find(&empty, C_TYPE_STRUCT, S8("First"), (CScopeId){0}).value == C_ID_UNDERLYING_INVALID);
+        BUSTER_TEST(arguments, c_test_aggregate_unique(&empty, C_TYPE_STRUCT, S8("First"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+        CTypeId replacement = c_test_aggregate_lookup_add(&empty, (CType){.kind = C_TYPE_UNION, .tag = S8("Other"), .tag_scope = {0}});
+        BUSTER_TEST(arguments, replacement.value == first.value);
+        BUSTER_TEST(arguments, c_test_aggregate_unique(&empty, C_TYPE_STRUCT, S8("First"), &decided).value == C_ID_UNDERLYING_INVALID && !decided);
+        CTypeId restored = c_test_aggregate_lookup_add(&empty, (CType){.kind = C_TYPE_STRUCT, .tag = S8("First"), .tag_scope = {0}});
+        BUSTER_TEST(arguments, c_test_aggregate_unique(&empty, C_TYPE_STRUCT, S8("First"), &decided).value == restored.value && decided);
+    }
     // The index names a tag's only row, says no row carries an absent one,
     // and leaves every other answer to the caller's search.
     CAggregateLookup lookup = {.slot_count = 8};
