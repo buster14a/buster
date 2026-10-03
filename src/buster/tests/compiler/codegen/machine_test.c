@@ -291,9 +291,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_candidates(UnitTestArgum
     return result;
 }
 
-// 4096 short cold intervals each have four baseline spill/reload edits and
+// 4096 short cold intervals each have three baseline spill/reload edits and
 // cannot pin across their physical definitions. The later hot interval has
-// twenty edits but leaves the callee-saved pin file untouched. This exercises
+// eleven edits but leaves the callee-saved pin file untouched. A reloaded
+// unchanged value is clean: subsequent eviction needs no second spill.
+// This exercises
 // actual eligibility, capped admission, pin planning and FAST acceptance;
 // the former prefix policy left the hot value's traffic in the final plan.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_late_candidate(UnitTestArguments* arguments)
@@ -352,7 +354,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_late_candidate(UnitTestA
     BUSTER_TEST(arguments, after.candidate_eligible_values - before.candidate_eligible_values == 4097);
     BUSTER_TEST(arguments, after.candidates - before.candidates == 4096);
     BUSTER_TEST(arguments, after.candidate_excluded_values - before.candidate_excluded_values == 1);
-    BUSTER_TEST(arguments, after.candidate_excluded_traffic - before.candidate_excluded_traffic == 4);
+    BUSTER_TEST(arguments, after.candidate_excluded_traffic - before.candidate_excluded_traffic == 3);
 #endif
     BUSTER_TEST(arguments, baseline.valid && placement.valid && placement.pinned_register_count >= 1);
     u32 baseline_hot = 0;
@@ -370,8 +372,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_late_candidate(UnitTestA
             }
         }
     }
-    BUSTER_TEST(arguments, baseline_hot == 20 && placed_hot == 0);
-    BUSTER_TEST(arguments, placement.reload_count + placement.spill_count + 20 == baseline.reload_count + baseline.spill_count);
+    BUSTER_TEST_RAW(arguments, baseline_hot == 11 && placed_hot == 0,
+        string_format(arena, S8("QUALITY late candidate baseline edits={u32} placed edits={u32}"), baseline_hot, placed_hot));
+    BUSTER_TEST(arguments, placement.reload_count + placement.spill_count + 11 == baseline.reload_count + baseline.spill_count);
     MachineEncodeResult encoded = machine_encode_x86_64(arena, &function, &placement);
     BUSTER_TEST(arguments, encoded.valid && encoded.byte_count != 0);
     scratch_end(temporary);
