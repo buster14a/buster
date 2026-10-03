@@ -1013,8 +1013,8 @@ Complex comparisons/truth conversion and floating classification combine
 Boolean comparisons with `IR_BINARY_BOOLEAN_AND`/`IR_BINARY_BOOLEAN_OR`.
 Their canonical verifier case requires matching Boolean value operands and a
 Boolean value result. Integer bitwise opcodes still require integer operands.
-Both native canonical emitters implement these Boolean operations as well as
-the existing machine selectors, including canonical fallback for x87 functions.
+Both native machine selectors implement these Boolean operations. Unsupported
+x87 shapes fail diagnostically instead of selecting the retired emitter.
 
 A `_Bool` destination is one rule for every scalar source (C 6.3.1.2): the
 result is 0 exactly when the whole value compares equal to 0.

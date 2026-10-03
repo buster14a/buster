@@ -191,8 +191,8 @@ allocator modes and both frontend forms.
   `c_ir_emit_parameter` must pass the resolved layout alignment to
   `c_ir_emit_local`, just as an ordinary declaration does. Rounding a slot's
   frame-relative offset alone cannot honor alignment greater than the frame
-  pointer guarantee; the canonical native emitter uses the place's alignment
-  to reserve and materialize dynamically aligned storage. The parameter
+  pointer guarantee; the MIR selectors use the place's alignment to reserve
+  and materialize dynamically aligned storage. The parameter
   alignment tests inspect IR on all six native targets and use an opaque,
   separately host-compiled observer for native x86-64 callee addresses.
 - System V x86-64 padding-only eightbytes retain NO_CLASS and consume no

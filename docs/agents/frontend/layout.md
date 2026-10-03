@@ -110,8 +110,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   zero meaning the declared type's size, and `ir_field_access_size` is what
   every reader asks: the load and the read-modify-write in `c_gen.c`, the four
   constant-initializer folds there, the `IR_OPCODE_AGGREGATE` selectors in
-  `machine_x86_64.c` and `machine_aarch64.c`, and the two canonical emitters in
-  `codegen.c`. It is also the one place a `LOAD` or `STORE` may disagree with
+  `machine_x86_64.c` and `machine_aarch64.c`. It is also the one place a `LOAD` or `STORE` may disagree with
   its place's type, which `ir_place_narrow_bit_field_access` is what validation
   admits it through. **A field whose bits cross every unit that fits has no
   single-unit access even then**, which is every width whose byte count is not
@@ -212,8 +211,8 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   writer of a bit-field is a read-modify-write, including the one inside an
   aggregate initializer, where the members are materialized into a zero-filled
   slot and it is tempting to treat the accumulated word as the whole unit: the
-  canonical emitters spell it `OR mem, reg` and the two `IR_OPCODE_AGGREGATE`
-  selectors seed the accumulator with a load of the unit rather than with zero.
+  two `IR_OPCODE_AGGREGATE` selectors seed the accumulator with a load of the
+  unit rather than with zero.
   Ordering the members differently does not substitute for it -- a whole-unit
   store loses whichever neighbour ran first, and two overlapping units lose one
   of themselves whatever the order (issue #705).
@@ -432,16 +431,15 @@ where Clang answers the member's (issue #1249).
 ## Padded GNU vectors
 
 Non-power-of-two vectors preserve their logical lane count and round their
-object size to the next power of two. The x86-64 SysV and Win64 canonical
-emitters implement their call boundaries; optimized modes currently report
-canonical fallback for those new shapes. The registered driver suite keeps
+object size to the next power of two. The x86-64 SysV and Win64 MIR selectors
+implement their call boundaries across retained allocator spellings. The registered driver suite keeps
 the complete padded-vector source inline and materializes a private file for
 cross-target, native mixed-compiler, and Wine checks. In the native Linux
 mixed-compiler rows Buster compiles its half for `znver5` while the PATH Clang
 compiles the other half for `x86-64-v4`, which has the same 64-byte vector ABI
 and is accepted by Clang releases older than 19, unlike `znver5`. The approved retirement
-corpus and its pre-existing C ABI header stay unchanged: #507 explicitly
-leaves this new frontend feature to #73, separate from retirement coverage.
+corpus and its pre-existing C ABI header stay unchanged. The padded-vector
+regressions cover the admitted MIR shapes independently of the archived oracle.
 
 ## Offsetof member promotion
 

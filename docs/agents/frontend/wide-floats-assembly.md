@@ -83,9 +83,9 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   **Native code generation implements the binary16 runtime vocabulary.**
   Scalar arguments and results use the ABI's real floating position: the low
   sixteen bits of an XMM register on System V and Win64 x86-64, and the H/V
-  register position on AArch64. The direct emitter and the MIR value-shape
-  tables agree on that classification, so `none`, `mir-stack`, `fast` and
-  `quality` compile the same signatures without machine fallback. Baseline
+  register position on AArch64. The shared ABI classification feeds the MIR
+  value-shape tables, so `none`, `mir-stack`, `fast` and `quality` compile the
+  same signatures through MIR. Baseline
   targets need no F16C or AVX512-FP16 feature. On x86-64, lowering widens each half through
   `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
   through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`, and an x87
@@ -198,8 +198,8 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   fixture strictly across AArch64 Linux/Android/UEFI and x86-64 Android, every
   MIR allocator, both frontend forms and PIC/non-PIC; it requires the relevant
   soft-float imports, and on native Linux AArch64 links with the host runtime
-  and executes. The canonical `none` emitter still refuses binary128 widening
-  and loads through pointers; those functions need a MIR allocator.
+  and executes. All retained allocator spellings use this MIR lowering;
+  `none` aliases MIR_STACK.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and
@@ -219,15 +219,15 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   Unsigned-64 conversion composes signed conversion, comparison, scalar masks
   and an exact zero/2^63 correction at extended precision; it preserves all
   four rounding modes and restores the complete control word after truncation.
-  The direct implementation is `codegen_canonical_x64_emit_f80_*` in
-  `codegen.c`. The machine selector also lowers i128 casts to and from f80
+  `machine_x64_emit_f80` in `machine_x86_64.c` encodes these MIR rows. The
+  machine selector also lowers i128 casts to and from f80
   through two frame limbs and closed x87 transactions. Its final addition
   selects 24-, 53-, or 64-bit precision for one row, preserving the caller's
   complete control word; f80-to-i128 extracts high and low unsigned limbs
   at 64-bit precision before restoring a signed result.
   Preserve the caller's
-  x87 control word: canonical truncate helpers and the MIR conversion row
-  may temporarily change only rounding control for a C integer cast, then
+  x87 control word: MIR conversion rows may temporarily change only rounding
+  control for a C integer cast, then
   restore the exact saved word. `tests/basic_c_f80_machine.c` checks this
   subset under strict MIR; its HOST/LIBRARY/FENV modes support independent
   Clang callers and callees. `tests/basic_c_f80_u64.c` covers unsigned
@@ -297,12 +297,9 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   that edge. `tests/basic_c_long_double_static_initializer.c` pins the finite
   arithmetic and `tests/basic_c_long_double_static_special.c` everything from
   the infinities out, both against bytes read out of Clang's own object.
-  The canonical emitter still refuses a fixed wide-float parameter of a
-  variadic *definition* (the SysV `va_start`
-  register-save area does not account for it), an aggregate whose
-  classification carries an X87 class without being the ABI-proven single-f80
-  or complex shape, and every wide float on a target whose `long double` is
-  not this format.
+  Wide-float ABI admission belongs to the target machine selector and
+  canonical ABI classification. Unsupported shapes produce a structured
+  codegen error without fallback.
 - **A module-level `__asm__` block emits into the module's text through
   `codegen_emit_global_assembly` in `codegen.c`.** It interprets the
   directives itself — `.text`, `.byte`, `.p2align`, and the symbol directives
