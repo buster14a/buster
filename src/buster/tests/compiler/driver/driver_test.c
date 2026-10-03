@@ -8194,7 +8194,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_inline_assembly_constrai
 #if BUSTER_ANDROID || BUSTER_IOS
                                  S8("-c"),
 #endif
-                                 S8("-o"), output, S8("tests/basic_c_asm_constraint_unions.c")};
+                                 S8("-o"), output, S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_constraint_unions.c")};
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
                 compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);

@@ -23198,7 +23198,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
 {
     UnitTestResult result = {0};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
-    String8 path = S8("tests/basic_c_asm_constraint_unions.c");
+    String8 path = S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_constraint_unions.c");
     ByteSlice input = file_read(arguments->arena, path, (FileReadOptions){0});
     String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
     BUSTER_TEST(arguments, input.length != 0);

@@ -4209,7 +4209,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_clear_instruction_cache(UnitTest
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_counters(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 path = S8("tests/basic_c_asm_counters.c");
+    String8 path = S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_counters.c");
     ByteSlice input = file_read(arguments->arena, path, (FileReadOptions){0});
     String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
     BUSTER_TEST(arguments, input.length != 0);
@@ -4883,7 +4883,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_uefi_platform_variadic(UnitT
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_constraint_unions(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 paths[] = {S8("tests/basic_c_asm_constraint_unions.c"), S8("tests/basic_c_asm_port_constraints.c")};
+    String8 paths[] = {S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_constraint_unions.c"), S8("src/buster/tests/compiler/codegen/fixtures/basic_c_asm_port_constraints.c")};
     String8 port_names[] = {S8("constraint_outb"), S8("constraint_inb"), S8("constraint_outb_small"), S8("constraint_inb_large")};
     u8 port_bytes[] = {0xee, 0xec, 0xee, 0xec};
     OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS, OPERATING_SYSTEM_WINDOWS};
