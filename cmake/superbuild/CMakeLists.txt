@@ -21,6 +21,14 @@ if (BUSTER_SUPERBUILD_BUILD_DRIVER STREQUAL "" OR NOT IS_ABSOLUTE "${BUSTER_SUPE
     message(FATAL_ERROR "BUSTER_SUPERBUILD_BUILD_DRIVER must name an existing absolute build driver")
 endif()
 
+if (NOT DEFINED BUSTER_SUPERBUILD_TEST_ADMISSION)
+    set(BUSTER_SUPERBUILD_TEST_ADMISSION overlap)
+endif()
+if (NOT BUSTER_SUPERBUILD_TEST_ADMISSION STREQUAL "overlap" AND
+    NOT BUSTER_SUPERBUILD_TEST_ADMISSION STREQUAL "all-builds")
+    message(FATAL_ERROR "Unknown matrix test admission policy")
+endif()
+
 set_property(GLOBAL PROPERTY JOB_POOLS "buster_matrix_cpu=${BUSTER_SUPERBUILD_OUTER_JOBS}")
 
 add_custom_target(buster_compile)
@@ -54,6 +62,8 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
     set(BUSTER_TREE_NATIVE_CONFIG "${${BUSTER_TREE_PREFIX}_NATIVE_CONFIG}")
     set(BUSTER_TREE_BUILD_TARGETS "${${BUSTER_TREE_PREFIX}_BUILD_TARGETS}")
     set(BUSTER_TREE_PARALLEL_JOBS "${${BUSTER_TREE_PREFIX}_PARALLEL_JOBS}")
+    set(BUSTER_TREE_TEST_JOBS "${${BUSTER_TREE_PREFIX}_TEST_JOBS}")
+    set(BUSTER_TREE_TEST_AFTER "${${BUSTER_TREE_PREFIX}_TEST_AFTER}")
     set(BUSTER_TREE_UNITY_ONLY "${${BUSTER_TREE_PREFIX}_UNITY_ONLY}")
     set(BUSTER_TREE_TEST_0_CONFIG "${${BUSTER_TREE_PREFIX}_TEST_0_CONFIG}")
     set(BUSTER_TREE_TEST_0_TARGET "${${BUSTER_TREE_PREFIX}_TEST_0_TARGET}")
@@ -66,7 +76,8 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
     endif()
 
     if (BUSTER_TREE_BUILD_DIRECTORY STREQUAL "" OR BUSTER_TREE_NATIVE_CONFIG STREQUAL "" OR
-        BUSTER_TREE_BUILD_TARGETS STREQUAL "" OR BUSTER_TREE_PARALLEL_JOBS LESS 1 OR
+        BUSTER_TREE_BUILD_TARGETS STREQUAL "" OR BUSTER_TREE_PARALLEL_JOBS LESS 1 OR BUSTER_TREE_TEST_JOBS LESS 1 OR
+        (NOT BUSTER_TREE_TEST_AFTER STREQUAL "" AND NOT BUSTER_TREE_TEST_AFTER LESS BUSTER_SUPERBUILD_TREE_INDEX) OR
         (NOT BUSTER_TREE_UNITY_ONLY STREQUAL "0" AND NOT BUSTER_TREE_UNITY_ONLY STREQUAL "1") OR
         (NOT BUSTER_TREE_TEST_0_CONFIG STREQUAL "" AND BUSTER_TREE_TEST_0_TARGET STREQUAL "") OR
         (BUSTER_TREE_TEST_0_CONFIG STREQUAL "" AND NOT BUSTER_TREE_TEST_0_TARGET STREQUAL "") OR
@@ -100,7 +111,7 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
     if (NOT BUSTER_TREE_TEST_0_CONFIG STREQUAL "")
         list(APPEND BUSTER_TREE_TEST_COMMANDS
             COMMAND "${CMAKE_COMMAND}" -E env
-            "BUSTER_TEST_JOBS=${BUSTER_TREE_PARALLEL_JOBS}"
+            "BUSTER_TEST_JOBS=${BUSTER_TREE_TEST_JOBS}"
             "BUSTER_TEST_TABLE_AUDITS=${BUSTER_TREE_TABLE_AUDITS}"
             ${${BUSTER_TREE_PREFIX}_TEST_0_OBSERVER} "${CMAKE_COMMAND}" --build "${BUSTER_TREE_BUILD_DIRECTORY}"
             --config "${BUSTER_TREE_TEST_0_CONFIG}"
@@ -111,7 +122,7 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
     if (NOT BUSTER_TREE_TEST_1_CONFIG STREQUAL "")
         list(APPEND BUSTER_TREE_TEST_COMMANDS
             COMMAND "${CMAKE_COMMAND}" -E env
-                "BUSTER_TEST_JOBS=${BUSTER_TREE_PARALLEL_JOBS}"
+                "BUSTER_TEST_JOBS=${BUSTER_TREE_TEST_JOBS}"
                 "BUSTER_TEST_TABLE_AUDITS=${BUSTER_TREE_TABLE_AUDITS}"
                 ${${BUSTER_TREE_PREFIX}_TEST_1_OBSERVER} "${CMAKE_COMMAND}" --build "${BUSTER_TREE_BUILD_DIRECTORY}"
                 --config "${BUSTER_TREE_TEST_1_CONFIG}"
@@ -123,7 +134,7 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
         list(APPEND BUSTER_TREE_TEST_COMMANDS
             COMMAND ${${BUSTER_TREE_PREFIX}_ANALYZE_OBSERVER} "${CMAKE_COMMAND}" --build "${BUSTER_TREE_BUILD_DIRECTORY}"
                 --config "${BUSTER_TREE_ANALYZE_CONFIG}"
-                --target clang_analyze
+                --target clang_analyze optnone_audit
                 ${BUSTER_TREE_BUILD_OPTIONS}
         )
     endif()
@@ -140,6 +151,18 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
         # compiler slot to its test command while other trees continue building.
         # The shared pool still bounds both kinds of command globally.
         add_dependencies(${BUSTER_TREE_TEST_TARGET} ${BUSTER_TREE_COMPILE_TARGET})
+        if (BUSTER_SUPERBUILD_TEST_ADMISSION STREQUAL "all-builds")
+            add_dependencies(${BUSTER_TREE_TEST_TARGET} buster_compile)
+        endif()
+        # Serialized test phases (build.c matrix_superbuild_allocate_jobs) each
+        # take the whole CPU budget, so a tree's tests also wait for the
+        # previous serialized tree's tests. Builds are unaffected.
+        if (NOT BUSTER_TREE_TEST_AFTER STREQUAL "")
+            if (NOT TARGET buster_test_${BUSTER_TREE_TEST_AFTER})
+                message(FATAL_ERROR "Compiler tree ${BUSTER_SUPERBUILD_TREE_INDEX} follows a tree without tests")
+            endif()
+            add_dependencies(${BUSTER_TREE_TEST_TARGET} buster_test_${BUSTER_TREE_TEST_AFTER})
+        endif()
         add_dependencies(buster_matrix ${BUSTER_TREE_TEST_TARGET})
     else()
         # Compile-only portability rows have no post-build command.

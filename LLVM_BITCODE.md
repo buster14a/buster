@@ -82,6 +82,18 @@ allocation maps canonical stack saves and restores to LLVM's `llvm.stacksave`
 and `llvm.stackrestore` intrinsics, preserving the block position of each
 operation and the lifetime of outer allocations.
 
+Canonical module constructor and destructor registrations emit
+`llvm.global_ctors` and `llvm.global_dtors` as appending arrays of
+`{i32, ptr, ptr}`. Each row retains its priority and callback symbol; the
+associated-data pointer is null. The native default-priority sentinel 65536
+maps to LLVM's default 65535. LLVM runs constructors in increasing priority
+and destructors in decreasing priority; equal-priority order is unspecified.
+Selected modules contribute to at most one array of each kind. Empty kinds
+add no types, globals or constants, preserving zero-registration output.
+The existing canonical validator rejects malformed registration targets and
+priorities; duplicate reserved linkage names or record/value count overflow
+fail without publishing artifact bytes.
+
 Canonical scalar integer leading-zero count, trailing-zero count, and
 population count emit overloaded `llvm.ctlz.iN`, `llvm.cttz.iN`, and
 `llvm.ctpop.iN` declarations for widths 1 through 64. The first two pass
@@ -151,7 +163,47 @@ Source-level debug metadata and LLVM optimization pipelines are outside the
 current emitter. Add new mappings only with deterministic byte-level tests and
 validation through an LLVM consumer that can parse the generated module.
 
+## Integer wire validation
+
+`llvm_bitcode_tests` exhausts all 131,070 bit patterns at widths 1 through 16
+and checks zero, one, neighboring sign boundaries, all-ones and high-bit
+truncation at every width through 64. A private test-only boundary calls the
+production integer operand encoder without allocating or emitting a module
+per pattern. An independent inverse of LLVM's signed rotation checks the
+decoded bits; exact signed-minimum operands for i1/i8/i16/i32/i64 are
+`3`, `257`, `65537`, `4294967297`, and `1`. The oracle rejects the historical
+narrow-sign operand `1` at every width below 64 and accepts its i64 sentinel.
+
+The existing complete-module serialized-reader checks and separately compiled
+Clang consumer fixtures remain complementary: the scalar sweep does not test
+record framing or replace consumer execution. Consumer availability and native
+platform guards retain their existing policy. Run the registered module with
+`build/Release/ide test --module=llvm_bitcode_tests --verbose=1 --ci=1`.
+
 ## Stack scope validation
+
+Fixed-size canonical locals, aggregate ABI conversion/result storage, bit-field
+aggregate construction storage and variadic-list temporaries allocate once in
+the LLVM function entry block, after entry PHIs and before stack saves. Their
+loads, stores, zero initialization and calls retain their canonical positions.
+Dynamic `STACK_ALLOCATE` records remain at their original block positions;
+scoped stack restore therefore releases dynamic storage without invalidating
+fixed slots. Stable slot numbering and each instruction's slot consumption are
+checked separately from its value-producing records.
+
+The registered `llvm_bitcode_test_fixed_allocas` independently reads original
+binary records to check allocation block positions for both frontend forms on
+six native target triples. Fixed local/bit-field subjects and x86-64 ABI/list
+subjects require every allocation in entry; a loop combining fixed and dynamic
+arrays requires exactly one allocation outside entry. Repeated artifacts and
+source/output readbacks retain byte equality. Linux x86-64/AArch64 Clang
+controls consume the original C and bitcode at `-O0`/`-O2`; the separate observer
+checks 65,536 iterations of 256-byte storage and cycling bit-field values.
+Linux x86-64 also checks direct and indirect aggregate ABI temporaries,
+aggregate definitions, compound bit-field values and copied variadic lists.
+Consumer processes have 30-second deadlines, bounded capture and stop further
+admission if process-tree ownership or cleanup fails. Hosted execution is
+required to establish results; registration alone is not passing evidence.
 
 `llvm_bitcode_tests` checks two saves, dynamic allocations and void restores
 in one canonical function, including a saved token passed through a block
@@ -163,3 +215,35 @@ the independently compiled observer reads only live elements. The 1024-iteration
 The test module also checks that a later unsupported operation cannot replace
 an existing output. When Clang is available, the fixture is consumed and run
 at both `-O0` and `-O2` for both frontend modes.
+
+## Lifecycle registration validation
+
+The registered `llvm_bitcode_test_lifecycle` fixture preserves the C frontend's
+canonical `IrModule.initializers` boundary across both frontend forms and six
+Linux, Windows and macOS target rows. It checks callback symbols, definition
+linkage, priorities and constructor/destructor kinds before asking the direct
+serializer for deterministic bytes. Removing registrations must restore the
+zero-registration control; changing priority or kind must change the bytes.
+Malformed callback symbols and priorities must fail without publishing bytes.
+The canonical native default-priority sentinel must encode identically to the
+explicit LLVM default priority 65535.
+
+On native Linux x86-64 and AArch64, the fixture requires Clang and GCC. Original
+inline C units and a separately compiled observer provide reference output at
+`-O0` and `-O2`; Clang also consumes the Buster-produced bitcode in both frontend
+forms at those optimization levels. The two-translation-unit case contains
+only static callback definitions and an external observer declaration. Unique
+priorities require increasing constructor order and decreasing destructor
+order, with exactly one default callback of each kind. Constructor-only,
+destructor-only, default-only, explicit-65535 and no-registration controls
+avoid equal-priority ordering assumptions. The observer returns normally from
+`main`, so its captured fixed bytes include destructor output after `main`.
+A normal exit with missing callbacks still fails the byte oracle. Compile/run
+children have 30-second deadlines, and source and emitted bytes remain checked
+against their original inputs after consumption. Other hosts retain the
+canonical target checks and report native execution as unsupported.
+
+The fixture covers the lifecycle records tracked by
+[#1336](https://github.com/buster14a/buster/issues/1336). The LLVM contract is
+[`llvm.global_ctors` and `llvm.global_dtors`](https://llvm.org/docs/LangRef.html#the-llvm-global-ctors-global-variable):
+appending arrays of priority, function pointer and associated-data pointer.

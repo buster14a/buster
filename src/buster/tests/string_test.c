@@ -205,6 +205,38 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, pages != 0);
         bool committed = pages && os_commit(pages, page_size, (ProtectionFlags){.read = 1, .write = 1}, false);
         BUSTER_TEST(arguments, committed);
+        {
+            char8 suffixed[] = {'f', 'o', 'o', 'b', 'a', 'r'};
+            String8Z bounded_copy = {0};
+            bool bounded_valid = string8z_copy_arena(arguments->arena, (String8){suffixed, 3}, &bounded_copy);
+            String8 bounded_text = {.pointer = bounded_copy.pointer, .length = bounded_copy.length};
+            BUSTER_TEST(arguments, bounded_valid && string_equal(bounded_text, S8("foo")) && bounded_copy.pointer[bounded_copy.length] == 0);
+
+            char8 embedded_nul[] = {'f', 'o', 0, 'o'};
+            String8Z rejected = bounded_copy;
+            bool embedded_valid = string8z_copy_arena(arguments->arena, (String8){embedded_nul, BUSTER_ARRAY_LENGTH(embedded_nul)}, &rejected);
+            BUSTER_TEST(arguments, !embedded_valid && !rejected.pointer && !rejected.length);
+            bool null_valid = string8z_copy_arena(arguments->arena, (String8){.length = 1}, &rejected);
+            BUSTER_TEST(arguments, !null_valid && !rejected.pointer && !rejected.length);
+
+            String16Z wide_copy = {0};
+            bool wide_valid = string16z_from_string8_arena(arguments->arena, (String8){suffixed, 3}, &wide_copy);
+            String16 wide_text = {.pointer = wide_copy.pointer, .length = wide_copy.length};
+            String16 expected_wide = string16_from_string8(arguments->arena, S8("foo"), false);
+            BUSTER_TEST(arguments, wide_valid && string16_equal(wide_text, expected_wide) && wide_copy.pointer[wide_copy.length] == 0);
+
+            if (committed)
+            {
+                char8* last_bytes = pages + page_size - 3;
+                last_bytes[0] = 'e';
+                last_bytes[1] = 'n';
+                last_bytes[2] = 'd';
+                String8Z guarded_copy = {0};
+                bool guarded_valid = string8z_copy_arena(arguments->arena, (String8){last_bytes, 3}, &guarded_copy);
+                String8 guarded_text = {.pointer = guarded_copy.pointer, .length = guarded_copy.length};
+                BUSTER_TEST(arguments, guarded_valid && string_equal(guarded_text, S8("end")) && guarded_copy.pointer[guarded_copy.length] == 0);
+            }
+        }
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parsers); i += 1)
         {
             StringIntegerParserCase parser = parsers[i];
@@ -395,6 +427,16 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
             string_format(arena, S8("{"));
             os_exit(0);
         }
+        if (string_equal(failure_mode, S8("string_format_fail_nested_brace")))
+        {
+            string_format(arena, S8("{u8{}}"), (u8)1);
+            os_exit(0);
+        }
+        if (string_equal(failure_mode, S8("string_format_fail_source_brace")))
+        {
+            string_format(arena, S8("struct S { char c; long l; };"));
+            os_exit(0);
+        }
         if (string_equal(failure_mode, S8("string_format_fail_type")))
         {
             string_format(arena, S8("{unknown}"));
@@ -442,6 +484,10 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         {
             String8 formatted = string_format(arena, S8("{{ {S8} }}"), S8("value"));
             BUSTER_STRING_TEST(arguments, formatted, S8("{ value }"));
+        }
+        {
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{{{{}}}}}")), S8("{{}}}"));
+            BUSTER_STRING_TEST(arguments, string_format(arena, S8("{S8}"), S8("struct S { char c; long l; };")), S8("struct S { char c; long l; };"));
         }
         {
             String8 formatted = string_format(arena, S8("async_thread_{u64}"), (u64)7);
@@ -522,23 +568,34 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         }
         {
 #if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
-            String8 failure_modes[] = {
-                S8("string_format_fail_brace"),
-                S8("string_format_fail_type"),
-                S8("string_format_fail_modifier"),
-                S8("string_format_fail_width_overflow"),
-                S8("string_join_fail_overflow"),
-                S8("string_duplicate_fail_null"),
+            // Check the reported cause as well as fatal status: a formatter
+            // recursion or an unrelated earlier failure must not pass.
+            typedef struct StringFormatFailureCase StringFormatFailureCase;
+            struct StringFormatFailureCase
+            {
+                String8 mode;
+                String8 diagnostic;
+            };
+            StringFormatFailureCase failure_cases[] = {
+                {S8("string_format_fail_brace"), S8("string_format: unterminated placeholder (write a literal brace as {{) at ")},
+                {S8("string_format_fail_nested_brace"), S8("string_format: nested opening brace in placeholder (write a literal brace as {{) at ")},
+                {S8("string_format_fail_type"), S8("string_format: unknown placeholder type (write a literal brace as {{) at ")},
+                {S8("string_format_fail_source_brace"), S8("string_format: unknown placeholder type (write a literal brace as {{) at ")},
+                {S8("string_format_fail_modifier"), {0}},
+                {S8("string_format_fail_width_overflow"), {0}},
+                {S8("string_join_fail_overflow"), {0}},
+                {S8("string_duplicate_fail_null"), {0}},
             };
             String8 executable = program_state->input.arguments.pointer[0];
-            for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(failure_modes); mode_index += 1)
+            for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(failure_cases); mode_index += 1)
             {
                 String8 child_arguments[] = {
                     executable,
                     S8("test"),
+                    S8("--module=string_tests"),
                 };
                 String8 environment_keys[] = {S8("BUSTER_STRING_FORMAT_FAILURE")};
-                String8 environment_values[] = {failure_modes[mode_index]};
+                String8 environment_values[] = {failure_cases[mode_index].mode};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
@@ -546,11 +603,17 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
-                    ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
+                    ProcessWaitResult wait_result = os_process_wait_deadline(arena, spawn, 30000000);
                     String8 error = (String8){.pointer = (char8*)wait_result.streams[STANDARD_STREAM_ERROR].pointer,
                                              .length = wait_result.streams[STANDARD_STREAM_ERROR].length};
+                    BUSTER_TEST(arguments, !wait_result.timed_out);
                     BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_FAILED);
                     BUSTER_TEST(arguments, string_first_sequence(error, S8("TODO")) == BUSTER_STRING_NO_MATCH);
+                    if (failure_cases[mode_index].diagnostic.length)
+                    {
+                        BUSTER_TEST(arguments, string_starts_with_sequence(error, failure_cases[mode_index].diagnostic));
+                        BUSTER_TEST(arguments, string_ends_with_sequence(error, S8(" in string_format_va\n")));
+                    }
                 }
             }
 #endif
@@ -6476,29 +6539,36 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         // A backslash run is literal unless followed by a quote. Before a
         // quote, pairs decode to slashes and the odd slash escapes the quote;
         // an even run toggles quoting. Check both initial quote states.
+        enum { max_slash_count = 65 };
         for (u64 quoted = 0; quoted < 2; quoted += 1)
         {
             for (u64 quote_after = 0; quote_after < 2; quote_after += 1)
             {
-                for (u64 slash_count = 0; slash_count <= 65; slash_count += 1)
+                for (u64 slash_count = 0; slash_count <= max_slash_count; slash_count += 1)
                 {
-                    char16 command_line[80];
-                    char8 expected[80];
+                    // Input: opening quote, x, slashes, following quote, space,
+                    // y and NUL. Output reaches at most 65 + x + space + y;
+                    // reserve one extra byte for the independently bounded quote.
+                    char16 command_line[max_slash_count + 6];
+                    char8 expected[max_slash_count + 4];
                     u64 input_length = 0;
-                    u64 expected_length = 0;
+                    u64 expected_slash_count = quote_after ? slash_count / 2 : slash_count;
+                    u64 expected_length = 1 + expected_slash_count;
                     if (quoted)
                     {
                         command_line[input_length++] = '"';
                     }
                     command_line[input_length++] = 'x';
-                    expected[expected_length++] = 'x';
+                    expected[0] = 'x';
                     for (u64 i = 0; i < slash_count; i += 1)
                     {
                         command_line[input_length++] = '\\';
                     }
-                    for (u64 i = 0; i < (quote_after ? slash_count / 2 : slash_count); i += 1)
+                    // Index the slash span directly: GCC 13 must see that
+                    // every store stays within the fixed fixture bound.
+                    for (u64 i = 0; i < expected_slash_count; i += 1)
                     {
-                        expected[expected_length++] = '\\';
+                        expected[1 + i] = '\\';
                     }
                     if (quote_after)
                     {

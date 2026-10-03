@@ -203,12 +203,24 @@ String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminat
     return result;
 }
 
+#if BUSTER_BENCH_ALLOCATIONS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL StringEqualCensus string_equal_totals;
+
+StringEqualCensus string_equal_census(void)
+{
+    return string_equal_totals;
+}
+#endif
+
 bool string_equal(String8 s1, String8 s2)
 {
     // Length, emptiness and pointer identity settle the answer without looking
     // at any byte; only a same-length, distinct, non-empty pair reaches the
     // comparison itself.
     bool result = s1.length == s2.length;
+#if BUSTER_BENCH_ALLOCATIONS
+    string_equal_totals.calls += 1;
+#endif
     if (result && s1.length)
     {
         if (!s1.pointer || !s2.pointer)
@@ -217,6 +229,9 @@ bool string_equal(String8 s1, String8 s2)
         }
         else if (s1.pointer != s2.pointer)
         {
+#if BUSTER_BENCH_ALLOCATIONS
+            string_equal_totals.compared_bytes += s1.length;
+#endif
 #if BUSTER_OPTIMIZE
             result = memory_compare(s1.pointer, s2.pointer, s1.length * sizeof(char8));
 #else
@@ -982,14 +997,14 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             {
                 if (format.pointer[right_brace_index] == '{')
                 {
-                    os_fail();
+                    os_fail_message_raw(S8("string_format: nested opening brace in placeholder (write a literal brace as {{)"));
                 }
                 right_brace_index += 1;
             }
 
             if (right_brace_index >= format.length)
             {
-                os_fail();
+                os_fail_message_raw(S8("string_format: unterminated placeholder (write a literal brace as {{)"));
             }
 
             String8 format_body = string_slice(format, format_index + 1, right_brace_index);
@@ -1058,7 +1073,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 
             if (format_string_i >= BUSTER_ARRAY_LENGTH(possible_format_strings))
             {
-                os_fail();
+                os_fail_message_raw(S8("string_format: unknown placeholder type (write a literal brace as {{)"));
             }
 
             FormatTypeId format_type_id = (FormatTypeId)format_string_i;
@@ -1452,6 +1467,31 @@ String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate
     return string_join_arena(arena, (SliceString8){.pointer = &string, .length = 1}, zero_terminate);
 }
 
+BUSTER_GLOBAL_LOCAL bool string8_os_boundary_input_valid(String8 string)
+{
+    bool valid = string.pointer || !string.length;
+    for (u64 index = 0; index < string.length && valid; index += 1)
+    {
+        valid = string.pointer[index] != 0;
+    }
+    return valid;
+}
+
+bool string8z_copy_arena(Arena* arena, String8 string, String8Z* result)
+{
+    if (result)
+    {
+        *result = (String8Z){0};
+    }
+    bool valid = result && string8_os_boundary_input_valid(string);
+    if (valid)
+    {
+        String8 copy = string_duplicate_arena(arena, string, true);
+        *result = (String8Z){.pointer = copy.pointer, .length = copy.length};
+    }
+    return valid;
+}
+
 SliceString8 string16_environment_block_to_slice_string(Arena* arena, const char16* environment_block)
 {
     SliceString8 result = {0};
@@ -1824,6 +1864,21 @@ String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate
 
     String16 result = (String16){.pointer = pointer, .length = result_length};
     return result;
+}
+
+bool string16z_from_string8_arena(Arena* arena, String8 string, String16Z* result)
+{
+    if (result)
+    {
+        *result = (String16Z){0};
+    }
+    bool valid = result && string8_os_boundary_input_valid(string);
+    if (valid)
+    {
+        String16 copy = string16_from_string8(arena, string, true);
+        *result = (String16Z){.pointer = copy.pointer, .length = copy.length};
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool windows_command_line_argument_needs_quotes(String8 string)

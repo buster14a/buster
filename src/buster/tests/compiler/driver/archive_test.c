@@ -227,10 +227,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_transitions(Unit
 }
 
 #include <buster/tests/compiler/driver/archive_bench.c>
+#include <buster/tests/compiler/driver/archive_lazy_test.c>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_archive_test_generated(arguments);
+    UnitTestResult lazy = compiler_driver_archive_test_lazy(arguments);
+    result.test_count += lazy.test_count;
+    result.succeeded_test_count += lazy.succeeded_test_count;
+    UnitTestResult unused_payload = compiler_driver_archive_test_unused_size_relocation(arguments);
+    result.test_count += unused_payload.test_count;
+    result.succeeded_test_count += unused_payload.succeeded_test_count;
     UnitTestResult transitions = compiler_driver_archive_test_transitions(arguments);
     result.test_count += transitions.test_count;
     result.succeeded_test_count += transitions.succeeded_test_count;

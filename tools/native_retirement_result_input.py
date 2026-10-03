@@ -19,7 +19,11 @@ Paths are opened component-by-component beneath one held root descriptor.
 Symlinks are rejected, and regular files must have link count one; this strict
 hard-link policy prevents an evidence pathname from aliasing mutable storage
 outside the root. Every absolute-root and shard-relative directory descriptor
-is retained and revalidated against its parent entry. Each open file, its
+is retained and revalidated against its parent entry; ancestors above the
+evidence root compare only device, inode, and file type, because unrelated
+processes change their link count, permission bits, and ownership in place.
+The root and its descendants also compare mode, link count, and ownership.
+Each open file, its
 descriptor, and its held parent entry are likewise rechecked after streaming,
 so ancestor or file replacement, truncation, growth, or in-place metadata
 changes fail closed. The receipt reports integrity only. It defines no
@@ -36,7 +40,7 @@ import sqlite3
 import stat
 import sys
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -113,6 +117,7 @@ class _HeldDirectory:
     descriptor: int
     name: str
     identity: _DirectoryIdentity
+    ancestor: bool = False
 
 
 def _fail(message):
@@ -226,13 +231,14 @@ def _directory_flags():
     return os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
-def _held_directory(descriptor, name):
-    return _HeldDirectory(descriptor, name, _directory_identity(os.fstat(descriptor), name or "/"))
+def _held_directory(descriptor, name, ancestor):
+    return _HeldDirectory(descriptor, name, _directory_identity(os.fstat(descriptor), name or "/"),
+                          ancestor)
 
 
-def _append_held_directory(directories, descriptor, name):
+def _append_held_directory(directories, descriptor, name, ancestor=False):
     try:
-        directories.append(_held_directory(descriptor, name))
+        directories.append(_held_directory(descriptor, name, ancestor))
     except BaseException:
         try:
             os.close(descriptor)
@@ -246,6 +252,21 @@ def _close_directories(directories):
         os.close(directory.descriptor)
 
 
+def _revalidated_identity(identity, directory):
+    # Ancestors above the evidence root (such as /tmp) are shared with
+    # unrelated processes. Their link count moves on any sibling mkdir/rmdir,
+    # and their permission bits and ownership can change in place without
+    # replacing them (#2085). Only device, inode, and file type prove that the
+    # held descriptor and the parent entry still name the same directory; the
+    # descriptor-relative walk rejects a rename or replacement through them.
+    # The root and its descendants keep the strict comparison. Unlinked
+    # ancestors still fail through ``_directory_identity``'s link-count floor
+    # and the parent-entry lookup.
+    if directory.ancestor:
+        identity = replace(identity, mode=stat.S_IFMT(identity.mode), links=0, owner=0, group=0)
+    return identity
+
+
 def _verify_directories(directories, name):
     for index, directory in enumerate(directories):
         try:
@@ -257,7 +278,9 @@ def _verify_directories(directories, name):
             _fail(f"{name} directory ancestor was unlinked or replaced during verification")
         except OSError as error:
             _fail(f"{name} directory ancestor cannot be revalidated: {error}")
-        if descriptor_identity != directory.identity or entry_identity != directory.identity:
+        expected = _revalidated_identity(directory.identity, directory)
+        if (_revalidated_identity(descriptor_identity, directory) != expected
+                or _revalidated_identity(entry_identity, directory) != expected):
             _fail(f"{name} directory ancestor was replaced or changed during verification")
 
 
@@ -266,11 +289,12 @@ def _open_root(path):
     root = _canonical_root(path)
     directories = []
     try:
+        components = root.split("/")[1:]
         descriptor = os.open("/", _directory_flags())
-        _append_held_directory(directories, descriptor, "")
-        for component in root.split("/")[1:]:
+        _append_held_directory(directories, descriptor, "", True)
+        for index, component in enumerate(components):
             child = os.open(component, _directory_flags(), dir_fd=directories[-1].descriptor)
-            _append_held_directory(directories, child, component)
+            _append_held_directory(directories, child, component, index + 1 < len(components))
             descriptor = child
     except IntegrityError:
         _close_directories(directories)

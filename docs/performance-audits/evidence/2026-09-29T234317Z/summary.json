@@ -1,0 +1,237 @@
+{
+  "experiment_commit": "734e1908e93bdcd3a85db9a2163c28363dcaa51e",
+  "base_commit": "8f67df736f13d4edc055110a7a6d619a00a22eaf",
+  "run_id": 36646359840,
+  "job_id": 109670147324,
+  "artifact_id": 11068133560,
+  "artifact_sha256": "02a1897663565c0392c7f5db2a148fa16e82fb00c6ee44895dd263c8b97a9619",
+  "actual_costs": [
+    {
+      "leaves": 4,
+      "mode": "mir-stack",
+      "samples_ns": [
+        2950,
+        2501,
+        2408,
+        2368,
+        2352,
+        2334,
+        2334
+      ],
+      "median_ns": 2368
+    },
+    {
+      "leaves": 4,
+      "mode": "fast",
+      "samples_ns": [
+        2615,
+        2355,
+        2143,
+        2113,
+        2093,
+        2099,
+        2128
+      ],
+      "median_ns": 2128
+    },
+    {
+      "leaves": 4,
+      "mode": "quality",
+      "samples_ns": [
+        2147,
+        2135,
+        2112,
+        2121,
+        2109,
+        2109,
+        2127
+      ],
+      "median_ns": 2121
+    },
+    {
+      "leaves": 16,
+      "mode": "mir-stack",
+      "samples_ns": [
+        11283,
+        10500,
+        10383,
+        10397,
+        10384,
+        10363,
+        10413
+      ],
+      "median_ns": 10397
+    },
+    {
+      "leaves": 16,
+      "mode": "fast",
+      "samples_ns": [
+        7718,
+        6977,
+        6865,
+        6860,
+        6859,
+        6804,
+        6789
+      ],
+      "median_ns": 6860
+    },
+    {
+      "leaves": 16,
+      "mode": "quality",
+      "samples_ns": [
+        6905,
+        6873,
+        6853,
+        6855,
+        6844,
+        6863,
+        6901
+      ],
+      "median_ns": 6863
+    },
+    {
+      "leaves": 32,
+      "mode": "fast",
+      "samples_ns": [
+        16480,
+        15641,
+        15314,
+        15265,
+        15142,
+        41845,
+        23627
+      ],
+      "median_ns": 15641
+    },
+    {
+      "leaves": 32,
+      "mode": "quality",
+      "samples_ns": [
+        15387,
+        15235,
+        15186,
+        15198,
+        15220,
+        15215,
+        15210
+      ],
+      "median_ns": 15215
+    }
+  ],
+  "synthetic_costs": [
+    {
+      "rows": 64,
+      "mode": "fixedpoint",
+      "samples_ns": [
+        4680,
+        4132,
+        4059,
+        4166,
+        4198,
+        4208,
+        4115
+      ],
+      "median_ns": 4166
+    },
+    {
+      "rows": 64,
+      "mode": "certificate",
+      "samples_ns": [
+        4707,
+        3552,
+        3552,
+        3603,
+        4171,
+        3723,
+        3923
+      ],
+      "median_ns": 3723
+    },
+    {
+      "rows": 256,
+      "mode": "fixedpoint",
+      "samples_ns": [
+        13572,
+        12806,
+        13547,
+        12766,
+        13072,
+        13604,
+        12590
+      ],
+      "median_ns": 13072
+    },
+    {
+      "rows": 256,
+      "mode": "certificate",
+      "samples_ns": [
+        10032,
+        9984,
+        10845,
+        11045,
+        11561,
+        11583,
+        11629
+      ],
+      "median_ns": 11045
+    },
+    {
+      "rows": 1024,
+      "mode": "fixedpoint",
+      "samples_ns": [
+        47658,
+        48962,
+        48986,
+        45446,
+        45458,
+        46116,
+        45949
+      ],
+      "median_ns": 46116
+    },
+    {
+      "rows": 1024,
+      "mode": "certificate",
+      "samples_ns": [
+        36875,
+        35903,
+        37594,
+        37031,
+        36810,
+        38543,
+        35933
+      ],
+      "median_ns": 36875
+    },
+    {
+      "rows": 4096,
+      "mode": "fixedpoint",
+      "samples_ns": [
+        241065,
+        183445,
+        174399,
+        178381,
+        178648,
+        183391,
+        178403
+      ],
+      "median_ns": 178648
+    },
+    {
+      "rows": 4096,
+      "mode": "certificate",
+      "samples_ns": [
+        139426,
+        138741,
+        139659,
+        146434,
+        139387,
+        139333,
+        140964
+      ],
+      "median_ns": 139426
+    }
+  ],
+  "accepted_performance": false
+}

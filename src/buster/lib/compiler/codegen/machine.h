@@ -799,7 +799,7 @@ typedef enum MachineX64F80BinaryMode
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT (MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT + MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT)
 #define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 32u
 #define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 0u
-#define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 7u
+#define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 8u
 #define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 14u
 
 typedef enum MachineX64EmitProducerStatus
@@ -1543,6 +1543,10 @@ typedef enum MachineEditKind
     // Predicate edge captures address an explicit frame slot directly.
     MACHINE_EDIT_FRAME_SPILL,
     MACHINE_EDIT_FRAME_RELOAD,
+    // subject vreg, whose single definition is the target's frame address
+    // row, recomputes that address into location preg at point: the reload
+    // of a value naming a slot that keeps its own storage all function.
+    MACHINE_EDIT_REMATERIALIZE_FRAME,
     MACHINE_EDIT_KIND_COUNT,
 } MachineEditKind;
 
@@ -1859,6 +1863,7 @@ BUSTER_F_DECL MachineX64CanonicalAuthoritySite const* machine_x86_64_canonical_a
 BUSTER_F_DECL u32 machine_x86_64_neutral_patch_site_count(void);
 BUSTER_F_DECL MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal);
 BUSTER_F_DECL void machine_x86_64_exact_prewarm(void);
+BUSTER_F_DECL void machine_x86_64_exact_prewarm_all_shapes(void);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
 BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info);
@@ -2053,6 +2058,16 @@ BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_prepassed(Arena
 BUSTER_F_DECL MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
 BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
+// The same encoders, writing into the caller's buffer when the function's
+// worst-case byte budget fits `caller_capacity`, and into a budget-sized
+// buffer from `arena` otherwise; `bytes` in the result says which. Either way
+// the encoder is bounded by that same budget, so its bytes and its success or
+// failure do not depend on where it writes. On failure `caller_bytes` may
+// hold partial bytes past anything the caller has committed.
+BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement,
+                                                             u8* caller_bytes, u64 caller_capacity);
+BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* function, MachineStackPlacement* placement,
+                                                              u8* caller_bytes, u64 caller_capacity);
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL bool machine_test_debug_values_build(Arena* arena, IrProgram* program, IrFunction* function,
@@ -2134,6 +2149,9 @@ typedef struct MachineX64MetadataShapeCacheAudit MachineX64MetadataShapeCacheAud
 struct MachineX64MetadataShapeCacheAudit
 {
     u32 prepared_rows;
+    u32 registered_queries;
+    u32 resolved_rows;
+    u32 pending_rows;
     u32 invalid_rows;
     bool valid;
     u8 reserved[3];

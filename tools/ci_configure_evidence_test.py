@@ -86,6 +86,50 @@ class ConfigureEvidenceTests(unittest.TestCase):
         self.assertEqual(next(item for item in result["files"] if item["path"].endswith("cmake-profile.json"))["status"], "missing")
         self.assertNotIn("passed", json.dumps(result))
 
+    def test_each_split_shard_cli_retains_its_configure_evidence(self):
+        trees = (
+            "build-sanitized-debug-ci_on-cc_clang-sanitize_on-fuzz_available_on-configs_Debug",
+            "build-sanitized-release-ci_on-cc_clang-sanitize_on-fuzz_available_on-configs_Release",
+            "build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug",
+            "build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug",
+            "build-portability-ci_on-cc_msvc-sanitize_off-fuzz_available_off-configs_Debug",
+        )
+        for tree in trees:
+            with self.subTest(tree=tree), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                build = root / "build"
+                output = root / "configure"
+                cache = build / tree / "CMakeCache.txt"
+                cache.parent.mkdir(parents=True)
+                data = (tree + "\r\n").encode("ascii")
+                cache.write_bytes(data)
+                log = cache.parent / "CMakeFiles" / "CMakeConfigureLog.yaml"
+                log.parent.mkdir()
+                log.write_bytes(b"configure diagnostic\n")
+                owner = tree.split("-ci_on-cc_", 1)[0]
+                superbuild = build / f"{owner}-superbuild-ci_on"
+                superbuild.mkdir()
+                (superbuild / "CMakeCache.txt").write_bytes(b"not a compiler tree")
+                run = subprocess.run([sys.executable, evidence.__file__, "--build-root", str(build), "--output", str(output)],
+                                     capture_output=True, text=True, check=False)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                result = json.loads((output / "manifest.json").read_text())
+                self.assertEqual(result["errors"], [])
+                self.assertEqual(result["tree_count"], 1)
+                self.assertEqual(result["configure_logs_captured"], 1)
+                self.assertEqual(result["profiles_captured"], 0)
+                record = next(item for item in result["files"] if item["path"].endswith("CMakeCache.txt"))
+                self.assertEqual(record["sha256"], hashlib.sha256(data).hexdigest())
+                self.assertEqual((output / record["path"]).read_bytes(), data)
+                self.assertFalse(any("superbuild" in item["path"] for item in result["files"]))
+
+    def test_split_superbuilds_alone_are_not_empty_success(self):
+        for owner in ("sanitized-debug", "sanitized-release", "portability"):
+            self.write(f"build-{owner}-superbuild-ci_on/CMakeCache.txt")
+        result = self.collect()
+        self.assertEqual(result["tree_count"], 0)
+        self.assertEqual(result["errors"], ["no matrix configure trees found"])
+
     def test_missing_build_root_is_not_empty_success(self):
         self.build.rmdir()
         result = self.collect()

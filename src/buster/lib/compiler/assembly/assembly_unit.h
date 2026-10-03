@@ -60,6 +60,9 @@ struct AssemblyUnitRelocation
     u32 section;
     u32 symbol;
     AssemblyRelocationKind kind;
+    // Instruction provenance and retained PLT request use existing tail padding.
+    bool plt;
+    bool x86_branch;
 };
 
 typedef struct AssemblyUnitResult AssemblyUnitResult;

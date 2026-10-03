@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import ci_zig_cache
+import ci_summary
 
 
 class ZigCachePolicyTests(unittest.TestCase):
@@ -61,6 +62,33 @@ class ZigCachePolicyTests(unittest.TestCase):
                             mode=mode,
                             namespace="issue709-control-v1",
                         )
+
+    def test_split_owners_share_exact_archive_but_never_publish_a_cohort(self):
+        for shard in sorted(ci_zig_cache.SPLIT_CHECK_SHARDS):
+            with self.subTest(shard=shard):
+                ordinary = self.policy(shard=shard)
+                self.assertEqual(ordinary.key, self.policy().key)
+                self.assertFalse(ordinary.save)
+                prime = self.policy(mode="prime", namespace="issue2120-control-v1", shard=shard)
+                release = self.policy(mode="prime", namespace="issue2120-control-v1")
+                self.assertEqual(prime.key, release.key)
+                self.assertFalse(prime.save)
+                self.assertFalse(prime.publication_proof_required)
+                read = self.policy(mode="read", namespace="issue2120-control-v1", shard=shard)
+                self.assertEqual(read.key, release.key)
+                self.assertTrue(read.require_hit)
+                self.assertFalse(read.save)
+                for event in ("pull_request", "push", "merge_group"):
+                    with self.assertRaisesRegex(ValueError, "workflow_dispatch"):
+                        self.policy(event=event, shard=shard)
+                for target in ("aarch64-macos", "aarch64-windows"):
+                    with self.assertRaisesRegex(ValueError, "supported split target"):
+                        ci_zig_cache.resolve_policy(
+                            "workflow_dispatch", "refs/heads/main", "main", "ordinary", "",
+                            "Windows", "ARM64", target, self.manifest_hash, shard)
+        for shard in ("all", "sanitized", "unknown", ""):
+            with self.assertRaisesRegex(ValueError, "unsupported desktop shard"):
+                self.policy(shard=shard)
 
     def test_modes_and_namespaces_fail_closed(self):
         invalid = (
@@ -306,6 +334,46 @@ class ZigCacheEvidenceTests(unittest.TestCase):
 
 
 class ZigCacheWorkflowTests(unittest.TestCase):
+    def test_bootstrap_owner_has_a_separate_budget_and_fail_closed_summary(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
+        steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)",
+                                desktop))
+        bootstrap = steps["Bootstrap wrapper regression tests"]
+        self.assertIn("id: bootstrap_wrappers", bootstrap)
+        self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}", bootstrap)
+        self.assertIn("set -euo pipefail", bootstrap)
+        self.assertIn('if [[ "$BUSTER_MATRIX_SHARD" != release ]]', bootstrap)
+        self.assertIn("BOOTSTRAP_WRAPPERS owned-by-release-shard", bootstrap)
+        for command in ("tools/bootstrap_wrapper_cases.py --jobs 2",
+                        "tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v"):
+            self.assertIn(command + ' 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"',
+                          bootstrap)
+        self.assertNotIn("continue-on-error:", bootstrap)
+        policy = steps["Workflow tool regression tests"]
+        self.assertIn("timeout-minutes: ${{ (matrix.os == 'windows' || matrix.os == 'macos') && 5 || 2 }}",
+                      policy)
+        self.assertNotIn("tests/bootstrap_wrapper_test.py", policy)
+        self.assertIn("tools/ci_zig_cache_test.py=zig-cache-policy-test.log", policy)
+        self.assertIn("path: ${{ runner.temp }}/buster-ci/", steps["Retain desktop logs"])
+
+        summary = steps["Desktop result and reproduction"]
+        self.assertIn("always()", summary)
+        self.assertIn("tools/ci_summary.py", summary)
+        expression = re.search(r"BUSTER_CI_REQUIRED: (.+)", summary).group(1)
+        lists = re.findall(r"'([^']*bootstrap_wrappers[^']*)'", expression)
+        self.assertEqual(len(lists), 2)
+        for required in lists:
+            for outcome in (None, "skipped", "cancelled", "failure", "timed_out", "success"):
+                with self.subTest(required=required, outcome=outcome):
+                    outcomes = {name: {"outcome": "success"} for name in required.split()}
+                    if outcome is None:
+                        del outcomes["bootstrap_wrappers"]
+                    else:
+                        outcomes["bootstrap_wrappers"] = {"outcome": outcome, "conclusion": "success"}
+                    self.assertEqual(ci_summary.assess(outcomes, required.split()),
+                                     [] if outcome == "success" else ["bootstrap_wrappers"])
+
     def test_workflow_uses_bounded_ref_derived_cache_controls(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         events = text.split("on:\n", 1)[1].split("\n\n", 1)[0]
@@ -365,13 +433,13 @@ class ZigCacheWorkflowTests(unittest.TestCase):
         workflow_tools = desktop.split(
             "- name: Workflow tool regression tests", 1
         )[1].split("- name: Bootstrap wrapper regression tests", 1)[0]
-        self.assertIn("run_suite tools/ci_zig_cache_test.py zig-cache-policy-test.log", workflow_tools)
+        self.assertIn("            tools/ci_zig_cache_test.py=zig-cache-policy-test.log\n", workflow_tools)
 
         bootstrap = desktop.split(
             "- name: Bootstrap wrapper regression tests", 1
         )[1].split("- name: Install mold", 1)[0]
         self.assertIn(
-            "if: ${{ !cancelled() && steps.checkout.outcome == 'success' && "
+            "if: ${{ needs.reuse.outputs.reuse != 'true' && !cancelled() && steps.checkout.outcome == 'success' && "
             "steps.zig_cache_policy.outcome == 'success' }}",
             bootstrap,
         )

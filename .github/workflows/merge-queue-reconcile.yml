@@ -1,0 +1,75 @@
+name: Main integration admission reconciler
+
+# Event-driven exact-group admission (#1807). Each run is one bounded pass from
+# trusted main: it never waits on prerequisites and never checks out or runs
+# merge-group bytes. Completion of a required merge-group workflow, a main push
+# (predecessor landing) or the bounded scheduled sweep (missed events) each
+# re-derive every live queue ref's state; delivery payloads are not trusted.
+# Groups whose own merge-queue-admission.yml still declares merge_group keep the
+# legacy runner-held producer and are only shadow-evaluated here.
+on:
+  workflow_run:
+    workflows:
+      - Buster CI
+      - Self-host fixed point
+      - TCC bootstrap
+      - GPU toolchain acceptance
+      - Benchmark service workflow policy
+      - API migration policy
+      - Native retirement rebinding
+    types: [completed]
+    # Filter upstream runs before creating skipped workflow entries (#2462).
+    branches: ['gh-readonly-queue/main/**']
+  push:
+    branches: [main]
+  schedule:
+    - cron: '7-59/15 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+# One serialized pass at a time. A newer pending run replaces an older pending
+# one; that is safe because every pass is a full, payload-independent sweep.
+concurrency:
+  group: merge-queue-admission-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile exact-group admission
+    if: >-
+      ${{ github.server_url == 'https://github.com' &&
+          vars.GH_ACTIONS_CI_ENABLED == 'true' &&
+          (github.event_name != 'workflow_run' ||
+           github.event.workflow_run.event == 'merge_group') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+      pull-requests: read
+      statuses: read
+    steps:
+      - name: Check out independently trusted main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reconcile every live merge group once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -B tools/merge_queue_admission.py reconcile \
+            --repo-root . --repository "$GITHUB_REPOSITORY" \
+            --details-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --output "$RUNNER_TEMP/merge-queue-reconcile.json"
+      - name: Retain reconciliation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: merge-queue-reconcile-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/merge-queue-reconcile.json
+          if-no-files-found: ignore
+          retention-days: 14

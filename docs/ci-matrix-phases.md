@@ -2,7 +2,7 @@
 
 `build.c` owns the optional `buster-desktop-phases-v1` observation. Set
 `BUSTER_MATRIX_PHASE_OUTPUT` to a **fresh directory outside `build/`** before
-`test_all_combinations_ci`. The twelve existing desktop jobs set it to
+`test_all_combinations_ci`. The ten default desktop jobs set it to
 `RUNNER_TEMP/buster-ci/matrix-phases`; the ordinary desktop artifact retains
 all records, including failed and interrupted attempts. Unset it for compiler
 performance acceptance. Ordinary local builds and native/throughput jobs do
@@ -31,8 +31,10 @@ compiler policy. The live CMake cache and graph remain provenance-bound.
 - `<task>.<pid>.start.json` and `.end.json`: one native observer per admitted
   command. Retain the exact child argv, inherited test quota, monotonic
   admission/child-start/child-end/publication-start timestamps, portable result,
-  native wait status, and timeout/termination authority. CPU time and RSS are
-  `unknown`. A missing end record is incomplete, never a zero-duration success.
+  native wait status, and timeout/termination authority. Comparable CPU time
+  and RSS remain `unknown`; qualification evidence can retain the explicitly
+  scoped OS witnesses described below. A missing end record is incomplete,
+  never a zero-duration success.
 - `terminal.json`: the original driver graph finished, including its coverage
   publication. It does not substitute for any child record.
 - `summary.json` and `summary.md`: validated timeline, per-tree phase durations,
@@ -56,7 +58,13 @@ return success. The enclosing worker/driver completion proves publication
 finished. Partial staging files are retained and make the consumer fail.
 
 In pooled mode each build becomes eligible when the outer scheduler starts;
-validation becomes eligible at its producer's completion. Consecutive validation
+validation becomes eligible at its producer's completion. A serialized test
+tree's first validation task also names the previous test tree's last test task
+as `after`; it becomes eligible when both have completed. The validator accepts
+`after` only on a pooled tree's first validation task, only for another tree's
+final validation or post-test task, and only as a single chain. A nested test
+command may be the tree's `ide test` or the isolated-process runner
+`<driver> test_units_partitioned <tree ide>`. Consecutive validation
 commands for a shared multi-config tree retain one pool-edge identity because
 Ninja holds that slot across them. The self-host consumer is a separate
 competing edge. Its time is retained, not attributed to compiler tests.
@@ -73,6 +81,42 @@ retains the verified cache identity. Runner/image metadata remains beside the
 phase report and in the existing job result. GitHub's numeric job ID and API
 wall timestamps are joined from the run inventory using the exact platform and
 shard name; they do not order native phase events.
+
+## Optional process resource witnesses
+
+`BUSTER_CI_CHECKS_EVIDENCE=1` enables resource accounting for commands spawned
+by `matrix_phase_run`. Other values leave the ordinary spawn/wait defaults
+unchanged. The native end record then includes a `resources` object with
+`schema=buster-process-resources-v1`, separate `cpu` and `peak_memory` metrics,
+and each metric's status, source, scope, unit and native error. CPU retains
+`user` and `system`; memory retains `value` and `kind`.
+
+| Platform | CPU source and scope | Peak memory source, unit and kind |
+|---|---|---|
+| Linux | `wait4`, child and descendants it waited for; microseconds | `wait4-ru_maxrss`, KiB converted to bytes; `largest-individual-high-water` in that accounting scope |
+| macOS | `wait4`, child and descendants it waited for; microseconds | `wait4-ru_maxrss`, native bytes; `largest-individual-high-water` in that accounting scope |
+| Windows | `get-process-times`, child process only; microseconds converted from 100 ns counters | `k32-get-process-memory-info`, child process only, bytes; `peak-working-set` |
+
+Windows queries the existing child handle after exit and before closing it.
+Its memory witness is a working-set peak, not peak commit. POSIX copies usage
+only after the exact child's successful reap. These queries do not replace
+exit, deadline, capture or process-tree cleanup authority. A failed payload
+still fails even when resource counters are available.
+
+Only `status=observed` has numeric values. `unknown`, `unsupported` and `error`
+retain the literal `unknown`; they never substitute zero. An error status must
+retain a nonzero native error code. Missing end records and unsuccessful reaps
+do not manufacture measurements. Driver callbacks have no child resources.
+The consumer validates the nested contract and preserves witnesses in each
+summary event, including unavailable statuses.
+
+These counters have different platform scopes and do not measure simultaneous
+whole-process-tree RSS. Parent and nested child phases can account for the same
+work; summing their CPU counters or memory peaks would double-count it.
+Legacy `cpu_time` and `peak_rss` remain `unknown` at plan, task and tree level.
+No comparable campaign resource gate or RSS growth acceptance follows from
+these witnesses alone. Historical archives without witnesses remain readable
+and their missing measurements are not reconstructed from new instrumentation.
 
 ## Validation and failure behavior
 
@@ -97,6 +141,12 @@ bound includes observer launch/publication, temporary-fixture creation and
 Python result-reading; it subtracts only the observer-measured child interval.
 Keep every sample. These controls measure observer cost, not compiler throughput
 or the total source-change cost of rebuilding the driver.
+The hosted native controls additionally touch child memory and consume CPU,
+check waited-descendant accounting on POSIX, preserve failure/deadline status,
+and require ordinary observers to omit resource witnesses. Their
+`MATRIX_PHASE_RESOURCE_CHILD` and `MATRIX_PHASE_RESOURCE_DESCENDANT` records
+retain actual counters. Consumer-only schema controls can run without compiling:
+`python3 tools/ci_matrix_phases_test.py PhaseValidationTests ResourceWitnessTests -v`.
 
 The fixed-duration prediction preserves pool/inner quotas and dependencies,
 uses declaration priority among ready edges, and evaluates at most 5,040 tree
@@ -116,3 +166,45 @@ not recycle its timings as a matched baseline. Update #709 and choose exactly
 one #892 disposition from current evidence: focused Zig configuration work,
 focused sanitized-test-tail work, a separate scheduling candidate, or no change.
 The instrumentation PR alone is not that measured disposition.
+
+## Windows build barrier qualification (#2119)
+
+Native plans retain `test_admission=overlap|all-builds`. An absent setting means
+`overlap`, preserving historical journals. `BUSTER_MATRIX_TEST_ADMISSION=all-builds`
+is admitted only for pooled Windows x86-64 grouped `checks`. Its real Ninja test
+targets depend on the aggregate `buster_compile` target as well as their producer
+and preceding serialized test target. The phase consumer independently requires
+every build to finish before a test becomes eligible and binds an explicit
+current-job environment setting to the plan. CPU time and RSS remain unknown.
+
+Predictions honor compile dependencies, serialized test edges, and the barrier.
+Fixed-duration replay cannot predict changed CPU contention, so it cannot admit
+a production policy. Qualification uses three complete first attempts per policy,
+unchanged source/images/toolchains/cache and census, at least 10% median Windows
+checks improvement, and at most 5% growth in total workflow runner seconds.
+The accepted overlapping policy remains the production default.
+
+The three qualification dispatch refs enable `BUSTER_CI_CHECKS_EVIDENCE=1`
+only in their desktop combination steps. For each runtime task the native
+observer queries the same binary's independent inventory, captures its actual
+test output and verifies the binary hash before and after execution. It retains
+`unit-observations/<task-id>/` beside the phase directory, leaving the strict
+phase journal inventory unchanged. Query failure, output truncation, cleanup
+failure, changed binaries or an existing receipt fail the observed task.
+Ordinary runs keep direct streams. These unit completion and phase timing
+receipts do not supply comparable CPU time or peak RSS; positive timing alone
+cannot accept either issue.
+
+The separate `BUSTER_CI_CONDITIONS_EVIDENCE` opt-in records selected Go, iOS/
+analyzer/UEFI Ninja, and Android adb hash/version receipts in the same three
+dispatch variants. It leaves the native desktop observation flag and phase
+journal schema unchanged. `ci_checks_qualification.py::condition_keys` declares
+the required role tool/cache inputs; selected-tool receipts bind the exact
+source/run/attempt/workflow job and are checked before comparison. Temporary
+receipt paths are provenance, while selected executable hash/version and all
+existing desktop/native identities remain comparison inputs. Cache scope is
+the existing Zig evidence, Android initial requested-package validity and
+explicit Actions-cache policy; it adds no global OS/language cache census.
+Missing legacy versions stay pending. See
+[checks qualification](ci-combination-shards.md#further-checks-partition-qualification-2120)
+for artifact paths and prospective cohort requirements.

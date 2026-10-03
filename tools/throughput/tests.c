@@ -12,6 +12,40 @@
 static unsigned test_assertions, test_failures;
 #define CHECK(c) do { ++test_assertions; if (!(c)) { ++test_failures; fprintf(stderr, "TEST failure %d: %s\n", __LINE__, #c); } } while (0)
 
+/* A failed child check names how the child ended and keeps its log. Cases
+ * share one log path, so the failing log is copied to LOG.line-N before the
+ * next case truncates it; the harness artifact uploads the test root. */
+static void test_child_exit(TpProcess result, int expected, char const* log, int line)
+{
+    ++test_assertions;
+    if (result.exit_code != expected || result.timed_out || result.launch_error)
+    {
+        ++test_failures;
+        fprintf(stderr, "TEST failure %d: child exit_code=%d expected=%d signal=%d timed_out=%d launch_error=%d launch_stage=%s wall_seconds=%.3f log=%s\n",
+                line, result.exit_code, expected, result.signal_number, result.timed_out, result.launch_error,
+                tp_launch_stage_name(result.launch_stage), result.wall_seconds, log);
+        char kept[TP_PATH_CAP], chunk[4096], tail[2048];
+        int length = snprintf(kept, sizeof(kept), "%s.line-%d", log, line);
+        FILE* input = fopen(log, "rb");
+        FILE* output = input && length > 0 && (size_t)length < sizeof(kept) ? fopen(kept, "wb") : NULL;
+        size_t tail_length = 0, count = 0;
+        while (input && (count = fread(chunk, 1, sizeof(chunk), input)) > 0)
+        {
+            if (output) fwrite(chunk, 1, count, output);
+            size_t keep = count >= sizeof(tail) ? 0 : (tail_length + count > sizeof(tail) ? sizeof(tail) - count : tail_length);
+            size_t take = count >= sizeof(tail) ? sizeof(tail) : count;
+            memmove(tail, tail + tail_length - keep, keep);
+            memcpy(tail + keep, chunk + count - take, take);
+            tail_length = keep + take;
+        }
+        int kept_ok = output && fclose(output) == 0;
+        if (input) fclose(input);
+        fprintf(stderr, "TEST failure %d: child log %s, kept=%s, last %zu bytes:\n%.*s\n", line, input ? "read" : "unreadable",
+                kept_ok ? kept : "no", tail_length, (int)tail_length, tail);
+    }
+}
+#define CHECK_CHILD_EXIT(result, expected, log) test_child_exit((result), (expected), (log), __LINE__)
+
 static int test_text(char const* root, char const* name, char const* text)
 {
     char path[TP_PATH_CAP];
@@ -21,6 +55,33 @@ static int test_text(char const* root, char const* name, char const* text)
     if (file && fclose(file) != 0) ok = 0;
     return ok;
 }
+
+#ifdef __linux__
+static void test_service_output_share(char const* root)
+{
+    char directory[TP_PATH_CAP], nested[TP_PATH_CAP], file[TP_PATH_CAP], link[TP_PATH_CAP];
+    int paths = tp_path(directory, root, "service-output-XXXXXX") && mkdtemp(directory) != NULL &&
+                tp_path(nested, directory, "artifacts") && tp_path(file, nested, "result.log") &&
+                tp_path(link, directory, "linked.log");
+    CHECK(paths);
+    if (paths)
+    {
+        TpConfig config;
+        char* options[] = {"throughput", "run", "--output", directory, "--service-output", NULL};
+        CHECK(tp_options(5, options, &config) && config.service_output);
+        CHECK(mkdir(nested, 0700) == 0 && test_text(nested, "result.log", "result\n") &&
+              chmod(file, 0600) == 0 && tp_share_service_output(directory));
+        struct stat root_info = {0}, nested_info = {0}, file_info = {0};
+        CHECK(stat(directory, &root_info) == 0 && stat(nested, &nested_info) == 0 &&
+              stat(file, &file_info) == 0 && (root_info.st_mode & 07777) == 0770 &&
+              (nested_info.st_mode & 07777) == 0770 && (file_info.st_mode & 07777) == 0640);
+        CHECK(chmod(directory, 0700) == 0 && symlink("artifacts/result.log", link) == 0 &&
+              !tp_share_service_output(directory));
+        CHECK(unlink(link) == 0 && chmod(nested, 0700) == 0 && unlink(file) == 0 &&
+              rmdir(nested) == 0 && rmdir(directory) == 0);
+    }
+}
+#endif
 
 static int test_bundle(char const* root, unsigned scenario)
 {
@@ -105,6 +166,7 @@ static int test_child(int argc, char** argv)
     int result = 0;
     if (argc < 3) result = 2;
     else if (!strcmp(argv[2], "fail")) result = 7;
+    else if (!strcmp(argv[2], "exit125")) result = 125;
     else if (!strcmp(argv[2], "throughput")) result = throughput_cli_main(argc - 2, argv + 2);
     else if (!strcmp(argv[2], "throughput-admission-oom"))
     {
@@ -176,17 +238,48 @@ static int test_child(int argc, char** argv)
         for (int i = 3; i < argc; ++i) printf("%s\n", argv[i]);
     }
 #ifndef _WIN32
-    else if (!strcmp(argv[2], "summary-write-failure") && argc == 4)
+    else if (argc == 4 && (!strcmp(argv[2], "summary-write-failure") ||
+                           !strcmp(argv[2], "summary-write-setup-failure")))
     {
-        /* Restrict only this child so buffered report writes fail at close. */
-        struct rlimit limit;
-        int ok = getrlimit(RLIMIT_FSIZE, &limit) == 0;
+        /* The native one-byte limit also truncates the redirected child log.
+         * Save each outcome, restore the limit after comparison closes its
+         * streams, then publish diagnostics. Setup failure is not a write test. */
+        int resource = !strcmp(argv[2], "summary-write-failure") ? RLIMIT_FSIZE : -1;
+        struct rlimit saved;
+        char const* stage = "getrlimit";
+        int ok = getrlimit(resource, &saved) == 0;
+        int setup_error = ok ? 0 : errno;
+        int comparison = -1, comparison_error = 0, restore_status = -1, restore_error = 0;
         if (ok)
         {
-            limit.rlim_cur = 1;
-            ok = signal(SIGXFSZ, SIG_IGN) != SIG_ERR && setrlimit(RLIMIT_FSIZE, &limit) == 0;
+            stage = "signal";
+            ok = signal(SIGXFSZ, SIG_IGN) != SIG_ERR;
+            if (!ok) setup_error = errno;
         }
-        result = ok && tp_compare(argv[3]) == 2 ? 0 : 1;
+        if (ok)
+        {
+            struct rlimit limit = saved;
+            limit.rlim_cur = 1;
+            stage = "setrlimit";
+            ok = setrlimit(resource, &limit) == 0;
+            if (!ok) setup_error = errno;
+        }
+        if (ok)
+        {
+            stage = "compare";
+            comparison = tp_compare(argv[3]);
+            comparison_error = errno;
+            restore_status = setrlimit(resource, &saved);
+            if (restore_status != 0) restore_error = errno;
+        }
+        /* A failed diagnostic write under the injected limit sets stream
+         * error flags. Clear only the log streams, never the report streams. */
+        clearerr(stdout);
+        clearerr(stderr);
+        int reported = fprintf(stderr, "\nSUMMARY_WRITE_FAILURE stage=%s setup_errno=%d compare=%d restore=%d restore_errno=%d last_errno=%d\n",
+                               stage, setup_error, comparison, restore_status, restore_error, comparison_error) >= 0;
+        if (fflush(stderr) != 0) reported = 0;
+        result = ok && comparison == 2 && restore_status == 0 && reported ? 0 : 1;
     }
 #endif
     else result = 2;
@@ -408,6 +501,79 @@ static void test_processes(char const* executable, char const* root)
     for (unsigned i = 0; i < TP_COUNTERS; ++i)
         CHECK(isfinite(quoted.counters[i]) ? quoted.running_fraction[i] >= 0.90 : quoted.counter_errors[i] != 0);
 }
+
+#ifndef _WIN32
+static unsigned test_open_descriptor_count(void)
+{
+    unsigned count = 0;
+    for (int descriptor = 0; descriptor < 256; ++descriptor)
+    {
+        if (fcntl(descriptor, F_GETFD) >= 0) ++count;
+    }
+    return count;
+}
+
+/* The error channel must report preexec failure, survive repeated cleanup,
+ * and remain empty when a successfully launched program itself exits 125. */
+static void test_launch_errors(char const* executable, char const* root)
+{
+    char log[TP_PATH_CAP], denied_path[TP_PATH_CAP], format_path[TP_PATH_CAP];
+    int paths_ok = tp_path(log, root, "launch-errors.log") &&
+                   tp_path(denied_path, root, "launch-denied") &&
+                   tp_path(format_path, root, "launch-format");
+    CHECK(paths_ok);
+    if (paths_ok)
+    {
+        CHECK(test_text(root, "launch-denied", "not executable\n") && chmod(denied_path, 0600) == 0);
+        CHECK(test_text(root, "launch-format", "not an executable format\n") && chmod(format_path, 0700) == 0);
+        char* valid[] = {(char*)executable, "child", "exit125", NULL};
+        TpProcess exited = tp_process(valid, NULL, log, 2, -1, 0);
+        CHECK(exited.exit_code == 125 && !exited.signal_number && !exited.timed_out &&
+              !exited.launch_error && exited.launch_stage == TP_LAUNCH_NONE);
+        char* missing[] = {"/definitely/missing/buster-throughput-compiler", NULL};
+        char* denied[] = {denied_path, NULL};
+        char* format[] = {format_path, NULL};
+        char* commands[] = {(char*)executable, "child", "fail", NULL};
+        struct
+        {
+            char** argv;
+            char const* directory;
+            int error;
+            TpLaunchStage stage;
+        } cases[] = {
+            {missing, NULL, ENOENT, TP_LAUNCH_EXEC},
+            {denied, NULL, EACCES, TP_LAUNCH_EXEC},
+            {format, NULL, ENOEXEC, TP_LAUNCH_EXEC},
+            {commands, "/definitely/missing/buster-throughput-directory", ENOENT, TP_LAUNCH_DIRECTORY},
+        };
+        unsigned descriptors = test_open_descriptor_count();
+        for (unsigned round = 0; round < 4; ++round)
+        {
+            for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+            {
+                TpProcess failed = tp_process(cases[i].argv, cases[i].directory, log, 2, -1, 0);
+                unsigned failures = test_failures;
+                CHECK(failed.exit_code == 125 && !failed.signal_number && !failed.timed_out &&
+                      failed.launch_error == cases[i].error && failed.launch_stage == cases[i].stage);
+                if (test_failures != failures)
+                {
+                    fprintf(stderr,
+                            "THROUGHPUT_LAUNCH_ERROR_MISMATCH round=%u case=%u argv0=%s directory=%s "
+                            "exit_code=%d expected_exit_code=125 signal_number=%d expected_signal_number=0 "
+                            "timed_out=%d expected_timed_out=0 launch_error=%d expected_launch_error=%d "
+                            "launch_stage=%s expected_launch_stage=%s wall_seconds=%.3f log=%s\n",
+                            round + 1, i + 1, cases[i].argv[0], cases[i].directory ? cases[i].directory : "<inherited>",
+                            failed.exit_code, failed.signal_number, failed.timed_out, failed.launch_error, cases[i].error,
+                            tp_launch_stage_name(failed.launch_stage), tp_launch_stage_name(cases[i].stage),
+                            failed.wall_seconds, log);
+                }
+            }
+        }
+        CHECK(test_open_descriptor_count() == descriptors);
+        puts("THROUGHPUT_LAUNCH_ERRORS cases=4 repetitions=4 valid_exit125=distinct");
+    }
+}
+#endif
 
 /* Exact integer serialization is independent of floating-point summary
  * medians. Zero, UINT64_MAX and unavailable must survive a complete replay. */
@@ -906,7 +1072,7 @@ static void test_workload_descriptors(char const* executable, char const* root)
             "--source-root", source_root, "--compiler", (char*)executable, "--evidence", evidence,
             "--evidence-outcome", "failed", NULL};
         TpProcess result = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(result.exit_code == 0 && !result.launch_error && !result.timed_out);
+        CHECK_CHILD_EXIT(result, 0, log);
         FILE* file = fopen(log, "rb");
         char report[8192] = {0};
         CHECK(file != NULL);
@@ -919,30 +1085,30 @@ static void test_workload_descriptors(char const* executable, char const* root)
         }
         CHECK(remove(header_path) == 0);
         result = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(result.exit_code == 2);
+        CHECK_CHILD_EXIT(result, 2, log);
         CHECK(test_text(source_root, "header.h", "#define ANSWER 42\n"));
         CHECK(test_text(source_root, "source.c", "#include \"header.h\"\nint value(void) { return 7; }\n"));
         result = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(result.exit_code == 2);
+        CHECK_CHILD_EXIT(result, 2, log);
         CHECK(test_text(source_root, "source.c", "#include \"header.h\"\nint value(void) { return ANSWER; }\n"));
         CHECK(test_text(source_root, "extra.h", "undeclared\n"));
         result = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(result.exit_code == 2);
+        CHECK_CHILD_EXIT(result, 2, log);
         char extra[TP_PATH_CAP];
         CHECK(tp_path(extra, source_root, "extra.h") && remove(extra) == 0);
         command[12] = "accepted";
         result = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(result.exit_code == 2);
+        CHECK_CHILD_EXIT(result, 2, log);
         command[12] = "failed";
         command[10] = extra;
         result = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(result.exit_code == 2);
+        CHECK_CHILD_EXIT(result, 2, log);
         command[10] = evidence;
         char malformed[8192];
         length = snprintf(malformed, sizeof(malformed), "%sschema=duplicate\n", descriptor);
         CHECK(length > 0 && (size_t)length < sizeof(malformed) && test_text(directory, "fixture.workload", malformed));
         result = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(result.exit_code == 2);
+        CHECK_CHILD_EXIT(result, 2, log);
         size_t descriptor_length = strlen(descriptor) + 1;
         memcpy(malformed, descriptor, descriptor_length);
         char* unsafe = strstr(malformed, "input=source\tsource.c");
@@ -950,14 +1116,14 @@ static void test_workload_descriptors(char const* executable, char const* root)
         if (unsafe) memcpy(unsafe + strlen("input=source\t"), "../bad.c", strlen("../bad.c"));
         CHECK(test_text(directory, "fixture.workload", malformed));
         result = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(result.exit_code == 2);
+        CHECK_CHILD_EXIT(result, 2, log);
         memcpy(malformed, descriptor, descriptor_length);
         char* frontend = strstr(malformed, "compile_argv=$FRONTEND");
         CHECK(frontend != NULL);
         if (frontend) memcpy(frontend + strlen("compile_argv="), "-DMISSING", strlen("-DMISSING"));
         CHECK(test_text(directory, "fixture.workload", malformed));
         result = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(result.exit_code == 2);
+        CHECK_CHILD_EXIT(result, 2, log);
     }
 }
 
@@ -1016,14 +1182,15 @@ static void test_workload_admission(char const* executable, char const* root)
     CHECK(tp_path(output, directory, "success"));
 #if defined(_WIN32)
     TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
-#elif defined(BUSTER_SANITIZE)
+#elif BUSTER_SANITIZE
     puts("THROUGHPUT_ADMISSION_STACK status=unsupported reason=sanitizer-instrumented");
     TpProcess result = test_admit_workload(executable, descriptor, source_root, evidence, output, manifests, log);
 #else
+    puts("THROUGHPUT_ADMISSION_STACK status=selected mode=throughput-low-stack");
     TpProcess result = test_admit_workload_mode(executable, "throughput-low-stack", descriptor, source_root,
                                                 evidence, output, manifests, log);
 #endif
-    CHECK(result.exit_code == 0 && !result.launch_error && !result.timed_out);
+    CHECK_CHILD_EXIT(result, 0, log);
     FILE* file = fopen(log, "rb");
     char report[65536] = {0};
     CHECK(file != NULL);
@@ -1031,6 +1198,12 @@ static void test_workload_admission(char const* executable, char const* root)
     {
         size_t size = fread(report, 1, sizeof(report) - 1, file);
         CHECK(size < sizeof(report) - 1 && !ferror(file) && fclose(file) == 0);
+        // The low-stack child's report is otherwise only inside the CI artifact.
+        if (!(result.exit_code == 0 && !result.launch_error && !result.timed_out) || !strstr(report, "\"admitted\":true"))
+        {
+            fprintf(stderr, "THROUGHPUT_ADMISSION_REPORT exit=%d signal=%d launch_error=%d timed_out=%d\n%s\n",
+                    result.exit_code, result.signal_number, result.launch_error, result.timed_out, report);
+        }
         CHECK(strstr(report, "\"admitted\":true") && strstr(report, "\"performed_cells\":[") &&
               strstr(report, "\"object\":{\"command_count\":2") &&
               strstr(report, "\"translated_bytes\":32") && strstr(report, "\"runtime-transcript\"") &&
@@ -1044,17 +1217,18 @@ static void test_workload_admission(char const* executable, char const* root)
     result = test_admit_workload_mode(executable, "throughput-admission-oom", descriptor, source_root,
                                       evidence, failed_output, manifests, failure_log);
     struct stat failed_status;
-    CHECK(result.exit_code == 2 && stat(failed_output, &failed_status) != 0 && errno == ENOENT);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
+    CHECK(stat(failed_output, &failed_status) != 0 && errno == ENOENT);
     CHECK(tp_path(failed_output, directory, "preexisting") && tp_mkdirs(failed_output));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
-    CHECK(result.exit_code == 2);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
 
     char* saved_dependency = manifests[0];
     char missing_manifest[TP_PATH_CAP];
     CHECK(tp_path(missing_manifest, directory, "missing.identity") && tp_path(failed_output, directory, "missing-dependency"));
     manifests[0] = missing_manifest;
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
-    CHECK(result.exit_code == 2);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
     manifests[0] = saved_dependency;
 
     char mismatch[TP_PATH_CAP + 1024];
@@ -1065,19 +1239,19 @@ static void test_workload_admission(char const* executable, char const* root)
     CHECK(mismatch_length > 0 && (size_t)mismatch_length < sizeof(mismatch) &&
           test_text(directory, names[0], mismatch) && tp_path(failed_output, directory, "identity-mismatch"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
-    CHECK(result.exit_code == 2);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
     CHECK(test_identity_manifest(directory, names[0], kinds[0], operations[0], bindings[0], closure, closure_hash, closure_bytes));
 
     CHECK(test_text(directory, "closure.txt", "drifted closure\n") && tp_path(failed_output, directory, "closure-drift"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
-    CHECK(result.exit_code == 2);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
     CHECK(test_text(directory, "closure.txt", "immutable closure\n"));
 
     char* saved_runtime = manifests[5];
     manifests[5] = missing_manifest;
     CHECK(tp_path(failed_output, directory, "missing-runtime"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
-    CHECK(result.exit_code == 2);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
     manifests[5] = saved_runtime;
 
     CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes,
@@ -1085,7 +1259,7 @@ static void test_workload_admission(char const* executable, char const* root)
                                     "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265") &&
           tp_path(failed_output, directory, "compiler-failure"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
-    CHECK(result.exit_code == 2);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
     char commands[TP_PATH_CAP];
     CHECK(tp_path(commands, failed_output, "commands.jsonl"));
     file = fopen(commands, "rb");
@@ -1103,27 +1277,27 @@ static void test_workload_admission(char const* executable, char const* root)
                                     "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265") &&
           tp_path(failed_output, directory, "missing-artifact"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
-    CHECK(result.exit_code == 2);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
 
     CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes,
                                     "-DTP_TEST_MUTATE_PRIOR",
                                     "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265") &&
           tp_path(failed_output, directory, "artifact-drift"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
-    CHECK(result.exit_code == 2);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
 
     CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes, "",
                                     "0000000000000000000000000000000000000000000000000000000000000000") &&
           tp_path(failed_output, directory, "runtime-mismatch"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
-    CHECK(result.exit_code == 2);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
 
     CHECK(test_text(directory, "oracle.log", "prefix status=pass suffix\n") &&
           test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes, "",
                                     "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265") &&
           tp_path(failed_output, directory, "oracle-substring"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
-    CHECK(result.exit_code == 2);
+    CHECK_CHILD_EXIT(result, 2, failure_log);
 }
 
 static void test_checked_in_workload_descriptors(void)
@@ -1293,17 +1467,48 @@ static void test_summary_cleanup(char const* root)
 static void test_summary_write_failure(char const* executable, char const* root)
 {
     char directory[TP_PATH_CAP], log[TP_PATH_CAP];
-    int paths_ok = tp_path(directory, root, "summary-write-failure") &&
-                   tp_path(log, root, "summary-write-failure.log");
+    int paths_ok = tp_path(directory, root, "summary-write-failure");
     CHECK(paths_ok);
     if (paths_ok)
     {
         CHECK(test_bundle(directory, 0));
-        char* command[] = {(char*)executable, "child", "summary-write-failure", directory, NULL};
-        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);
-        CHECK(child.exit_code == 0 && !child.timed_out && !child.launch_error);
-        test_summaries(directory, 0);
-        CHECK(tp_completion(directory, 1, 20, 1, 0));
+        CHECK(tp_compare(directory) == 0);
+        test_summaries(directory, 1);
+        char const* modes[] = {"summary-write-failure", "summary-write-setup-failure"};
+        char const* logs[] = {"summary-write-failure.log", "summary-write-setup-failure.log"};
+        for (unsigned mode = 0; mode < 2; ++mode)
+        {
+            int log_ok = tp_path(log, root, logs[mode]);
+            CHECK(log_ok);
+            if (log_ok)
+            {
+                char* command[] = {(char*)executable, "child", (char*)modes[mode], directory, NULL};
+                TpProcess child = tp_process(command, NULL, log, 3, -1, 0);
+                CHECK_CHILD_EXIT(child, mode ? 1 : 0, log);
+                /* Require a complete diagnostic after the one-byte write
+                 * limit, including for the deliberately invalid setup. */
+                FILE* file = fopen(log, "rb");
+                CHECK(file != NULL);
+                if (file)
+                {
+                    char diagnostic[1024], expected[256];
+                    size_t length = fread(diagnostic, 1, sizeof(diagnostic) - 1, file);
+                    diagnostic[length] = 0;
+                    CHECK(!ferror(file) && feof(file));
+                    CHECK(fclose(file) == 0);
+                    snprintf(expected, sizeof(expected),
+                             "SUMMARY_WRITE_FAILURE stage=%s setup_errno=%d compare=%d restore=%d restore_errno=0",
+                             mode ? "getrlimit" : "compare", mode ? EINVAL : 0, mode ? -1 : 2, mode ? -1 : 0);
+                    CHECK(strstr(diagnostic, expected) != NULL);
+                }
+            }
+            /* A real write failure removes reports; a setup failure never
+             * enters comparison and must leave the existing reports alone. */
+            test_summaries(directory, mode != 0);
+            CHECK(tp_completion(directory, 1, 20, 1, 0));
+            CHECK(tp_compare(directory) == 0);
+            test_summaries(directory, 1);
+        }
     }
 }
 #endif
@@ -1638,6 +1843,9 @@ int main(int argc, char** argv)
         test_diagnostic_probes(root);
         test_legacy_schema(executable, root);
         test_compile_options();
+#ifdef __linux__
+        test_service_output_share(root);
+#endif
         test_workload_selection();
         test_job_capacity();
         test_optional_inputs(root);
@@ -1650,6 +1858,9 @@ int main(int argc, char** argv)
         test_inputs(root);
         test_maximum_jobs(root);
         test_processes(executable, root);
+#ifndef _WIN32
+        test_launch_errors(executable, root);
+#endif
         test_retirement_statistics();
         printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu job=%zu max_jobs=%u run_heap=%zu replay_heap=%zu\n",
                sizeof(TpProcess), sizeof(TpRow), sizeof(TpJob), (unsigned)TP_MAX_JOBS,

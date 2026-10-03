@@ -8,12 +8,20 @@
 #include <buster/lib/compiler/wasm/wasm.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/compiler/ebpf/ebpf.h>
+#include <buster/lib/compiler/spirv/spirv.h>
 
 // A unity C translation unit retains preprocessing, semantic, typed IR, and
 // object/debug data through the driver call. The reservation is virtual and
 // uses demand-paged commits, so this headroom does not eagerly consume 8 GiB
 // of physical memory.
 #define COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE BUSTER_GB(32)
+
+// Bounds of `@path` response-file expansion in compiler_driver_parse_arguments:
+// the bytes read from all response files of one invocation together, and the
+// length of the expanded command line. A command line with no argument that
+// begins with '@' is not expanded and neither bound applies to it.
+#define COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT BUSTER_MB(4)
+#define COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT ((u64)1 << 16)
 
 typedef enum CompilerDriverError
 {
@@ -34,6 +42,7 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_OBJECT,
     COMPILER_DRIVER_ERROR_LINK,
     COMPILER_DRIVER_ERROR_FILE_WRITE,
+    COMPILER_DRIVER_ERROR_SPIRV,
     COMPILER_DRIVER_ERROR_COUNT,
 } CompilerDriverError;
 
@@ -77,6 +86,7 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_C11,
     COMPILER_DRIVER_C_DIALECT_C17,
     COMPILER_DRIVER_C_DIALECT_C23,
+    COMPILER_DRIVER_C_DIALECT_GNU89,
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
@@ -113,6 +123,11 @@ struct CompilerDriverInvocation
     // API-only opt-out from retaining structured records. Legacy diagnostic
     // text and warnings remain available; clean compilation allocates neither.
     bool suppress_diagnostic_records;
+    // API opt-out from summing preprocessed.bytes, which only the `-v` source
+    // report and the source-metrics file read. The field is then zero; every
+    // other preprocessed count is still gathered. The cc command sets it when
+    // it prints neither report.
+    bool omit_spelled_bytes;
     // Opt-in, checked token / canonical IR / selected MIR evidence.
     String8 bootstrap_trace_prefix;
     String8 gpu_architecture;
@@ -126,6 +141,7 @@ struct CompilerDriverInvocation
     GpuToolchain gpu_tools;
     GpuTarget gpu_target;
     Target target;
+    TargetPlainCharPolicy plain_char_policy;
     u32 input_count;
     // Zero when input_languages is null; otherwise exactly input_count.
     u32 input_language_count;
@@ -165,17 +181,22 @@ struct CompilerDriverInvocation
     // -fregister-allocator= selects another mode and
     // -fno-register-allocator selects NONE.
     u8 register_allocator;
-    // -fPIC/-fpic, cleared by -fno-pic. The code generator reads it as a code
-    // model: it picks the thread-local model, and a symbol another object
-    // could interpose is addressed through the GOT and called through the
-    // PLT, which are the references `ld -shared` will place. -fPIE/-fpie are
-    // rejected on x86-64 ELF because that reference model is not implemented;
-    // other targets preserve their prior accepted no-op behavior.
+    // -fPIC/-fpic/-fPIE/-fpie, cleared by -fno-pic (and -fno-pie after a PIE
+    // spelling), and implied by linking a position-independent image. The
+    // code generator reads it as a code model: it picks the thread-local
+    // model, and a symbol another object could interpose is addressed through
+    // the GOT and called through the PLT, which are the references `ld
+    // -shared` will place. A PIE takes the same model; the image writer
+    // relaxes the GOT loads of the definitions it binds.
     bool position_independent;
+    // -shared or -pie: the NativeImageKind a link produces. Accepted for a
+    // link only on x86-64 Linux, the one target with a writer for it.
+    NativeImageKind image_kind;
     u8 optimization_level;
     bool has_gpu_target;
     bool save_gpu_temporaries;
     bool register_allocator_explicit;
+    bool plain_char_policy_explicit;
     // Compatibility state for -fno-machine-fallback/-fmachine-fallback.
     // Native production codegen is unconditionally MIR-only; neither flag
     // can re-enable the retired direct canonical fallback.
@@ -184,6 +205,7 @@ struct CompilerDriverInvocation
     // production generation returns no fallback records.
     bool record_codegen_fallbacks;
     bool c_dialect_explicit;
+    bool debug_info_explicit;
 };
 
 typedef struct CompilerDriverFallbackRecord CompilerDriverFallbackRecord;
@@ -202,6 +224,7 @@ struct CompilerDriverResult
     IrLocalPromotionStatistics local_promotion;
     IrFastStatistics fast;
     CIRDirectSsaStatistics direct_ssa;
+    CTypeLayoutStatistics type_layout;
     String8 diagnostic;
     String8 warning;
     // Published in input/stage order, owned by the result arena. Empty on a
@@ -217,7 +240,10 @@ struct CompilerDriverResult
     GpuArtifact gpu;
     LlvmBitcodeArtifact llvm_bitcode;
     EbpfArtifact ebpf;
+    SpirvArtifact spirv;
     ObjectFile object;
+    // What serializing `object` cost, for -c; zero when no object was written.
+    ObjectWriteStatistics object_write_statistics;
     CodegenStatistics codegen_statistics;
     CompilerDriverFallbackRecord* fallback_records;
     u32 fallback_record_count;
@@ -248,7 +274,7 @@ struct CompilerDriverResult
     bool has_gpu;
     bool has_llvm_bitcode;
     bool has_ebpf;
-    u8 reserved;
+    bool has_spirv;
 };
 
 // Prepare the target-independent frontend, ABI and opcode tables. Serial

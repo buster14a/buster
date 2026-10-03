@@ -2,29 +2,32 @@ name: Compiler throughput
 
 on:
   pull_request:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       baseline_ref:
         description: Baseline commit or ref (PRs always use their immutable base SHA)
         default: main
-        required: true
-  schedule:
-    - cron: '23 4 * * 1'
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: throughput-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # The request workflow owns the bounded non-PR queue. A reusable invocation
+  # must not create a second, single-pending group that replaces its caller.
+  group: throughput-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The macOS leg lives in throughput-harness-macos.yml with a path filter
+  # (#1825), so the Linux comparison below never waits for a macOS runner.
+  # Keep its Unix harness step identical to this one.
   harness:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, macos-26, windows-2025]
+        os: [ubuntu-26.04, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:

@@ -27,9 +27,19 @@
   device space: every ordinary chord has at most 0.25 pixel geometric error,
   while ten subdivision levels cap one source curve at 1,024 segments. A
   count-then-emit pass allocates the exact path and rejects more than 1,048,576
-  raster points; a conservative limit of 67,108,864 scanline edge-search steps
+  raster points. Compound glyphs align unsigned byte/word indices in their
+  original outline points after applying component matrices, including nested
+  compounds. An explicit stack admits up to eight component levels; retained
+  original points are capped at 1,048,576, while glyph visits, anchor searches
+  and decoded/translated points share a 9,437,184-unit work budget. Glyph-local reads
+  and instruction-payload ranges are checked. Hinting and its phantom points
+  are not evaluated: an attachment outside the original outline points returns
+  an all-zero bitmap and rolls back its arena allocations; phantom-point support
+  is tracked by [#2138](https://github.com/buster14a/buster/issues/2138). A
+  conservative limit of 67,108,864 scanline edge-search steps
   further bounds raster work. The headless `truetype_tests` module covers these
-  contracts, including scale-sensitive curve goldens, the subdivision cap and
+  contracts, including point/XY attachment equivalence, transformed/nested
+  unsigned indices, scale-sensitive curve goldens, the subdivision cap and
   a deterministic malformed-parameter sweep in sanitizer and fuzz-enabled CI
   configurations.
 - The active headless `ide` target has no production TrueType caller. It adds
@@ -42,10 +52,40 @@
   `tests/truetype_dependency_test.py` checks the generated split graphs,
   builds the tests-disabled split compiler in Debug and Release, and checks
   the actual Release unity preprocessing closure for tests on and off.
+- TrueType horizontal kerning uses the legacy version-0 `kern` table's
+  format-0 subtables. Matching pair values add in subtable order; the override
+  coverage bit replaces the accumulated value, and later subtables can add to
+  that replacement. Missing pairs leave the accumulation unchanged. Vertical,
+  minimum-distance, cross-stream and other-format subtables are ignored by
+  this advance-only API. Pair arrays must fit their declared subtable length;
+  malformed arrays contribute nothing. Registered `truetype_tests` cover
+  additive order, overrides, absent pairs and coverage filtering using
+  synthetic font bytes, with no dependency on installed fonts.
 - Renderers consume window-system handles through `WmNativeSurface`; do not
   reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
 
+## Host CPU probing
+
+`entry_point` resolves host CPU facts through `target` and the selected
+`x86_64` or `aarch64` probe module. Split consumers register that architecture
+module; unity `target.c` includes it. The x86-64 probe owns CPUID/XGETBV and
+model/feature/brand queries without a compiler dependency. The existing
+`x86_64_encode_register_operation` declaration in `x86_64.h` is implemented by
+`compiler_assembly_metadata`; instruction-encoding consumers register that
+compiler module, while CPU-probe consumers do not.
+
 ## Transactional process spawning
+
+`os_get_environment_variable` searches the environment snapshot captured at
+entry. Windows names compare without case (`SystemRoot`/`SYSTEMROOT`,
+`PATH`/`Path`), using ordinal Unicode mapping for non-ASCII differences;
+POSIX names remain distinct. ASCII and byte-equal names need no allocation;
+the Unicode fallback uses temporary scratch or a private arena when no thread
+context is selected. The first matching captured entry
+wins, including an empty value, and the returned slice preserves its original
+bytes and pointer. Missing or empty query names return a null-empty slice.
+Registered `os_tests` cover these rules with serially replaced snapshots and
+restore the original environment before any other test runs.
 
 `os_process_spawn` validates all bounded argv and environment strings before it
 allocates a pipe or initializes a platform spawn object. Empty argv, embedded
@@ -79,6 +119,63 @@ the complete compiler environment. Registered `os_tests` inject each setup
 failure, compare live descriptor/handle counts, exercise an unrelated
 inheritable object, an exact hostile-PATH environment, and a subprocess that
 closes descriptors 0-2 before spawning with capture.
+
+## Deterministic captured-pipe replay
+
+Ordinary POSIX `os_process_wait_deadline` drains the blocking pipes created by
+`os_process_spawn`. `os_process_capture_step` in `os_internal.h` separates
+readiness, byte progress, EOF, abandonment and close observations from native
+calls. One readiness observation admits one read. A successful short read
+advances by its exact count; an interrupted read contributes no bytes and
+returns to polling. Poll timeout/interruption can be retried. EOF stops reads;
+one close attempt ends descriptor authority, even if that attempt fails.
+A close error conservatively leaves release outcome unknown and is never
+retried: it cannot authorize reuse of a possibly recycled descriptor.
+
+Transport failure and abandoned draining remain failed after successful child
+termination. Successfully drained prefixes are retained and the child's native
+status remains separately available. `capture_failed` reports transport/cleanup
+failure; abandonment without EOF remains unsuccessful without setting that bit.
+A timeout alone preserves the Wasm consumer's existing pre-readiness retry
+eligibility. The reducer does not authorize restarting a child whose external
+effects may already have happened.
+The reducer does not own process-group identity, cancellation signalling,
+descendant enumeration or the quiescent-group buffered-byte snapshot.
+
+Registered `os_tests` replay numeric `capture-replay-v1` event/count traces with
+an independent ownership/readiness/accounting oracle after every transition.
+The bounded worklist enumerates native-permitted prefixes through six events;
+deletion minimization retains admission and failure class, including the
+invariant class for discovered counterexamples. Shared poll failure is applied
+to every open stream. Traces contain no payloads, paths, command lines or user
+environment. Tests reject malformed counts, reads without readiness and reuse
+after close. They represent idle polls and EINTR, not read EAGAIN on these
+blocking pipes. The recorded `WAIT_FAILED, CLOSE_OK` regression is a minimal
+poll-resource-failure witness, conditional on a successful child exit.
+
+Read EBADF and close-after-release EIO injections are separate adapter
+robustness controls, excluded from native event generation. They test failure
+wiring, prefix preservation and uncertain-close handling; they do not prove
+that an exclusively owned anonymous pipe naturally returns these errors.
+The native fixture observes a real five-byte child's successful exit without
+reaping it, then applies a calling-thread, bounded call-index fault. Healthy
+controls before and after check real bytes and descriptor census. Existing
+real flood, deadlines and process-tree tests remain independent challenges;
+simulated success is not complete OS validation. Native fixture execution is
+desktop Linux/macOS; the reducer itself is portable C. Windows capture and
+group lifecycle are outside this replay model.
+
+Primary contracts are the Linux man-pages `read(2)`, `poll(2)`, `pipe(7)` and
+`close(2)` pages (rendered man-pages 6.19 at
+[man7.org](https://man7.org/linux/man-pages/)). Short progress, zero-byte EINTR,
+blocking-pipe EOF and poll ENOMEM are modeled; generic-file EIO examples are
+not transferred to anonymous pipes. At Apple XNU
+`f6217f891ac0bb64f3d375211650a4c1ff8ca1ea` (`xnu-12377.1.9`),
+[`pipe_close`](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/sys_pipe.c)
+returns zero. That file's header has APSL-2.0 plus John S. Dyson's custom
+redistribution terms; no code is imported. The inspected Linux documentation's
+per-page licenses/provenance and any unavailable verification remain recorded
+on the owning issue/PR rather than inferred as a repository-wide license.
 
 ## Virtual memory commitment and prefaulting
 
@@ -206,3 +303,14 @@ can make a mapping unavailable to test that real fallback. Registered tests
 also model stale stat sizes for growth/truncation deterministically, check
 prefix errors/interruption/EOF/stat/close failure and allocation rollback, and
 exercise actual compiler source and object input diagnostics.
+
+## Linux image-browser consumer
+
+The opt-in [native image browser](../projects/image-browser.md) consumes
+`window` and `rendering_raster` on Linux x86-64/XCB CPU presentation. The existing
+`WINDOW` module options link `xcb`, `xcb-imdkit`, `xcb-util`, `xcb-keysyms`,
+`xcb-xkb`, `xkbcommon-x11` and `xkbcommon`; the new target adds no native
+library dependency. Its own loader uses existing OS threads, one-lane dispatch
+and Linux libc synchronization/filesystem calls where no current generic API
+fits. It adds no UI/font/Vulkan module to the compiler. Native Xvfb pixel
+readback is software-XCB evidence, not GPU or other-platform product support.

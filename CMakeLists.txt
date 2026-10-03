@@ -11,6 +11,7 @@ set (CMAKE_COLOR_DIAGNOSTICS ON)
 include(CheckCCompilerFlag)
 include(CheckCSourceCompiles)
 include(cmake/IOSBundleAssets.cmake)
+include(cmake/NativeTargetCompatibility.cmake)
 
 set(BUSTER_CONFIG_TYPES Debug Release)
 
@@ -79,17 +80,14 @@ if (DEFINED CMAKE_BUILD_TYPE)
     set(BUSTER_STATUS_CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
 endif()
 
-set(BUSTER_CROSS_COMPILE ${CMAKE_CROSSCOMPILING})
-
-# CMake leaves CMAKE_SYSTEM_PROCESSOR empty for the iOS platform; derive it from
-# the requested architecture so the per-arch codegen module selection still works.
-if (NOT CMAKE_SYSTEM_PROCESSOR)
-    if (CMAKE_OSX_ARCHITECTURES)
-        list(GET CMAKE_OSX_ARCHITECTURES 0 CMAKE_SYSTEM_PROCESSOR)
-    else()
-        set(CMAKE_SYSTEM_PROCESSOR "${CMAKE_HOST_SYSTEM_PROCESSOR}")
-    endif()
+include(cmake/TargetArchitecture.cmake)
+set(BUSTER_TARGET_OSX_ARCHITECTURES "")
+if (DEFINED CMAKE_OSX_ARCHITECTURES)
+    set(BUSTER_TARGET_OSX_ARCHITECTURES "${CMAKE_OSX_ARCHITECTURES}")
 endif()
+buster_target_architecture(CMAKE_SYSTEM_PROCESSOR BUSTER_CROSS_COMPILE
+    "${CMAKE_SYSTEM_NAME}" "${CMAKE_SYSTEM_PROCESSOR}" "${CMAKE_HOST_SYSTEM_PROCESSOR}"
+    "${BUSTER_TARGET_OSX_ARCHITECTURES}" "${CMAKE_CROSSCOMPILING}")
 
 set(C_COMPILER_GNU OFF)
 set(C_COMPILER_APPLE_CLANG OFF)
@@ -121,6 +119,7 @@ if ((C_COMPILER_NAME STREQUAL "zig" OR C_COMPILER_NAME STREQUAL "zig.exe") AND "
 endif()
 
 option(BUSTER_CI "Enable CI mode" OFF)
+option(BUSTER_TEST_PROCESS_PARTITIONS "Run CI unit modules in isolated processes within the test quota" OFF)
 option(BUSTER_LINK_LIBC "Link libc" ON)
 option(BUSTER_UNITY_BUILD "Enable unity builds for optimized non-sanitized Clang configurations" ON)
 option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
@@ -209,7 +208,7 @@ if (NOT "${BUSTER_PGO_USE}" STREQUAL "")
         message(FATAL_ERROR "BUSTER_PGO_MANIFEST is empty")
     endif()
     list(GET BUSTER_PGO_MANIFEST_LINES 0 BUSTER_PGO_MANIFEST_VERSION)
-    if (NOT BUSTER_PGO_MANIFEST_VERSION STREQUAL "BUSTER_PGO_PROFILE_V1")
+    if (NOT BUSTER_PGO_MANIFEST_VERSION STREQUAL "BUSTER_PGO_PROFILE_V2")
         message(FATAL_ERROR "Unsupported BUSTER_PGO_MANIFEST version: ${BUSTER_PGO_MANIFEST_VERSION}")
     endif()
 
@@ -218,6 +217,7 @@ if (NOT "${BUSTER_PGO_USE}" STREQUAL "")
     set(BUSTER_PGO_MANIFEST_SOURCE_REVISION "")
     set(BUSTER_PGO_MANIFEST_SOURCE_TREE "")
     set(BUSTER_PGO_MANIFEST_CLANG_SHA256 "")
+    set(BUSTER_PGO_MANIFEST_BUILD_LTO "")
     foreach(BUSTER_PGO_MANIFEST_LINE IN LISTS BUSTER_PGO_MANIFEST_LINES)
         if (BUSTER_PGO_MANIFEST_LINE MATCHES "^fingerprint=([0-9a-f]+)$")
             if (BUSTER_PGO_MANIFEST_FINGERPRINT)
@@ -244,6 +244,11 @@ if (NOT "${BUSTER_PGO_USE}" STREQUAL "")
                 message(FATAL_ERROR "Duplicate clang_sha256 in BUSTER_PGO_MANIFEST")
             endif()
             set(BUSTER_PGO_MANIFEST_CLANG_SHA256 "${CMAKE_MATCH_1}")
+        elseif(BUSTER_PGO_MANIFEST_LINE MATCHES "^build_lto=(ON|OFF)$")
+            if (BUSTER_PGO_MANIFEST_BUILD_LTO)
+                message(FATAL_ERROR "Duplicate build_lto in BUSTER_PGO_MANIFEST")
+            endif()
+            set(BUSTER_PGO_MANIFEST_BUILD_LTO "${CMAKE_MATCH_1}")
         endif()
     endforeach()
 
@@ -269,6 +274,17 @@ if (NOT "${BUSTER_PGO_USE}" STREQUAL "")
 
     if (NOT BUSTER_PGO_MANIFEST_FINGERPRINT STREQUAL BUSTER_PGO_FINGERPRINT)
         message(FATAL_ERROR "PGO training fingerprint mismatch")
+    endif()
+
+    # IR PGO hashes control flow after the pre-link pipeline, which differs
+    # between ThinLTO and non-LTO builds, so a profile only fits its own mode.
+    if (BUSTER_LTO)
+        set(BUSTER_PGO_CURRENT_BUILD_LTO ON)
+    else()
+        set(BUSTER_PGO_CURRENT_BUILD_LTO OFF)
+    endif()
+    if (NOT BUSTER_PGO_MANIFEST_BUILD_LTO STREQUAL BUSTER_PGO_CURRENT_BUILD_LTO)
+        message(FATAL_ERROR "PGO profile was trained with build_lto=${BUSTER_PGO_MANIFEST_BUILD_LTO}, but BUSTER_LTO is ${BUSTER_PGO_CURRENT_BUILD_LTO}")
     endif()
 
     file(SHA256 "${BUSTER_PGO_USE}" BUSTER_PGO_CURRENT_PROFILE_SHA256)
@@ -352,20 +368,34 @@ if (BUSTER_FUZZ_AVAILABLE)
         message(FATAL_ERROR "Unsupported fuzz runtime architecture: ${CMAKE_SYSTEM_PROCESSOR}")
     endif()
 
+    # Distribution packages suffix the runtime with its architecture; upstream
+    # LLVM releases use the per-target runtime directory with unsuffixed names.
     if (WIN32)
-        set(BUSTER_FUZZ_RUNTIME_NAME "clang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.lib")
+        set(BUSTER_FUZZ_RUNTIME_NAMES
+            "clang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.lib"
+            "clang_rt.fuzzer_no_main.lib"
+        )
     else()
-        set(BUSTER_FUZZ_RUNTIME_NAME "libclang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.a")
+        set(BUSTER_FUZZ_RUNTIME_NAMES
+            "libclang_rt.fuzzer_no_main-${BUSTER_FUZZ_RUNTIME_ARCH}.a"
+            "libclang_rt.fuzzer_no_main.a"
+        )
     endif()
 
-    execute_process(
-        COMMAND "${CMAKE_C_COMPILER}" "--print-file-name=${BUSTER_FUZZ_RUNTIME_NAME}"
-        OUTPUT_VARIABLE BUSTER_FUZZ_NO_MAIN_RUNTIME
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE BUSTER_FUZZ_RUNTIME_RESULT
-    )
-    if (NOT BUSTER_FUZZ_RUNTIME_RESULT EQUAL 0 OR NOT IS_ABSOLUTE "${BUSTER_FUZZ_NO_MAIN_RUNTIME}" OR NOT EXISTS "${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
-        message(FATAL_ERROR "Could not find the Clang no-main fuzz runtime '${BUSTER_FUZZ_RUNTIME_NAME}': ${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
+    foreach(runtime_name IN LISTS BUSTER_FUZZ_RUNTIME_NAMES)
+        execute_process(
+            COMMAND "${CMAKE_C_COMPILER}" "--print-file-name=${runtime_name}"
+            OUTPUT_VARIABLE BUSTER_FUZZ_RUNTIME_CANDIDATE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE BUSTER_FUZZ_RUNTIME_RESULT
+        )
+        if (BUSTER_FUZZ_RUNTIME_RESULT EQUAL 0 AND IS_ABSOLUTE "${BUSTER_FUZZ_RUNTIME_CANDIDATE}" AND EXISTS "${BUSTER_FUZZ_RUNTIME_CANDIDATE}")
+            set(BUSTER_FUZZ_NO_MAIN_RUNTIME "${BUSTER_FUZZ_RUNTIME_CANDIDATE}")
+            break()
+        endif()
+    endforeach()
+    if (NOT BUSTER_FUZZ_NO_MAIN_RUNTIME)
+        message(FATAL_ERROR "Could not find the Clang no-main fuzz runtime (tried ${BUSTER_FUZZ_RUNTIME_NAMES})")
     endif()
 endif()
 
@@ -752,7 +782,7 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
         set(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "${BUSTER_ZIG_LINUX_ASAN_RUNTIME}")
     elseif (C_COMPILER_GNU_FAMILY)
         set(BUSTER_LINUX_ASAN_RUNTIME_NAMES)
-        if (C_COMPILER_CLANG_FAMILY)
+        if (C_COMPILER_CLANG AND NOT C_COMPILER_ZIG)
             if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
                 set(BUSTER_LINUX_ASAN_ARCH x86_64)
             elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
@@ -762,11 +792,12 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
             if (BUSTER_LINUX_ASAN_ARCH)
                 list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES
                     "libclang_rt.asan-${BUSTER_LINUX_ASAN_ARCH}.so"
-                    "libclang_rt.asan.so"
                 )
             endif()
+            list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libclang_rt.asan.so")
+        elseif (C_COMPILER_GNU)
+            list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libasan.so")
         endif()
-        list(APPEND BUSTER_LINUX_ASAN_RUNTIME_NAMES "libasan.so")
 
         foreach(runtime_name IN LISTS BUSTER_LINUX_ASAN_RUNTIME_NAMES)
             execute_process(
@@ -775,14 +806,36 @@ if (UNIX AND NOT APPLE AND BUSTER_SANITIZE)
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 RESULT_VARIABLE BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_RESULT
             )
+            get_filename_component(BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_NAME
+                "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}" NAME)
             if (BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_RESULT EQUAL 0
                 AND IS_ABSOLUTE "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}"
+                AND BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE_NAME STREQUAL "${runtime_name}"
                 AND EXISTS "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}")
                 get_filename_component(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME "${BUSTER_LINUX_ASAN_RUNTIME_CANDIDATE}" REALPATH)
                 get_filename_component(BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR "${BUSTER_LINUX_ASAN_PRELOAD_RUNTIME}" DIRECTORY)
                 break()
             endif()
         endforeach()
+
+        if (C_COMPILER_CLANG AND NOT C_COMPILER_ZIG AND NOT BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
+            set(BUSTER_LINUX_ASAN_EXPECTED_RUNTIME "libclang_rt.asan.so")
+            if (BUSTER_LINUX_ASAN_ARCH)
+                set(BUSTER_LINUX_ASAN_EXPECTED_RUNTIME
+                    "libclang_rt.asan-${BUSTER_LINUX_ASAN_ARCH}.so (or libclang_rt.asan.so)")
+            endif()
+            string(REGEX MATCH "^[0-9]+" BUSTER_LINUX_ASAN_CLANG_MAJOR
+                "${CMAKE_C_COMPILER_VERSION}")
+            set(BUSTER_LINUX_ASAN_PACKAGE_HINT
+                "Install the matching compiler-rt development package")
+            if (BUSTER_LINUX_ASAN_CLANG_MAJOR)
+                string(APPEND BUSTER_LINUX_ASAN_PACKAGE_HINT
+                    " (Debian/Ubuntu: libclang-rt-${BUSTER_LINUX_ASAN_CLANG_MAJOR}-dev)")
+            endif()
+            message(FATAL_ERROR
+                "Could not find Clang's Linux AddressSanitizer runtime ${BUSTER_LINUX_ASAN_EXPECTED_RUNTIME} for ${CMAKE_C_COMPILER}. "
+                "${BUSTER_LINUX_ASAN_PACKAGE_HINT}.")
+        endif()
     endif()
 
     if (BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
@@ -1034,6 +1087,7 @@ buster_register_module(compiler_wasm "${BUSTER_SOURCE_DIR}/compiler/wasm/wasm${C
 buster_register_module(compiler_gpu "${BUSTER_SOURCE_DIR}/compiler/gpu/gpu${COMMON_EXTENSION}")
 buster_register_module(compiler_llvm_bitcode "${BUSTER_SOURCE_DIR}/compiler/llvm/bitcode${COMMON_EXTENSION}")
 buster_register_module(compiler_ebpf "${BUSTER_SOURCE_DIR}/compiler/ebpf/ebpf${COMMON_EXTENSION}")
+buster_register_module(compiler_spirv "${BUSTER_SOURCE_DIR}/compiler/spirv/spirv${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
@@ -1045,6 +1099,8 @@ buster_register_module(ui_builder "${BUSTER_SOURCE_DIR}/ui_builder${COMMON_EXTEN
 buster_register_module(window "${BUSTER_SOURCE_DIR}/window${COMMON_EXTENSION}")
 buster_register_module(rendering "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSION}")
 buster_register_module(truetype "${BUSTER_SOURCE_DIR}/truetype${COMMON_EXTENSION}")
+buster_register_module(image
+    "${BUSTER_SOURCE_DIR}/image${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/png${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/jpeg${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/gif${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/bmp${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/tga${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/qoi${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/image/pnm${COMMON_EXTENSION}")
 buster_register_module(font_provider "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
 buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
 
@@ -1062,10 +1118,13 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/file_test.c
     src/buster/tests/target_test.c
     src/buster/tests/truetype_test.c
+    src/buster/tests/image_test.c
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/frontend/c/once_test.c
+    src/buster/tests/compiler/frontend/c/type_layout_test.c
     src/buster/tests/compiler/frontend/c/macro_conditional_test.c
+    src/buster/tests/compiler/frontend/c/record_layout_test.c
     src/buster/tests/compiler/assembly/aarch64_encoding_test.c
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c
@@ -1101,6 +1160,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/jit/jit_test.c
     src/buster/tests/compiler/link/link_test.c
     src/buster/tests/compiler/gpu/gpu_test.c
+    src/buster/tests/compiler/spirv/spirv_test.c
     src/buster/tests/compiler/driver/driver_test.c
     src/buster/tests/compiler/driver/object_path_test.c
 )
@@ -1115,15 +1175,20 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/simd_test.h
     src/buster/tests/string_test.h
     src/buster/tests/os_test.h
+    src/buster/tests/os_capture_replay_test_internal.h
     src/buster/tests/file_test.h
     src/buster/tests/target_test.h
     src/buster/tests/truetype_test.h
+    src/buster/tests/image_test.h
     src/buster/tests/x86_64_test.h
     src/buster/tests/compiler/metamorphic/metamorphic_test.h
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
     src/buster/tests/compiler/frontend/c/c_test.h
     src/buster/tests/compiler/frontend/c/once_test.h
+    src/buster/tests/compiler/frontend/c/type_layout_test.h
     src/buster/tests/compiler/frontend/c/macro_conditional_test.h
+    src/buster/tests/compiler/frontend/c/record_layout_test.h
+    src/buster/tests/compiler/frontend/c/record_layout_corpus.generated.h
     src/buster/tests/compiler/assembly/aarch64_encoding_test.h
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.h
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.h
@@ -1159,6 +1224,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/jit/jit_test.h
     src/buster/tests/compiler/link/link_test.h
     src/buster/tests/compiler/gpu/gpu_test.h
+    src/buster/tests/compiler/spirv/spirv_test.h
     src/buster/tests/compiler/driver/driver_test.h
     src/buster/tests/compiler/driver/object_path_test.h
 )
@@ -1312,6 +1378,11 @@ if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # 32-byte-aligned AVX spills without realigning the incoming stack.
     list(APPEND GNU_FAMILY_NATIVE_TARGET -mno-avx)
 endif()
+buster_native_target_compatibility_flags(
+    GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY
+    "${CMAKE_C_COMPILER_ID}" "${C_COMPILER_ZIG}" "${CMAKE_C_COMPILER_VERSION}" "${CMAKE_SYSTEM_PROCESSOR}" "${BUSTER_CROSS_COMPILE}"
+)
+list(APPEND GNU_FAMILY_NATIVE_TARGET ${GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY})
 
 # Match the unsigned plain-char contract of GNU_FAMILY_OPTIONS. /J changes
 # the compiler's type semantics; defining _CHAR_UNSIGNED alone is not enough.
@@ -1777,11 +1848,13 @@ function(executable_add name is_buster_program main_file)
         endif()
     endif()
 
-    if (NOT "${BUSTER_PGO_GENERATE}" STREQUAL "")
+    # The sealed production profile is trained on ide. Other executables have
+    # different unity call graphs and cannot consume its control-flow hashes.
+    if ("${name}" STREQUAL "ide" AND NOT "${BUSTER_PGO_GENERATE}" STREQUAL "")
         set(BUSTER_PGO_GENERATE_FLAG "-fprofile-generate=${BUSTER_PGO_GENERATE}")
         target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_GENERATE_FLAG}>")
         target_link_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_GENERATE_FLAG}>")
-    elseif(NOT "${BUSTER_PGO_USE}" STREQUAL "")
+    elseif("${name}" STREQUAL "ide" AND NOT "${BUSTER_PGO_USE}" STREQUAL "")
         set(BUSTER_PGO_USE_FLAG "-fprofile-use=${BUSTER_PGO_USE}")
         target_compile_options(${name} PRIVATE
             "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_USE_FLAG}>"
@@ -2008,13 +2081,15 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
-# The headless compiler has no production font consumer.  Keep the reusable
-# module registered above, but add it to ide only when its registered tests are
-# present.  A future product target using font_provider must name truetype in
-# its own module inventory rather than relying on ide's test dependency.
+# The headless compiler has no production font or image consumer. Keep the
+# reusable modules registered above, but add them to ide only for their tests
+# (and image fuzzing). Future product targets must name their own dependencies.
 set(BUSTER_COMPILER_TEST_MODULES)
 if (BUSTER_INCLUDE_TESTS)
     list(APPEND BUSTER_COMPILER_TEST_MODULES truetype)
+endif()
+if (BUSTER_INCLUDE_TESTS OR BUSTER_FUZZ_AVAILABLE)
+    list(APPEND BUSTER_COMPILER_TEST_MODULES image)
 endif()
 
 # buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
@@ -2061,6 +2136,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_gpu
     compiler_llvm_bitcode
     compiler_ebpf
+    compiler_spirv
     compiler_driver
     simd
     file
@@ -2069,6 +2145,8 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     hash
     ${BUSTER_COMPILER_PLATFORM_MODULES}
 )
+
+include(cmake/HotReloadDemo.cmake)
 
 if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
      CMAKE_SYSTEM_PROCESSOR MATCHES
@@ -2109,25 +2187,11 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
         endif()
     endif()
 
-    # Pick the newest installed build-tools unless told otherwise.
-    if (NOT BUSTER_ANDROID_BUILD_TOOLS_DIR)
-        file(GLOB BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES "${BUSTER_ANDROID_SDK}/build-tools/*")
-        if (BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES)
-            list(SORT BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES)
-            list(GET BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES -1 BUSTER_ANDROID_BUILD_TOOLS_DIR)
-        endif()
-    endif()
-
-    # android.jar matching the configured platform (fallback to newest available).
-    string(REGEX MATCH "[0-9]+" BUSTER_ANDROID_API_LEVEL "${ANDROID_PLATFORM}")
-    set(BUSTER_ANDROID_JAR "${BUSTER_ANDROID_SDK}/platforms/android-${BUSTER_ANDROID_API_LEVEL}/android.jar")
-    if (NOT EXISTS "${BUSTER_ANDROID_JAR}")
-        file(GLOB BUSTER_ANDROID_PLATFORM_JARS "${BUSTER_ANDROID_SDK}/platforms/*/android.jar")
-        if (BUSTER_ANDROID_PLATFORM_JARS)
-            list(SORT BUSTER_ANDROID_PLATFORM_JARS)
-            list(GET BUSTER_ANDROID_PLATFORM_JARS -1 BUSTER_ANDROID_JAR)
-        endif()
-    endif()
+    include(cmake/AndroidSdkSelection.cmake)
+    buster_android_build_tools(BUSTER_ANDROID_BUILD_TOOLS_DIR
+        "${BUSTER_ANDROID_SDK}" "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
+    buster_android_platform_jar(BUSTER_ANDROID_JAR
+        "${BUSTER_ANDROID_SDK}" "${ANDROID_PLATFORM}" "${BUSTER_ANDROID_JAR}")
 
     find_program(BUSTER_AAPT2 aapt2 HINTS "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
     find_program(BUSTER_ZIPALIGN zipalign HINTS "${BUSTER_ANDROID_BUILD_TOOLS_DIR}")
@@ -2210,6 +2274,40 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
         VERBATIM
     )
 else()
+    if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
+        executable_add(ui_slider_component_tests OFF src/buster/tests/ui_slider_component_test.c
+            MODULES os arena integer string file hash time float ui_core ui_builder
+            SOURCES src/buster/tests/ui_slider_test.c)
+        if (UNIX)
+            target_link_libraries(ui_slider_component_tests PRIVATE m)
+        elseif (WIN32)
+            target_link_libraries(ui_slider_component_tests PRIVATE ws2_32)
+        endif()
+        add_custom_target(test_ui_slider
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:ui_slider_component_tests>"
+            DEPENDS ui_slider_component_tests
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run headless UI slider input regressions"
+            VERBATIM)
+    endif()
+    if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
+        # Exercise real UI consumers without adding native window/rendering
+        # modules to the headless compiler. The runner owns an inert renderer
+        # boundary and the same foundation modules as the measurement tools.
+        executable_add(ui_utf8_component_tests OFF src/buster/tests/ui_utf8_component_test.c
+            MODULES os arena integer string file hash time float ui_core)
+        if (UNIX)
+            target_link_libraries(ui_utf8_component_tests PRIVATE m)
+        elseif (WIN32)
+            target_link_libraries(ui_utf8_component_tests PRIVATE ws2_32)
+        endif()
+        add_custom_target(test_ui_utf8
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:ui_utf8_component_tests>"
+            DEPENDS ui_utf8_component_tests
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run headless UI UTF-8 consumer regressions"
+            VERBATIM)
+    endif()
     add_custom_target(test_units
         COMMAND
         ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
@@ -2219,6 +2317,26 @@ else()
         COMMENT "Run unit tests"
         VERBATIM
     )
+    if (BUSTER_CI)
+        # The native driver owns child quotas, completion proof and cleanup.
+        # These opt-in targets reuse ide and the authoritative sanitizer env.
+        add_custom_target(test_units_partitioned
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+                "${BUSTER_BUILD_DRIVER}" test_units_partitioned "$<TARGET_FILE:ide>"
+            DEPENDS ide
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run isolated unit-test module partitions"
+            VERBATIM
+        )
+        add_custom_target(test_unit_inventory
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+                "BUSTER_TEST_MODULE_GROUP=inventory" "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
+            DEPENDS ide
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Query the unit-test module inventory without executing modules"
+            VERBATIM
+        )
+    endif()
     # Native observer only; this prefix does not change dependencies or test policy.
     set(BUSTER_MATRIX_TEST_OBSERVER)
     if (BUSTER_MATRIX_PHASE_DRIVER)
@@ -2230,10 +2348,14 @@ else()
             "${BUSTER_MATRIX_PHASE_EPOCH}" 0 --)
     endif()
     if (BUSTER_CI)
+        set(BUSTER_CI_TEST_COMMAND "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS})
+        if (BUSTER_TEST_PROCESS_PARTITIONS)
+            set(BUSTER_CI_TEST_COMMAND "${BUSTER_BUILD_DRIVER}" test_units_partitioned "$<TARGET_FILE:ide>")
+        endif()
         add_custom_target(test_all
             COMMAND
             ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
-            ${BUSTER_MATRIX_TEST_OBSERVER} "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
+            ${BUSTER_MATRIX_TEST_OBSERVER} ${BUSTER_CI_TEST_COMMAND}
             DEPENDS ide
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             COMMENT "Run all compiler and library tests"
@@ -2249,6 +2371,16 @@ else()
             COMMENT "Test all"
             VERBATIM
         )
+    endif()
+
+    if (TARGET test_ui_slider)
+        add_dependencies(test_all test_ui_slider)
+        add_dependencies(test_units test_ui_slider)
+    endif()
+
+    if (TARGET test_ui_utf8)
+        add_dependencies(test_all test_ui_utf8)
+        add_dependencies(test_units test_ui_utf8)
     endif()
 
     # Desktop-only performance benchmark. Not wired up for Android/iOS:
@@ -2277,9 +2409,26 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
             COMMENT "Running clang --analyze"
             VERBATIM
         )
+        # See docs/agents/build.md: no production function of the unity ide may
+        # inherit the test region's optnone (#1376).
+        add_custom_target(optnone_audit
+            COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}"
+                optnone_audit
+                "${CMAKE_BINARY_DIR}"
+                --config "$<CONFIG>"
+                --quiet
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            USES_TERMINAL
+            COMMENT "Auditing optnone in the unity ide"
+            VERBATIM
+        )
     else()
         message(STATUS "clang_analyze target disabled: ${BUSTER_CLANG_ANALYZE_DRIVER} not found")
     endif()
 elseif (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG)
     message(STATUS "clang_analyze target disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF")
 endif()
+
+# Separate application/component graphs keep graphics out of the compiler.
+include(cmake/Raster.cmake)
+include(cmake/ImageBrowser.cmake)

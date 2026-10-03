@@ -223,18 +223,21 @@ TargetDataLayout target_data_layout(Target target)
     bool wasm32 = target.cpu_arch == CPU_ARCH_WASM32;
     bool wasm64 = target.cpu_arch == CPU_ARCH_WASM64;
     bool bpfel = target.cpu_arch == CPU_ARCH_BPFEL;
+    bool spirv_compute = target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE;
     bool wasm = wasm32 || wasm64;
     bool arm_plain_char_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && !windows;
-    u32 pointer_size = wasm32 ? 4 : 8;
-    u32 long_size = llp64 || wasm32 ? 4 : 8;
-    bool double_long_double = llp64 || wasm64 || bpfel || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
+    u32 pointer_size = wasm32 || spirv_compute ? 4 : 8;
+    u32 long_size = llp64 || wasm32 || spirv_compute ? 4 : 8;
+    bool plain_char_is_signed = target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED ||
+                                (target.plain_char_policy != TARGET_PLAIN_CHAR_POLICY_UNSIGNED && !arm_plain_char_unsigned);
+    bool double_long_double = llp64 || wasm64 || bpfel || spirv_compute || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
     u32 long_double_size = double_long_double ? 8 : 16;
     bool x87_long_double = target.cpu_arch == CPU_ARCH_X86_64 && target.os != OPERATING_SYSTEM_ANDROID;
     u32 long_double_bits = double_long_double ? 64 : x87_long_double ? 80 : 128;
     bool aarch64_pointer_list = target.cpu_arch == CPU_ARCH_AARCH64 && (apple || windows);
-    u32 va_list_size = wasm32 ? 4 : llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
+    u32 va_list_size = wasm32 || spirv_compute ? 4 : llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
                        target.cpu_arch == CPU_ARCH_X86_64 ? TARGET_X86_64_SYSV_VA_LIST_SIZE : 32;
-    u32 va_list_alignment = wasm32 ? 4 : 8;
+    u32 va_list_alignment = wasm32 || spirv_compute ? 4 : 8;
 
     TargetDataLayout layout = {
         .boolean = {.size = 1, .alignment = 1, .bit_width = 1},
@@ -264,8 +267,8 @@ TargetDataLayout target_data_layout(Target target)
         .abi_stack_alignment = bpfel ? 8 : 16,
         .abi_max_alignment = bpfel ? 8 : 16,
         .endianness = TARGET_ENDIAN_LITTLE,
-        .plain_char_is_signed = !arm_plain_char_unsigned,
-        .has_128_bit_integer = !wasm && !bpfel,
+        .plain_char_is_signed = plain_char_is_signed,
+        .has_128_bit_integer = !wasm && !bpfel && !spirv_compute,
     };
     return layout;
 }
@@ -410,6 +413,14 @@ TargetParseResult target_parse_triple(String8 triple)
 
     u64 component_start = 0;
     u32 component_index = 0;
+    // The execution environment is part of this exact spelling. Generic
+    // SPIR-V triples remain owned by the external GPU pipeline parser.
+    if (string_equal(triple, S8("spirv-vulkan1.2-compute")))
+    {
+        result.target.cpu_arch = CPU_ARCH_SPIRV_COMPUTE;
+        result.target.os = OPERATING_SYSTEM_FREESTANDING;
+        component_start = triple.length;
+    }
     while (component_start < triple.length)
     {
         u64 component_end = component_start;
@@ -583,7 +594,7 @@ bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
     if (model == CPU_MODEL_BASELINE)
     {
         return arch == CPU_ARCH_X86_64 || arch == CPU_ARCH_AARCH64 || arch == CPU_ARCH_WASM32 || arch == CPU_ARCH_WASM64 ||
-               arch == CPU_ARCH_BPFEL;
+               arch == CPU_ARCH_BPFEL || arch == CPU_ARCH_SPIRV_COMPUTE;
     }
     if (model == CPU_MODEL_NATIVE)
     {
@@ -1218,7 +1229,8 @@ bool target_cpu_features_are_valid(Target target)
     if (target.cpu_features_explicit)
     {
         TargetCpuFeatures features = target.cpu_features;
-        if (target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64 || target.cpu_arch == CPU_ARCH_BPFEL)
+        if (target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64 || target.cpu_arch == CPU_ARCH_BPFEL ||
+            target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE)
         {
             return !target_cpu_features_any(features);
         }
@@ -1859,6 +1871,9 @@ String8 cpu_arch_to_string_os(CpuArch arch)
         break;
     case CPU_ARCH_BPFEL:
         result = S8("bpfel");
+        break;
+    case CPU_ARCH_SPIRV_COMPUTE:
+        result = S8("spirv-vulkan1.2-compute");
         break;
     default:
         result = S8("");

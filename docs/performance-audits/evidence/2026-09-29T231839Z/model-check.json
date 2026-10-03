@@ -1,0 +1,246 @@
+{
+  "canonical_five_parameter_chain": {
+    "dense": {
+      "counts": {
+        "block_visits": 4,
+        "cap_hit": 1,
+        "empty_block_visits": 0,
+        "incoming_visits": 28,
+        "logical_sweeps": 4,
+        "parameter_visits": 14,
+        "removed_parameters": 4,
+        "root_hops": 3,
+        "root_queries": 28
+      },
+      "state": {
+        "parameter_roots": [
+          [
+            100,
+            100
+          ],
+          [
+            101,
+            0
+          ],
+          [
+            102,
+            0
+          ],
+          [
+            103,
+            0
+          ],
+          [
+            104,
+            0
+          ]
+        ],
+        "remaining_incoming": [
+          [
+            100,
+            [
+              0,
+              0
+            ]
+          ]
+        ],
+        "remaining_values": [
+          100
+        ],
+        "removal_events": [
+          [
+            1,
+            104,
+            0
+          ],
+          [
+            2,
+            103,
+            0
+          ],
+          [
+            3,
+            102,
+            0
+          ],
+          [
+            4,
+            101,
+            0
+          ]
+        ]
+      }
+    },
+    "fifo": {
+      "counts": {
+        "budget_exhausted": 0,
+        "construction_block_visits": 1,
+        "construction_empty_block_visits": 0,
+        "construction_parameter_visits": 5,
+        "incoming_visits": 18,
+        "index_creation_incoming_visits": 10,
+        "index_creation_occurrences": 10,
+        "index_creation_roots": 5,
+        "index_retarget_occurrences": 4,
+        "index_root_pop_operations": 5,
+        "notification_live_occurrences": 4,
+        "notification_occurrences": 4,
+        "parameter_check_budget": 20,
+        "parameter_visits": 9,
+        "queue_enqueue_attempts": 9,
+        "queue_enqueues": 9,
+        "queue_peak_entries": 5,
+        "queue_pending_at_exit": 0,
+        "queue_pops": 9,
+        "removed_parameters": 5,
+        "root_hops": 4,
+        "root_queries": 18
+      },
+      "state": {
+        "parameter_roots": [
+          [
+            100,
+            0
+          ],
+          [
+            101,
+            0
+          ],
+          [
+            102,
+            0
+          ],
+          [
+            103,
+            0
+          ],
+          [
+            104,
+            0
+          ]
+        ],
+        "remaining_incoming": [],
+        "remaining_values": [],
+        "removal_events": [
+          [
+            5,
+            104,
+            0
+          ],
+          [
+            6,
+            103,
+            0
+          ],
+          [
+            7,
+            102,
+            0
+          ],
+          [
+            8,
+            101,
+            0
+          ],
+          [
+            9,
+            100,
+            0
+          ]
+        ]
+      }
+    },
+    "ordered_agenda": {
+      "counts": {
+        "cap_hit": 1,
+        "construction_block_visits": 1,
+        "construction_empty_block_visits": 0,
+        "construction_parameter_visits": 5,
+        "incoming_visits": 16,
+        "index_creation_incoming_visits": 10,
+        "index_creation_occurrences": 10,
+        "index_creation_roots": 5,
+        "index_retarget_occurrences": 4,
+        "index_root_pop_operations": 4,
+        "logical_sweeps": 4,
+        "notification_live_occurrences": 4,
+        "notification_occurrences": 4,
+        "parameter_visits": 8,
+        "queue_current_enqueues": 5,
+        "queue_enqueue_attempts": 9,
+        "queue_enqueues": 9,
+        "queue_next_enqueues": 4,
+        "queue_peak_entries": 5,
+        "queue_pending_at_exit": 1,
+        "queue_pops": 8,
+        "queue_round_transfers": 3,
+        "removed_parameters": 4,
+        "root_hops": 3,
+        "root_queries": 16
+      },
+      "state": {
+        "parameter_roots": [
+          [
+            100,
+            100
+          ],
+          [
+            101,
+            0
+          ],
+          [
+            102,
+            0
+          ],
+          [
+            103,
+            0
+          ],
+          [
+            104,
+            0
+          ]
+        ],
+        "remaining_incoming": [
+          [
+            100,
+            [
+              0,
+              0
+            ]
+          ]
+        ],
+        "remaining_values": [
+          100
+        ],
+        "removal_events": [
+          [
+            1,
+            104,
+            0
+          ],
+          [
+            2,
+            103,
+            0
+          ],
+          [
+            3,
+            102,
+            0
+          ],
+          [
+            4,
+            101,
+            0
+          ]
+        ]
+      }
+    }
+  },
+  "command": "python3 tools/research/phase_order_model_check.py",
+  "dense_ordered_mismatch_cases": [],
+  "dependency_graphs": 10000,
+  "scope": "Offline dependency graphs, not compiled C or validated canonical IR inputs",
+  "seed": 20260930
+}

@@ -411,6 +411,10 @@ struct IrType
     // zero-parameter prototypes and never set it.
     bool is_unprototyped;
     u8 float_format;
+    // Optional source-language integer conversion rank. Width and signedness
+    // do not distinguish, for example, LP64 long from long long. Numeric rank
+    // contains no frontend type ID and survives aligned/qualified copies.
+    u8 integer_conversion_rank;
 };
 
 typedef struct IrTypeTable IrTypeTable;
@@ -443,7 +447,9 @@ struct IrSymbol
     String8 name;
     String8 link_name;
     // Optional object-format section requested by the source declaration.
-    // Direct object backends consume this without frontend-specific parsing.
+    // The ELF object writer places a definition there, the LLVM bitcode
+    // writer records it and eBPF names programs with it; the C frontend
+    // refuses it where the output cannot place it (issue 1276).
     String8 section_name;
     IrSourceRange source;
     IrTypeId type;

@@ -1,0 +1,12 @@
+Stage-1 large-input family (callgrind, observation builds), run from a clean checkout of
+main d9e736e2cf08804a2c603d153e9fb608f18c5c49 (the compiled input is the unmodified base source):
+
+valgrind --tool=callgrind --dump-instr=no --collect-jumps=no --callgrind-out-file=<out> \
+  <ide-obs | ide-proto-obs> cc -march=cascadelake -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 \
+  -DBUSTER_INCLUDE_TESTS=0 -g -v -fsource-metrics=<metrics> src/buster/apps/ide/ide.c -lm -o <exe>
+
+base  (ide-obs       b33526b8d871877ed6f9306007b346ca3f8fdd5ecad24a8f55b6f3ad211ac0e1): 24,810,589,023 Ir
+cand  (ide-proto-obs bfac855a38bc38fa43e5745fa2c2f4171b84004c082e835d4e07993df57fa098): 24,782,977,851 Ir
+delta: -27,611,172 Ir (-0.111%)
+produced executable, both: a3fadc98f19a5ff9f3362be67a12e6c5c45f762709d000d8d7146e59554ebfbb
+-v statistics lines (IR_FRONTEND_SSA, IR_FAST*, IR_LOCAL_PROMOTION*, CODEGEN*): identical

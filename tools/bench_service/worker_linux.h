@@ -90,6 +90,7 @@ typedef struct BqWorkerObserved
     bool syscall_architectures_native;
     bool syscall_filter_system_service;
     bool syscall_error_number_eperm;
+    bool capability_sets_empty;
     bool security_properties_valid;
     bool paths_valid;
     char inaccessible_paths[BQ_PATH_CAP * 2 + 2];
@@ -111,7 +112,9 @@ struct BqWorkerBackend
     BqError (*start)(BqWorkerBackend*, char const* const*, u32);
     BqError (*observe)(BqWorkerBackend*, char const*, BqWorkerObserved*, u64);
     BqError (*signal)(BqWorkerBackend*, char const*, char const*, u64);
-    BqError (*join)(BqWorkerBackend*, int*, u64);
+    /* The final flag makes a pending worker cancellation interrupt the wait.
+     * Cleanup joins pass false: they run after the outer unit is proven empty. */
+    BqError (*join)(BqWorkerBackend*, int*, u64, bool);
     BqError (*cleanup_launcher)(BqWorkerBackend*, u64);
     BqError (*delay)(BqWorkerBackend*, u32);
     u64 (*clock)(BqWorkerBackend*);

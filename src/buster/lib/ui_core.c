@@ -129,23 +129,24 @@ BUSTER_GLOBAL_LOCAL u64 ui_utf8_sequence_length(String8 string, u64 position)
 BUSTER_GLOBAL_LOCAL u32 ui_utf8_codepoint_at(String8 string, u64 position)
 {
     u64 length = ui_utf8_sequence_length(string, position);
+    u32 result;
     if (length == 0)
     {
-        return 0xfffdu;
+        result = 0xfffdu;
     }
-    u8 first = (u8)string.pointer[position];
-    u32 result = first;
-    if (length >= 2)
+    else
     {
-        result = (result & 0x1fu) << 6 | ((u8)string.pointer[position + 1] & 0x3fu);
-    }
-    if (length >= 3)
-    {
-        result = (result & 0x0fu) << 6 | ((u8)string.pointer[position + 2] & 0x3fu);
-    }
-    if (length == 4)
-    {
-        result = (result & 0x07u) << 6 | ((u8)string.pointer[position + 3] & 0x3fu);
+        u8 first = (u8)string.pointer[position];
+        result = first;
+        if (length >= 2)
+        {
+            u32 first_mask = length == 2 ? 0x1fu : length == 3 ? 0x0fu : 0x07u;
+            result &= first_mask;
+        }
+        for (u64 index = 1; index < length; index += 1)
+        {
+            result = result << 6 | ((u8)string.pointer[position + index] & 0x3fu);
+        }
     }
     return result;
 }
@@ -700,6 +701,7 @@ UI_BoxFlagInfo ui_box_flag_info(u32 bit_index)
         UI_BOX_FLAG_INFO(54, HasFuzzyMatchRanges, Appearance, false);
         UI_BOX_FLAG_INFO(55, RoundChildrenByParent, Appearance, true);
         UI_BOX_FLAG_INFO(56, SquishAnchored, Appearance, false);
+        UI_BOX_FLAG_INFO(57, OwnsHorizontalArrows, Interaction, false);
         case 63:
             result.flag = UI_BoxFlag_Debug;
             result.name = S8("Debug");
@@ -2320,9 +2322,12 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
             UI_BoxFlags axis_flag = 0;
             UI_FocusDirection direction = UI_FocusDirection_LinearForward;
             event->owner_assigned = 1;
-            bool edit_owns_horizontal_arrow = !ui_key_match(provisional_focus_edit, ui_key_zero()) &&
-                                               (event->key == WM_KEY_LEFT || event->key == WM_KEY_RIGHT);
-            if (ui_focus_navigation_event(event, &axis_flag, &direction) && !edit_owns_horizontal_arrow)
+            UI_Box* focused_box = ui_box_from_key(provisional_focus_active);
+            bool widget_owns_horizontal_arrows = focused_box && focused_box->last_touched_build_index == previous_build_index &&
+                                                 ui_box_focusable(focused_box, true) && (focused_box->flags & UI_BoxFlag_OwnsHorizontalArrows);
+            bool owns_horizontal_arrow = (event->key == WM_KEY_LEFT || event->key == WM_KEY_RIGHT) &&
+                                         (!ui_key_match(provisional_focus_edit, ui_key_zero()) || widget_owns_horizontal_arrows);
+            if (ui_focus_navigation_event(event, &axis_flag, &direction) && !owns_horizontal_arrow)
             {
                 UI_Box* candidate = ui_focus_navigation_candidate(provisional_focus_active, axis_flag, direction, previous_build_index, ui_state->previous_root);
                 if (candidate)
@@ -2570,6 +2575,7 @@ UI_Signal ui_signal_from_box(UI_Box* box)
                 {
                     sig.f |= UI_SignalFlag_LeftClicked;
                     sig.clicked_left = 1;
+                    sig.left_click_position = event->pos;
                 }
             }
             ui_eat_event(event);

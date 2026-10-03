@@ -17,6 +17,56 @@ Expression/type queries and initializer walks use explicit work stacks. Constant
 values contain scalar bits and a C type, including the target's integer width
 and floating representation; they are not canonical values or instructions.
 
+## Declaration constraints
+
+Declaration-specifier parsing rejects repeated or conflicting storage classes
+before publishing an entity. `c_parse_storage_classes_valid` normalizes GNU
+thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
+thread-local combinations. A typed `auto` declaration at file scope or with
+another storage class still requires type inference under C23 6.7.1p4.
+
+Windows target predefines in `c_source.c` normalize `__inline` and `__forceinline`
+to the function specifier `inline`, without injecting a storage class. UCRT-style
+`static __inline` and `extern __inline` declarations retain their source storage;
+explicit duplicate and conflicting classes remain rejected. The regression checks
+canonical symbol linkage for static, extern, and bare aliases using the existing
+inline lowering policy; it does not add Microsoft COMDAT emission semantics.
+
+`c_type_parse_root_finish` validates restrict applicability on the type rows a
+query appended, after parenthesized function-pointer declarators settle. Direct
+pointer construction and GNU `__auto_type` inference use the same object-pointer
+predicate. Scalar, void, and function-pointer restrict qualifiers fail; object
+pointers, typedef-mediated pointers, and arrays of object pointers remain valid.
+
+`c_parse_type_is_variably_modified` follows array and pointer derivations, so
+file-scope identifiers and block-scope identifiers with linkage cannot acquire
+variably modified types through typedefs or pointer-to-VLA declarations. The
+separate array-only duration check still permits a static pointer to a VLA while
+rejecting a VLA object with static duration. Function prototype parameter types
+retain their existing rules; the VM walk stops at function types.
+
+The bound check uses the semantic typed constant folder. NORMAL-mode sizeof
+type operands use the complete abstract-declarator reader, so parenthesized
+pointers to arrays and functions retain their pointer size. Its explicit task
+stack retains GNU's selected omitted-middle conditional value and its common
+branch type, and resolves null-derived member addresses from target layout offsets, evaluating each
+array index as a typed child so truncating casts and faults retain C semantics. Numeric pointer
+subtraction uses pointee units, so musl's portable null-based offsetof array
+bounds remain constant. Runtime pointer bases and indexes still produce VM
+types; a folder's unsupported shape is never accepted as a constant. The
+protected TYPE-mode and enum constant queries retain their separate refusal
+rules; only NORMAL-mode conversions admit numeric pointers at the target width.
+
+`c_parse_tag_lookup` chooses the nearest visible spelling across the existing
+struct, union, and enum indexes. A conflicting kind reports `wrong kind of tag`;
+an inner tag body or standalone tag declaration can introduce a new identity.
+Ordinary identifiers and typedef names retain their separate namespace.
+
+`c_test_declaration_constraints` pins accepted and rejected neighbors for
+issues #1854, #1855, #1856, and #1859 through semantics-only analysis and both
+canonical lowering forms. Rejected inputs must have source diagnostics and may
+not become successful partial programs.
+
 ## Lowering diagnostic inventory
 
 The inventory covers source-dependent rejection sites in `c_gen.c`, including
@@ -56,6 +106,65 @@ Failed queries, speculative machine frames and copied semantic models do not
 publish cache entries. Immutable scalar query types are created before query
 checkpoints; declarator and qualified types remain independent. All borrowed
 cache pointers are cleared before the semantic model is returned.
+
+`CParseResult.type_identity_queries` retains successful `_Generic` selections
+and `__builtin_types_compatible_p` answers through lowering. These compact rows
+contain original token ranges or an integer answer; no frontend identity enters
+canonical IR. The shared semantic resolver uses `CType` compatibility, applies
+lvalue/array/function conversion only to generic controllers, and preserves
+qualifiers below the outermost level. The GNU builtin ignores only outermost
+qualifiers. Associations use full abstract declarators, including function
+pointers and pointers to arrays. A generic expression retains its selected
+expression's type, including when inspected by `typeof` or `sizeof`.
+
+The existing token position index records identity-query candidates once.
+Nested queries settle in reverse token order on an explicit work walk; the
+expression task stack follows the selected range without evaluating the
+controller or discarded values. Append-only answers participate in semantic
+result checkpoints. Lowering consumes retained answers; model-building-only
+callers resolve missing answers through the same semantic helper.
+
+`c_test_type_identity_authority` inspects the independent expected return
+constants in raw canonical IR for both frontend forms on six native layouts.
+The `fixtures/type_identity.c` fixture beside the frontend tests repeats qualifier, decay, function
+pointer, conditional-pointer and GNU-compatibility answers across enumerators,
+static assertions, static initializers, array bounds, case labels and runtime
+values. Driver coverage runs it with strict codegen verification under both
+frontend forms and all four native allocators. The equivalence table accepts
+qualifier-distinguished associations and rejects a missing compatible arm.
+
+The conversion and compatibility rules follow C17 6.3.2.1, 6.5.1.1 and 6.7.3;
+WG14 [DR 481](https://www.open-std.org/jtc1/sc22/wg14/issues/c11c17/issue0481.html)
+records the historical generic-controller conversion question. The builtin's
+outermost-qualifier rule and constant-expression contract follow the
+[GCC documentation](https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html).
+
+Every type-machine push copies a whole `CTypeParseFrame`, so a frame holds
+neither a parse-result snapshot nor the token stream. The frames of one run
+share the root query's `CPreprocessResult` by pointer; the root outlives the
+run, which pops its frames before returning or failing. The few frame kinds
+that can abandon a partial parse (aggregate segments, typeof and `_Atomic`
+operands) snapshot into the machine's `frame_checkpoints` row for their own
+slot, and root snapshots and rollbacks are passed by pointer. A rollback that
+does not continue into a successful parse is masked by its root's rollback, so
+`c_test_type_parse_snapshot_rows` checks row independence directly.
+
+A modification destination is typed from its whole operand.
+`c_parse_assignment_identifier_is_operand` is the one rule both assignment
+scans in `c_parse_validate_const_assignments` use for when the identifier in
+front of `=` is that whole operand: a member access, indirection, address-of
+or prefix update in front of it names another object, so `*--p = c` converts
+`c` to the pointee's type, not to `p`'s. A parameter entity keeps its declared
+array spelling, so `c_parse_update_operand_modifiable` and the read-only check
+apply C17 6.7.6.3p7 themselves: `argv++` on `char *argv[]` updates the
+adjusted pointer, a local or member array stays unmodifiable, and a `const`
+inside the brackets (`CArrayBound.is_const`, `int a[const 2]`) makes that
+pointer read-only here and in `c_ir_mark_local_read_only`. A qualified
+typedef'd array parameter (`const L2 v`) is still treated as a const pointer
+on both paths; C17 6.7.3p10 qualifies its element instead.
+The embedded modification-destination sources in `compiler_driver_tests`
+run these shapes under every allocator and both frontend forms; the
+equivalence table holds their rejected neighbours.
 
 `c_parse_validate_label_values` walks a body's assignment, return and call
 values -- one scope-chain entity lookup per identifier -- only when

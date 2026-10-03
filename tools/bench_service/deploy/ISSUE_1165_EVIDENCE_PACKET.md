@@ -85,7 +85,7 @@ invent literal placeholders as service IDs, hashes, URLs or timestamps.
 
 | Record group | Required fields and references |
 | --- | --- |
-| Identity and coverage | Stable attempt key; role/scenario; supersedes/retry/alias references; workflow path/ref/commit/tree, run URL/ID/attempt and job URL/ID; requester and separate approval/release references; predeclared idempotency key; request bytes/digest; authenticated principal and effective UID/GID |
+| Identity and coverage | Stable attempt key; role/scenario; supersedes/retry/alias references; workflow path/ref/commit/tree, run URL/ID/attempt and job URL/ID; requester and triggering actor login/ID with the same-attempt `authorize` job URL/conclusion; predeclared idempotency key; request bytes/digest; authenticated principal and effective UID/GID |
 | Installation and inputs | Operator handoff/signoff; installed commit/tree; base and candidate commit/tree-to-source-manifest mapping; manifest bytes/count/hash (normal row must exceed 4 KiB); source closure; service/build-driver/harness/gateway/broker/helper SHA-256 and bootstrap/dependency identities; recipe/profile/schema identities; separate exporting service hash |
 | Host and lifecycle | Host/boot/kernel/manager identity; stable lease device/inode and ownership timeline; outer and every stage unit/invocation/cgroup identity; stage manifests/journal sequence range; exact trigger/action/time; observed terminal phase, outcome, validity, failure reason, reconciliation/quarantine decision |
 | Service authority | Exact `gateway result` receipt/reference and authenticated origin; job/token; request/manifest/bundle/full-result digests; service-owned result binding; finalization/exportability decision; no candidate-supplied authority |

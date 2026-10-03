@@ -170,7 +170,7 @@ def _run_attempt(
             "TMP": str(attempt_directory),
         }
     )
-    arguments = [*command, "--install", *packages]
+    arguments = [*command, "--verbose", "--install", *packages]
     timed_out = False
     status = 127
     with log_path.open("w", encoding="utf-8", newline="\n") as stream:
@@ -257,11 +257,18 @@ def install(
                 flush=True,
             )
             initial_invalid = validate_packages(sdk_root, packages)
+            for package in packages:
+                print(
+                    f"ANDROID_SDK_PREINSTALL package={package} "
+                    f"status={'failure' if package in initial_invalid else 'success'}",
+                    file=combined,
+                )
             if not initial_invalid:
                 print("ANDROID_SDK_INSTALL_RESULT status=success attempts=0 source=preinstalled", file=combined)
                 print("Android SDK packages are already installed and structurally valid.")
                 return 0
 
+            pending = tuple(package for package in packages if package in initial_invalid)
             for attempt in range(1, attempts + 1):
                 attempt_log = log_directory / f"android-sdk-install.attempt-{attempt}.log"
                 attempt_directory = attempt_root / f"attempt-{attempt}"
@@ -269,7 +276,7 @@ def install(
                 started = time.monotonic()
                 status, timed_out = _run_attempt(
                     command,
-                    packages,
+                    pending,
                     sdk_root,
                     attempt_directory,
                     attempt_log,
@@ -277,6 +284,7 @@ def install(
                     effective_environment,
                 )
                 invalid = validate_packages(sdk_root, packages)
+                pending = tuple(package for package in packages if package in invalid)
                 with attempt_log.open("a", encoding="utf-8", newline="\n") as stream:
                     for package in packages:
                         errors = invalid.get(package, [])
@@ -294,7 +302,7 @@ def install(
                     if status != 0 or invalid:
                         _cleanup_new_temp_entries(sdk_root, temporary_before, stream)
                         _cleanup_invalid_packages(sdk_root, invalid, stream)
-                        if attempt < attempts:
+                        if attempt < attempts and invalid:
                             delay = backoff_seconds * attempt
                             print(f"ANDROID_SDK_RETRY next_attempt={attempt + 1} backoff_seconds={delay}", file=stream)
                 _append_attempt(combined, attempt, attempt_log)
@@ -310,16 +318,20 @@ def install(
                     return 0
 
                 _print_failure_tail(attempt_log)
+                if not invalid:
+                    # A nonzero installer status still fails when every package
+                    # is valid; there is no incomplete package left to retry.
+                    break
                 if attempt < attempts:
                     time.sleep(backoff_seconds * attempt)
 
             print(
-                f"ANDROID_SDK_INSTALL_RESULT status=failure attempts={attempts} packages={','.join(packages)}",
+                f"ANDROID_SDK_INSTALL_RESULT status=failure attempts={attempt} packages={','.join(packages)}",
                 file=combined,
                 flush=True,
             )
         print(
-            f"Android SDK installation failed after {attempts} attempts; complete logs are in {log_directory}.",
+            f"Android SDK installation failed after {attempt} attempts; complete logs are in {log_directory}.",
             file=sys.stderr,
         )
         return 1

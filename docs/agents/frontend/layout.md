@@ -4,6 +4,11 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- Type-embedded constant producers use the protected TYPE query contract
+  described in [foundations](foundations.md). It reads a declaration-point
+  model and returns stable integer facts without entering the live declaration
+  machine. Enum consumers retain the explicit ENUM compatibility mode until
+  their declaration preparation is migrated (#1247).
 - A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
   alignment above the native stack's sixteen-byte guarantee, both canonical
   and machine emitters compute `align_down(old_sp - size, alignment)` and
@@ -17,6 +22,47 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   operands; loading the decayed value creates invalid IR and forces both native
   selectors to reject the function. `tests/basic_c_pointer_to_vla.c` covers row
   addresses, runtime strides, local arrays and indirect comparison calls.
+- **Bit-field allocation is a target ABI fact, placed by one authority**
+  (#1439). `c_record_layout_rule` derives the rule from the `Target` alone:
+  `C_RECORD_LAYOUT_MICROSOFT` for every Windows target (MSVC and MinGW
+  spellings alike), `C_RECORD_LAYOUT_AAPCS64` for AArch64 outside Darwin and
+  Windows, and `C_RECORD_LAYOUT_ITANIUM` otherwise; x86-64 UEFI stays Itanium
+  because PE/COFF does not imply the Windows C layout, as Clang agrees. The
+  rule lives in the C frontend, its only reader, rather than in
+  `TargetDataLayout`. Both engines --
+  `c_parse_type_layout_core` (the `sizeof`/`offsetof` fold) and the aggregate
+  branch of `c_lower_to_ir_with_options` (`IrType`) -- evaluate a member's own
+  facts and hand it to `c_record_layout_place`, which follows Clang's
+  `ItaniumRecordLayoutBuilder` and `MicrosoftRecordLayoutBuilder`.
+  Microsoft: a bit-field opens a unit of its declared type's size and the next
+  one shares it only while its declared type has the same size and its bits
+  fit; a zero-width field matters only after a non-zero one; a union's
+  bit-fields do not raise its alignment; an empty record is four bytes.
+  AAPCS64: unnamed and zero-width containers raise the record's alignment
+  (#1344). Itanium: `#pragma pack` of any value suppresses straddle padding
+  (#1318), and a unit that then fails to cover its field is fitted like a
+  packed one. The two engines used to carry a copy each of the System V rule
+  and were tested only against each other, so they agreed on the wrong answer
+  for every Windows and AArch64 Linux record with mixed or unnamed bit-fields.
+  **Their agreement is not the oracle**: `record_layout_tests` compiles a
+  Clang-derived corpus for every native target and compares the folded
+  constants, member images and wrapper objects byte for byte. Regenerate it
+  with `tools/record_layout_oracle.py generate` (a Clang knowing every triple),
+  and run `tools/record_layout_oracle.py campaign --ide <ide>` for randomized
+  records. MinGW's GCC `ms_struct` emulation differs from MSVC for empty
+  records, `packed` records with bit-fields and a union's zero-width field;
+  Buster's Windows targets are the MSVC ABI.
+- **A declarator-less aggregate member is a dialect fact** (#1706, #1750). In
+  GNU C only an untagged `struct { ... };` or `union { ... };` defined in place
+  is an anonymous member; `struct S;`, a typedef name, or a nested tagged
+  definition declares nothing. Windows targets speak the Microsoft dialect
+  (`c_source.c` predefines `_MSC_EXTENSIONS`), where any complete struct or union
+  named there is an anonymous member that adds storage and promotes its fields,
+  as in cl and Clang `*-pc-windows-msvc`. `c_type_parse_aggregate_segment_step`
+  decides it from the target. `c_test_tagged_member_declares_nothing` (x86-64
+  Linux) and `c_test_tagged_member_microsoft_anonymous` (x86-64 and AArch64
+  Windows) name their targets, and the Clang corpus pins both answers byte for
+  byte on every native target.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,
@@ -28,13 +74,28 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   bit on `CMember`; an object declarator's `aligned` joins the specifier-level
   alignment specifiers in the one contiguous run `alignment_start`/
   `alignment_count` names, which is why the trailing scan runs immediately
-  after the specifier one. `#pragma pack(N)` asks the same question -- the
-  ceiling a member's alignment is clamped to -- and `packed` is that ceiling at
-  one byte, so both feed one knob. **Two layout engines read it and must agree**:
+  after the specifier one. GNU `packed` lowers natural member alignment to one
+  byte, and an explicit member `aligned` or `_Alignas` can raise it again.
+  Standard `_Alignas` constraints still use the declared type's original
+  natural alignment, so packing cannot legalize a weaker request (#2192).
+  GNU `aligned` may request less than the natural alignment and merges with
+  the packed placement floor.
+  `#pragma pack(N)` instead caps that merged member alignment on Itanium and
+  AAPCS64 targets (#1244, duplicate #1248). A nonzero bit-field contributes its
+  unpacked alignment capped to the pragma ceiling, even with GNU packed. Its
+  explicit start request applies only when it does not exceed that ceiling. Zero-width bit-fields retain their natural and
+  explicit alignment; Microsoft's required explicit member alignment overrides
+  packing. The actual pragma ceiling stays separate from aggregate `packed` in
+  both engines. `c_test_pragma_pack_explicit_alignment` pins these target rules,
+  parse-time constants, and canonical member offsets. The registered
+  `compiler_driver_test_pragma_pack_alignment` also cross-links independent
+  host/Buster definitions and consumers in both directions for every allocator
+  on desktop Linux. **Two layout engines read it**:
   `c_parse_type_layout` in `c_parse.c` folds `sizeof`/`_Alignof` during the
   parse and `c_lower_to_ir` in `c_gen.c` builds the `IrType`. They disagreed
   about `#pragma pack` before this: the fold packed and the IR did not, so a
-  folded size contradicted the object it sized.
+  folded size contradicted the object it sized. Both now place members through
+  `c_record_layout_place` (above).
   A packed bit-field takes the next bit rather than the next storage unit of
   its declared type, which is what Clang and GCC do and what makes
   `struct __attribute__((packed)) { int a : 3; int b : 30; }` five bytes. The
@@ -79,10 +140,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   **A zero width belongs to the *unnamed* bit-field alone**: C requires a named
   one to be at least one bit wide (C23 6.7.3.2p4) and both reference compilers
   refuse `int b : 0;`, where accepting it laid out a member that occupies no
-  bits and can still be assigned and read back (issue #710). The width is
-  checked in `c_lower_to_ir` where the constant expression is folded, so the
-  expression spelling `int b : 1 - 1;` is refused with the literal one rather
-  than only the spelling the parse fast path folds. The report shares the
+  bits and can still be assigned and read back (issue #710). **A width is
+  evaluated once, where the member is declared**: `c_parse.c` folds a
+  single-token literal (decimal, hex, octal or suffixed) with
+  `c_integer_expression_evaluate` and anything else through
+  `c_parse_typed_integer_constant`, the evaluator enumerators use, and stores
+  it on `CMember.bit_width` with `bit_width_resolved`. The sizeof folding,
+  bit-field promotion, the zero-width check and the IR layout all read that
+  number, so `int b : (5)`, an enumerator, a cast, `0x5` or
+  `sizeof(int) * 8 - 7` lays out identically in a folded `sizeof`/`offsetof`
+  and in the object. An unresolved width holds the layout unresolved instead
+  of reading as zero; lowering still evaluates such a width itself as a
+  temporary bridge, and `c_parse_validate_bit_field_widths` re-evaluates only
+  unresolved widths to diagnose a non-integer one.
+  `c_test_bit_field_width_authority` pins clang's answers for each spelling.
+  `int b : 1 - 1;` is refused like the literal `int b : 0;`. The report shares the
   one-diagnostic-per-type budget with the rejected alignment specifier -- they
   are one `definition_rejection` slot whose kind travels with the message --
   and the definition still lays out, the way a rejected alignment specifier
@@ -173,10 +245,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   or call arguments.
   **Integer promotion uses the bit-field width, not its storage width.** An
   `unsigned int : 3` promotes to `int`, while an `unsigned int : 32` remains
-  unsigned. `c_ir_mark_unsigned_bit_field_value` keeps this distinction in a
-  lazily allocated frontend table; canonical types and field layout retain
-  the declared type. Arithmetic, unary plus, default arguments, and switches
-  consult the promotion fact. Explicit casts discard it, and assignment
+  unsigned. The same width rule applies to implementation-defined wider
+  integer bit-fields: widths below 32 promote to `int`, signed width 32 to
+  `int`, and unsigned width 32 to `unsigned int`; widths above 32 retain the
+  declared type. `c_ir_mark_bit_field_value` keeps a differing `int` or
+  `unsigned int` promotion in a lazily allocated frontend table; canonical
+  types and field layout retain the declared type. Arithmetic, unary plus,
+  default arguments, and switches consult the promotion fact. Explicit casts discard it, and assignment
   results retain it after masking to the stored width, without rereading a
   volatile field. The strict operand type walk receives the promotion context
   explicitly so `_Generic(+field)` and conditional arms agree with emitted
@@ -184,6 +259,25 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `tests/basic_c_bit_field_promotion.c` covers widths 1, 3, 31, and 32,
   anonymous members, casts, assignments, and argument promotion under every
   allocator (GitHub #218).
+  Assignment, compound assignment and prefix update results normalize to the
+  stored field width for every integer bit-field, independently of promotion.
+  Signed results sign-extend from that width; narrow declared types normalize
+  at 32 bits before converting back. Boolean results use truth conversion.
+  The computed value supplies the result without a second volatile load.
+  Assignment-expression destination calls are prepared before place lowering;
+  the retained place carries their result into the store exactly once. The
+  runtime fixture includes `get_fields()->c = 9` in a local initializer, whose
+  returned value is 1 and whose destination call must run once.
+  `compiler_driver_test_bit_field_assignment_results` covers both frontend
+  forms and all four allocators, with ordinary, volatile and split packed
+  fields, postfix controls, full-width fields and terminating update loops.
+  `c_test_bit_field_assignment_accesses` also pins the volatile load/store
+  counts on six desktop layouts in both forms. Boolean raw-unit accesses
+  remain valid even when their layout needs no narrowed storage unit.
+  The registered `c_test_typeof_conditional_type` additionally covers
+  `long`/`long long` fields of widths 20, 31, 32 and 33, signed and unsigned
+  promotions, both semantic and IR signatures, and an inline runtime regression
+  under GNU17/GNU23, both frontend forms and every allocator (GitHub #1245).
   Automatic nested initializers select known fields by index, preserving the
   initializer expression's source range without inventing a token for an
   anonymous member. Positional cursors and brace-elided descent skip unnamed
@@ -313,6 +407,28 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   refusing the type, the way the settled-table scan reports without refusing
   one: the report is what refuses the translation unit.
 
+## `_Alignof` over an object
+
+GNU `_Alignof`/`__alignof__` accept an expression, and over a named object they
+answer the object's alignment rather than its type's: GCC and Clang fold
+`_Alignas(32) int g; _Alignof(g)` to 32 and accept it as an integer constant
+expression (issue #1704). Both layout engines raise the type's answer by the
+same runs, which `c_alignof_object_next_run` names: the entity's own and those
+of every object declaration of it that is complete before the operand, so
+`extern int g; _Alignas(32) int g;` answers 32 after the second declaration.
+`c_parse_alignof_object_alignment` serves the parse-time folds; a file-scope
+static assertion over such an operand is deferred to canonical-IR constant
+evaluation, where `c_ir_alignof_object_alignment` serves both that and the
+lowered value. An enum initializer runs inside the type machine and must not
+mutate it, so there only runs of integer expressions and builtin types fold;
+`_Alignas(struct S)` there is refused as not constant. A run may itself spell
+`_Alignof(object)`, so each engine counts nested evaluations and refuses past
+`C_ALIGNOF_OBJECT_DEPTH_LIMIT`; the refusal is sticky up to the outermost
+operand, because a record's evaluator otherwise falls back to another fold and
+answers the type's alignment. Member operands (`_Alignof(s.x)` with an
+`_Alignas` member, or a `packed` one) still answer the member type's alignment
+where Clang answers the member's (issue #1249).
+
 ## Padded GNU vectors
 
 Non-power-of-two vectors preserve their logical lane count and round their
@@ -320,6 +436,154 @@ object size to the next power of two. The x86-64 SysV and Win64 canonical
 emitters implement their call boundaries; optimized modes currently report
 canonical fallback for those new shapes. The registered driver suite keeps
 the complete padded-vector source inline and materializes a private file for
-cross-target, native mixed-compiler, and Wine checks. The approved retirement
+cross-target, native mixed-compiler, and Wine checks. In the native Linux
+mixed-compiler rows Buster compiles its half for `znver5` while the PATH Clang
+compiles the other half for `x86-64-v4`, which has the same 64-byte vector ABI
+and is accepted by Clang releases older than 19, unlike `znver5`. The approved retirement
 corpus and its pre-existing C ABI header stay unchanged: #507 explicitly
 leaves this new frontend feature to #73, separate from retirement coverage.
+
+## Offsetof member promotion
+
+Runtime `__builtin_offsetof` enters `c_ir_offsetof_evaluate`, and static
+initializers use the OFFSETOF query child. Both dispatch
+`c_ir_constant_offsetof_attempt`, which selects each member through the
+existing `c_ir_promoted_member_path`. Anonymous struct/union promotion, missing
+or ambiguous members, and bit-field refusal therefore use the same lowering
+walk. Member sums, array-index multiplication and accumulated array offsets
+are checked before publication. Array-index expressions are constant-query
+children on the explicit query stack; a dot must separate member selections.
+
+Parser enumerators and static assertions still use
+`c_parse_constant_offsetof` / `c_parse_constant_member_offset`. They already
+promote anonymous members and refuse bit-fields. Issue #1570 remains open for
+a shared parser/lowering designator authority, signed-index policy, the
+parser's unchecked offset arithmetic and nested `offsetof` in array indices.
+The parser's index evaluator accepts `sizeof` but does not evaluate nested
+`offsetof`; this lowering repair does not settle those contracts.
+
+`c_test_offsetof_members` pins direct and anonymous member offsets, a nested
+anonymous struct within a union, and an anonymous array element through
+parser constants, scalar initializer bits, aggregate initializer bytes and both canonical frontend forms
+on Linux, Windows and macOS x86-64/AArch64 in GNU17/GNU23. It also refuses
+direct/promoted bit-fields in enumerators, assertions, static initializers and
+runtime expressions, plus missing members, malformed dot separators and lowering arithmetic overflow.
+The positive source also includes a named multidimensional member chain.
+Static initializer and runtime witnesses use an array index containing nested
+`sizeof` and `offsetof` queries; the matching parser enumerator uses literal
+index 1 so it remains independent of the parser's nested-index limitation.
+`c_test_offsetof_members_runtime` compares all three constant contexts with
+addresses of real subobjects in generated programs, using both frontend forms
+and all four register allocators. Runtime execution is omitted on Android/iOS.
+
+## Parse-side layout solve: ordered passes and the agenda
+
+`c_parse_type_layout_core` answers `sizeof`/`_Alignof`/`offsetof` during
+semantic analysis. A query that is not a builtin kind and has no committed
+cache entry reaches `c_parse_type_layout_solve`, which has two drivers over one
+per-type attempt, `c_parse_type_layout_attempts`. The attempt body is shared,
+so each type's layout rule has one implementation; the drivers differ only in
+which type they hand it next (`c_parse_layout_next`) and where its facts live
+(`c_parse_layout_resolved`/`_size`/`_alignment`/`_provisional`/`_publish`).
+The body takes the agenda as a parameter and is inlined into each driver with
+a constant, so the ordered passes' copy carries no agenda branch; keep new
+reads and writes of per-query facts on those accessors. Its aggregate branch
+places members through `c_record_layout_place` (above), which reads only the
+target and the member it is handed, so it adds no agenda prerequisite.
+
+- **Ordered passes** (`c_parse_type_layout_passes`, the only driver before this
+  section existed). Per-query columns cover the whole type table, seeded from
+  the committed cache when there is one; every pending type is seeded, then
+  attempted in pending order, pass after pass, until the requested type
+  resolves or a pass resolves nothing; resolved non-provisional types are then
+  committed. Without a cache the pending list is the whole table, so every
+  such query costs O(types) even when it needs one small struct.
+- **Agenda** (`c_parse_type_layout_agenda`, `CParseLayoutAgenda`). Used only
+  for queries with no cache and no type-parse machine: enumerator `sizeof`
+  folds and other machineless constant evaluation. It enters the requested
+  type, applies the seed rule lazily on first read (`c_parse_layout_seed`,
+  shared with the passes), and attempts only what is reached. The first time
+  a type is popped it waits on each of its static prerequisites that is still
+  open (`c_parse_layout_agenda_expand`: an aligned alias's unqualified type and
+  specifier types, an atomic copy's unqualified type, an enum's/vector's/array's
+  element, and a complete aggregate's member layout types and specifier types),
+  and it is attempted only once all of them are final. Array-bound `sizeof`
+  operands are discovered by the attempt itself: an attempt that stops at an
+  open type records it as the blocker, waits on it, and is retried exactly when
+  it becomes final.
+
+**Why the agenda gives the passes' answer.** Within one query a type's fact
+only moves from unknown to resolved, and without a machine an attempt reads
+only other types' facts plus immutable parse state; its operand parses work on
+a by-value `CParseResult` copy, and every identifier token is already interned.
+So an attempt that succeeds keeps succeeding with the same value once more
+types resolve, and the requested type's value is the unique least fixed point
+of its dependency closure. Every edge the agenda registers is read by any
+successful attempt of the waiting type, so it is a necessary condition. When
+nothing is ready and the requested type is still open, every open type waits
+on another open type through necessary conditions; none of them can resolve
+in any order, which is the passes' "a pass without progress".
+
+**The one order-dependent read.** An array-bound `sizeof` operand whose kind
+alone decides its layout (not an aggregate, array or vector) is answered by
+the passes from the operand once it has resolved, and otherwise from the
+first type of the same kind that has resolved by then. That depends on attempt
+order unless the seed resolves the type in question before any attempt. The
+agenda answers only those cases (`c_parse_layout_operand_resolved`,
+`c_parse_layout_kind_scan`); a complete enum or an aligned alias as operand,
+or a kind whose first type is not seeded, abandons the agenda before its
+answer is used, and the query reruns on the passes (`agenda_fallbacks`).
+
+**What stays on the passes, and why.** A query with a machine can reenter the
+type-parse machine from an attempt (a bound's operand type, a type-naming
+`_Alignas`), which rewrites the machine's shared result slot and mutation
+limit; skipping the passes' reentries for types outside the closure would
+change that state, so machine queries, including `offsetof` inside the machine
+(#1297), keep the passes. A cached query commits every type its passes
+resolved, and later kind-scan answers read that committed set, so running the
+cached path on the agenda would change future answers. Both obstacles are the
+ones #1247 removes (a side-effect-free evaluator in Stage 0, the array-arm
+re-tokenizer and its kind scan in Stage 3); after them the agenda can serve
+both paths.
+
+**Work and storage.** Agenda state is arena scratch for the one query: an
+entry per reached type the seed rule does not answer (open-addressed index at
+most half full), one edge per distinct (waiting type, prerequisite) pair, and a
+LIFO ready stack; nothing outlives the query. A seeded type's fact is a function
+of its own record, so it is recomputed on a miss rather than stored; every
+declaration's scalar specifier is a record of its own, so this keeps the
+entries to the closure's aggregates, arrays, enums and aliases. The last type
+looked up is remembered, because an attempt reads a type's resolution and then
+its layout. An entry is pushed the first time
+something waits on it (the requested type is pushed at the start) and again
+each time its unfinished edge count returns to zero; it gains edges only while
+popped, so it is never on the stack twice. A type the seed resolves is never
+pushed. A type is attempted once, plus once per array-bound operand that was
+still open when an attempt read it, since its static prerequisites are all
+final before the first attempt. An expansion registers its edges back to back,
+so a prerequisite named twice (two members of one type) finds its own edge at
+the head of that prerequisite's waiters and is not registered again; a blocker
+is open and every earlier prerequisite is final, so it is never a repeat. Each
+edge completes exactly once. `ide cc -v` prints the counts accumulated over a
+compile:
+
+```text
+C_TYPE_LAYOUT solves=N pass_solves=N pass_state_types=N pass_attempts=N agenda_solves=N agenda_types=N agenda_attempts=N agenda_edges=N agenda_notifications=N agenda_pushes=N agenda_fallbacks=N
+```
+
+`solves` counts queries that reached a driver; a fallback counts one agenda
+solve and one pass solve. `pass_state_types` sums each pass solve's column
+length (the query's type count), `pass_attempts` the per-type attempts those
+solves handed out; the `agenda_*` fields are entries, attempts, registered
+edges, completed edges, pushes and abandoned solves. They are work counts, not
+timings, and live on `CParseResult.type_layout_statistics`, outside the
+checkpointed body so rollbacks and operand copies keep counting.
+
+`c_type_layout_tests` asks every question of both drivers
+(`c_test_type_layout`): exact agenda work on a stable region of 0 to 1024
+unrelated structs (constant) against linear pass work, containment chains
+(D + 1 attempts and D edges for depth D), fan-out (W + 1 attempts, W edges),
+a diamond whose every type is attempted once, three invalid cycles (unresolved on both, no edge ever completes), the
+order-dependent operands with their fallbacks, production enumerator folds,
+and a 160-program seeded random corpus of valid and invalid aggregates whose
+every type and member offset must match.
