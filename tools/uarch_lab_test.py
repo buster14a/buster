@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import stat
+import struct
 import sys
 import tempfile
 import unittest
@@ -324,7 +325,16 @@ if globals().get("ARGV_LOG"):
     import os
     info = os.stat(sys.argv[0])
     open(ARGV_LOG, "a").write("%s %d %d\n" % (sys.argv[0], info.st_ino, info.st_nlink))
-time.sleep(globals().get("DELAY", 0.0))
+# ALLOC: touch this many bytes, so the peak RSS is known to exceed it.
+hold = b"\x01" * globals().get("ALLOC", 0)
+delay = globals().get("DELAY", 0.0)
+if globals().get("SPEED_BY_EXE"):
+    # A fake stage-1 compiler (a copied Python interpreter running this file
+    # as `cc`): its speed is the trailing byte of the interpreter it runs in.
+    with open("/proc/self/exe", "rb") as handle:
+        handle.seek(-1, 2)
+        delay = SPEED_BY_EXE[handle.read(1)]
+time.sleep(delay)
 if args[:1] == ["bench"]:
     print("BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=30 bytes=21042 min_ns=3359552 median_ns=3983033")
     sys.exit(0)
@@ -337,7 +347,11 @@ for arg in args:
             sys.stderr.write("cc: error: unknown argument\n")
             sys.exit(1)
         open(arg.split("=", 1)[1], "w").write(METRICS)
-open(out, "wb").write(globals().get("OUTPUT", b"\x7fELF same bytes"))
+output = globals().get("OUTPUT", b"\x7fELF same bytes")
+if globals().get("OUTPUT_FILE"):
+    # The stage-1 "executable": a real ELF (the Python interpreter) plus a pad.
+    output = open(OUTPUT_FILE, "rb").read() + OUTPUT_PAD
+open(out, "wb").write(output)
 '''
 
 FAKE_PERF = r'''#!/usr/bin/env python3
@@ -494,6 +508,12 @@ class FlowTests(Fakes, unittest.TestCase):
         self.assertIn("Dominant top-down level-1 category: **backend_bound** 40.1%", report)
         self.assertIn("alone, running 100.0%; group value 38.2", report)
         self.assertIn("harness span", report)
+        # The default fake allocates nothing: its RSS is not above the floor.
+        self.assertIn("- peak RSS (wait4 ru_maxrss of taskset/perf and the compiler", report)
+        self.assertIn("3 of 3 runs NA", report)
+        self.assertIn("- output code sections (elf): NA bytes", report)
+        with open(os.path.join(output, "timed", "runs.json")) as handle:
+            self.assertTrue(all(run["maxrss_bytes"] > 0 and run["harness_rss_bytes"] > 0 for run in json.load(handle)))
         self.assertTrue(os.path.exists(os.path.join(output, "timeline", "timeline.html")))
         self.assertIn("BENCH_C_FRONTEND", report)
         rerendered = lab.render_report(output)
@@ -818,12 +838,25 @@ class Lab2ReviewTests(unittest.TestCase):
         self.assertNotIn("driver_diagnostic", " ".join(label for label, _ in summary["regions"]))
 
 
-# Golden keys of the machine-readable summaries; a change here is a schema
-# change and needs a new schema id (RUN_SCHEMA / COMPARE_SCHEMA).
+# Golden keys of the machine-readable summaries.  A removed key or a change
+# of meaning needs a new schema id (RUN_SCHEMA / COMPARE_SCHEMA /
+# RETIREMENT_SCHEMA); an added key is listed here and documented.
 RUN_SUMMARY_KEYS = {"schema", "directory", "command", "cpu", "ide", "host", "capabilities", "steps", "timed", "phases", "work",
                     "topdown", "dominant_topdown_category", "hot_symbols", "findings"}
 COMPARE_SUMMARY_KEYS = {"schema", "directory", "command", "repo_root", "cpu", "host", "baseline", "candidate", "outputs_identical",
-                        "plan", "method", "verdict", "metrics", "phases", "checks", "profile", "steps", "warnings"}
+                        "code_bytes", "plan", "method", "verdict", "metrics", "phases", "checks", "profile", "steps", "warnings"}
+CODE_BYTES_KEYS = {"a_value", "b_value", "ratio", "a_format", "b_format", "a_file_bytes", "b_file_bytes", "a_sections", "b_sections", "note"}
+RETIREMENT_SUMMARY_KEYS = {"schema", "directory", "decision", "contract", "verdict", "baseline", "candidate", "stage1", "repo_root", "cpu",
+                           "host", "plan", "limits", "cells", "aggregates", "external_checks", "warnings"}
+RETIREMENT_VERDICT_KEYS = {"outcome", "text", "failed", "inconclusive", "missing_cells"}
+RETIREMENT_BINARY_KEYS = {"path", "sha256", "size_bytes", "revision", "label"}
+RETIREMENT_PLAN_KEYS = {"modes", "required_cells", "pairs", "target_minutes_per_cell", "estimated_minutes", "seed", "warmups",
+                        "profile_steps", "total_s"}
+RETIREMENT_CELL_KEYS = {"cell", "kind", "extra_args", "status", "note", "directory", "summary", "summary_schema", "baseline", "candidate",
+                        "complete_pairs", "outputs_identical", "checks", "diagnostics", "outcome"}
+RETIREMENT_CHECK_KEYS = {"label", "kind", "ratio", "ci_low", "ci_high", "ci_coverage", "n", "a_value", "b_value", "limit", "outcome", "reason"}
+COMPILER_CHECKS = {"compiler_wall_time", "peak_rss", "code_bytes", "runs_succeeded", "deterministic", "measurement_complete", "measurement_stable"}
+RUNTIME_CHECKS = {"generated_runtime", "generated_compilers_agree", "runs_succeeded", "deterministic", "measurement_complete", "measurement_stable"}
 COMPARE_METRIC_KEYS = {"unit", "direction", "label", "n", "a_median", "b_median", "a_min", "b_min", "a_mad", "b_mad", "delta", "ratio",
                        "ci_low", "ci_high", "ci_coverage", "geomean_ratio", "bootstrap_ci_low", "bootstrap_ci_high",
                        "ratio_of_medians", "min_ratio", "change_percent", "outcome", "note"}
@@ -835,7 +868,7 @@ MOVERS_KEYS = {"a_event_count", "b_event_count", "a_samples", "b_samples", "reli
 MOVER_ROW_KEYS = {"symbol", "a_share", "b_share", "delta_share", "noise_pp", "beyond_noise", "exceeds_bound", "a_estimate",
                   "b_estimate", "delta_estimate"}
 COMPARE_METRIC_NAMES = ["wall", "task_clock", "compiler_wall", "instructions", "cycles", "ipc", "branch_misses", "branch_mpki",
-                        "page_faults", "minor_faults", "major_faults"]
+                        "page_faults", "minor_faults", "major_faults", "peak_rss"]
 
 
 def paired_sample(count, ratio, seed, noise=0.002):
@@ -982,6 +1015,9 @@ class CompareFlowTests(Fakes, unittest.TestCase):
             {"DELAY": 0.25, "OUTPUT": b"\x7fELF other bytes", "METRICS": CC_METRICS.replace("analysis_ns=30000000", "analysis_ns=25000000")})
         self.assertEqual(summary["schema"], lab.COMPARE_SCHEMA)
         self.assertEqual(set(summary), COMPARE_SUMMARY_KEYS)
+        self.assertEqual(set(summary["code_bytes"]), CODE_BYTES_KEYS)
+        self.assertIsNone(summary["code_bytes"]["ratio"])
+        self.assertIn("baseline: elf unknown ELF class or data encoding", summary["code_bytes"]["note"])
         self.assertEqual(set(summary["metrics"]), set(COMPARE_METRIC_NAMES))
         for row in summary["metrics"].values():
             self.assertEqual(set(row), COMPARE_METRIC_KEYS)
@@ -1018,9 +1054,28 @@ class CompareFlowTests(Fakes, unittest.TestCase):
         self.assertTrue(report.startswith("# A/B compile-time comparison\n\n**Candidate is SLOWER"))
         self.assertIn("| analysis | 30.00 | 25.00 | -5.00 | 0.8333 |", report)
         self.assertIn("## Why: symbol share movers, sampling", report)
-        before = open(os.path.join(output, "summary.json")).read()
+        before = lab.read_text(os.path.join(output, "summary.json"))
         self.assertEqual(lab.render_compare(output), report)
-        self.assertEqual(open(os.path.join(output, "summary.json")).read(), before)
+        self.assertEqual(lab.read_text(os.path.join(output, "summary.json")), before)
+
+    @unittest.skipIf(not sys.platform.startswith("linux"), "wait4 ru_maxrss and an ELF interpreter")
+    def test_peak_rss_and_code_bytes(self):
+        common = {"OUTPUT_FILE": sys.executable}
+        summary, report, output = self.compare(["--pairs", "6"], dict(common, OUTPUT_PAD=b"B"), dict(common, ALLOC=160 << 20, OUTPUT_PAD=b"A"))
+        with open(os.path.join(output, "pairs.json")) as handle:
+            records = json.load(handle)
+        self.assertTrue(all(record["maxrss_bytes"] >= (160 << 20) for record in records if record["variant"] == "a"))
+        self.assertTrue(all(record["wrapper_rss_bytes"] and record["harness_rss_bytes"] for record in records))
+        rss = summary["metrics"]["peak_rss"]
+        # B allocates nothing, so its value is not above the floor: NA, and
+        # the pair has no ratio (never a win for the smaller variant).
+        self.assertEqual((rss["unit"], rss["n"], rss["outcome"]), ("bytes", 0, "no data"))
+        self.assertIn("candidate: peak RSS NA in 6 of 6 runs", " ".join(summary["warnings"]))
+        code = lab.code_sections(sys.executable)["code_bytes"]
+        self.assertEqual((summary["code_bytes"]["a_value"], summary["code_bytes"]["b_value"], summary["code_bytes"]["ratio"]), (code, code, 1.0))
+        self.assertFalse(summary["outputs_identical"])
+        self.assertIn("- generated code bytes (executable sections, exact): A %s, B %s, B/A 1.000000" % (lab.fmt(code), lab.fmt(code)), report)
+        self.assertIn("| peak RSS (wait4 ru_maxrss) | bytes |", report)
 
     def test_identical_compilers_with_too_few_pairs(self):
         summary, report, _ = self.compare(["--pairs", "2"])
@@ -1274,7 +1329,7 @@ class CliTests(unittest.TestCase):
     def test_every_help_string_renders(self):
         import subprocess
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uarch_lab.py")
-        for arguments in ([], ["run"], ["compare"], ["report"]):
+        for arguments in ([], ["run"], ["compare"], ["retirement"], ["report"]):
             result = subprocess.run([sys.executable, script] + arguments + ["--help"], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, (arguments, result.stderr))
 
@@ -1297,6 +1352,386 @@ class Lab4ReviewTests(unittest.TestCase):
         self.assertEqual(lab.whole_or_zero(-0.3), 0.0)
         self.assertEqual(str(lab.whole_or_zero(-0.0)), "0.0")
         self.assertEqual(lab.whole_or_zero(-80.0), -80.0)
+
+
+def elf_fixture(wide=True, endian="<", sections=None, extended=False):
+    """A minimal ELF (header, payload, section header table) with the given
+    [(name, sh_type, sh_flags, size)] after the null section and before
+    .shstrtab, built with struct."""
+    sections = sections if sections is not None else [
+        (".text", 1, 0x6, 100), (".init", 1, 0x6, 20), (".data", 1, 0x3, 50), (".tbss", 8, 0x6, 1000), (".rodata", 1, 0x2, 30)]
+    names = b"\0" + b"".join(name.encode() + b"\0" for name, _, _, _ in sections) + b".shstrtab\0"
+    header_size, entry_size = (64, 64) if wide else (52, 40)
+    entry = struct.Struct(endian + ("IIQQQQIIQQ" if wide else "IIIIIIIIII"))
+    payload, rows, offset, name_offset = b"", [(0, 0, 0, 0, 0, 0)], header_size, 1
+    for name, kind, flags, size in sections:
+        rows.append((name_offset, kind, flags, offset, size, 0))
+        name_offset += len(name) + 1
+        if kind != 8:
+            payload += b"\xcc" * size
+            offset += size
+    rows.append((name_offset, 3, 0, offset, len(names), 0))
+    payload += names
+    shoff = header_size + len(payload)
+    count = len(rows)
+    if extended:  # section 0 carries the count and the string-table index
+        rows[0] = (0, 0, 0, 0, count, count - 1)
+    table_bytes = b"".join(entry.pack(name, kind, flags, 0, file_offset, size, link, 0, 1, 0)
+                           for name, kind, flags, file_offset, size, link in rows)
+    ident = b"\x7fELF" + bytes([2 if wide else 1, 1 if endian == "<" else 2, 1]) + b"\0" * 9
+    header = struct.pack(endian + ("16sHHIQQQIHHHHHH" if wide else "16sHHIIIIIHHHHHH"), ident, 2, 62, 1, 0, 0, shoff, 0, header_size,
+                         0, 0, entry_size, 0 if extended else count, 0xffff if extended else count - 1)
+    return header + payload + table_bytes
+
+
+class CodeBytesTests(unittest.TestCase):
+    def write(self, data):
+        handle, path = tempfile.mkstemp(prefix="uarch-lab-elf-")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        with open(path, "wb") as writer:
+            writer.write(data)
+        return path
+
+    # Executable sections with file bytes count (.text, .init); writable data,
+    # read-only data and an executable SHT_NOBITS section (.tbss) do not.
+    def test_elf64_little_endian(self):
+        code = lab.code_sections(self.write(elf_fixture()))
+        self.assertEqual((code["format"], code["code_bytes"], code["reason"]), ("elf64", 120, None))
+        self.assertEqual(code["sections"], [{"name": ".text", "size": 100}, {"name": ".init", "size": 20}])
+        self.assertEqual(code["file_bytes"], len(elf_fixture()))
+
+    def test_elf_variants(self):
+        for wide, endian, extended in ((True, ">", False), (False, "<", False), (False, ">", False), (True, "<", True)):
+            code = lab.code_sections(self.write(elf_fixture(wide, endian, extended=extended)))
+            self.assertEqual(code["code_bytes"], 120, (wide, endian, extended))
+            self.assertEqual(code["format"], "elf64" if wide else "elf32")
+
+    def test_zero_code_payload_is_a_value(self):
+        code = lab.code_sections(self.write(elf_fixture(sections=[(".data", 1, 0x3, 8)])))
+        self.assertEqual((code["code_bytes"], code["sections"]), (0, []))
+
+    def test_executable_payload_must_be_inside_file(self):
+        data = bytearray(elf_fixture())
+        section_table = struct.unpack_from("<Q", data, 40)[0]
+        struct.pack_into("<Q", data, section_table + 64 + 24, len(data) + 1)
+        code = lab.code_sections(self.write(data))
+        self.assertIsNone(code["code_bytes"])
+        self.assertEqual(code["reason"], "executable section outside the file")
+
+    def test_unsupported_and_malformed_are_na(self):
+        for data, fmt_name, reason in ((b"\xcf\xfa\xed\xfe" + b"\0" * 60, "mach-o", "no validated Mach-O"),
+                                       (b"MZ" + b"\0" * 62, "pe", "no validated PE"), (b"#!/bin/sh\n", "unknown", "not an ELF"),
+                                       (b"\x7fELF\x02\x01", "elf64", "truncated ELF header"), (b"\x7fELF", "elf", "truncated"),
+                                       (elf_fixture()[:200], "elf64", "section header table")):
+            code = lab.code_sections(self.write(data))
+            self.assertIsNone(code["code_bytes"], data[:8])
+            self.assertEqual(code["format"], fmt_name)
+            self.assertIn(reason, code["reason"])
+        self.assertIn("unreadable", lab.code_sections("/nonexistent/uarch-lab")["reason"])
+
+    def test_summary_ratio_is_exact(self):
+        a = self.write(elf_fixture())
+        b = self.write(elf_fixture(sections=[(".text", 1, 0x6, 121)]))
+        code = lab.code_bytes_summary([a, b])
+        self.assertEqual((code["a_value"], code["b_value"], code["note"]), (120, 121, None))
+        self.assertEqual(code["ratio"], 121 / 120)
+        zero = self.write(elf_fixture(sections=[(".data", 1, 0x3, 8)]))
+        self.assertEqual(lab.code_bytes_summary([a, zero])["ratio"], 0.0)
+        empty = lab.code_bytes_summary([zero, a])
+        self.assertIsNone(empty["ratio"])
+        self.assertEqual(empty["note"], "zero baseline code payload: no ratio denominator")
+        self.assertIn("candidate: pe", lab.code_bytes_summary([a, self.write(b"MZ" + b"\0" * 62)])["note"])
+
+
+@unittest.skipIf(not hasattr(os, "wait4") or not sys.platform.startswith("linux"), "wait4 ru_maxrss in KiB is Linux behaviour")
+class PeakRssTests(unittest.TestCase):
+    def run_child(self, argv, timeout=60):
+        return lab.run_measured(argv, os.getcwd(), dict(os.environ), timeout)
+
+    def test_known_allocation(self):
+        status, _, _, rss, harness = self.run_child([sys.executable, "-c", "hold = b'1' * (48 << 20); print('done')"])
+        self.assertEqual(status, 0)
+        self.assertGreaterEqual(rss, 48 << 20)
+        self.assertLess(rss, harness + (200 << 20))
+
+    # Record current residence; previous large allocations have been released
+    # before spawn and must not discard later low-memory measurements.
+    def test_harness_resident_footprint_is_recorded(self):
+        before = lab.harness_resident_bytes()
+        status, _, _, rss, harness = self.run_child(["true"])
+        self.assertEqual(status, 0)
+        self.assertGreater(harness, 0)
+        self.assertAlmostEqual(harness / before, 1.0, delta=0.1)
+        self.assertGreater(rss, 0)
+
+    def test_success_without_new_output_is_rejected(self):
+        root = tempfile.mkdtemp(prefix="uarch-lab-no-output-")
+        self.addCleanup(shutil.rmtree, root, True)
+        output = os.path.join(root, "out.exe")
+        with open(output, "w") as handle:
+            handle.write("previous result")
+        measured = lab.Lab(root, repo_root=root)
+        status, _, err = measured.run_command([sys.executable, "-c", "pass", "-o", output])
+        self.assertEqual(status, 1)
+        self.assertIn("did not create", err)
+        self.assertFalse(os.path.exists(output))
+
+    # The maximum over the waited tree: a shell parent that reaps a large
+    # child reports the child's high-water mark (the perf-wrapper case).
+    def test_reaped_descendant_counts(self):
+        status, out, _, rss, _ = self.run_child(["sh", "-c", "%s -c \"hold = b'1' * (64 << 20)\"; echo ok" % sys.executable])
+        self.assertEqual((status, out.strip()), (0, b"ok"))
+        self.assertGreaterEqual(rss, 64 << 20)
+
+    def test_exit_status_timeout_and_missing_binary(self):
+        self.assertEqual(self.run_child([sys.executable, "-c", "import sys; sys.stderr.write('x'); sys.exit(3)"])[:3], (3, b"", b"x"))
+        status, _, err, _, _ = self.run_child([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.5)
+        self.assertEqual(status, 124)
+        self.assertTrue(err.endswith(b"timeout\n"))
+        self.assertEqual(self.run_child(["/nonexistent/uarch-lab-binary"])[0], 127)
+
+    def test_timeout_terminates_descendants(self):
+        child = "import subprocess,time; p=subprocess.Popen(['sleep','60']); print(p.pid,flush=True); time.sleep(60)"
+        status, out, _, _, _ = self.run_child([sys.executable, "-c", child], timeout=0.5)
+        self.assertEqual(status, 124)
+        pid = int(out.strip())
+        try:
+            with open("/proc/%d/stat" % pid) as handle:
+                state = handle.read().split()[2]
+            self.assertEqual(state, "Z", "a live descendant survived the timeout")
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+
+    def test_rss_value_needs_a_clear_margin_over_the_wrapper(self):
+        run = {"maxrss_bytes": 300 << 20, "wrapper_rss_bytes": 12 << 20, "harness_rss_bytes": 40 << 20}
+        self.assertEqual(lab.rss_floor(run), 40 << 20)
+        self.assertEqual(lab.rss_value(run), 300 << 20)
+        self.assertIsNone(lab.rss_value(dict(run, maxrss_bytes=17 << 20, harness_rss_bytes=12 << 20)))
+        self.assertIsNone(lab.rss_value(dict(run, harness_rss_bytes=250 << 20)))
+        self.assertIsNone(lab.rss_value(dict(run, wrapper_rss_bytes=None)))
+        self.assertIsNone(lab.rss_value(dict(run, harness_rss_bytes=None)))
+        self.assertIsNone(lab.rss_value(dict(run, maxrss_bytes=None)))
+        self.assertIsNone(lab.rss_value({}))
+
+
+def interval_row(ratio, low, high, n=20):
+    return {"ratio": ratio, "ci_low": low, "ci_high": high, "ci_coverage": 0.9586, "n": n, "a_median": 1.0, "b_median": ratio}
+
+
+def cell_summary(wall=(1.0, 0.99, 1.01), rss=(1.0, 0.999, 1.001), code=(1000, 1005), deterministic=True, failed=0, identical=True):
+    variant = {"path": "/x/ide", "sha256": "0" * 64, "runs": 20, "failed": failed, "deterministic": deterministic}
+    return {"schema": lab.COMPARE_SCHEMA, "host": {"cpu_model": "fake"}, "warnings": [],
+            "plan": {"pairs": 20, "complete_pairs": 20, "fresh_copy": True}, "steps": {"timed": "ok"}, "checks": {},
+            "baseline": dict(variant, deterministic=True), "candidate": variant, "outputs_identical": identical,
+            "metrics": {"wall": interval_row(*wall), "peak_rss": interval_row(*rss) if rss else lab.compare_series([], "bytes", "lower", 1)},
+            "code_bytes": {"a_value": code[0], "b_value": code[1], "ratio": code[1] / code[0] if code[0] and code[1] is not None else None,
+                           "note": None if code[0] and code[1] is not None else "candidate: pe no validated PE code-section parser"}}
+
+
+class RetirementLimitTests(unittest.TestCase):
+    def test_incomplete_or_unstable_series_cannot_pass(self):
+        summary = cell_summary()
+        summary["steps"]["timed"] = "failed"
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", summary)), "INCONCLUSIVE")
+        summary = cell_summary()
+        summary["plan"]["pairs"] = 100
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", summary)), "INCONCLUSIVE")
+        summary = cell_summary()
+        summary["metrics"]["peak_rss"]["n"] = 6
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", summary)), "INCONCLUSIVE")
+        summary = cell_summary()
+        summary["checks"]["drift"] = {"flag": True}
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", summary)), "INCONCLUSIVE")
+
+    def test_interval_outcomes(self):
+        self.assertEqual(lab.limit_outcome(0.98, 1.05, 1.05)[0], "PASS")
+        self.assertEqual(lab.limit_outcome(1.0501, 1.07, 1.05)[0], "FAIL")
+        self.assertEqual(lab.limit_outcome(1.04, 1.06, 1.05), ("INCONCLUSIVE", "CI [1.0400, 1.0600] crosses 1.05"))
+        self.assertEqual(lab.limit_outcome(None, None, 1.05)[0], "INCONCLUSIVE")
+
+    def test_exact_outcomes(self):
+        self.assertEqual(lab.exact_outcome(1.01, 1.01)[0], "PASS")
+        self.assertEqual(lab.exact_outcome(1.0101, 1.01)[0], "FAIL")
+        self.assertEqual(lab.exact_outcome(None, 1.01, "candidate: pe"), ("INCONCLUSIVE", "candidate: pe"))
+
+    def test_limits_match_the_contract(self):
+        self.assertEqual(lab.RETIREMENT_LIMITS, {"compiler_wall_time": 1.05, "peak_rss": 1.05, "code_bytes": 1.01, "generated_runtime": 1.03})
+        contract = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "native-retirement-performance-contract.md")
+        with open(contract) as handle:
+            text = handle.read()
+        for row in ("| Compiler wall time |", "| Compiler peak RSS |"):
+            self.assertIn("Upper simultaneous bound at most `1.05` |", next(line for line in text.splitlines() if line.startswith(row)))
+        self.assertIn("Exact ratio at most `1.01` in every cell |", next(line for line in text.splitlines() if line.startswith("| Generated code bytes |")))
+        self.assertIn("Upper simultaneous bound at most `1.03` |",
+                      next(line for line in text.splitlines() if line.startswith("| Generated-program runtime |")))
+
+    def test_compiler_cell_checks(self):
+        checks = lab.cell_checks("compiler", cell_summary())
+        self.assertEqual(set(checks), COMPILER_CHECKS)
+        for check in checks.values():
+            self.assertEqual(set(check), RETIREMENT_CHECK_KEYS)
+        self.assertEqual(lab.cell_outcome(checks), "PASS")
+        self.assertEqual(checks["code_bytes"]["ratio"], 1.005)
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", cell_summary(wall=(1.08, 1.06, 1.10)))), "FAIL")
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", cell_summary(rss=(1.03, 1.0, 1.06)))), "INCONCLUSIVE")
+        self.assertEqual(lab.cell_outcome(lab.cell_checks("compiler", cell_summary(rss=None))), "INCONCLUSIVE")
+        self.assertEqual(lab.cell_checks("compiler", cell_summary(code=(1000, 1011)))["code_bytes"]["outcome"], "FAIL")
+        self.assertEqual(lab.cell_checks("compiler", cell_summary(code=(1000, None)))["code_bytes"]["outcome"], "INCONCLUSIVE")
+        self.assertEqual(lab.cell_checks("compiler", cell_summary(deterministic=False))["deterministic"]["outcome"], "FAIL")
+        self.assertEqual(lab.cell_checks("compiler", cell_summary(failed=1))["runs_succeeded"]["outcome"], "FAIL")
+
+    def test_runtime_cell_checks(self):
+        checks = lab.cell_checks("generated-runtime", cell_summary(wall=(1.01, 1.0, 1.03)))
+        self.assertEqual(set(checks), RUNTIME_CHECKS)
+        self.assertEqual(lab.cell_outcome(checks), "PASS")
+        self.assertEqual(lab.cell_checks("generated-runtime", cell_summary(wall=(1.02, 1.01, 1.04)))["generated_runtime"]["outcome"], "INCONCLUSIVE")
+        self.assertEqual(lab.cell_checks("generated-runtime", cell_summary(identical=False))["generated_compilers_agree"]["outcome"], "FAIL")
+
+    def directory(self, summaries, statuses=None):
+        root = tempfile.mkdtemp(prefix="uarch-lab-retire-")
+        self.addCleanup(shutil.rmtree, root, True)
+        cells = []
+        for name in list(lab.RETIREMENT_MODES) + [lab.RUNTIME_CELL]:
+            status = (statuses or {}).get(name, "ok" if name in summaries else "not run")
+            cells.append({"cell": name, "kind": "generated-runtime" if name == lab.RUNTIME_CELL else "compiler", "extra": [],
+                          "status": status, "note": "" if status == "ok" else "stopped"})
+            if name in summaries:
+                os.makedirs(os.path.join(root, name))
+                with open(os.path.join(root, name, "summary.json"), "w") as handle:
+                    json.dump(summaries[name], handle)
+        binary = {"path": "/x/ide", "sha256": "0" * 64, "size_bytes": 1, "revision": None, "label": "A"}
+        with open(os.path.join(root, "retirement-config.json"), "w") as handle:
+            json.dump({"cells": cells, "baseline": binary, "candidate": dict(binary, label="B"), "cpu": 2, "pairs": None,
+                       "modes": list(lab.RETIREMENT_MODES), "target_minutes_per_cell": 12.0, "seed": 1, "repo_root": root}, handle)
+        lab.render_retirement(root)
+        with open(os.path.join(root, "retirement.json")) as handle:
+            return json.load(handle), root
+
+    def all_cells(self, **override):
+        summaries = {name: cell_summary() for name in lab.RETIREMENT_MODES}
+        summaries[lab.RUNTIME_CELL] = cell_summary(wall=(1.0, 0.99, 1.02))
+        summaries.update(override)
+        return summaries
+
+    def test_overall_pass_and_schema(self):
+        summary, root = self.directory(self.all_cells())
+        self.assertEqual(summary["schema"], lab.RETIREMENT_SCHEMA)
+        self.assertEqual(set(summary), RETIREMENT_SUMMARY_KEYS)
+        self.assertEqual(set(summary["verdict"]), RETIREMENT_VERDICT_KEYS)
+        self.assertEqual(set(summary["baseline"]), RETIREMENT_BINARY_KEYS)
+        self.assertEqual(set(summary["plan"]), RETIREMENT_PLAN_KEYS)
+        for cell in summary["cells"]:
+            self.assertEqual(set(cell), RETIREMENT_CELL_KEYS)
+        self.assertEqual(summary["verdict"]["outcome"], "PASS", summary["verdict"])
+        self.assertEqual([cell["cell"] for cell in summary["cells"]], ["none", "mir-stack", "fast", "quality", "generated-runtime"])
+        self.assertEqual(summary["cells"][0]["summary"], os.path.join("none", "summary.json"))
+        self.assertEqual(summary["limits"]["code_bytes"]["limit"], 1.01)
+        self.assertEqual(summary["aggregates"]["compiler_wall_time"]["cells"], 4)
+        self.assertAlmostEqual(summary["aggregates"]["compiler_wall_time"]["geomean_upper_bound"], 1.01)
+        self.assertFalse(summary["aggregates"]["peak_rss"]["gating"])
+        with open(os.path.join(root, "retirement.md")) as handle:
+            text = handle.read()
+        self.assertTrue(text.startswith("# Native-retirement performance gate (#512)\n\n**PASS: every required cell"))
+        self.assertIn("| quality | generated code bytes | 1.0050 | exact | 1.01 | **PASS** |", text)
+
+    def test_any_failure_fails(self):
+        summary, _ = self.directory(self.all_cells(quality=cell_summary(code=(1000, 1020))))
+        self.assertEqual(summary["verdict"]["outcome"], "FAIL")
+        self.assertEqual(summary["verdict"]["failed"], ["quality code_bytes (1.020000 > 1.01)"])
+
+    def test_partial_or_imprecise_is_inconclusive(self):
+        partial = self.all_cells()
+        del partial["none"]
+        summary, _ = self.directory(partial)
+        self.assertEqual(summary["verdict"]["outcome"], "INCONCLUSIVE")
+        self.assertEqual(summary["verdict"]["missing_cells"], ["none"])
+        self.assertEqual(summary["cells"][0]["checks"]["cell_measured"]["outcome"], "INCONCLUSIVE")
+        summary, _ = self.directory(self.all_cells(fast=cell_summary(wall=(1.03, 1.01, 1.06))))
+        self.assertEqual(summary["verdict"]["outcome"], "INCONCLUSIVE")
+        self.assertEqual(summary["verdict"]["inconclusive"], ["fast compiler_wall_time (CI [1.0100, 1.0600] crosses 1.05)"])
+        summary, _ = self.directory(self.all_cells(), {"quality": "failed"})
+        self.assertEqual(summary["verdict"]["outcome"], "INCONCLUSIVE")
+        self.assertIn("quality sub-run failed (stopped)", summary["verdict"]["inconclusive"])
+
+
+@unittest.skipIf(not sys.platform.startswith("linux"), "the fake stage-1 compiler is a copied Linux ELF interpreter")
+class RetirementFlowTests(Fakes, unittest.TestCase):
+    # The fakes: A and B write the Python interpreter (a real ELF64, so code
+    # bytes are measured) plus a pad byte as their stage-1 output.  In the
+    # generated-runtime cell that output runs as a compiler: the copied
+    # interpreter executes the repository root's `cc` script (the default
+    # command's first argument), whose speed is the pad byte.  A is slower
+    # and larger than B, so every interval check passes clearly.
+    def setUp(self):
+        self.root, self.ide, self.perf = self.fakes("new")
+        common = {"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new", "OUTPUT_FILE": sys.executable}
+        write_script(self.ide, FAKE_IDE, dict(common, DELAY=0.25, ALLOC=192 << 20, OUTPUT_PAD=b"S"))
+        self.candidate = os.path.join(self.root, "ide-b")
+        write_script(self.candidate, FAKE_IDE, dict(common, ALLOC=128 << 20, OUTPUT_PAD=b"F"))
+        write_script(os.path.join(self.root, "cc"), FAKE_IDE, {"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
+                                                               "SPEED_BY_EXE": {b"S": 0.25, b"F": 0.0}})
+
+    def retire(self, arguments):
+        output = os.path.join(self.root, "gate")
+        stdout = sys.stdout
+        try:
+            sys.stdout = open(os.devnull, "w")
+            lab.main(["retirement", "--baseline", self.ide, "--candidate", self.candidate, "--repo-root", self.root, "--cpu", "-1",
+                      "--output", output, "--perf", self.perf, "--baseline-rev", "main@abc", "--candidate-rev", "522@def"] + arguments)
+        finally:
+            sys.stdout.close()
+            sys.stdout = stdout
+        with open(os.path.join(output, "retirement.json")) as handle:
+            return json.load(handle), output
+
+    def test_fast_cell_and_generated_runtime_end_to_end(self):
+        summary, output = self.retire(["--modes", "fast", "--pairs", "6"])
+        self.assertEqual(set(summary), RETIREMENT_SUMMARY_KEYS)
+        cells = {cell["cell"]: cell for cell in summary["cells"]}
+        self.assertEqual(list(cells), ["fast", "generated-runtime"])
+        fast, runtime = cells["fast"], cells["generated-runtime"]
+        self.assertEqual(fast["extra_args"], ["-fregister-allocator=fast"])
+        self.assertEqual({name: check["outcome"] for name, check in fast["checks"].items()}, dict.fromkeys(COMPILER_CHECKS, "PASS"),
+                         fast["checks"])
+        self.assertEqual({name: check["outcome"] for name, check in runtime["checks"].items()}, dict.fromkeys(RUNTIME_CHECKS, "PASS"),
+                         runtime["checks"])
+        code = lab.code_sections(sys.executable)["code_bytes"]
+        self.assertEqual((fast["checks"]["code_bytes"]["a_value"], fast["checks"]["code_bytes"]["ratio"]), (code, 1.0))
+        self.assertGreaterEqual(fast["checks"]["peak_rss"]["a_value"], 192 << 20)
+        self.assertLess(fast["checks"]["peak_rss"]["ratio"], 1.0)
+        self.assertLess(runtime["checks"]["generated_runtime"]["ci_high"], 1.0)
+        # Partial run: three allocator modes were not measured, so never PASS.
+        self.assertEqual(summary["verdict"]["outcome"], "INCONCLUSIVE")
+        self.assertEqual(summary["verdict"]["missing_cells"], ["none", "mir-stack", "quality"])
+        self.assertEqual((summary["baseline"]["revision"], summary["candidate"]["revision"]), ("main@abc", "522@def"))
+        self.assertEqual(summary["baseline"]["sha256"], lab.sha256_file(self.ide))
+        stage1 = summary["stage1"]
+        self.assertEqual(stage1["baseline"]["sha256"], lab.sha256_file(os.path.join(output, "fast", "a", "reference.exe")))
+        self.assertEqual(runtime["baseline"]["path"], stage1["baseline"]["path"])
+        self.assertEqual(runtime["summary_schema"], lab.COMPARE_SCHEMA)
+        with open(os.path.join(output, "fast", "compare.json")) as handle:
+            self.assertEqual(json.load(handle)["config"]["extra"], ["-fregister-allocator=fast"])
+        self.assertIn("pair count fixed by --pairs 6", summary["warnings"][1])
+        with open(os.path.join(output, "retirement.md")) as handle:
+            report = handle.read()
+        self.assertTrue(report.startswith("# Native-retirement performance gate (#512)\n\n**INCONCLUSIVE: cells not measured: none, mir-stack, quality"))
+        before = lab.read_text(os.path.join(output, "retirement.json"))
+        stdout = sys.stdout
+        try:
+            sys.stdout = open(os.devnull, "w")
+            lab.main(["report", output])
+        finally:
+            sys.stdout.close()
+            sys.stdout = stdout
+        self.assertEqual(lab.read_text(os.path.join(output, "retirement.json")), before)
+
+    def test_runtime_cell_needs_the_fast_cell(self):
+        summary, _ = self.retire(["--modes", "none", "--pairs", "2"])
+        runtime = summary["cells"][1]
+        self.assertEqual((runtime["status"], runtime["note"]), ("not run", "needs the fast cell (--modes)"))
+        self.assertEqual(summary["verdict"]["outcome"], "INCONCLUSIVE")
+        self.assertEqual(summary["cells"][0]["checks"]["compiler_wall_time"]["outcome"], "INCONCLUSIVE")
 
 
 if __name__ == "__main__":
