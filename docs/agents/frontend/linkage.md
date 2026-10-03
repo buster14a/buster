@@ -20,6 +20,20 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   (GitHub #363); object parsing alone is not runtime-unwind evidence.
   Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
   saves, and keeps saved-register offsets separate from stack-allocation sizes.
+- **AArch64 ELF variant procedure-call metadata is refused explicitly.**
+  `object_read_elf64` refuses every non-null, non-FILE symbol carrying
+  `STO_AARCH64_VARIANT_PCS` (st_other bit 0x80), naming the symbol and table
+  index. The neutral object model cannot preserve this marking or the
+  intermediary register/state guarantees required by
+  [AAELF64's symbol-table contract](https://github.com/ARM-software/abi-aa/blob/2025Q4/aaelf64/aaelf64.rst#symbol-table).
+  The check precedes reserved-index and unallocated-section skipping, so those
+  paths cannot silently erase the ABI requirement. An invalid name remains a
+  malformed-input error. Ordinary AArch64 visibility, ignored FILE/null records
+  and other architectures retain their existing behavior; this is a refusal
+  boundary, with variant-PCS execution support still open under GitHub #1243.
+  `object_test_elf_variant_pcs` uses original raw ELF records to cover defined
+  and undefined FUNC/NOTYPE entries, local/global/weak bindings, every visibility,
+  reserved/discarded sections, unnamed/malformed names and x86-64 controls.
 - **Program-symbol identity crosses the object boundary.**
   `object_from_canonical_codegen_module` resolves a relocation's `IrSymbolId`
   through `entry_by_symbol`. Entries map to their own index; globals and

@@ -1552,6 +1552,179 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_writer_alignment_capacity(UnitTes
     return result;
 }
 
+// Original ELF64 records, independent of object_write and its symbol policy.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_variant_pcs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u8 bindings[] = {0, 1, 2};
+    u8 types[] = {0, 2};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        Target target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX};
+        u8 original[576] = {0};
+        ByteSlice bytes = BUSTER_ARRAY_TO_SLICE(original);
+        memcpy(original, "\x7f" "ELF", 4);
+        original[4] = 2;
+        original[5] = 1;
+        original[6] = 1;
+        object_test_write_u16(bytes, 16, 1);
+        object_test_write_u16(bytes, 18, architectures[architecture] == CPU_ARCH_AARCH64 ? 183 : 62);
+        object_test_write_u32(bytes, 20, 1);
+        object_test_write_u64(bytes, 40, 256);
+        object_test_write_u16(bytes, 52, 64);
+        object_test_write_u16(bytes, 58, 64);
+        object_test_write_u16(bytes, 60, 5);
+        object_test_write_u16(bytes, 62, 4);
+        object_test_write_u32(bytes, 64, architectures[architecture] == CPU_ARCH_AARCH64 ? UINT32_C(0xd65f03c0) : UINT32_C(0x909090c3));
+        // .text, .symtab, .strtab, .shstrtab. A named local and global definition
+        // follow the null symbol; the later one exercises partial admission.
+        object_test_write_u32(bytes, 320, 1);
+        object_test_write_u32(bytes, 324, 1);
+        object_test_write_u64(bytes, 328, 6);
+        object_test_write_u64(bytes, 344, 64);
+        object_test_write_u64(bytes, 352, 4);
+        object_test_write_u64(bytes, 368, 4);
+        object_test_write_u32(bytes, 384, 7);
+        object_test_write_u32(bytes, 388, 2);
+        object_test_write_u64(bytes, 408, 72);
+        object_test_write_u64(bytes, 416, 72);
+        object_test_write_u32(bytes, 424, 3);
+        object_test_write_u32(bytes, 428, 2);
+        object_test_write_u64(bytes, 432, 8);
+        object_test_write_u64(bytes, 440, 24);
+        object_test_write_u32(bytes, 448, 15);
+        object_test_write_u32(bytes, 452, 3);
+        object_test_write_u64(bytes, 472, 144);
+        object_test_write_u64(bytes, 480, 28);
+        object_test_write_u64(bytes, 496, 1);
+        object_test_write_u32(bytes, 512, 23);
+        object_test_write_u32(bytes, 516, 3);
+        object_test_write_u64(bytes, 536, 176);
+        object_test_write_u64(bytes, 544, 33);
+        object_test_write_u64(bytes, 560, 1);
+        memcpy(original + 144, "\0pcs_control\0variant_target", 28);
+        memcpy(original + 176, "\0.text\0.symtab\0.strtab\0.shstrtab", 33);
+        object_test_write_u32(bytes, 96, 1);
+        original[100] = 0x02;
+        object_test_write_u16(bytes, 102, 1);
+        object_test_write_u64(bytes, 112, 4);
+        object_test_write_u32(bytes, 120, 13);
+        original[124] = 0x12;
+        object_test_write_u16(bytes, 126, 1);
+        object_test_write_u64(bytes, 136, 4);
+        for (u32 binding = 0; binding < BUSTER_ARRAY_LENGTH(bindings); binding += 1)
+        {
+            for (u32 type = 0; type < BUSTER_ARRAY_LENGTH(types); type += 1)
+            {
+                for (u32 defined = 0; defined < 2; defined += 1)
+                {
+                    for (u32 visibility = 0; visibility < 4; visibility += 1)
+                    {
+                        for (u32 marked = 0; marked < 2; marked += 1)
+                        {
+                            TemporalArena scope = arena_begin_temporal(arguments->arena);
+                            u8 input[576];
+                            memcpy(input, original, sizeof(input));
+                            ByteSlice mutated = BUSTER_ARRAY_TO_SLICE(input);
+                            input[124] = (u8)((bindings[binding] << 4) | types[type]);
+                            input[125] = (u8)(visibility | (marked ? 0x80 : 0));
+                            object_test_write_u32(mutated, 428, bindings[binding] ? 2 : 3);
+                            object_test_write_u16(mutated, 126, defined ? 1 : 0);
+                            object_test_write_u64(mutated, 136, defined ? 4 : 0);
+                            ObjectFile object = object_read(arguments->arena, mutated, target);
+                            bool refused = architectures[architecture] == CPU_ARCH_AARCH64 && marked;
+                            BUSTER_TEST(arguments, object.error == (refused ? OBJECT_ERROR_UNSUPPORTED_TARGET : OBJECT_ERROR_NONE));
+                            if (refused)
+                            {
+                                BUSTER_STRING_TEST(arguments, object.diagnostic,
+                                                   S8("unsupported ELF AArch64 symbol variant_target (index 2): STO_AARCH64_VARIANT_PCS"));
+                                ObjectArtifact failed = object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64);
+                                BUSTER_TEST(arguments, failed.error != OBJECT_ERROR_NONE && !failed.bytes.pointer && !failed.bytes.length);
+                            }
+                            else
+                            {
+                                BUSTER_TEST(arguments, !object.diagnostic.length && object.symbol_count == 2);
+                                bool valid = object.symbol_count == 2 && object.symbols;
+                                BUSTER_TEST(arguments, valid);
+                                if (valid)
+                                {
+                                    ObjectSymbol* symbol = &object.symbols[1];
+                                    BUSTER_STRING_TEST(arguments, symbol->name, S8("variant_target"));
+                                    BUSTER_TEST(arguments, symbol->global == (bindings[binding] != 0));
+                                    BUSTER_TEST(arguments, symbol->weak == (bindings[binding] == 2));
+                                    BUSTER_TEST(arguments, symbol->hidden == (visibility == 2 || visibility == 3));
+                                    BUSTER_TEST(arguments, symbol->section == (defined ? OBJECT_SECTION_TEXT : OBJECT_SECTION_UNDEFINED));
+                                }
+                            }
+                            u8 expected[576];
+                            memcpy(expected, original, sizeof(expected));
+                            expected[124] = (u8)((bindings[binding] << 4) | types[type]);
+                            expected[125] = (u8)(visibility | (marked ? 0x80 : 0));
+                            object_test_write_u32(BUSTER_ARRAY_TO_SLICE(expected), 428, bindings[binding] ? 2 : 3);
+                            object_test_write_u16(BUSTER_ARRAY_TO_SLICE(expected), 126, defined ? 1 : 0);
+                            object_test_write_u64(BUSTER_ARRAY_TO_SLICE(expected), 136, defined ? 4 : 0);
+                            BUSTER_TEST(arguments, memcmp(input, expected, sizeof(input)) == 0);
+                            arena_set_position(arguments->arena, scope.position);
+                        }
+                    }
+                }
+            }
+        }
+        if (architectures[architecture] == CPU_ARCH_AARCH64)
+        {
+            // Do not let reserved definitions or discarded nonallocated
+            // sections bypass the flag's explicit refusal.
+            u16 indexes[] = {0xfff1, 0xfff2, 0xffff, 3};
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(indexes); index += 1)
+            {
+                TemporalArena scope = arena_begin_temporal(arguments->arena);
+                u8 input[576];
+                memcpy(input, original, sizeof(input));
+                input[125] = 0x80;
+                object_test_write_u16(BUSTER_ARRAY_TO_SLICE(input), 126, indexes[index]);
+                ObjectFile object = object_read(arguments->arena, BUSTER_ARRAY_TO_SLICE(input), target);
+                BUSTER_TEST(arguments, object.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                BUSTER_STRING_TEST(arguments, object.diagnostic,
+                                   S8("unsupported ELF AArch64 symbol variant_target (index 2): STO_AARCH64_VARIANT_PCS"));
+                arena_set_position(arguments->arena, scope.position);
+            }
+            {
+                TemporalArena scope = arena_begin_temporal(arguments->arena);
+                u8 input[576];
+                memcpy(input, original, sizeof(input));
+                input[125] = 0x80;
+                object_test_write_u32(BUSTER_ARRAY_TO_SLICE(input), 120, 0);
+                ObjectFile object = object_read(arguments->arena, BUSTER_ARRAY_TO_SLICE(input), target);
+                BUSTER_TEST(arguments, object.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                BUSTER_STRING_TEST(arguments, object.diagnostic,
+                                   S8("unsupported ELF AArch64 symbol <unnamed> (index 2): STO_AARCH64_VARIANT_PCS"));
+                object_test_write_u32(BUSTER_ARRAY_TO_SLICE(input), 120, 28);
+                object = object_read(arguments->arena, BUSTER_ARRAY_TO_SLICE(input), target);
+                BUSTER_TEST(arguments, object.error == OBJECT_ERROR_INVALID_INPUT && !object.diagnostic.length);
+                arena_set_position(arguments->arena, scope.position);
+            }
+        }
+        {
+            TemporalArena scope = arena_begin_temporal(arguments->arena);
+            u8 input[576];
+            memcpy(input, original, sizeof(input));
+            // STT_FILE and the null symbol are ignored metadata, not retained
+            // runtime symbol references. Their other byte is not interpreted.
+            input[77] = 0x80;
+            input[124] = 4;
+            input[125] = 0x80;
+            object_test_write_u16(BUSTER_ARRAY_TO_SLICE(input), 126, 0xfff1);
+            object_test_write_u64(BUSTER_ARRAY_TO_SLICE(input), 136, 0);
+            object_test_write_u32(BUSTER_ARRAY_TO_SLICE(input), 428, 3);
+            ObjectFile object = object_read(arguments->arena, BUSTER_ARRAY_TO_SLICE(input), target);
+            BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE && !object.diagnostic.length && object.symbol_count == 1);
+            arena_set_position(arguments->arena, scope.position);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_thread_local_symbol_identity(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2395,6 +2568,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult dwarf5 = object_test_dwarf5_sections(arguments);
     result.test_count += dwarf5.test_count;
     result.succeeded_test_count += dwarf5.succeeded_test_count;
+    UnitTestResult variant_pcs = object_test_elf_variant_pcs(arguments);
+    result.test_count += variant_pcs.test_count;
+    result.succeeded_test_count += variant_pcs.succeeded_test_count;
     UnitTestResult thread_local_identity = object_test_elf_thread_local_symbol_identity(arguments);
     result.test_count += thread_local_identity.test_count;
     result.succeeded_test_count += thread_local_identity.succeeded_test_count;
