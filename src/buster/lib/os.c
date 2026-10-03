@@ -1029,7 +1029,7 @@ u64 process_control_atomic_load(ProcessControlAtomic* address)
 {
     u64 result;
 #if BUSTER_SINGLE_THREADED
-    result = *address;
+    result = (u64)*address;
 #elif BUSTER_COMPILER_MSVC
     result = (u64)_InterlockedCompareExchange64((volatile long long*)address, 0, 0);
 #elif defined(__clang__)

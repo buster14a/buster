@@ -2588,6 +2588,22 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, counter == 13);
         BUSTER_TEST(arguments, atomic_u64_decrement(&counter) == 13);
         BUSTER_TEST(arguments, counter == 12);
+
+        ProcessControlAtomic control = 0;
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == 0);
+        process_control_atomic_store(&control, 0x7fffffffull);
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == 0x7fffffffull);
+        BUSTER_TEST(arguments, !process_control_atomic_set_if_zero(&control, 1));
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == 0x7fffffffull);
+        process_control_atomic_store(&control, 0);
+        BUSTER_TEST(arguments, process_control_atomic_set_if_zero(&control, 1));
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == 1);
+#if BUSTER_SINGLE_THREADED
+        control = -1;
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == UINT64_MAX);
+        control = INT32_MIN;
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == UINT64_MAX - 0x7fffffffull);
+#endif
     }
 
     // os_is_only_live_thread() is what BUSTER_CHECK_SERIAL_INITIALIZATION
