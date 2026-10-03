@@ -174,9 +174,44 @@
   process-table, unified-log and crash-report probes retain separate bounded
   lifecycle receipts and up to 64 KiB of stdout/stderr per command, with
   native exit, timeout/helper status and capture completion distinguished.
-  Probe failure does not establish an app crash. The additive
-  `bash ios/launch_diagnostics_mock_test.sh` attached-monitor controls
-  cover rejection, native exit 124, watchdog expiry, large output and cleanup.
+  `ios/lifecycle_capture_bridge.sh` starts GNU command and capture clocks before
+  interpreter startup. Those timers own only bootstrap/collector groups; the
+  initialized `ios/lifecycle_capture.py` owner detaches before admitting a
+  keeper or native command. The owner anchors its private command group with a
+  deliberately unreaped keeper and retains a separate owned native handle for
+  a command that leaves that group. Native exit/signal, command-clock result,
+  real output EOF and owned cleanup remain separate facts. Late native exit 0
+  does not turn a deadline into success. The first 64 KiB are retained while
+  remaining output is drained. The existing command, at-most-ten-second TERM
+  grace and absolute capture budgets remain; loss of the collector's lifetime
+  pipe triggers final owned dispatch without a new post-cap grace period.
+  Native completion without observed EOF triggers owned cleanup; that
+  observation alone does not prove a descendant is alive. Escaped grandchildren
+  remain outside signal authority and can yield incomplete capture at the bound.
+  Complete capture requires a real zero-byte output read before the capture
+  bound. Ordinary keeper release also waits for one complete, authenticated
+  command-monitor result and final protocol EOF. The collector requires a
+  complete helper token, real completion-pipe EOF and matching actual invocation
+  wait status. It snapshots only that closed private generation before writing
+  its admission receipt. Expiry, cancellation, malformed handoffs or a shim's
+  mismatched exit refuse admission; a residual old owner can only publish in
+  its old generation. Caller cancellation retains status 130/143. Residual
+  cleanup and unknown reaps remain failures, rather than synchronized-cleanup
+  claims. Ordinary EOF releases only the keeper and does not prove silent
+  descendants are gone. Named receipts retain dispatches, authority release,
+  native/keeper reaps and keeper control-EOF acknowledgement. Probe failure does
+  not establish an app crash.
+  `bash ios/launch_diagnostics_mock_test.sh` runs the existing attached-monitor
+  controls, `python3 ios/lifecycle_capture_test.py -v` and the caller-clock
+  controls in `python3 ios/lifecycle_capture_bridge_test.py -v`. They cover
+  actual native statuses versus launch errors, binary retention, held and
+  escaped writers, cancellation and keeper failure, startup clock expiry,
+  ignored/blocked signals, final protocol EOF, actual shim exit, generation
+  isolation and malformed receipt refusal. The signing fixture also requires
+  empty or malformed capture receipts to prevent install/launch, including
+  native-success cases. The Python lifecycle and caller-clock controls use
+  owned handles or finite fixture release markers; they do not claim
+  CoreSimulator descendants are contained by a group.
   `bash ios/launch_diagnostics_simulator_test.sh` uses a synthetic timed-out
   payload with real CoreSimulator boot, probes and shutdown on hosted macOS
   ARM64. The mobile lifecycle workflow retains actual probe availability and
