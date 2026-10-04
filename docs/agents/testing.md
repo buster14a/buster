@@ -62,8 +62,8 @@
   The existing host observer remains shared because its ABI is unchanged.
   These files are loaded by the registered driver test, not compiled as test
   modules. The regression asserts the selected
-  allocator after parsing, verifies every function's intended canonical or
-  machine path without native fallback, and executes aligned
+  allocator after parsing, verifies every function through MIR without native
+  fallback (including the NONE compatibility spelling for MIR-stack), and executes aligned
   parameter reads/writes after integer, vector and combined bank exhaustion.
   Volatile caller objects independently check that callee writes stay in the
   callee's by-value copies.
@@ -542,8 +542,9 @@ it does not replace target-matrix execution or the seeded differential corpus.
 
 Allocator-matrix commands place optimization flags before the explicit allocator
 flag because the last allocator-affecting option wins. Assert the parsed allocator
-on the invocation passed to execution; retain `-fverify-codegen` and allow machine
-fallback for NONE, while requiring strict machine coverage on applicable MIR rows.
+on the invocation passed to execution; retain `-fverify-codegen` and
+`-fno-machine-fallback` on applicable native rows in every mode. NONE retains its
+parsed spelling but selects MIR-stack, so it has no direct-emitter exception.
 
 ## Oracle independence
 

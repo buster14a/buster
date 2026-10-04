@@ -1214,6 +1214,84 @@ static void test_workload_descriptors(char const* executable, char const* root)
     }
 }
 
+/* Only an unexpected admission failure reaches this inspection. The original
+ * files stay under the test root; print their metadata and bounded text into
+ * the desktop combinations log before a later self-test can clear that root.
+ * Inspection does not rerun any child, rewrite a file or alter a test result. */
+static void test_admission_failure_diagnostic(char const* log, char const* predicate, char const* process)
+{
+    char text[8192] = {0};
+    FILE* file = fopen(log, "rb");
+    CHECK(file != NULL);
+    if (file)
+    {
+        size_t count = fread(text, 1, sizeof(text) - 1, file);
+        int read_ok = count < sizeof(text) - 1 && !ferror(file);
+        int close_ok = fclose(file) == 0;
+        CHECK(read_ok && close_ok);
+        CHECK(strstr(text, "THROUGHPUT_ADMISSION_FAILURE operation=source-to-object") &&
+              strstr(text, predicate) && strstr(text, "THROUGHPUT_ADMISSION_PROCESS") &&
+              strstr(text, process) && strstr(text, "THROUGHPUT_ADMISSION_ARGV ["));
+    }
+}
+
+static void test_admission_failure_file(char const* root, char const* leaf, int text)
+{
+    char path[TP_PATH_CAP], hash[65] = {0};
+    uint64_t bytes = 0, lines = 0;
+    int path_ok = tp_path(path, root, leaf);
+    int regular = path_ok && tp_workload_regular_file(path);
+    int hashed = regular && tp_hash_file(path, hash, &bytes, &lines);
+    fprintf(stderr, "THROUGHPUT_ADMISSION_FILE leaf=%s path=%s regular=%d hashed=%d bytes=%" PRIu64 " sha256=%s\n",
+            leaf, path_ok ? path : "unavailable", regular, hashed, bytes, hashed ? hash : "unavailable");
+    if (regular && text)
+    {
+        FILE* file = fopen(path, "rb");
+        if (file)
+        {
+            enum { TEXT_LIMIT = 65536 };
+            char chunk[4096];
+            size_t printed = 0;
+            fprintf(stderr, "THROUGHPUT_ADMISSION_FILE_BEGIN leaf=%s limit=%u\n", leaf, (unsigned)TEXT_LIMIT);
+            while (printed < TEXT_LIMIT)
+            {
+                size_t request = sizeof(chunk) < TEXT_LIMIT - printed ? sizeof(chunk) : TEXT_LIMIT - printed;
+                size_t count = fread(chunk, 1, request, file);
+                if (count) fwrite(chunk, 1, count, stderr);
+                printed += count;
+                if (count < request) break;
+            }
+            int truncated = printed == TEXT_LIMIT && fgetc(file) != EOF;
+            int read_error = ferror(file);
+            int close_error = fclose(file) != 0;
+            fprintf(stderr, "\nTHROUGHPUT_ADMISSION_FILE_END leaf=%s printed=%zu truncated=%d read_error=%d close_error=%d\n",
+                    leaf, printed, truncated, read_error, close_error);
+        }
+        else fprintf(stderr, "THROUGHPUT_ADMISSION_FILE_UNREADABLE leaf=%s errno=%d\n", leaf, errno);
+    }
+}
+
+static void test_admission_failure_files(char const* directory, char const* output)
+{
+    // The accepted fixture has exactly two object operations, then link/runtime.
+    test_admission_failure_file(directory, "admission.log", 1);
+    static char const* const leaves[] = {
+        "commands.jsonl", "object-000.log", "object-000.metrics", "object-000.o",
+        "object-001.log", "object-001.metrics", "object-001.o", "compile-link.log",
+        "compile-link.metrics", "runtime.log",
+#ifdef _WIN32
+        "program.exe"
+#else
+        "program"
+#endif
+    };
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(leaves); ++i)
+    {
+        int text = strstr(leaves[i], ".jsonl") || strstr(leaves[i], ".log") || strstr(leaves[i], ".metrics");
+        test_admission_failure_file(output, leaves[i], text);
+    }
+}
+
 static void test_workload_admission(char const* executable, char const* root)
 {
     char* missing_output[] = {"throughput", "admit-workload", "descriptor", "--source-root", "root", "--compiler", "compiler",
@@ -1298,6 +1376,10 @@ static void test_workload_admission(char const* executable, char const* root)
               !strstr(report, "}}},\"argv_identity\""));
     }
 
+    if (result.exit_code != 0 || result.signal_number || result.launch_error || result.timed_out ||
+        !strstr(report, "\"admitted\":true"))
+        test_admission_failure_files(directory, output);
+
     char failed_output[TP_PATH_CAP], failure_log[TP_PATH_CAP];
     CHECK(tp_path(failure_log, directory, "admission-failure.log"));
     CHECK(tp_path(failed_output, directory, "admission-state-oom"));
@@ -1347,6 +1429,7 @@ static void test_workload_admission(char const* executable, char const* root)
           tp_path(failed_output, directory, "compiler-failure"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
     CHECK_CHILD_EXIT(result, 2, failure_log);
+    test_admission_failure_diagnostic(failure_log, "predicate=process-pass", "exit_code=7");
     char commands[TP_PATH_CAP];
     CHECK(tp_path(commands, failed_output, "commands.jsonl"));
     file = fopen(commands, "rb");
@@ -1365,6 +1448,7 @@ static void test_workload_admission(char const* executable, char const* root)
           tp_path(failed_output, directory, "missing-artifact"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
     CHECK_CHILD_EXIT(result, 2, failure_log);
+    test_admission_failure_diagnostic(failure_log, "predicate=artifact-regular-file", "exit_code=0");
 
     CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes,
                                     "-DTP_TEST_MUTATE_PRIOR",

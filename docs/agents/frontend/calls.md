@@ -218,8 +218,8 @@ allocator modes and both frontend forms.
   `c_ir_emit_parameter` must pass the resolved layout alignment to
   `c_ir_emit_local`, just as an ordinary declaration does. Rounding a slot's
   frame-relative offset alone cannot honor alignment greater than the frame
-  pointer guarantee; the canonical native emitter uses the place's alignment
-  to reserve and materialize dynamically aligned storage. The parameter
+  pointer guarantee; MIR stack placement and native encoding use the place's
+  alignment to reserve and materialize dynamically aligned storage. The parameter
   alignment tests inspect IR on all six native targets and use an opaque,
   separately host-compiled observer for native x86-64 callee addresses.
 - System V x86-64 padding-only eightbytes retain NO_CLASS and consume no
@@ -231,13 +231,13 @@ allocator modes and both frontend forms.
   aligned float/integer records in both directions with the configured host
   compiler and available Linux GCC, including register exhaustion, aggregate
   returns and variadic access in every native allocator/frontend form.
-  The direct SysV variadic reader consumes live ABI parts in registers while
+  The MIR SysV variadic reader consumes live ABI parts in registers while
   retaining the complete aligned storage image in the overflow area. A record
   containing only ignored fields has zero transport parts and currently hits
   the frontend's unsupported zero-part signature gate; the LLVM negative
   fixture pins that earlier refusal and absence of a produced artifact.
 - A GNU zero-size struct or union is the distinct supported zero-part SysV
-  case in the canonical native x86-64 path. It consumes no argument register,
+  case in the native x86-64 MIR path. It consumes no argument register,
   stack slot, variadic cursor space or hidden result pointer. Loads preserve
   their place provenance while moving no bytes, and stores are zero-byte
   operations after the lvalue and value have been evaluated. Nonempty

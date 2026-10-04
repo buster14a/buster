@@ -1985,7 +1985,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
                         String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
                                              S8("-fverify-codegen"), S8("-o"), output, source};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                        invocation.reject_machine_fallback = mode != 0;
+                        invocation.reject_machine_fallback = true;
                         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                         BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                             string_format(temporary.arena, S8("enum {S8} {S8} {S8}: {S8}"),
