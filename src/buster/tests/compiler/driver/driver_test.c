@@ -19391,6 +19391,53 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(incompatible_cpu_command_line));
     BUSTER_TEST(arguments, incompatible_cpu.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, incompatible_cpu.diagnostic, S8("CPU model is incompatible with target: apple-m4"));
+    typedef struct CompilerDriverTestCpuModelAdmissionCase CompilerDriverTestCpuModelAdmissionCase;
+    struct CompilerDriverTestCpuModelAdmissionCase
+    {
+        String8 model_name;
+        bool compatible;
+    };
+    CompilerDriverTestCpuModelAdmissionCase const cpu_model_admission_cases[] = {
+        {S8("i486"), false},
+        {S8("pentium"), false},
+        {S8("k6"), false},
+        {S8("athlon-xp"), false},
+        {S8("k8"), true},
+        {S8("bonnell"), true},
+        {S8("baseline"), true},
+        {S8("znver5"), true},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cpu_model_admission_cases); case_index += 1)
+    {
+        CompilerDriverTestCpuModelAdmissionCase const* model_case = &cpu_model_admission_cases[case_index];
+        String8 march_argument = string_format(arguments->arena, S8("-march={S8}"), model_case->model_name);
+        String8 cpu_model_command_line[] = {
+            S8("--target=x86_64-linux"),
+            march_argument,
+            S8("-c"),
+            S8("source.c"),
+        };
+        CompilerDriverInvocation parsed =
+            compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(cpu_model_command_line));
+        BUSTER_TEST(arguments, parsed.error ==
+                                   (model_case->compatible ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_ARGUMENT));
+        if (!model_case->compatible)
+        {
+            String8 expected_diagnostic =
+                string_format(arguments->arena, S8("CPU model is incompatible with target: {S8}"), model_case->model_name);
+            BUSTER_STRING_TEST(arguments, parsed.diagnostic, expected_diagnostic);
+        }
+    }
+    String8 incompatible_mcpu_command_line[] = {
+        S8("--target=x86_64-linux"),
+        S8("-mcpu=k6"),
+        S8("-c"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation incompatible_mcpu =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(incompatible_mcpu_command_line));
+    BUSTER_TEST(arguments, incompatible_mcpu.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, incompatible_mcpu.diagnostic, S8("CPU model is incompatible with target: k6"));
     String8 unknown_cpu_command_line[] = {
         S8("-march=future-fast"),
         S8("-c"),

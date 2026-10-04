@@ -589,6 +589,21 @@ CpuModel cpu_model_from_string(String8 string)
     return CPU_MODEL_ERROR;
 }
 
+// Long mode is a per-model capability, not a position in the x86 model enum:
+// these selectable models only execute IA-32 code.
+BUSTER_GLOBAL_LOCAL bool cpu_model_x86_is_ia32_only(CpuModel model)
+{
+    bool result = model == CPU_MODEL_AMD_I486 ||
+                  model == CPU_MODEL_AMD_PENTIUM ||
+                  model == CPU_MODEL_AMD_K6 ||
+                  model == CPU_MODEL_AMD_K6_2 ||
+                  model == CPU_MODEL_AMD_K6_3 ||
+                  model == CPU_MODEL_AMD_GEODE ||
+                  model == CPU_MODEL_AMD_ATHLON ||
+                  model == CPU_MODEL_AMD_ATHLON_XP;
+    return result;
+}
+
 bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
 {
     if (model == CPU_MODEL_BASELINE)
@@ -602,7 +617,8 @@ bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
     }
     if (arch == CPU_ARCH_X86_64)
     {
-        return model >= CPU_MODEL_AMD_I486 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+        // The enum interval identifies x86-family membership only; long mode is explicit.
+        return model >= CPU_MODEL_AMD_I486 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS && !cpu_model_x86_is_ia32_only(model);
     }
     if (arch == CPU_ARCH_AARCH64)
     {
@@ -657,7 +673,7 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
             TARGET_CPU_FEATURE_AARCH64_NEON,
         }, 2);
     }
-    if (arch != CPU_ARCH_X86_64)
+    if (arch != CPU_ARCH_X86_64 || cpu_model_x86_is_ia32_only(model))
     {
         return target_cpu_features_empty();
     }
