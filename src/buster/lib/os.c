@@ -3779,6 +3779,10 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 // Captured pipe output is accumulated as a chunk list in scratch memory while
 // draining, because the streams are read interleaved (see below) but each
 // stream's bytes must end up contiguous in the caller's arena.
+// Retained payload is packed independently of the native read boundaries.
+// Only the final chunk of a stream can have unused capacity.
+enum { PIPE_CAPTURE_CHUNK_BYTES = 16 * 1024 };
+
 typedef struct PipeChunk PipeChunk;
 struct PipeChunk
 {
@@ -3827,21 +3831,32 @@ BUSTER_GLOBAL_LOCAL void pipe_capture_append(Arena* arena, PipeCapture* capture,
     pipe_capture_add_count(result->observed_bytes + stream, &result->observed_total, length);
     if (retained)
     {
-        PipeChunk* chunk = arena_allocate(arena, PipeChunk, 1);
-        chunk->next = 0;
-        chunk->length = retained;
-        chunk->data = arena_allocate(arena, u8, retained);
-        memcpy(chunk->data, data, retained);
-
-        if (capture->last)
+        u64 copied = 0;
+        while (copied < retained)
         {
-            capture->last->next = chunk;
+            PipeChunk* chunk = capture->last;
+            if (!chunk || chunk->length == PIPE_CAPTURE_CHUNK_BYTES)
+            {
+                chunk = arena_allocate(arena, PipeChunk, 1);
+                chunk->next = 0;
+                chunk->length = 0;
+                chunk->data = arena_allocate(arena, u8, PIPE_CAPTURE_CHUNK_BYTES);
+                if (capture->last)
+                {
+                    capture->last->next = chunk;
+                }
+                else
+                {
+                    capture->first = chunk;
+                }
+                capture->last = chunk;
+            }
+            u64 available = PIPE_CAPTURE_CHUNK_BYTES - chunk->length;
+            u64 amount = BUSTER_MIN(retained - copied, available);
+            memcpy(chunk->data + chunk->length, data + copied, amount);
+            chunk->length += amount;
+            copied += amount;
         }
-        else
-        {
-            capture->first = chunk;
-        }
-        capture->last = chunk;
         capture->total_length += retained;
         pipe_capture_add_count(result->captured_bytes + stream, &result->captured_total, retained);
     }
@@ -4029,6 +4044,50 @@ BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* ca
     BUSTER_CHECK(offset == capture->total_length);
     return (ByteSlice){pointer, capture->total_length};
 }
+
+#if BUSTER_INCLUDE_TESTS
+OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, ProcessSpawnResult spawn,
+    OsProcessCaptureTestInput const* inputs, u64 input_count)
+{
+    OsProcessCaptureTestResult result = {0};
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    u64 start = scratch.arena->position;
+    PipeCapture captures[(size_t)STANDARD_STREAM_COUNT] = {0};
+    for (u64 index = 0; index < input_count; index += 1)
+    {
+        OsProcessCaptureTestInput const* input = inputs + index;
+        BUSTER_VALIDATE(input->stream == STANDARD_STREAM_OUTPUT || input->stream == STANDARD_STREAM_ERROR);
+        BUSTER_VALIDATE(!input->bytes.length || input->bytes.pointer);
+        u64 offset = 0;
+        do
+        {
+            u64 count = input->bytes.length - offset;
+            if (input->read_size && count > input->read_size)
+            {
+                count = input->read_size;
+            }
+            pipe_capture_append(scratch.arena, captures + input->stream, spawn, &result.wait, input->stream,
+                input->bytes.pointer ? input->bytes.pointer + offset : 0, count);
+            offset += count;
+        } while (offset < input->bytes.length);
+    }
+    result.storage_bytes = scratch.arena->position - start;
+    for (u32 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+    {
+        for (PipeChunk* chunk = captures[stream].first; chunk; chunk = chunk->next)
+        {
+            result.chunk_count[stream] += 1;
+        }
+        if (stream != STANDARD_STREAM_INPUT)
+        {
+            result.wait.streams[stream] = pipe_capture_flatten(arena, captures + stream);
+        }
+    }
+    result.wait.result = result.wait.capture_failed ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
+    scratch_end(scratch);
+    return result;
+}
+#endif
 
 // Milliseconds left until `deadline`, clamped into a poll/wait argument. Zero
 // when the deadline has passed, and `no_deadline` when there is none.

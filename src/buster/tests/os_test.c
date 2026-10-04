@@ -933,6 +933,228 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_environment_lookup(UnitTestArguments*
 
 #include <buster/tests/os_capture_replay_test_internal.h>
 
+// The allocation oracle counts requested arena bytes, not process RSS. Its
+// independent 64-byte node budget includes the header and alignment padding.
+// A one-byte-per-read collector would exceed it by about 32 MiB for 1 MiB.
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 start = arena->position;
+    u8* data = arena_allocate(arena, u8, 1048576);
+    for (u64 index = 0; index < 1048576; index += 1) data[index] = (u8)(index * 37 + index / 251);
+    u64 lengths[] = {0, 1, 16384, 16385, 1048576};
+    u64 read_sizes[] = {0, 1, 97};
+    u64 output_start = arena->position;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(lengths); index += 1)
+    {
+        u64 length = lengths[index];
+        u64 chunks = (length + 16383) / 16384;
+        u64 storage = 0;
+        for (u32 fragment = 0; fragment < BUSTER_ARRAY_LENGTH(read_sizes); fragment += 1)
+        {
+            OsProcessCaptureTestInput input = {STANDARD_STREAM_OUTPUT, {data, length}, read_sizes[fragment]};
+            OsProcessCaptureTestResult collected = os_process_capture_test_collect(arena, (ProcessSpawnResult){0}, &input, 1);
+            BUSTER_TEST(arguments, collected.chunk_count[STANDARD_STREAM_OUTPUT] == chunks &&
+                collected.chunk_count[STANDARD_STREAM_ERROR] == 0 && collected.chunk_count[STANDARD_STREAM_INPUT] == 0);
+            BUSTER_TEST(arguments, collected.storage_bytes >= chunks * 16384 &&
+                collected.storage_bytes <= chunks * (16384 + 64));
+            if (fragment == 0) storage = collected.storage_bytes;
+            BUSTER_TEST(arguments, collected.storage_bytes == storage);
+            BUSTER_TEST(arguments, collected.wait.observed_total == length && collected.wait.captured_total == length &&
+                collected.wait.observed_bytes[STANDARD_STREAM_OUTPUT] == length &&
+                collected.wait.captured_bytes[STANDARD_STREAM_OUTPUT] == length);
+            BUSTER_TEST(arguments, collected.wait.streamed_total == 0 && collected.wait.dropped_total == 0 &&
+                !collected.wait.capture_limit_exceeded && !collected.wait.output_truncated && !collected.wait.capture_failed &&
+                collected.wait.result == PROCESS_RESULT_SUCCESS);
+            // Reuse and overwrite the collector's scratch storage before
+            // checking that flattened output belongs to the caller's arena.
+            TemporalArena reuse = scratch_begin(&arena, 1);
+            if (storage) memset(arena_allocate(reuse.arena, u8, storage), 0xA5, storage);
+            scratch_end(reuse);
+            if (BUSTER_REQUIRE(arguments, collected.wait.streams[STANDARD_STREAM_OUTPUT].length == length))
+            {
+                if (length) BUSTER_TEST(arguments, memory_compare(collected.wait.streams[STANDARD_STREAM_OUTPUT].pointer, data, length));
+            }
+            BUSTER_TEST(arguments, collected.wait.streams[STANDARD_STREAM_ERROR].length == 0);
+            arena_set_position(arena, output_start);
+        }
+    }
+    arena_set_position(arena, start);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_limits(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 start = arena->position;
+    u64 length = 16777217;
+    u8* data = arena_allocate(arena, u8, length);
+    for (u64 index = 0; index < length; index += 1) data[index] = (u8)(index * 37 + index / 251);
+    u64 output_start = arena->position;
+    // Zero selects the defaults. Explicit defaults agree; UINT64_MAX removes
+    // the per-stream and/or total bound. The total-only row crosses 32 MiB.
+    u64 per_stream[] = {0, 16777216, UINT64_MAX, UINT64_MAX};
+    u64 total[] = {0, 33554432, 0, UINT64_MAX};
+    u64 expected_output[] = {16777216, 16777216, 16777217, 16777217};
+    u64 expected_error[] = {16777216, 16777216, 16777215, 16777217};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(total); index += 1)
+    {
+        ProcessSpawnResult spawn = {0};
+        spawn.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = per_stream[index];
+        spawn.capture_limits.per_stream[STANDARD_STREAM_ERROR] = per_stream[index];
+        spawn.capture_limits.total = total[index];
+        OsProcessCaptureTestInput inputs[] = {
+            {STANDARD_STREAM_OUTPUT, {data, length}, 0},
+            {STANDARD_STREAM_ERROR, {data, length}, 0},
+        };
+        OsProcessCaptureTestResult collected = os_process_capture_test_collect(arena, spawn, inputs, BUSTER_ARRAY_LENGTH(inputs));
+        u64 captured = expected_output[index] + expected_error[index];
+        BUSTER_TEST(arguments, collected.wait.observed_total == 33554434 && collected.wait.captured_total == captured &&
+            collected.wait.dropped_total == 33554434 - captured && collected.wait.streamed_total == 0);
+        BUSTER_TEST(arguments, (bool)collected.wait.capture_limit_exceeded == (index != 3) &&
+            (bool)collected.wait.output_truncated == (index != 3) && !collected.wait.capture_failed &&
+            collected.wait.result == PROCESS_RESULT_SUCCESS);
+        u64 expected[] = {0, expected_output[index], expected_error[index]};
+        u64 nodes = 0;
+        for (u32 stream = STANDARD_STREAM_OUTPUT; stream < STANDARD_STREAM_COUNT; stream += 1)
+        {
+            u64 chunks = (expected[stream] + 16383) / 16384;
+            nodes += chunks;
+            BUSTER_TEST(arguments, collected.chunk_count[stream] == chunks);
+            BUSTER_TEST(arguments, collected.wait.observed_bytes[stream] == length &&
+                collected.wait.captured_bytes[stream] == expected[stream] &&
+                collected.wait.dropped_bytes[stream] == length - expected[stream] && collected.wait.streamed_bytes[stream] == 0);
+            if (BUSTER_REQUIRE(arguments, collected.wait.streams[stream].length == expected[stream]))
+            {
+                BUSTER_TEST(arguments, memory_compare(collected.wait.streams[stream].pointer, data, expected[stream]));
+            }
+        }
+        BUSTER_TEST(arguments, collected.storage_bytes <= captured + 2 * 16383 + nodes * 64);
+        arena_set_position(arena, output_start);
+    }
+
+    // Interleaving matters when streams share a quota. Within each admitted
+    // descriptor, fragmentation must preserve both prefixes and accounting.
+    u64 read_sizes[] = {0, 1, 97};
+    for (u32 policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE; policy <= PROCESS_CAPTURE_OVERFLOW_FAIL; policy += 1)
+    {
+        for (u32 fragment = 0; fragment < BUSTER_ARRAY_LENGTH(read_sizes); fragment += 1)
+        {
+            ProcessSpawnResult spawn = {0};
+            spawn.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = 16385;
+            spawn.capture_limits.per_stream[STANDARD_STREAM_ERROR] = 16384;
+            spawn.capture_limits.total = 24577;
+            spawn.capture_overflow_policy = (ProcessCaptureOverflowPolicy)policy;
+            OsProcessCaptureTestInput inputs[] = {
+                {STANDARD_STREAM_OUTPUT, {data, 16384}, read_sizes[fragment]},
+                {STANDARD_STREAM_ERROR, {data, 8192}, read_sizes[fragment]},
+                {STANDARD_STREAM_OUTPUT, {0}, 0},
+                {STANDARD_STREAM_OUTPUT, {data + 16384, 16385}, read_sizes[fragment]},
+                {STANDARD_STREAM_ERROR, {data + 8192, 8193}, read_sizes[fragment]},
+            };
+            OsProcessCaptureTestResult collected = os_process_capture_test_collect(arena, spawn, inputs, BUSTER_ARRAY_LENGTH(inputs));
+            BUSTER_TEST(arguments, collected.wait.observed_total == 49154 && collected.wait.captured_total == 24577 &&
+                collected.wait.dropped_total == 24577 && collected.wait.streamed_total == 0);
+            BUSTER_TEST(arguments, collected.wait.capture_limit_exceeded && collected.wait.output_truncated &&
+                (bool)collected.wait.capture_failed == (policy == PROCESS_CAPTURE_OVERFLOW_FAIL) &&
+                collected.wait.result == (policy == PROCESS_CAPTURE_OVERFLOW_FAIL ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));
+            u64 observed[] = {0, 32769, 16385};
+            u64 expected[] = {0, 16385, 8192};
+            for (u32 stream = STANDARD_STREAM_OUTPUT; stream < STANDARD_STREAM_COUNT; stream += 1)
+            {
+                BUSTER_TEST(arguments, collected.wait.observed_bytes[stream] == observed[stream] &&
+                    collected.wait.captured_bytes[stream] == expected[stream] &&
+                    collected.wait.dropped_bytes[stream] == observed[stream] - expected[stream] && collected.wait.streamed_bytes[stream] == 0);
+                if (BUSTER_REQUIRE(arguments, collected.wait.streams[stream].length == expected[stream]))
+                {
+                    BUSTER_TEST(arguments, memory_compare(collected.wait.streams[stream].pointer, data, expected[stream]));
+                }
+            }
+            BUSTER_TEST(arguments, collected.chunk_count[STANDARD_STREAM_OUTPUT] == 2 && collected.chunk_count[STANDARD_STREAM_ERROR] == 1 &&
+                collected.storage_bytes <= 3 * (16384 + 64));
+            arena_set_position(arena, output_start);
+        }
+    }
+    arena_set_position(arena, start);
+    return result;
+}
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_overflow(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 start = arena->position;
+    String8 path = buster_test_temporary_path(arena, S8("capture-storage-overflow"), S8(".bin"));
+    u8* data = arena_allocate(arena, u8, 32769);
+    for (u64 index = 0; index < 32769; index += 1) data[index] = (u8)(index * 37 + index / 251);
+    u64 output_start = arena->position;
+    u64 read_sizes[] = {0, 97, 0, 0};
+    u64 streamed[] = {16384, 16384, 0, 7};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(read_sizes); index += 1)
+    {
+        BUSTER_TEST(arguments, os_file_delete(path));
+        OsFileTestStep steps[] = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 7}, {OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}};
+        if (index == 3) os_file_test_begin(path, steps, BUSTER_ARRAY_LENGTH(steps));
+        OsFileDescriptor* file = 0;
+        if (index != 2)
+        {
+            file = os_file_open(path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+            BUSTER_TEST(arguments, file != 0);
+        }
+        if (file || index == 2)
+        {
+            ProcessSpawnResult spawn = {.capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE};
+            spawn.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = 16385;
+            spawn.capture_limits.total = 16385;
+            spawn.capture_overflow_files[STANDARD_STREAM_OUTPUT] = file;
+            OsProcessCaptureTestInput input = {STANDARD_STREAM_OUTPUT, {data, 32769}, read_sizes[index]};
+            OsProcessCaptureTestResult collected = os_process_capture_test_collect(arena, spawn, &input, 1);
+            if (index == 3) BUSTER_TEST(arguments, os_file_test_end() == BUSTER_ARRAY_LENGTH(steps));
+            BUSTER_TEST(arguments, collected.wait.observed_total == 32769 && collected.wait.captured_total == 16385 &&
+                collected.wait.streamed_total == streamed[index] && collected.wait.dropped_total == 16384 - streamed[index]);
+            BUSTER_TEST(arguments, collected.wait.observed_bytes[STANDARD_STREAM_OUTPUT] == 32769 &&
+                collected.wait.captured_bytes[STANDARD_STREAM_OUTPUT] == 16385 &&
+                collected.wait.streamed_bytes[STANDARD_STREAM_OUTPUT] == streamed[index] &&
+                collected.wait.dropped_bytes[STANDARD_STREAM_OUTPUT] == 16384 - streamed[index]);
+            BUSTER_TEST(arguments, collected.wait.capture_limit_exceeded && collected.wait.output_truncated &&
+                (bool)collected.wait.capture_failed == (index >= 2) &&
+                collected.wait.result == (index >= 2 ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));
+            BUSTER_TEST(arguments, collected.chunk_count[STANDARD_STREAM_OUTPUT] == 2 && collected.storage_bytes <= 2 * (16384 + 64));
+            if (BUSTER_REQUIRE(arguments, collected.wait.streams[STANDARD_STREAM_OUTPUT].length == 16385))
+            {
+                BUSTER_TEST(arguments, memory_compare(collected.wait.streams[STANDARD_STREAM_OUTPUT].pointer, data, 16385));
+            }
+            if (file)
+            {
+                // The caller retains descriptor ownership after collection.
+                FileStats stats = os_file_get_stats(file, (FileStatsOptions){.size = 1});
+                BUSTER_TEST(arguments, stats.valid && stats.size == streamed[index]);
+                u8 marker = 0xD3;
+                OsFileTransferResult appended = os_file_write_checked(file, (ByteSlice){&marker, 1});
+                BUSTER_TEST(arguments, appended.transferred == 1 && !appended.error.v);
+                BUSTER_TEST(arguments, os_file_close(file));
+                ByteSlice actual = file_read(arena, path, (FileReadOptions){0});
+                if (BUSTER_REQUIRE(arguments, actual.length == streamed[index] + 1))
+                {
+                    BUSTER_TEST(arguments, memory_compare(actual.pointer, data + 16385, streamed[index]) && actual.pointer[streamed[index]] == marker);
+                }
+                BUSTER_TEST(arguments, os_file_delete(path));
+            }
+        }
+        else if (index == 3)
+        {
+            BUSTER_TEST(arguments, os_file_test_end() == 0);
+        }
+        arena_set_position(arena, output_start);
+    }
+    arena_set_position(arena, start);
+    return result;
+}
+#endif
+
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
 // Observe a real child's exit without reaping before injecting drain errors.
 // The five-byte payload fits the pipe: failure cannot turn a still-writing
@@ -1036,6 +1258,11 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, os_test_environment_lookup);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_replay);
+    BUSTER_TEST_FIXTURE(arguments, os_test_capture_storage);
+    BUSTER_TEST_FIXTURE(arguments, os_test_capture_limits);
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, os_test_capture_overflow);
+#endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_native);
