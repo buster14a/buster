@@ -3859,11 +3859,103 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
                                                                               CPreprocessResult preprocess, u32 start, u32 end, u8 const* skipped)
 {
     CCallArityDiagnostic result = {0};
+    typedef struct CCallAttributeGroup CCallAttributeGroup;
+    struct CCallAttributeGroup
+    {
+        u32 next_name;
+        u32 payload_end;
+    };
+    enum { C_CALL_ATTRIBUTE_INLINE_GROUPS = 8 };
+    CCallAttributeGroup inline_attribute_groups[C_CALL_ATTRIBUTE_INLINE_GROUPS];
+    CCallAttributeGroup* attribute_groups = inline_attribute_groups;
+    Arena* attribute_arena = 0;
+    u32 attribute_group_count = 0;
+    u32 attribute_group_capacity = C_CALL_ATTRIBUTE_INLINE_GROUPS;
     CParseCandidates calls = c_parse_call_candidates(preprocess);
     for (u32 index = c_parse_candidates_next(&calls, start, end); index + 1 < end && !result.message.length;
          index = c_parse_candidates_next(&calls, index + 1, end))
     {
         CToken token = preprocess.tokens[index];
+        while (attribute_group_count && index >= attribute_groups[attribute_group_count - 1].payload_end)
+        {
+            attribute_group_count -= 1;
+        }
+        bool attribute_name = false;
+        if (attribute_group_count)
+        {
+            CCallAttributeGroup* group = attribute_groups + attribute_group_count - 1;
+            // Advance only over attribute specifiers, jumping their argument
+            // groups through the retained delimiter index. The call cursor
+            // still visits every candidate inside those arguments.
+            while (group->next_name < index && group->next_name < group->payload_end)
+            {
+                u32 next = group->next_name + 1;
+                if (preprocess.tokens[group->next_name].kind == C_TOKEN_IDENTIFIER && next < group->payload_end &&
+                    c_token_is_punctuator(&preprocess.tokens[next], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 close = c_parse_matching_delimiter_indexed(analysis, preprocess, next);
+                    next = close < group->payload_end ? close + 1 : group->payload_end;
+                }
+                group->next_name = next;
+            }
+            attribute_name = group->next_name == index;
+        }
+        if (attribute_name)
+        {
+            continue;
+        }
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ATTRIBUTE_KEYWORDS) &&
+            c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(analysis, preprocess, index + 1);
+            if (close < end)
+            {
+                u32 payload_start = index + 2;
+                u32 payload_end = close;
+                if (payload_start < payload_end && c_token_is_punctuator(&preprocess.tokens[payload_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    c_parse_matching_delimiter_indexed(analysis, preprocess, payload_start) + 1 == payload_end)
+                {
+                    payload_start += 1;
+                    payload_end -= 1;
+                }
+                if (attribute_group_count == attribute_group_capacity)
+                {
+                    // Spill only for simultaneous nesting beyond the fixed
+                    // local buffer. A private arena avoids exhausting the two
+                    // scratch arenas when message/model owners occupy both.
+                    CTokenPositionIndex* positions = analysis->position_index;
+                    u32 first = c_parse_position_lower_bound(positions->attribute_positions, positions->attribute_count, start);
+                    u32 after = c_parse_position_lower_bound(positions->attribute_positions, positions->attribute_count, end);
+                    u32 doubled = attribute_group_capacity <= UINT32_MAX / 2 ? attribute_group_capacity * 2 : UINT32_MAX;
+                    u32 capacity = BUSTER_MIN(after - first, doubled);
+                    if (!attribute_arena && capacity > attribute_group_count)
+                    {
+                        attribute_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+                    }
+                    if (attribute_arena && capacity > attribute_group_count)
+                    {
+                        CCallAttributeGroup* groups = arena_allocate(attribute_arena, CCallAttributeGroup, capacity);
+                        memcpy(groups, attribute_groups, sizeof(*groups) * attribute_group_count);
+                        attribute_groups = groups;
+                        attribute_group_capacity = capacity;
+                    }
+                    else
+                    {
+                        result.message = S8("could not allocate GNU attribute-role frames");
+                        result.token_index = index;
+                    }
+                }
+                if (!result.message.length)
+                {
+                    attribute_groups[attribute_group_count++] = (CCallAttributeGroup){
+                        .next_name = payload_start,
+                        .payload_end = payload_end,
+                    };
+                }
+            }
+            continue;
+        }
         bool is_member_call =
             index && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
                       c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
@@ -3928,6 +4020,10 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
                                                           type->parameter_count, type->is_variadic, argument_count);
             result.token_index = index;
         }
+    }
+    if (attribute_arena)
+    {
+        BUSTER_VALIDATE(arena_destroy(attribute_arena, 1));
     }
     return result;
 }

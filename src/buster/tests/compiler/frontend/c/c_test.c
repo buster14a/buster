@@ -18182,6 +18182,310 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_then_prototyped(UnitTestA
    there, and every dialect refuses a call that overruns a real parameter list.
    Both used to report only that the call could not be prepared, which named
    neither the callee nor the count. */
+// GNU attribute names are grammar heads, while calls in their argument
+// expressions retain ordinary arity constraints.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "volatile unsigned first_calls, second_calls, ordinary_calls, seen;\n"
+        "static void tidy(int *value) { first_calls += 1u; seen += (unsigned)*value; }\n"
+        "static void other_tidy(int *value) { second_calls += 1u; seen += 10u * (unsigned)*value; }\n"
+        "int helper(int value) { return value; }\n"
+        "int cleanup(void) {\n"
+        "    ordinary_calls += 1u;\n"
+        "    int value __attribute__((unused, cleanup(tidy))) = 3;\n"
+        "    return 11;\n"
+        "}\n"
+        "#define JOIN(first, second) first##second\n"
+        "int __cleanup__(void) {\n"
+        "    ordinary_calls += 1u;\n"
+        "    int value JOIN(__attri, bute)((__cleanup__(other_tidy), unused)) = 5;\n"
+        "    return 13;\n"
+        "}\n"
+        "int aligned(void) {\n"
+        "    ordinary_calls += 1u;\n"
+        "    int value __attribute__((aligned(sizeof(helper(1))))) = 7;\n"
+        "    return value;\n"
+        "}\n"
+        "int main(void) {\n"
+        "    if (cleanup() != 11 || first_calls != 1u || second_calls != 0u || seen != 3u) return 1;\n"
+        "    if (__cleanup__() != 13 || first_calls != 1u || second_calls != 1u || seen != 53u) return 2;\n"
+        "    if (aligned() != 7 || ordinary_calls != 3u || first_calls != 1u || second_calls != 1u || seen != 53u) return 3;\n"
+        "    return 0;\n"
+        "}\n");
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+    String8 owners[] = {S8("cleanup"), S8("__cleanup__")};
+    String8 callbacks[] = {S8("tidy"), S8("other_tidy")};
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 target_index = 0; target_index < 6; target_index += 1)
+        {
+            Target target = target_native;
+            target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+            target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect],
+            });
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            String8 context = string_format(temporary.arena, S8("attribute roles dialect={u32} target={u32}"), dialect, target_index);
+            BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count, context);
+            BUSTER_TEST_RAW(arguments, !semantic.diagnostic_count && semantic.analysis_complete, context);
+            for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(owners); row += 1)
+            {
+                u32 found = 0;
+                for (u32 entity_index = 0; entity_index < semantic.entity_count; entity_index += 1)
+                {
+                    CEntity entity = semantic.entities[entity_index];
+                    if (!entity.has_cleanup || entity.declaration_index >= semantic.declaration_count ||
+                        !string_equal(semantic.declarations[entity.declaration_index].name, owners[row]))
+                    {
+                        continue;
+                    }
+                    found += 1;
+                    BUSTER_TEST_RAW(arguments, entity.cleanup_function.value < semantic.entity_count &&
+                        string_equal(semantic.entities[entity.cleanup_function.value].name, callbacks[row]), context);
+                }
+                BUSTER_TEST_RAW(arguments, found == 1, context);
+            }
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("attribute-call-roles.c"), tokens, syntax, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified,
+                    string_format(temporary.arena, S8("{S8} form={u32}: diagnostics={u32}"), context, form, lowered.diagnostic_count));
+                if (lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count &&
+                    BUSTER_REQUIRE(arguments, lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    String8 functions[] = {owners[0], owners[1], S8("aligned")};
+                    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(functions); row += 1)
+                    {
+                        u32 found = 0;
+                        for (u32 index = 0; index < module->function_count; index += 1)
+                        {
+                            IrFunction* function = module->functions + index;
+                            if (!string_equal(function->name, functions[row]))
+                            {
+                                continue;
+                            }
+                            found += 1;
+                            u32 calls = 0;
+                            for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+                            {
+                                calls += function->instructions[instruction].opcode == IR_OPCODE_CALL;
+                            }
+                            BUSTER_TEST_RAW(arguments, calls == (row < 2 ? 1u : 0u), context);
+                        }
+                        BUSTER_TEST_RAW(arguments, found == 1, context);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    // The nested type attribute ends before the outer cleanup specifier:
+    // its grammar state cannot replace the outer group's remaining names.
+    String8 nested_roles[] = {
+        S8("void tidy(int*); int aligned(void); int cleanup(void); int helper(int);"
+           " int probe(void) { int value __attribute__((aligned(sizeof(int __attribute__((aligned(sizeof(helper(1))))))), cleanup(tidy))) = 3; return value; }"),
+        S8("int aligned(void); int helper(int);"
+           " int probe(void) { int value __attribute__((aligned(sizeof(int __attribute__((aligned(sizeof(helper(1, 2))))))))) = 3; return value; }"),
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(nested_roles); row += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, nested_roles[row], (CPreprocessOptions){
+                .target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect],
+            });
+            CParseResult model = c_parse(temporary.arena, tokens);
+            CDiagnostic checked = c_test_check_named_call_arities(temporary.arena, &model, tokens, 0, (u32)tokens.token_count);
+            if (row)
+            {
+                BUSTER_STRING_TEST(arguments, checked.message, S8("too many arguments in the call to 'helper': it declares 1 parameter"));
+            }
+            else
+            {
+                BUSTER_TEST_RAW(arguments, !checked.message.length, nested_roles[row]);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST_RAW(arguments, !semantic.diagnostic_count && semantic.analysis_complete, nested_roles[row]);
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("attribute-nested-roles.c"), tokens, syntax, target_native,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified, nested_roles[row]);
+                    if (lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count &&
+                        BUSTER_REQUIRE(arguments, lowered.program->module_count == 1))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                        for (u32 index = 0; index < lowered.program->modules[0].function_count; index += 1)
+                        {
+                            IrFunction* function = lowered.program->modules[0].functions + index;
+                            if (string_equal(function->name, S8("probe")))
+                            {
+                                u32 calls = 0;
+                                for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+                                {
+                                    calls += function->instructions[instruction].opcode == IR_OPCODE_CALL;
+                                }
+                                BUSTER_TEST(arguments, calls == 1);
+                            }
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    // Both scratch arenas can be legitimate shared-query owners. Repeated
+    // deep queries must retain neither role buffers nor a third-scratch need.
+    String8 deep_start = S8("int aligned(void); int helper(int); int probe(void) { int value __attribute__((aligned(");
+    String8 deep_parts[22];
+    u32 deep_count = 0;
+    deep_parts[deep_count++] = deep_start;
+    for (u32 depth = 0; depth < 9; depth += 1)
+    {
+        deep_parts[deep_count++] = S8("sizeof(int __attribute__((aligned(");
+    }
+    deep_parts[deep_count++] = S8("sizeof(helper(1))");
+    for (u32 depth = 0; depth < 9; depth += 1)
+    {
+        deep_parts[deep_count++] = S8("))))");
+    }
+    deep_parts[deep_count++] = S8("))) = 3; return value; }");
+    String8 deep_source = string_join_arena(arguments->arena, (SliceString8){.pointer = deep_parts, .length = deep_count}, false);
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        TemporalArena model_temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(model_temporary.arena, deep_source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect],
+        });
+        CParseResult model = c_parse(model_temporary.arena, tokens);
+        c_parse_position_index_ensure(&model, tokens);
+        TemporalArena message_temporary = scratch_begin(&model_temporary.arena, 1);
+        BUSTER_TEST(arguments, model_temporary.arena != message_temporary.arena);
+        u64 model_position = model_temporary.arena->position;
+        u64 message_position = message_temporary.arena->position;
+        for (u32 repetition = 0; repetition < 16; repetition += 1)
+        {
+            CDiagnostic checked = c_test_check_named_call_arities(message_temporary.arena, &model, tokens, 0, (u32)tokens.token_count);
+            BUSTER_TEST_RAW(arguments, !checked.message.length, deep_source);
+            BUSTER_TEST(arguments, model_temporary.arena->position == model_position && message_temporary.arena->position == message_position);
+        }
+        scratch_end(message_temporary);
+        scratch_end(model_temporary);
+    }
+    typedef struct CTestAttributeRefusal CTestAttributeRefusal;
+    struct CTestAttributeRefusal
+    {
+        String8 source;
+        String8 arity;
+        bool cleanup;
+    };
+    CTestAttributeRefusal refused[] = {
+        {S8("int cleanup(void); int bad(void) { return cleanup(1); }"),
+         S8("too many arguments in the call to 'cleanup': it declares no parameters"), false},
+        {S8("int helper(int); int cleanup(void); int bad(void) { int (*cleanup)(int) = helper; return cleanup(); }"),
+         S8("too few arguments in the call to '<function pointer>': it declares 1 parameter"), false},
+        {S8("int helper(int); int bad(void) { int value __attribute__((aligned(sizeof(helper(1, 2))))); return 0; }"),
+         S8("too many arguments in the call to 'helper': it declares 1 parameter"), false},
+        {S8("int helper(int); int bad(void) { int value __attribute__((aligned(helper(1, 2)))); return 0; }"),
+         S8("too many arguments in the call to 'helper': it declares 1 parameter"), false},
+        {S8("void tidy(int*, int); int cleanup(void) { int value __attribute__((cleanup(tidy))) = 3; return 0; }"), {0}, true},
+        {S8("void tidy(float*); int cleanup(void) { int value __attribute__((cleanup(tidy))) = 3; return 0; }"), {0}, true},
+        {S8("void tidy(int*); int cleanup(void) { int tidy = 0; int value __attribute__((cleanup(tidy))) = 3; return 0; }"), {0}, true},
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(refused); row += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, refused[row].source, (CPreprocessOptions){
+                .target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect],
+            });
+            CParseResult model = c_parse(temporary.arena, tokens);
+            String8 context = string_format(temporary.arena, S8("attribute refusal row={u32} dialect={u32}"), row, dialect);
+            if (refused[row].arity.length)
+            {
+                CDiagnostic checked = c_test_check_named_call_arities(temporary.arena, &model, tokens, 0, (u32)tokens.token_count);
+                BUSTER_STRING_TEST(arguments, checked.message, refused[row].arity);
+            }
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST_RAW(arguments, semantic.diagnostic_count != 0 && semantic.analysis_complete, context);
+            if (refused[row].cleanup && BUSTER_REQUIRE(arguments, semantic.diagnostic_count != 0))
+            {
+                BUSTER_TEST_RAW(arguments, semantic.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_CLEANUP_ATTRIBUTE, context);
+            }
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("attribute-call-invalid.c"), tokens, syntax, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, context);
+                if (semantic.diagnostic_count && lowered.diagnostic_count)
+                {
+                    BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message, semantic.diagnostics[0].message);
+                    BUSTER_TEST_RAW(arguments, lowered.diagnostics[0].kind == semantic.diagnostics[0].kind, context);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 input = buster_test_temporary_path(arguments->arena, S8("attribute-call-roles"), S8(".c"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    String8 flags[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    for (u32 dialect = 0; written && dialect < BUSTER_ARRAY_LENGTH(flags); dialect += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 context = string_format(temporary.arena, S8("attribute driver {S8} {S8} form={u32}"), flags[dialect], modes[mode], form);
+                String8 frontend = form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa");
+                String8 syntax_command[] = {S8("-nostdinc"), flags[dialect], frontend, S8("-fsyntax-only"), input};
+                CompilerDriverResult checked = compiler_driver_execute_invocation(temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+                BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("{S8} syntax: {S8}"), context, checked.diagnostic));
+                String8 output = buster_test_temporary_path(temporary.arena, S8("attribute-call-roles"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), flags[dialect], modes[mode], frontend, S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("{S8} compile: {S8}"), context, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("{S8}: status={u32} timed_out={u32}"),
+                                context, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_arity_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -35531,6 +35835,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_typedef_parameters);
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
+    BUSTER_TEST_FIXTURE(arguments, c_test_attribute_call_roles);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);
