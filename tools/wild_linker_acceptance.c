@@ -252,6 +252,7 @@ int main(int argc, char** argv)
         {
             must("restore-frozen-objects", format("tar -xzf %s", quote(format("%s/%s-inputs.tar.gz", input, i ? "separate-release" : "unity-release"))));
         }
+        must("prepare-frozen-output-directories", "mkdir -p build-wild-unity/Debug build-wild-unity/Release build-wild-separate/Debug build-wild-separate/Release");
         const char* original_cells[] = {"separate-debug-default", "unity-release-default", "separate-release-default"};
         const char* cells[] = {"ide-debug", "ide-unity-release", "ide-separate-release"};
         for (unsigned i = 0; i < 3; ++i)
@@ -277,7 +278,7 @@ int main(int argc, char** argv)
         BenchResult cold = run_command("guest-cold-cache-admission", "drop-caches", -1, "sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'");
         write_text(format("%s/cold-cache-status.txt", evidence), cold.status ? "NOT RUN: guest refused drop-caches, diagnostic retained.\n" : "Guest cache eviction available; timing cold runs is deferred pending full input residency control. No cold-cache ranking claimed.\n");
         must("retain-original-summary", format("cp %s %s && cp %s %s", quote(format("%s/summary.csv", input)), quote(format("%s/original-summary.csv", evidence)), quote(format("%s/raw.csv", input)), quote(format("%s/original-raw.csv", evidence))));
-        write_text(format("%s/completion.txt", evidence), "supplementary_campaign=PASS\n");
+        write_text(format("%s/completion.txt", evidence), failures ? "supplementary_campaign=FAIL\n" : "supplementary_campaign=PASS\n");
         if (fclose(raw) || fclose(commands) || fclose(summary)) fail("final review flush");
         result = failures ? 1 : 0;
     }
