@@ -88,6 +88,12 @@
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
+- Modules with only test consumers join `ide` through
+  `BUSTER_COMPILER_TEST_MODULES` and a matching `#if BUSTER_INCLUDE_TESTS`
+  unity include. `truetype` and the AArch64 syntax model (`aarch64_syntax.c`
+  and its generated table) follow this rule; `aarch64_syntax.c` fails with
+  `#error` in a tests-disabled compile, so self-host stage 1 cannot silently
+  regain it.
 - Active CI is defined under `.github/workflows/`; the current tree has no
   Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
