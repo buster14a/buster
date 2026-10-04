@@ -142,13 +142,13 @@ static void generate(void)
 }
 static void setup(void)
 {
-    command("exec sh -c 'uname -a; lscpu; cat /proc/meminfo; cat /etc/os-release; env | sort'", "host");
+    command("exec sh -c 'uname -a; lscpu; cat /proc/meminfo; cat /etc/os-release; printf \"ImageOS=%s ImageVersion=%s RUNNER_ARCH=%s\\n\" \"$ImageOS\" \"$ImageVersion\" \"$RUNNER_ARCH\"'", "host");
     command("exec sh -c 'clang --version; gcc -v; gdb --version; ld --version; cmake --version; ninja --version; dpkg-query -W clang gcc gdb binutils libc6; sha256sum $(command -v clang) $(command -v gcc)'", "toolchains");
     command("git init -q source && git -C source remote add origin https://github.com/buster14a/buster && git -C source fetch -q --depth=1 origin f34cc3a56296be1b1244647775e1a40a67dae3ef && git -C source checkout -q FETCH_HEAD", "source");
     command("git clone -q https://github.com/TinyCC/tinycc external/tinycc && git -C external/tinycc checkout -q 0fb54300b56512754221d80adda85ddb9815bceb", "tcc-source");
     command("cd external/tinycc && ./configure --prefix=\"$(pwd)/../tcc\" --cc=clang --extra-cflags='-O2' && make -j2 && make install", "tcc-build");
     command("cd source && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -lm -o ../build-driver && ../build-driver generate --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=ON && ../build-driver build --config Release -t ide", "buster-build");
-    command("cp source/build/CMakeCache.txt source/build/compile_commands.json evidence/; cp source/AGENTS.md source/THIRD_PARTY_NOTICES.md evidence/; cp external/tinycc/COPYING evidence/tcc-COPYING; cp external/tinycc/README evidence/tcc-README; sha256sum source/build/Release/ide external/tcc/bin/tcc > evidence/compiler-sha256.txt; git -C source rev-parse HEAD HEAD^{tree} > evidence/source-pin.txt", "receipts");
+    command("cp source/build/CMakeCache.txt source/build/compile_commands.json evidence/; cp source/AGENTS.md source/THIRD_PARTY_NOTICES.md evidence/; cp external/tinycc/COPYING evidence/tcc-COPYING; cp external/tinycc/README evidence/tcc-README; external/tcc/bin/tcc -v > evidence/tcc-version.txt; sha256sum source/build/Release/ide external/tcc/bin/tcc > evidence/compiler-sha256.txt; git -C source rev-parse HEAD HEAD^{tree} > evidence/source-pin.txt; git -C external/tinycc rev-parse HEAD HEAD^{tree} > evidence/tcc-pin.txt", "receipts");
 }
 int main(int argc, char **argv)
 {
