@@ -1,7 +1,8 @@
 // GCC/Clang-compatible macro source boundaries: ordinary newline lookahead,
-// source conditionals inside arguments, and push/pop effects at the rescan
-// cursor. Pin tokens, expansion ownership, diagnostic source attribution and
-// dialect-owned phase-one trigraph translation in c_trigraph_preprocess_tests.
+// source conditionals inside arguments, skipped-group diagnostic release, and
+// push/pop effects at the rescan cursor. Pin tokens, expansion ownership,
+// diagnostic source attribution and dialect-owned phase-one trigraph
+// translation in c_trigraph_preprocess_tests.
 #include <buster/tests/compiler/frontend/c/macro_conditional_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
@@ -450,10 +451,134 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_trigraph_preprocess_tests(UnitTestArguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_skipped_group_text_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 body;
+    } bodies[] = {
+        {S8("This block isn't compiled.\n")},
+        {S8("He said \"stop\n")},
+        {S8("Use `make test` to run this.\n")},
+        {S8("control byte \x01\n")},
+        {S8("control byte \x7f\n")},
+        {S8("#error can't happen\n")},
+        {S8("#bogus `x`\n")},
+        {S8("# 'x\n")},
+        {S8("/* comment with #endif inside\n#endif */ still skipped, isn't it\n")},
+    };
+    struct
+    {
+        String8 prefix;
+        String8 suffix;
+        String8 expected;
+    } contexts[] = {
+        {S8("#if 0\n"), S8("\n#endif\nint x;\n"), S8("int x;")},
+        {S8("#ifdef UNDEFINED_NAME\n"), S8("\n#endif\nint x;\n"), S8("int x;")},
+        {S8("#define DEFINED_NAME 1\n#ifndef DEFINED_NAME\n"), S8("\n#endif\nint x;\n"), S8("int x;")},
+        {S8("#if 1\nint x;\n#elif 1\n"), S8("\n#endif\n"), S8("int x;")},
+        {S8("#if 1\nint x;\n#else\n"), S8("\n#endif\n"), S8("int x;")},
+        {S8("#if 1\n#if 0\n#if 1\n"), S8("\n#endif\n#endif\n#endif\nint x;\n"), S8("int x;")},
+        {S8("#define ID(x) x\nID(\n#if 0\n"), S8("\n#endif\nkept\n)\n"), S8("kept")},
+    };
+    for (u32 context_index = 0; context_index < BUSTER_ARRAY_LENGTH(contexts); context_index += 1)
+    {
+        for (u32 body_index = 0; body_index < BUSTER_ARRAY_LENGTH(bodies); body_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source_parts[] = {contexts[context_index].prefix, bodies[body_index].body, contexts[context_index].suffix};
+            String8 source = string_join_arena(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+            CPreprocessResult actual = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("skipped-group.c")});
+            CLexResult expected = c_lex(temporary.arena, contexts[context_index].expected);
+            String8 diagnostic = string_format(temporary.arena, S8("skipped-group context={u32} body={u32}"), context_index, body_index);
+            BUSTER_TEST_RAW(arguments, actual.diagnostic_count == 0, diagnostic);
+            BUSTER_TEST_RAW(arguments, expected.diagnostic_count == 0, diagnostic);
+            BUSTER_TEST_RAW(arguments, actual.token_count == expected.token_count, diagnostic);
+            for (u64 token_index = 0; token_index < actual.token_count && token_index < expected.token_count; token_index += 1)
+            {
+                BUSTER_TEST_RAW(arguments, actual.tokens[token_index].kind == expected.tokens[token_index].kind, diagnostic);
+                BUSTER_TEST_RAW(arguments,
+                                string_equal(c_token_spelling(actual.spelling_base, actual.tokens[token_index]),
+                                             c_token_spelling(expected.spelling_base, expected.tokens[token_index])),
+                                diagnostic);
+            }
+            scratch_end(temporary);
+        }
+    }
+
+    TemporalArena stringized_temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult stringized = c_preprocess(stringized_temporary.arena,
+                                                S8("#define STR(x) #x\n#define UNUSED `never expanded`\nSTR(`)\n"),
+                                                (CPreprocessOptions){.source_path = S8("skipped-group-stringize.c")});
+    BUSTER_TEST(arguments, stringized.diagnostic_count == 0);
+    BUSTER_TEST(arguments, stringized.token_count == 2);
+    if (BUSTER_REQUIRE(arguments, stringized.token_count == 2))
+    {
+        BUSTER_TEST(arguments, stringized.tokens[0].kind == C_TOKEN_STRING_LITERAL);
+        BUSTER_STRING_TEST(arguments, c_token_spelling(stringized.spelling_base, stringized.tokens[0]), S8("\"`\""));
+        BUSTER_TEST(arguments, stringized.tokens[1].kind == C_TOKEN_END_OF_FILE);
+    }
+    scratch_end(stringized_temporary);
+
+    TemporalArena unused_argument_temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult unused_argument = c_preprocess(unused_argument_temporary.arena,
+                                                     S8("#define IGNORE(x)\nIGNORE(`)\n"),
+                                                     (CPreprocessOptions){.source_path = S8("skipped-group-unused-argument.c")});
+    BUSTER_TEST(arguments, unused_argument.diagnostic_count == 0);
+    BUSTER_TEST(arguments, unused_argument.token_count == 1);
+    if (BUSTER_REQUIRE(arguments, unused_argument.token_count == 1))
+    {
+        BUSTER_TEST(arguments, unused_argument.tokens[0].kind == C_TOKEN_END_OF_FILE);
+    }
+    scratch_end(unused_argument_temporary);
+
+    struct
+    {
+        String8 source;
+        CDiagnosticKind kind;
+    } rejected[] = {
+        {S8("int y = 3 ` 4;\n"), C_DIAGNOSTIC_INVALID_CHARACTER},
+        {S8("int x = \x01;\n"), C_DIAGNOSTIC_INVALID_CHARACTER},
+        {S8("#define B `\nB\n"), C_DIAGNOSTIC_INVALID_CHARACTER},
+        {S8("'x"), C_DIAGNOSTIC_UNTERMINATED_CHARACTER_LITERAL},
+        {S8("\"x"), C_DIAGNOSTIC_UNTERMINATED_STRING_LITERAL},
+        {S8("#if 0\n#elif 'x\n#endif\n"), C_DIAGNOSTIC_UNTERMINATED_CHARACTER_LITERAL},
+        {S8("#if 0\n/* open"), C_DIAGNOSTIC_UNTERMINATED_BLOCK_COMMENT},
+        {S8("#if `\n"), C_DIAGNOSTIC_INVALID_CONDITIONAL},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(rejected); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult actual = c_preprocess(temporary.arena, rejected[case_index].source,
+                                                (CPreprocessOptions){.source_path = S8("skipped-group-invalid.c")});
+        String8 diagnostic_context = string_format(temporary.arena, S8("skipped-group rejected case={u32}"), case_index);
+        BUSTER_TEST_RAW(arguments, actual.diagnostic_count >= 1, diagnostic_context);
+        bool found_expected_kind = false;
+        for (u64 diagnostic_index = 0; diagnostic_index < actual.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = actual.diagnostics[diagnostic_index];
+            if (diagnostic.kind == rejected[case_index].kind)
+            {
+                found_expected_kind = true;
+                if (case_index == 0)
+                {
+                    BUSTER_TEST_RAW(arguments, diagnostic.location.line == 1, diagnostic_context);
+                    BUSTER_TEST_RAW(arguments, diagnostic.location.column == 11, diagnostic_context);
+                }
+            }
+        }
+        BUSTER_TEST_RAW(arguments, found_expected_kind, diagnostic_context);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, c_macro_rescan_boundary_tests);
+    BUSTER_TEST_FIXTURE(arguments, c_skipped_group_text_tests);
     BUSTER_TEST_FIXTURE(arguments, c_trigraph_preprocess_tests);
     UnitTestResult demand = c_macro_argument_demand_tests(arguments);
     result.test_count += demand.test_count;
