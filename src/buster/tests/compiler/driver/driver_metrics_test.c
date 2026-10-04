@@ -8,6 +8,71 @@
 // compiler_driver_test_input_metrics_lanes checks input order and link
 // suppression on the serial and -fcompile-jobs link paths.
 
+#include <buster/lib/compiler/driver/driver_internal.h>
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_setup_order(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct SetupOrderCase
+    {
+        CompilerDriverTestSetupEvent events[8];
+        u32 event_count;
+        u32 completed_setup;
+        u32 input_starts;
+        u32 input_ends;
+        u32 order_errors;
+        bool input_open;
+    } SetupOrderCase;
+    SetupOrderCase cases[] = {
+        {{COMPILER_DRIVER_TEST_SETUP_COMPILER, COMPILER_DRIVER_TEST_SETUP_TARGET, COMPILER_DRIVER_TEST_SETUP_ARENAS,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN, COMPILER_DRIVER_TEST_SETUP_INPUT_END}, 5, BUSTER_COMPILER_DRIVER_TEST_SETUP_COMPLETE, 1, 1, 0, false},
+        {{COMPILER_DRIVER_TEST_SETUP_TARGET, COMPILER_DRIVER_TEST_SETUP_ARENAS,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN, COMPILER_DRIVER_TEST_SETUP_INPUT_END}, 4, 6, 1, 1, 1, false},
+        {{COMPILER_DRIVER_TEST_SETUP_COMPILER, COMPILER_DRIVER_TEST_SETUP_ARENAS,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN, COMPILER_DRIVER_TEST_SETUP_INPUT_END}, 4, 5, 1, 1, 1, false},
+        {{COMPILER_DRIVER_TEST_SETUP_COMPILER, COMPILER_DRIVER_TEST_SETUP_TARGET,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN, COMPILER_DRIVER_TEST_SETUP_INPUT_END}, 4, 3, 1, 1, 1, false},
+        {{COMPILER_DRIVER_TEST_SETUP_COMPILER, COMPILER_DRIVER_TEST_SETUP_TARGET,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN, COMPILER_DRIVER_TEST_SETUP_ARENAS,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_END}, 5, BUSTER_COMPILER_DRIVER_TEST_SETUP_COMPLETE, 1, 1, 2, false},
+        {{COMPILER_DRIVER_TEST_SETUP_COMPILER, COMPILER_DRIVER_TEST_SETUP_TARGET, COMPILER_DRIVER_TEST_SETUP_ARENAS,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN, COMPILER_DRIVER_TEST_SETUP_ARENAS,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_END}, 6, BUSTER_COMPILER_DRIVER_TEST_SETUP_COMPLETE, 1, 1, 1, false},
+        {{COMPILER_DRIVER_TEST_SETUP_COMPILER, COMPILER_DRIVER_TEST_SETUP_TARGET, COMPILER_DRIVER_TEST_SETUP_ARENAS,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN, COMPILER_DRIVER_TEST_SETUP_INPUT_END, COMPILER_DRIVER_TEST_SETUP_ARENAS,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN, COMPILER_DRIVER_TEST_SETUP_INPUT_END}, 8, BUSTER_COMPILER_DRIVER_TEST_SETUP_COMPLETE, 2, 2, 1, false},
+        {{COMPILER_DRIVER_TEST_SETUP_COMPILER, COMPILER_DRIVER_TEST_SETUP_TARGET, COMPILER_DRIVER_TEST_SETUP_ARENAS,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN, COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_END}, 6, BUSTER_COMPILER_DRIVER_TEST_SETUP_COMPLETE, 2, 1, 2, false},
+        {{COMPILER_DRIVER_TEST_SETUP_INPUT_END}, 1, 0, 0, 1, 2, false},
+        {{COMPILER_DRIVER_TEST_SETUP_COMPILER, COMPILER_DRIVER_TEST_SETUP_TARGET, COMPILER_DRIVER_TEST_SETUP_ARENAS,
+          COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN}, 4, BUSTER_COMPILER_DRIVER_TEST_SETUP_COMPLETE, 1, 0, 1, true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        SetupOrderCase const* test = &cases[index];
+        compiler_driver_test_setup_order_begin();
+        for (u32 event_index = 0; event_index < test->event_count; event_index += 1)
+        {
+            compiler_driver_test_setup_order_event(test->events[event_index]);
+        }
+        CompilerDriverTestSetupOrder order = compiler_driver_test_setup_order_end();
+        BUSTER_TEST(arguments, order.completed_setup == test->completed_setup && order.input_starts == test->input_starts &&
+                                   order.input_ends == test->input_ends && order.order_errors == test->order_errors && order.input_open == test->input_open);
+    }
+    // Ending clears all state; events while disarmed cannot leak into a later
+    // observation. Beginning also resets an abandoned open observation.
+    compiler_driver_test_setup_order_event(COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN);
+    CompilerDriverTestSetupOrder disarmed = compiler_driver_test_setup_order_end();
+    BUSTER_TEST(arguments, !disarmed.completed_setup && !disarmed.input_starts && !disarmed.input_ends && !disarmed.order_errors && !disarmed.input_open);
+    compiler_driver_test_setup_order_begin();
+    compiler_driver_test_setup_order_event(COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN);
+    compiler_driver_test_setup_order_begin();
+    CompilerDriverTestSetupOrder reset = compiler_driver_test_setup_order_end();
+    BUSTER_TEST(arguments, !reset.completed_setup && !reset.input_starts && !reset.input_ends && !reset.order_errors && !reset.input_open);
+    return result;
+}
+
 #if !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_metrics_test_join(Arena* arena, String8 directory, String8 name)
 {
@@ -134,8 +199,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_metrics_test_change_directory(String8 p
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTestArguments* arguments, Arena* arena, String8 root, String8 ide)
 {
     UnitTestResult result = {0};
-    // Inputs 0 and 1 are identical sources under different names, so input
-    // 0 can be compared with a later copy of the same work.
+    // Inputs 0 and 1 retain identical source work under different names.
     String8 names[] = {S8("twin_first"), S8("twin_second"), S8("globals"), S8("rejected"), S8("third"), S8("long_name"), S8("long_error")};
     // Messages and function names past the text limit are cut and say so.
     char8* long_name = arena_allocate(arena, char8, COMPILER_DRIVER_METRICS_TEXT_LIMIT + 100);
@@ -178,7 +242,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTest
         // The per-input function cap, lowered through the private test seam
         // so the two-function input reaches it.
         compiler_driver_test_set_function_limit(1);
+        compiler_driver_test_setup_order_begin();
         CompilerDriverResult measured = compiler_driver_execute_invocation(arena, good);
+        CompilerDriverTestSetupOrder setup_order = compiler_driver_test_setup_order_end();
         compiler_driver_test_set_function_limit(0);
         u64 wall = timestamp_ns_between(good.metrics_origin, timestamp_take());
         BUSTER_TEST_RAW(arguments, measured.error == COMPILER_DRIVER_ERROR_NONE, measured.diagnostic);
@@ -190,15 +256,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_metrics_test_batches(UnitTest
         if (BUSTER_REQUIRE(arguments, measured.inputs && measured.input_result_count == 3 && measured.failed_input_count == 0))
         {
             BUSTER_TEST(arguments, compiler_driver_metrics_test_intervals(&measured, wall));
-            CompilerDriverInputResult const* first = &measured.inputs[0];
-            CompilerDriverInputResult const* twin = &measured.inputs[1];
-            // Table preparation and first-use setup used to add ~20 ms to
-            // input 0's codegen phase (600x its twin's). Setup now happens
-            // before any interval opens; the bound only allows cache warmth.
-            u64 first_total = first->end_nanoseconds - first->start_nanoseconds;
-            u64 twin_total = twin->end_nanoseconds - twin->start_nanoseconds;
-            BUSTER_TEST(arguments, first->phase_nanoseconds[COMPILER_DRIVER_PHASE_CODEGEN] <= 8 * twin->phase_nanoseconds[COMPILER_DRIVER_PHASE_CODEGEN]);
-            BUSTER_TEST(arguments, first_total <= 8 * twin_total);
+            // Completed setup must precede every real input interval, even
+            // when scheduling or publication changes twin wall-time ratios.
+            BUSTER_TEST(arguments, setup_order.completed_setup == BUSTER_COMPILER_DRIVER_TEST_SETUP_COMPLETE);
+            BUSTER_TEST(arguments, setup_order.input_starts == 3 && setup_order.input_ends == 3 && !setup_order.order_errors && !setup_order.input_open);
             for (u32 index = 0; index < 3; index += 1)
             {
                 CompilerDriverInputResult const* input = &measured.inputs[index];
@@ -376,6 +437,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics(UnitTestAr
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     Arena* arena = temporary.arena;
+    UnitTestResult setup_order = compiler_driver_metrics_test_setup_order(arguments);
+    result.succeeded_test_count += setup_order.succeeded_test_count;
+    result.test_count += setup_order.test_count;
     String8 path = buster_test_temporary_path(arena, S8("buster-metrics-parse"), S8(".c"));
     String8 metrics_option = S8("-fmetrics-out=records.txt");
     String8 parse_command[] = {metrics_option, S8("-fkeep-going"), S8("-fno-keep-going"), S8("-fmetrics-functions"), path};
@@ -396,7 +460,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics(UnitTestAr
     String8 suppressed_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-fsyntax-only"), metrics_option, path};
     CompilerDriverInvocation suppressed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(suppressed_command));
     suppressed.suppress_diagnostic_records = true;
-    BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, suppressed).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    compiler_driver_test_setup_order_begin();
+    CompilerDriverResult suppressed_result = compiler_driver_execute_invocation(arena, suppressed);
+    CompilerDriverTestSetupOrder refused_order = compiler_driver_test_setup_order_end();
+    BUSTER_TEST(arguments, suppressed_result.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, !refused_order.completed_setup && !refused_order.input_starts && !refused_order.input_ends &&
+                               !refused_order.order_errors && !refused_order.input_open);
     CompilerDriverInvocation functions = suppressed;
     functions.collect_input_metrics = false;
     functions.collect_function_sizes = true;
