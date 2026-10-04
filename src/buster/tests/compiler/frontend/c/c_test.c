@@ -19925,26 +19925,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_conditional_conversions(UnitTes
     return result;
 }
 
-// GitHub #2531: the strict operand-type walk runs as query-machine frames, so
-// operands taller than the old depth-64 cap are still typed by the walk rather
-// than falling back to the identifier-scan guess.
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArguments* arguments)
+// One `tall_H` function per height plus a main that runs them all; the
+// expression is H binary `+` over `i` then `+ (int)u` (GitHub #2531).
+BUSTER_GLOBAL_LOCAL String8 c_test_tall_expression_source(Arena* arena, const u32* heights, u32 height_count)
 {
-    UnitTestResult result = {0};
-    u32 heights[] = {1, 2, 63, 64, 65, 256, 1000, 10000};
-    String8* functions = arena_allocate(arguments->arena, String8, BUSTER_ARRAY_LENGTH(heights));
-    String8* calls = arena_allocate(arguments->arena, String8, BUSTER_ARRAY_LENGTH(heights));
-    for (u32 height_index = 0; height_index < BUSTER_ARRAY_LENGTH(heights); height_index += 1)
+    String8* functions = arena_allocate(arena, String8, height_count);
+    String8* calls = arena_allocate(arena, String8, height_count);
+    for (u32 height_index = 0; height_index < height_count; height_index += 1)
     {
         u32 height = heights[height_index];
-        String8* expression_parts = arena_allocate(arguments->arena, String8, 2 * height);
+        String8* expression_parts = arena_allocate(arena, String8, 2 * height);
         for (u32 operand = 0; operand < height; operand += 1)
         {
             expression_parts[2 * operand] = S8("i");
             expression_parts[2 * operand + 1] = operand + 1 == height ? S8(" + (int)u") : S8(" + ");
         }
-        String8 expression = string_join_arena(arguments->arena, (SliceString8){expression_parts, 2 * height}, false);
-        functions[height_index] = string_format(arguments->arena,
+        String8 expression = string_join_arena(arena, (SliceString8){expression_parts, 2 * height}, false);
+        functions[height_index] = string_format(arena,
             S8("static int tall_{u32}(int i, unsigned long u, int c) {{\n"
                "    _Static_assert(sizeof(({S8})) == sizeof(int), \"tall {u32}\");\n"
                "    __typeof__(({S8})) t = 0;\n"
@@ -19954,11 +19951,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
                "    return failed;\n"
                "}}\n"),
             height, expression, height, expression, expression, expression, expression);
-        calls[height_index] = string_format(arguments->arena, S8("    failed |= tall_{u32}(vi, vu, vc);\n"), height);
+        calls[height_index] = string_format(arena, S8("    failed |= tall_{u32}(vi, vu, vc);\n"), height);
     }
-    String8 functions_text = string_join_arena(arguments->arena, (SliceString8){functions, BUSTER_ARRAY_LENGTH(heights)}, false);
-    String8 calls_text = string_join_arena(arguments->arena, (SliceString8){calls, BUSTER_ARRAY_LENGTH(heights)}, false);
-    String8 source_text = string_format(arguments->arena,
+    String8 functions_text = string_join_arena(arena, (SliceString8){functions, height_count}, false);
+    String8 calls_text = string_join_arena(arena, (SliceString8){calls, height_count}, false);
+    String8 source_text = string_format(arena,
         S8("{S8}"
            "int main(void) {{\n"
            "    volatile int vi = -1, vc = 1;\n"
@@ -19968,6 +19965,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
            "    return failed;\n"
            "}}\n"),
         functions_text, calls_text);
+    return source_text;
+}
+
+// GitHub #2531: the strict operand-type walk runs as query-machine frames, so
+// operands taller than the old depth-64 cap are still typed by the walk rather
+// than falling back to the identifier-scan guess.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 heights[] = {1, 2, 63, 64, 65, 256, 1000};
+    String8 source_text = c_test_tall_expression_source(arguments->arena, heights, BUSTER_ARRAY_LENGTH(heights));
     Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
     {
@@ -19992,6 +20000,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
             }
             scratch_end(temporary);
         }
+    }
+    // The tallest operands only lower: each tall_H's _Static_assert already
+    // fails lowering when the walk mistypes the operand, so no driver sweep.
+    u32 lowered_heights[] = {4096, 10000};
+    String8 lowered_source_text = c_test_tall_expression_source(arguments->arena, lowered_heights, BUSTER_ARRAY_LENGTH(lowered_heights));
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        Arena* conflicts[] = {arguments->arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        Target target = target_native;
+        target.cpu_arch = CPU_ARCH_X86_64;
+        target.os = OPERATING_SYSTEM_LINUX;
+        CPreprocessResult tokens = c_preprocess(temporary.arena, lowered_source_text,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("tall-expression-types-lowered.c"), tokens, parsed, target,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("tall-expression-types"), S8(".c"));
