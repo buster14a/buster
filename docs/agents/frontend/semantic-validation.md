@@ -45,6 +45,21 @@ separate array-only duration check still permits a static pointer to a VLA while
 rejecting a VLA object with static duration. Function prototype parameter types
 retain their existing rules; the VM walk stops at function types.
 
+Constant negative array bounds are rejected at the original bound expression
+by `c_parse_validate_array_bound_values`, after expression/type-name validation
+has populated the bound table. A temporary source-token bitset also admits
+newly read bound rows while querying each original expression only once.
+The existing typed integer query supplies the
+target signed-magnitude fact, including narrow casts and 128-bit operands;
+masked low-limb values do not decide the sign. Parameter `static`, qualifiers
+and nullability words are skipped by the same prefix reader as the syntax check.
+Runtime VLA bounds, inferred bounds, flexible arrays and GNU zero-length arrays
+keep their existing policies. `c_test_negative_array_bounds` covers five negative
+spellings across eleven declaration/type-name contexts in GNU17/C17/C23, with exact
+source locations and matching semantic-only/full-compilation refusal. Both
+frontend forms validate positive neighbors in those dialects, including
+enum/typedef shadowing, and GNU-zero neighbors independently.
+
 The bound check uses the semantic typed constant folder. NORMAL-mode sizeof
 type operands use the complete abstract-declarator reader, so parenthesized
 pointers to arrays and functions retain their pointer size. Its explicit task

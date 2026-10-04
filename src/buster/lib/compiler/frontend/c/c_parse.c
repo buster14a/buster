@@ -27975,6 +27975,21 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
     }
 }
 
+BUSTER_C_INTERNAL u32 c_parse_array_bound_expression_start(CPreprocessResult preprocess, CArrayBound bound)
+{
+    u32 start = bound.token_start;
+    u32 end = BUSTER_MIN((u32)preprocess.token_count, start + bound.token_count);
+    CType qualifiers = {0};
+    while (start < end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+           (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("static")) ||
+            c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[start], &qualifiers) ||
+            c_parse_nullability_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]))))
+    {
+        start += 1;
+    }
+    return start;
+}
+
 // Every recorded array bound is one expression once its `static`, qualifier
 // and nullability words are set aside; `[]` and `[*]` have none to check.
 BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
@@ -27984,16 +27999,8 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* ma
     for (u32 bound_index = 0; bound_index < bound_count && !reported; bound_index += 1)
     {
         CArrayBound bound = result->array_bounds[bound_index];
-        u32 start = bound.token_start;
+        u32 start = c_parse_array_bound_expression_start(preprocess, bound);
         u32 end = BUSTER_MIN((u32)preprocess.token_count, bound.token_start + bound.token_count);
-        CType qualifiers = {0};
-        while (start < end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
-               (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("static")) ||
-                c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[start], &qualifiers) ||
-                c_parse_nullability_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]))))
-        {
-            start += 1;
-        }
         u32 token = 0;
         String8 message = {0};
         if (bound.is_static && (start == end || bound.is_star))
@@ -28015,6 +28022,43 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* ma
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_EXPECTED_DECLARATION, message);
             reported = true;
         }
+    }
+}
+
+// Use the typed signed-magnitude result: narrow casts and 128-bit values
+// cannot be classified by comparing a masked low limb with INT64_MAX.
+// Runtime bounds and GNU zero bounds retain their existing behavior.
+BUSTER_C_INTERNAL void c_parse_validate_array_bound_values(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
+{
+    if (result->array_bound_count)
+    {
+        u64 validation_mark = machine->scratch_arena->position;
+        // A typed sizeof/_Generic query can append another spelling of a bound.
+        // Visit each original source expression once, including newly read rows.
+        u64 checked_bytes = (preprocess.token_count + 7) / 8;
+        u8* checked = arena_allocate(machine->scratch_arena, u8, checked_bytes);
+        memset(checked, 0, checked_bytes);
+        for (u32 index = 0; index < result->array_bound_count; index += 1)
+        {
+            CArrayBound bound = result->array_bounds[index];
+            u32 start = c_parse_array_bound_expression_start(preprocess, bound);
+            u32 end = BUSTER_MIN((u32)preprocess.token_count, bound.token_start + bound.token_count);
+            u8 mask = (u8)(1u << (start & 7));
+            if (start < end && !bound.is_star && !bound.has_inferred_count && !(checked[start / 8] & mask))
+            {
+                checked[start / 8] |= mask;
+                CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
+                u64 mark = machine->scratch_arena->position;
+                CIntegerConstant value = c_parse_typed_integer_constant(machine, machine->scratch_arena, preprocess, result, scope, start, end);
+                arena_set_position(machine->scratch_arena, mark);
+                if (value.valid && value.is_negative)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                                       S8("array bound is a negative integer constant"));
+                }
+            }
+        }
+        arena_set_position(machine->scratch_arena, validation_mark);
     }
 }
 
@@ -28224,6 +28268,8 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
                                    C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, checked.message);
         }
     }
+    // Type names in expressions can append bounds after declaration binding.
+    c_parse_validate_array_bound_values(machine, result, preprocess);
     result->expression_scalar_types = 0;
 }
 

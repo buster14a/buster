@@ -5265,6 +5265,111 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_member_search(UnitTestArgumen
     return result;
 }
 
+// #1568: signed bounds retain their target type through constraint checking.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_negative_array_bounds(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestArrayBoundContext CTestArrayBoundContext;
+    struct CTestArrayBoundContext
+    {
+        String8 prefix;
+        String8 suffix;
+        u32 line;
+        u32 column;
+    };
+    CTestArrayBoundContext contexts[] = {
+        {S8("int a["), S8("]; int f(void) { return 0; }\n"), 1, 7},
+        {S8("int f(void) {\n    int a["), S8("]; return 0;\n}\n"), 2, 11},
+        {S8("static int a["), S8("]; int f(void) { return 0; }\n"), 1, 14},
+        {S8("int f(void) {\n    static int a["), S8("]; return 0;\n}\n"), 2, 18},
+        {S8("typedef int A["), S8("]; int f(void) { return 0; }\n"), 1, 15},
+        {S8("struct S {\n    int a["), S8("]; }; int f(void) { return 0; }\n"), 2, 11},
+        {S8("int f(int a["), S8("]);\n"), 1, 13},
+        {S8("int f(int a[static const "), S8("]) { return 0; }\n"), 1, 26},
+        {S8("int f(void) {\n    return sizeof(int["), S8("]);\n}\n"), 2, 23},
+        {S8("struct S {\n    void (*f)(int a["), S8("]); }; int g(void) { return 0; }\n"), 2, 21},
+        {S8("int f(void) {\n    typedef int A[_Generic(0, int: sizeof(int["), S8("]), default: 1)]; return 0;\n}\n"), 2, 47},
+    };
+    String8 negative[] = {S8("-1"), S8("(int)0x80000000"), S8("-1LL"), S8("(signed char)200"), S8("(__int128)-1")};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_C23};
+    String8 message = S8("array bound is a negative integer constant");
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 context = 0; context < BUSTER_ARRAY_LENGTH(contexts); context += 1)
+            {
+                for (u32 bound = 0; bound < BUSTER_ARRAY_LENGTH(negative); bound += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 source = string_format(temporary.arena, S8("{S8}{S8}{S8}"), contexts[context].prefix, negative[bound], contexts[context].suffix);
+                    CPreprocessOptions options = {.target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect]};
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count, source);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    bool found = false;
+                    for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                    {
+                        CDiagnostic diagnostic = semantic.diagnostics[index];
+                        found |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && string_equal(diagnostic.message, message) &&
+                                 diagnostic.location.line == contexts[context].line && diagnostic.location.column == contexts[context].column &&
+                                 diagnostic.location.offset == contexts[context].prefix.length;
+                    }
+                    BUSTER_TEST_RAW(arguments, found, source);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("negative-array-bound.c"), tokens, syntax, target_native,
+                                                                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && lowered.program == 0 && !lowered.canonical_ir_certified, source);
+                    BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                    for (u32 index = 0; index < semantic.diagnostic_count && index < lowered.diagnostic_count; index += 1)
+                    {
+                        BUSTER_TEST(arguments, semantic.diagnostics[index].kind == lowered.diagnostics[index].kind);
+                        BUSTER_STRING_TEST(arguments, semantic.diagnostics[index].message, lowered.diagnostics[index].message);
+                        BUSTER_TEST(arguments, semantic.diagnostics[index].location.offset == lowered.diagnostics[index].location.offset);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+        String8 accepted[] = {
+            S8("enum { N = 3 }; int a[N]; struct S { char b[sizeof(int) * 2]; }; int f(void) { return 0; }"),
+            S8("int object; int a[sizeof(object)]; int f(void) { return 0; }"),
+            S8("int a[(unsigned char)200]; int f(void) { return 0; }"),
+            S8("int a[(unsigned char)-1]; int f(void) { return 0; }"),
+            S8("int f(int n) { int a[n]; a[0] = 1; return a[0]; }"),
+            S8("struct S { int count; int a[]; }; int f(void) { return 0; }"),
+            S8("int f(int a[*]); int g(void) { return 0; }"),
+            S8("int N; int f(void) { enum { N = 3 }; int a[N]; return sizeof a; }"),
+            S8("enum { N = 3 }; typedef int A[N]; int f(int N) { struct S { A a; }; return sizeof(struct S); }"),
+        };
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            u32 case_count = BUSTER_ARRAY_LENGTH(accepted) + (dialects[dialect] == C_PREPROCESS_DIALECT_GNU17 ? BUSTER_ARRAY_LENGTH(contexts) : 0);
+            for (u32 index = 0; index < case_count; index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                u32 context = index < BUSTER_ARRAY_LENGTH(accepted) ? 0 : index - (u32)BUSTER_ARRAY_LENGTH(accepted);
+                String8 source = index < BUSTER_ARRAY_LENGTH(accepted) ? accepted[index] :
+                    string_format(temporary.arena, S8("{S8}0{S8}"), contexts[context].prefix, contexts[context].suffix);
+                CPreprocessOptions options = {.target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect]};
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !semantic.diagnostic_count, source);
+                CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("array-bound-control.c"), tokens, syntax, target_native,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.program->module_count == 1))
+                {
+                    BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 // Frozen acceptance covers the same source through semantics-only and both
 // canonical lowering forms, including valid neighboring declarations.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArguments* arguments)
@@ -35180,6 +35285,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     BUSTER_TEST_FIXTURE(arguments, c_test_declaration_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
     BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
