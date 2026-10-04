@@ -218,7 +218,9 @@ static void build_shares(const char* directory)
     const char* names[] = {"MOLD", "WILD"};
     const char* source = "src/buster/apps/ide/ide.c";
     const char* original = read_text(source);
-    for (unsigned round = 0; round < 5; ++round)
+    double edits[2][BUSTER_BENCH_SAMPLES];
+    double clean_times[2][BUSTER_BENCH_SAMPLES];
+    for (unsigned round = 0; round < 21; ++round)
     {
         unsigned first = random_u32() & 1;
         for (unsigned position = 0; position < 2; ++position)
@@ -231,18 +233,22 @@ static void build_shares(const char* directory)
                 format("%s build --build-directory %s --config Debug -t ide", quote(driver), quote(directory)));
             write_text(source, original);
             if (edited.status) fail("share edit build failed; source restored");
+            edits[which][round] = edited.wall_ms;
             double link = ninja_link_ms(directory);
             fprintf(shares, "edit,%s,%u,%.6f,%.6f,%.6f\n", names[which], round, edited.wall_ms, link, link / edited.wall_ms);
-            if (round < 3)
+            if (round < 7)
             {
                 must("share-clean", format("cmake --build %s --config Debug --target clean", quote(directory)));
                 BenchResult clean = must("review-clean-build", format("%s build --build-directory %s --config Debug -t ide", quote(driver), quote(directory)));
+                clean_times[which][round] = clean.wall_ms;
                 link = ninja_link_ms(directory);
                 fprintf(shares, "clean,%s,%u,%.6f,%.6f,%.6f\n", names[which], round, clean.wall_ms, link, link / clean.wall_ms);
             }
             if (fflush(shares)) fail("share flush");
         }
     }
+    report("matched-policy-edit-to-executable", edits[0], edits[1], 21);
+    report("matched-policy-clean-build", clean_times[0], clean_times[1], 7);
     if (fclose(shares)) fail("share close");
     must("review-source-restored", "git diff --exit-code -- src");
 }
@@ -266,7 +272,7 @@ int main(int argc, char** argv)
             "Independent direct-linker replay from #2646 frozen artifacts, unchanged source baseline 3b79a042. Same objects, scripts and system inputs hashed before/after; complete successful read-open traces retained.\n"
             "Direct timing excludes compiler-driver startup, includes /bin/sh and fork/wait (<1ms self-control); output close without fsync, warm page-cache. Original release package binaries, default threads and matched --threads=1. No LTO. Explicit --no-gc-sections --icf=none and identical fixed 20-byte benchmark-only build ID override differing upstream defaults.\n"
             "wait4 user/system and individual-child high-water RSS, not aggregate process-tree RSS. Bootstrap intervals are descriptive for the observed hosted VM; no dedicated-host claim.\n"
-            "Build link share uses the actual Ninja output step duration; end-to-end includes driver/Ninja/compilation. Clean samples n=3; edits n=5 per variant.\n");
+            "Build link share uses the actual Ninja output step duration; end-to-end includes driver/Ninja/compilation. Clean samples n=7; edits n=21 per variant.\n");
         smoke();
         direct_cell("small-archive", format("clang --ld-path=wild %s %s -o %s", quote(format("%s/main.o", evidence)), quote(format("%s/libprobe.a", evidence)), quote(format("%s/review-small", evidence))),
             ".", format("%s/review-small", evidence), quote(format("%s/review-small", evidence)));
@@ -292,6 +298,7 @@ int main(int argc, char** argv)
             }
         }
         interoperability(format("%s/ide-unity-release-wild.elf", evidence));
+        direct_cell("buster-produced-small", format("clang --ld-path=wild %s %s -o %s", quote(format("%s/main-buster.o", evidence)), quote(format("%s/probe-buster.o", evidence)), quote(format("%s/buster-direct", evidence))), ".", format("%s/buster-direct", evidence), quote(format("%s/buster-direct", evidence)));
         for (unsigned i = 0; i < 2; ++i)
         {
             const char* name = i ? "wild" : "mold";

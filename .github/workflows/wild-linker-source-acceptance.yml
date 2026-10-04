@@ -1,10 +1,10 @@
-name: Wild linker supplementary acceptance
+name: Wild linker isolated source acceptance
 
 # Explicitly scoped research execution. Never selects a self-hosted machine.
 on:
   push:
     branches: [codex/2645-wild-acceptance-evidence]
-    paths: [tools/wild_linker_acceptance.c, .github/workflows/wild-linker-acceptance.yml]
+    paths: [tools/wild_linker_acceptance.c, .github/workflows/wild-linker-source-acceptance.yml]
   workflow_dispatch:
 
 permissions:
@@ -12,14 +12,14 @@ permissions:
   actions: read
 
 concurrency:
-  group: wild-linker-acceptance-${{ github.ref }}
+  group: wild-linker-source-acceptance-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   evaluate:
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
       LC_ALL: C
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
@@ -42,7 +42,7 @@ jobs:
       - name: Install independent validation tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends gdb strace llvm-21 libclang-rt-21-dev ripgrep
+          sudo apt-get install -y --no-install-recommends gdb strace llvm-21 libclang-rt-21-dev ripgrep lld-21 zlib1g-dev libzstd-dev libtbb-dev
           echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
       - name: Install pinned external evaluation tools
         shell: bash
@@ -68,6 +68,49 @@ jobs:
           ln -s "$PWD/mold/bin/mold" ../bin/ld.mold
           echo "$RUNNER_TEMP/wild-evaluation/bin" >> "$GITHUB_PATH"
           echo "$PWD/cmake/bin" >> "$GITHUB_PATH"
+      - name: Build pinned isolated upstream production configurations
+        shell: bash
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: '3'
+          CARGO_PROFILE_RELEASE_LTO: 'false'
+          CARGO_PROFILE_RELEASE_DEBUG: '0'
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+          RUSTFLAGS: '-C target-cpu=x86-64 -C linker=clang -C link-arg=-fuse-ld=lld'
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/wild-isolated-upstream"
+          evidence="$RUNNER_TEMP/wild-evaluation/evidence"
+          mkdir -p "$root"
+          git init "$root/wild"
+          git -C "$root/wild" fetch --depth=1 https://github.com/wild-linker/wild.git e9a9b0cb6fd63a23cc7b93aafc931aadd5746be6
+          git -C "$root/wild" checkout --detach FETCH_HEAD
+          test "$(git -C "$root/wild" rev-parse HEAD)" = e9a9b0cb6fd63a23cc7b93aafc931aadd5746be6
+          git init "$root/mold"
+          git -C "$root/mold" fetch --depth=1 https://github.com/rui314/mold.git 9b376bc6a9899d4a16b41777de1f013989459fbc
+          git -C "$root/mold" checkout --detach FETCH_HEAD
+          test "$(git -C "$root/mold" rev-parse HEAD)" = 9b376bc6a9899d4a16b41777de1f013989459fbc
+          rustup toolchain install 1.94.0 --profile minimal
+          cargo +1.94.0 metadata --locked --format-version=1 --manifest-path "$root/wild/Cargo.toml" > "$evidence/wild-component-metadata.json"
+          cargo +1.94.0 build --locked --release --package wild --jobs 2 --manifest-path "$root/wild/Cargo.toml"
+          cmake -S "$root/mold" -B "$root/mold-build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ '-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG -march=x86-64' '-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG -march=x86-64' -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DMOLD_LTO=OFF -DMOLD_USE_MOLD=OFF -DMOLD_MOSTLY_STATIC=OFF -DMOLD_USE_MIMALLOC=OFF -DMOLD_USE_SYSTEM_TBB=ON
+          cmake --build "$root/mold-build" --target mold --parallel 2
+          strip "$root/mold-build/mold"
+          ln -sf "$root/wild/target/release/wild" "$RUNNER_TEMP/wild-evaluation/bin/wild"
+          ln -sf "$root/wild/target/release/wild" "$RUNNER_TEMP/wild-evaluation/bin/ld.wild"
+          ln -sf "$root/mold-build/mold" "$RUNNER_TEMP/wild-evaluation/bin/mold"
+          ln -sf "$root/mold-build/mold" "$RUNNER_TEMP/wild-evaluation/bin/ld.mold"
+          cp "$root/mold-build/CMakeCache.txt" "$evidence/mold-source.CMakeCache.txt"
+          cp "$root/wild/Cargo.lock" "$evidence/wild-source.Cargo.lock"
+          cp "$root/wild/Cargo.toml" "$evidence/wild-source.Cargo.toml"
+          cp "$root/mold/LICENSE" "$evidence/mold-source-LICENSE.txt"
+          cp "$root/wild/LICENSE-MIT" "$evidence/wild-source-LICENSE-MIT.txt"
+          cp "$root/wild/LICENSE-APACHE" "$evidence/wild-source-LICENSE-APACHE.txt"
+          rustc +1.94.0 -Vv > "$evidence/upstream-build.txt"
+          clang -v >> "$evidence/upstream-build.txt" 2>&1
+          env | sort | grep -E '^(CARGO_PROFILE_RELEASE_|RUSTFLAGS=)' >> "$evidence/upstream-build.txt"
+          printf '%s\n' 'Both: optimized level 3, no LTO/PGO, generic x86-64, stripped, libc allocator, LLVM linker. Different language/toolchain/runtime and mold system TBB/compression libraries are disclosed.' >> "$evidence/upstream-build.txt"
+          sha256sum "$root/wild/Cargo.lock" "$root/mold/CMakeLists.txt" "$root/mold-build/mold" "$root/wild/target/release/wild" >> "$evidence/upstream-build.txt"
+          ldd "$root/mold-build/mold" "$root/wild/target/release/wild" >> "$evidence/upstream-build.txt"
       - name: Record provenance and bootstrap existing C build driver
         shell: bash
         run: |
@@ -126,7 +169,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: wild-linker-acceptance-compact-${{ github.run_id }}-${{ github.run_attempt }}
+          name: wild-linker-source-acceptance-compact-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/wild-evaluation/evidence/*.csv
             ${{ runner.temp }}/wild-evaluation/evidence/*.tsv
@@ -143,7 +186,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: wild-linker-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          name: wild-linker-source-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/wild-evaluation/evidence
           if-no-files-found: error
           retention-days: 30
