@@ -26064,13 +26064,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         scratch_end(fixture_temporary);
     }
     // Static scalar conversions and automatic nested string initialization
-    // exercise distinct frontend paths and must agree under every allocator.
+    // exercise distinct frontend paths and must agree under every allocator;
+    // string rows reached through brace elision (#2525) are covered too.
     String8 c_initializer_regression_paths[] = {
         S8("tests/basic_c_bool_aggregate_constants.c"),
         S8("tests/basic_c_unsigned_float_aggregate_constants.c"),
         S8("tests/basic_c_int128_aggregate_constants.c"),
         S8("tests/basic_c_nested_string_initializers.c"),
         S8("tests/basic_c_float_integer_constants.c"),
+        S8("tests/basic_c_elided_string_rows.c"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_initializer_regression_paths); fixture_index += 1)
     {

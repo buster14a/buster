@@ -8632,6 +8632,16 @@ BUSTER_C_INTERNAL bool c_parse_initializer_value_is_aggregate_expression(CTypePa
     return kind == C_TYPE_ARRAY || kind == C_TYPE_VECTOR || kind == C_TYPE_STRUCT || kind == C_TYPE_UNION;
 }
 
+// C11 6.7.9p14: a string literal initializes an array of scalars whole; brace
+// elision descends through any other aggregate until it reaches one.
+// c_ir_initializer_type_takes_string answers the same question for IR types.
+BUSTER_C_INTERNAL bool c_parse_initializer_type_takes_string(CParseResult* result, CType* type)
+{
+    CTypeKind element = type->kind == C_TYPE_ARRAY && type->element_type.value < result->type_count ? result->types[type->element_type.value].kind
+                                                                                                    : C_TYPE_ARRAY;
+    return element != C_TYPE_ARRAY && element != C_TYPE_VECTOR && element != C_TYPE_STRUCT && element != C_TYPE_UNION;
+}
+
 BUSTER_C_INTERNAL bool c_parse_initializer_string_element_compatible(CPreprocessResult preprocess, CParseResult* result, CTypeId element_type,
                                                                        CIrDecodedString decoded)
 {
@@ -8858,8 +8868,9 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             };
             continue;
         }
-        if (aggregate && !c_ir_tokens_are_string_literals(preprocess, designator.value_start, frame->limit) &&
-            !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end))
+        bool string_value = c_ir_tokens_are_string_literals(preprocess, designator.value_start, value_end);
+        if (aggregate && !(string_value && c_parse_initializer_type_takes_string(result, value_type)) &&
+            (string_value || !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end)))
         {
             if (frame_count + designator.continuation_count >= capacity)
             {
