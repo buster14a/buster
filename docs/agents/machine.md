@@ -4,6 +4,14 @@
 
 The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+The typed AArch64 ADD/SUB extended-register recipe chooses Rm width from both
+the instruction width and the extension option. Every 32-bit form uses Wm,
+including UXTX and SXTX; a 64-bit form uses Xm only for UXTX/SXTX. Shifts 0–4
+are legal, while 5–7 are reserved. Rn 31 denotes SP/WSP; Rd 31 denotes SP/WSP
+for ADD/SUB and ZR for ADDS/SUBS; Rm 31 denotes ZR. The registered
+`aarch64_encoding_tests` checks literal raw-word decoding, independent field
+images, wrong widths/register roles and unchanged outputs after rejection.
+
 `machine_x64_select_switch` and `machine_a64_select_switch` compare matching
 selector-width bit images for every native allocator spelling. Mask raw keys
 and any excess register bits at that boundary, while leaving the caller's
