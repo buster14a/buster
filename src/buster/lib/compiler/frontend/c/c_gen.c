@@ -2136,6 +2136,12 @@ struct CIrQueryMachine
 {
     CIrQueryFrame* frames;
     CIrQueryFrame* completed;
+    // Strict operand-type results persist across query roots (the completed
+    // table is rewound whenever a root finishes) so nested subexpressions are
+    // typed once per unit instead of being re-derived by every enclosing
+    // conditional or sizeof operand that walks them (GitHub #2531).
+    CIrQueryFrame* strict_results;
+    u32* strict_slots;
     CIrConstantValue* values;
     CIrConstantOperator* operators;
     CIrQueryResume* resumes;
@@ -2144,6 +2150,9 @@ struct CIrQueryMachine
     u32 frame_capacity;
     u32 completed_count;
     u32 completed_capacity;
+    u32 strict_result_count;
+    u32 strict_result_capacity;
+    u32 strict_slot_mask;
     u32 value_count;
     u32 value_capacity;
     u32 operator_count;
@@ -3208,10 +3217,51 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
     return false;
 }
 
+BUSTER_C_INTERNAL u32 c_ir_strict_result_probe(CIrQueryMachine* machine, CIrQueryFrame key)
+{
+    u32 hash = key.start * 2654435761u ^ key.end * 2246822519u ^ (key.third * 2 + (u32)key.flag) * 3266489917u;
+    return (hash ^ (hash >> 16)) & machine->strict_slot_mask;
+}
+
+BUSTER_C_INTERNAL bool c_ir_strict_result_find(CIrQueryMachine* machine, CIrQueryFrame key, CIrQueryFrame* result_out)
+{
+    bool hit = false;
+    for (u32 probe = c_ir_strict_result_probe(machine, key); machine->strict_slots[probe] && !hit; probe = (probe + 1) & machine->strict_slot_mask)
+    {
+        CIrQueryFrame stored = machine->strict_results[machine->strict_slots[probe] - 1];
+        hit = c_ir_query_key_equal(stored, key);
+        if (hit)
+        {
+            *result_out = stored;
+        }
+    }
+    return hit;
+}
+
+BUSTER_C_INTERNAL void c_ir_strict_result_insert(CIrQueryMachine* machine, CIrQueryFrame frame)
+{
+    if (machine->strict_result_count < machine->strict_result_capacity)
+    {
+        u32 probe = c_ir_strict_result_probe(machine, frame);
+        while (machine->strict_slots[probe])
+        {
+            probe = (probe + 1) & machine->strict_slot_mask;
+        }
+        machine->strict_results[machine->strict_result_count] = frame;
+        machine->strict_slots[probe] = machine->strict_result_count + 1;
+        machine->strict_result_count += 1;
+    }
+}
+
 BUSTER_C_INTERNAL bool c_ir_query_request(CIntegerIrBuilder* builder, CIrQueryFrame key, CIrQueryFrame* result_out)
 {
     CIrQueryMachine* machine = builder->queries;
     BUSTER_CHECK(machine && machine->frame_count);
+    if (key.kind == C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE && machine->strict_slots &&
+        c_ir_strict_result_find(machine, key, result_out))
+    {
+        return true;
+    }
     for (u32 index = machine->completed_count; index != 0; index -= 1)
     {
         CIrQueryFrame completed = machine->completed[index - 1];
@@ -3335,6 +3385,10 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
         CIrQueryFrame completed = *frame;
         machine->frame_count -= 1;
         machine->completed[machine->completed_count++] = completed;
+        if (completed.kind == C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE && completed.success && machine->strict_slots)
+        {
+            c_ir_strict_result_insert(machine, completed);
+        }
     }
     BUSTER_CHECK(machine->completed_count > completed_start);
     *result_out = machine->completed[machine->completed_count - 1];
@@ -24690,6 +24744,10 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
             if (type.value == IR_ID_UNDERLYING_INVALID)
             {
                 c_ir_sizeof_operand_type_attempt(builder, index + 2, close, &type);
+                if (builder->queries->has_request)
+                {
+                    return IR_TYPE_ID_INVALID;
+                }
             }
             if (!operand_is_type_name)
             {
@@ -28084,8 +28142,11 @@ BUSTER_C_INTERNAL void c_ir_sizeof_statement_expression_operand(CIntegerIrBuilde
 }
 
 // The non-frame entry for the strict operand walk: callers outside the query
-// machine run one root frame and take its answer. A pending request is never
-// clobbered -- the caller's own frame will rerun and reach the completed table.
+// machine run one root frame and take its answer, while callers inside a run
+// issue a request so the result lands in the shared completed table instead of
+// being re-derived by a nested execution for every enclosing conditional. A
+// pending request is never clobbered -- the caller's own frame will rerun and
+// reach the completed table.
 BUSTER_C_INTERNAL bool c_ir_strict_operand_type(CIntegerIrBuilder* builder, u32 start, u32 end, bool promote_bit_fields, IrTypeId* type_out)
 {
     bool typed = false;
@@ -28100,7 +28161,18 @@ BUSTER_C_INTERNAL bool c_ir_strict_operand_type(CIntegerIrBuilder* builder, u32 
             .kind = C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE,
             .flag = promote_bit_fields,
         };
-        typed = c_ir_query_execute(builder, root, &result) && result.success;
+        if (machine->strict_slots && c_ir_strict_result_find(machine, root, &result))
+        {
+            typed = result.success;
+        }
+        else if (machine->frame_count)
+        {
+            typed = c_ir_query_request(builder, root, &result) && result.success;
+        }
+        else
+        {
+            typed = c_ir_query_execute(builder, root, &result) && result.success;
+        }
         if (typed)
         {
             *type_out = result.result_type;
@@ -33010,6 +33082,10 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         if (c_ir_sizeof_operand_type_attempt(builder, start, end, &dereferenced_type))
         {
             return dereferenced_type;
+        }
+        if (builder->queries->has_request)
+        {
+            return IR_TYPE_ID_INVALID;
         }
     }
     if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
@@ -50999,6 +51075,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     };
     queries.frames = arena_allocate(temporary_arena, CIrQueryFrame, query_frame_capacity);
     queries.completed = arena_allocate(temporary_arena, CIrQueryFrame, query_frame_capacity);
+    u64 strict_slot_capacity = next_power_of_two(query_frame_capacity * 2 + 16);
+    queries.strict_results = arena_allocate(temporary_arena, CIrQueryFrame, query_frame_capacity);
+    queries.strict_slots = arena_allocate_zeroed(temporary_arena, u32, strict_slot_capacity);
+    queries.strict_result_capacity = (u32)query_frame_capacity;
+    queries.strict_slot_mask = (u32)(strict_slot_capacity - 1);
     queries.values = arena_allocate(temporary_arena, CIrConstantValue, query_frame_capacity);
     queries.operators = arena_allocate(temporary_arena, CIrConstantOperator, query_frame_capacity);
     queries.resumes = arena_allocate(temporary_arena, CIrQueryResume, query_frame_capacity);

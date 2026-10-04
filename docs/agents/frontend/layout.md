@@ -272,7 +272,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   walk itself runs as explicit `CIrQueryMachine` frames
   (`C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE`) with no depth cap, so tall operands
   are typed by the walk rather than the identifier-scan fallback (GitHub
-  #2531).
+  #2531). Strict results persist in a hashed per-unit table
+  (`machine->strict_results`/`strict_slots`) across query roots, so nested
+  conditional and sizeof operands share each subexpression's walk instead of
+  re-deriving it for every enclosing frame.
   `tests/basic_c_bit_field_promotion.c` covers widths 1, 3, 31, and 32,
   anonymous members, casts, assignments, and argument promotion under every
   allocator (GitHub #218).
