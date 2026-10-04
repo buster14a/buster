@@ -236,7 +236,10 @@
   records, including matching helper/invocation statuses. Private fixed-order
   Bash `SECONDS` stages observe setup, monitor launch, interpreter handoff and
   publication without changing either clock or authorizing admission. Builtin
-  path trimming and caller writes remove known external launches; a retained
+  path trimming and caller writes remove known external launches. The seven
+  private IPC endpoints use the same fresh generation directory as the receipts,
+  removing a redundant directory-process launch before monitor/helper startup;
+  the existing clocks and descriptor protocol are unchanged. A retained
   late-start failure does not establish the cause of its post-setup delay or
   a hosted speed improvement. Startup refusal preserves any already observed
   command-monitor deadline even when the caller is then lost.
@@ -244,6 +247,10 @@
   [`-S`](https://docs.python.org/3/using/cmdline.html#cmdoption-S), which disables
   automatic [`site`](https://docs.python.org/3/library/site.html) initialization
   and its customization hooks. Payload arguments and environment are unchanged.
+  The dedicated keeper enters its unchanged ready/control/acknowledgment protocol
+  after importing only `os`, `signal` and `sys`; owner-only imports are skipped.
+  Its two private descriptor arguments are validated before descriptor access.
+  Imported-module and owner entry paths retain their ordinary initialization.
   A finite thirteen-second site hook remains unentered while both roles complete
   and are reaped; separate retained counterfactuals show this is a reachable
   startup delay class, not the established cause of the hosted late-start failure.
@@ -342,6 +349,17 @@
   retain real selected Go/Ninja/adb receipts. No compiler build or measurement
   dispatch is needed to run these controls. Missing historical observations
   remain pending; see [checks qualification](../ci-combination-shards.md#further-checks-partition-qualification-2120).
+- The same opt-in retains `buster-ci/ios-simulator-selection.json` from the
+  selected discovery record, or the arguments and UUID of an actual creation.
+  `tools/ci_ios_simulator.py` adds no simulator query and preserves the launcher's
+  first available name match. Explicit UUIDs and missing observed fields remain
+  unknown. `python3 -B tools/ci_ios_simulator_test.py -v` checks this producer with
+  finite JSON; workflow lint also runs it. Qualification requires a digest-bound
+  `simulator_selection` reference with matching source/run/attempt/mobile-job
+  identity. Runtime and device type are comparable; the initial UUID remains
+  provenance. The CI batch selects once for Debug and Release; collection must
+  join that UUID to the initial launcher log, reject retention failures or
+  repeated selection, and retain any distinct replacement UUID from recovery.
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),

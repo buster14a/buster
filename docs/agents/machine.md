@@ -216,6 +216,22 @@ fixture as well as compiling both architectures.
   opcode classifiers. The [metadata ownership inventory](../machine-metadata-ownership.md)
   documents every shared record's producer, consumer, publication and invalidation.
   Explicit barrier/vector membership is not a latency or hazard model.
+- QUALITY switch functions use the same placement path: the shared prepass
+  supplies loop spans and complete predecessor adjacency for block operands,
+  switch tables (including duplicate/default destinations), indirect branches
+  and asm-goto. Split entry/exit analysis consumes that adjacency, with entry
+  installs restricted to forward unconditional branches; ambiguous entries and
+  landing pads with predecessors outside the region remain ineligible. The
+  verified synthetic MIR fixture fixes table backedges and duplicate/default
+  predecessor counts independently of selector layout. The C switch fixture
+  covers loops, shared destinations, fallthrough, default-only switches, all
+  allocators and both frontend memory forms.
+  Its private input lives at
+  `src/buster/tests/compiler/codegen/fixtures/quality_switch_cfg.c`; the
+  registered machine module stringifies those same C tokens into its compiler
+  input, preserving the separately approved frozen `tests/` retirement corpus
+  and running on mobile without a separately staged source file. Directly
+  compiling the private input keeps its ordinary C function definitions.
 - QUALITY placement accumulates exact u64 weighted traffic for values and loop
   regions, including split-boundary costs. A u32 edit count and maximum weight
   4096 bound a traffic sum below 2^44. The heap preserves its strict-greater tie
@@ -793,6 +809,14 @@ fixture as well as compiling both architectures.
   hatch. X86 RIP-relative `lea` label addresses use the final block relocation;
   control-like `call`/`xbegin` label references and AArch64 label-address/call
   forms that the canonical backend did not support remain fail-closed controls.
+- Scalar x86 inline assembly admits SAR/SHL/SHR/SAL, including AT&T byte,
+  word, dword and qword suffixes, with immediate or CL counts. The shared
+  assembler validates count registers, widths and immediate bounds. Explicit
+  `cc` clobbers remain part of the closed transaction. INT imm8 and INT3 also
+  use checked metadata; generating a breakpoint does not execute it during
+  compiler validation. `machine_test_x64_inline_shift_breakpoint` checks fixed
+  encodings, rejected neighbouring operands and native shift results across
+  both frontend forms and every allocator.
 - x86 CPUID/XGETBV literal assembly with complete 32-bit pure outputs and
   separate fixed inputs selects constrained machine rows. Numeric/named ties
   retain the input's fixed register. CPUID consumes RAX/RCX together and
@@ -857,6 +881,18 @@ fixture as well as compiling both architectures.
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
   sequence too (`link_elf_relax_local_dynamic`).
 
+The x86 inline-assembly vocabulary admits zero-operand `rdtsc` and `rdtscp`
+through the shared assembler. `AssemblyEncodeOptions.inline_assembly` supplies
+the existing RDTSCP metadata row's feature token only for that zero-operand
+instruction; standalone and module-level assembly keep target feature gating.
+GNU fixed outputs or explicit clobbers name
+RAX/RDX and, for RDTSCP, RCX; ordinary transaction staging preserves live
+values and captures the declared 32-bit outputs. Memory and flags effects
+remain source-declared. `machine_test_x64_inline_timestamps` checks exact
+instruction bytes, output registers, clobbers and rejected operand forms
+across native targets, frontend forms and allocator modes. Runtime availability
+and ordering of timestamp reads remain the caller's responsibility.
+
 ## Wide integer conversion rounding
 
 - AArch64 i128-to-f32/f64 casts normalize the magnitude as two scalar MIR
@@ -878,6 +914,13 @@ chains them against every pending slot access. No architecture-specific
 scheduler exception is needed. The stack-alias tests explicitly recognize
 incoming reads independently of that metadata; otherwise a missing descriptor
 bit could disappear from both the scheduler and its test oracle.
+
+Windows AArch64 pre-C23 unprototyped calls use the same integer-register
+argument image as variadic calls. Both the machine caller plan and the callee's
+entry capture classify those promoted values with `IR_ABI_USE_VARIADIC_ARGUMENT`,
+but only a real variadic function emits `MACHINE_A64_VA_HOME_WINDOWS` or owns a
+`va_list` save area. Keep those properties separate when changing parameter
+placement.
 
 ## AArch64 large aggregate copies
 

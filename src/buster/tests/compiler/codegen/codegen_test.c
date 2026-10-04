@@ -2080,6 +2080,96 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_arm64_windows_tls_offsets(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS};
+    String8 source = S8("_Thread_local char tls_pad[8192] = {1};\n"
+                       "_Thread_local int tls_far = 42;\n"
+                       "int read_far(void) { tls_pad[0] = 7; return tls_far; }\n"
+                       "_Thread_local volatile int tls_repeat;\n"
+                       "int repeat(void) { return "
+                       "tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+"
+                       "tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+"
+                       "tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+"
+                       "tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat+tls_repeat; }\n");
+    for (u32 frontend = 0; frontend < 2; frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("arm64-tls-offsets.c"), tokens, parsed, target,
+                                                             (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+        if (BUSTER_REQUIRE(arguments, !tokens.error_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        {
+            IrValidationResult validation = ir_validate_canonical_module(lowered.program, lowered.program->modules);
+            BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
+            for (u32 allocator = 0; allocator < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; allocator += 1)
+            {
+                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, lowered.program->modules, target,
+                    (CodegenModuleOptions){.register_allocator = (u8)allocator, .verify_invariants = true});
+                if (BUSTER_REQUIRE(arguments, generated.error == CODEGEN_ERROR_NONE && !generated.statistics.fallback_function_count))
+                {
+                    u32 pairs = 0;
+                    u32 index_sites = 0;
+                    for (u32 index = 0; index < generated.relocation_count; index += 1)
+                    {
+                        CodegenModuleRelocation* high = generated.relocations + index;
+                        index_sites += high->kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+                                       high->kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12;
+                        if (high->kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
+                        {
+                            CodegenModuleRelocation* low = index + 1 < generated.relocation_count ? high + 1 : 0;
+                            bool pair = low && low->kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12 &&
+                                        low->symbol.value == high->symbol.value && low->offset == high->offset + 4 &&
+                                        low->offset <= generated.code.length && 4 <= generated.code.length - low->offset;
+                            if (BUSTER_REQUIRE(arguments, pair))
+                            {
+                                u32 high_word = 0;
+                                u32 low_word = 0;
+                                memcpy(&high_word, generated.code.pointer + high->offset, 4);
+                                memcpy(&low_word, generated.code.pointer + low->offset, 4);
+                                BUSTER_TEST(arguments, high_word == UINT32_C(0x91400129) && low_word == UINT32_C(0x91000129) &&
+                                                           !high->addend && !low->addend);
+                                pairs += 1;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, pairs == 34 && index_sites == 68);
+                    ObjectFile object = object_from_canonical_codegen_module(temporary.arena, lowered.program, &generated, target);
+                    BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE);
+                    u32 far_symbols = 0;
+                    for (u32 index = 0; object.error == OBJECT_ERROR_NONE && index < object.symbol_count; index += 1)
+                    {
+                        ObjectSymbol* symbol = object.symbols + index;
+                        if (string_equal(symbol->name, S8("tls_far")))
+                        {
+                            BUSTER_TEST(arguments, symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->value == 8192);
+                            far_symbols += 1;
+                        }
+                    }
+                    BUSTER_TEST(arguments, far_symbols == 1);
+                    ObjectArtifact written = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
+                    BUSTER_TEST(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length);
+                    if (written.error == OBJECT_ERROR_NONE)
+                    {
+                        ObjectFile reread = object_read(temporary.arena, written.bytes, target);
+                        BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE);
+                        u32 high_count = 0;
+                        for (u32 index = 0; reread.error == OBJECT_ERROR_NONE && index < reread.relocation_count; index += 1)
+                        {
+                            high_count += reread.relocations[index].kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12;
+                        }
+                        BUSTER_TEST(arguments, high_count == 34);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_reused_home_boundary(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2406,6 +2496,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_switch_key_images(Unit
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_symbols(arguments);
+    UnitTestResult arm64_tls = codegen_test_arm64_windows_tls_offsets(arguments);
+    result.succeeded_test_count += arm64_tls.succeeded_test_count;
+    result.test_count += arm64_tls.test_count;
     BUSTER_TEST_FIXTURE(arguments, codegen_test_ebpf_local_calls);
     UnitTestResult switch_key_images = codegen_test_canonical_switch_key_images(arguments);
     result.succeeded_test_count += switch_key_images.succeeded_test_count;

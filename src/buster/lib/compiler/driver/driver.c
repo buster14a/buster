@@ -3950,20 +3950,32 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     }
 }
 
-// The section an assembled unit's kind becomes. The unit keeps the section's
-// own name -- `.init` and `.fini` are neither `.text` nor absent -- and the
-// kind only decides the flags the object writer stamps on it.
+// Preserve each assembled section's own name and its code/data or DWARF
+// identity; the object writer derives allocation flags from that identity.
 BUSTER_GLOBAL_LOCAL ObjectSectionKind compiler_driver_assembly_section_kind(AssemblyUnitSectionKind kind)
 {
+    ObjectSectionKind object_kind;
     switch (kind)
     {
-    case ASSEMBLY_UNIT_SECTION_TEXT: return OBJECT_SECTION_TEXT;
-    case ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA: return OBJECT_SECTION_READ_ONLY_DATA;
-    case ASSEMBLY_UNIT_SECTION_DATA: return OBJECT_SECTION_DATA;
+    case ASSEMBLY_UNIT_SECTION_TEXT: object_kind = OBJECT_SECTION_TEXT; break;
+    case ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA: object_kind = OBJECT_SECTION_READ_ONLY_DATA; break;
+    case ASSEMBLY_UNIT_SECTION_DATA: object_kind = OBJECT_SECTION_DATA; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_INFO: object_kind = OBJECT_SECTION_DEBUG_INFO; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV: object_kind = OBJECT_SECTION_DEBUG_ABBREV; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_LINE: object_kind = OBJECT_SECTION_DEBUG_LINE; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_STR: object_kind = OBJECT_SECTION_DEBUG_STR; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_LOC: object_kind = OBJECT_SECTION_DEBUG_LOC; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_RANGES: object_kind = OBJECT_SECTION_DEBUG_RANGES; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_ADDR: object_kind = OBJECT_SECTION_DEBUG_ADDR; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_STR_OFFSETS: object_kind = OBJECT_SECTION_DEBUG_STR_OFFSETS; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_LINE_STR: object_kind = OBJECT_SECTION_DEBUG_LINE_STR; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_RNGLISTS: object_kind = OBJECT_SECTION_DEBUG_RNGLISTS; break;
+    case ASSEMBLY_UNIT_SECTION_DEBUG_LOCLISTS: object_kind = OBJECT_SECTION_DEBUG_LOCLISTS; break;
     case ASSEMBLY_UNIT_SECTION_ZERO:
-    case ASSEMBLY_UNIT_SECTION_KIND_COUNT: break;
+    case ASSEMBLY_UNIT_SECTION_KIND_COUNT:
+    default: object_kind = OBJECT_SECTION_ZERO; break;
     }
-    return OBJECT_SECTION_ZERO;
+    return object_kind;
 }
 
 // The assembler reports a relocation in its own vocabulary, which is wider

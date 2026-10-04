@@ -167,6 +167,20 @@ allocator modes and both frontend forms.
   is never set in that dialect and the call is refused as an arity error --
   which every dialect now reports by naming the callee and its parameter
   count rather than as "could not prepare C calls" (issue #666).
+- **A pre-C23 identifier-list definition keeps declared objects and promoted
+  callable values separate.** In `int f(c, x) char c; float x; { ... }`, the
+  body observes `char` and `float` parameter objects, while callers and the
+  callee ABI exchange the default-promoted `int` and `double` values. The
+  syntax pass records the identifier list and its following declaration list
+  as distinct token ranges; semantic binding reuses ordinary local-declarator
+  parsing, supplies `int` for an omitted declaration and preserves the
+  unprototyped call rule. C23 and GNU23 diagnose the removed definition form
+  while retaining declaration/body resynchronization. The registered
+  identifier-list frontend fixture checks declared object types, promoted
+  canonical IR signatures, call-site signatures, omitted declarations,
+  earlier `()` declarations and the declaration immediately following the
+  body. Its native runtime companion covers C17/GNU17, both frontend forms
+  and all four allocator modes with zero machine fallback (GitHub #1263).
 - **A callable parameter type is separate from its local object's type.**
   `c_ir_parameter_value_type` strips only top-level `volatile` from fixed
   parameter values in declaration and expression-built function types. It
@@ -266,6 +280,31 @@ operand pairs on six native layouts in GNU17/GNU23 and both frontend forms.
 Its embedded native fixture checks every allocator and preserves unevaluated
 index effects.
 
+Character literal expression queries retain the prefix's scalar identity:
+ordinary constants are `int`, `L` follows the target's `wchar_t`, `u` is
+`unsigned short`, `U` is `unsigned int`, and C23 `u8` is `unsigned char`.
+The allocation-free literal query and the type machine share this leaf policy;
+`typeof`, `_Generic` and inferred declarations agree with lowering, while
+arithmetic still applies the ordinary integer promotions. Prefix and dialect
+admission remain owned by existing lexing and semantic validation.
+`c_test_character_literal_query_types` checks fixed type, promotion and size
+expectations on six native layouts in GNU17/GNU23 through both query routes and
+both frontend forms. Its embedded native fixture checks signedness after `-1`
+assignment for `typeof`, GNU `__auto_type` and C23 `auto` in every allocator.
+
+Local C23 `auto name = expression` inference uses the existing initializer
+binding, value conversion and qualified type publication. The initializer is
+bound before its new identifier becomes visible, so an outer identifier may
+be shadowed. Prefix and suffix qualifiers are retained on the inferred object.
+An explicit type, including a visible typedef, `typeof` or `_Atomic(type)`,
+keeps `auto` as a storage specifier; pre-C23 typed declarations retain their
+existing behavior. `c_test_c23_auto_local_declarations` checks these controls
+and rejects missing initializers, multiple or non-identifier declarators,
+duplicate inferred specifiers and self-reference without an outer binding.
+This local automatic-object slice does not complete issue #1254: file-scope,
+`constexpr`, static, external and thread-local inference, and broader
+statement-expression queries remain outside its contract.
+
 Function types reject array and function return types when their declarators
 are formed, including unused prototypes, typedef return types and nested
 function-pointer declarators. Pointer return types keep their array/function
@@ -298,6 +337,29 @@ allows a list containing only ellipsis. Array `static` needs an expression;
 parameter derivations. A nested function-pointer parameter still introduces
 its own prototype scope. The syntax/object diagnostic-equivalence corpus
 checks rejection, legal neighbors and both frontend SSA forms.
+
+Parameter declarations give a visible typedef name priority over a parameter
+name in an ambiguous parenthesized group (C11 6.7.6.3p11). `T (T)` and
+`int (T)` derive an unnamed function parameter and then adjust it to a pointer;
+`T (T (T))` retains the inner function-parameter adjustment. Redundant abstract
+groups such as `int ((T))` carry that classification down the explicit type
+machine. Pointer-led named groups, `int T`, `const T T`, member names and
+ordinary block-scope shadowing keep their existing rules.
+
+A typedef remains a type in the function body. Checked expression leaf queries
+reject its use as a value, including within parentheses or operator operands;
+casts and type operands keep their type-name binding. The statement-expression
+walker recognizes typedef-led `for` initializer declarations in the enclosing
+scope and leaves their validation with the declaration owner.
+
+`c_test_parenthesized_typedef_parameters` checks the original prototype/body
+pairs, a char typedef, nested and deeply grouped abstract forms, retained
+typedef visibility, and rejected typedef-name expressions. Semantic-only and
+both canonical frontend forms check structured diagnostics on six native
+layouts in C11/GNU17/GNU23, with carried and zeroed symbol IDs. Embedded native
+sources exercise all four allocators at O0/O2 in both forms; hosted Linux x86-64
+GCC/Clang compile and execute the same original expected-value sources and
+independently reject the invalid typedef-name expression.
 
 ## GNU callback storage through void pointers
 

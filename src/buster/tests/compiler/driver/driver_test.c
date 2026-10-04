@@ -17,8 +17,11 @@
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
 // compiler_driver_test_wasm_switch_images checks typed selector/key equality.
+// compiler_driver_test_quoted_assembly_round_trip covers printed string/call symbols.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
 // the optional independent Clang cross-assembly observer.
+// compiler_driver_test_bare_dwarf_sections checks flag-less DWARF source names
+// through serialized ELF allocation flags and object-reader identities.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -4099,6 +4102,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitT
         }
         file_map_unmap(object_map);
     }
+    scratch_end(temporary);
+    return result;
+}
+
+// The -S printer quotes ordinary symbols. Keep its string reference and
+// external call usable by the input assembler through object writing/linking.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_quoted_assembly_round_trip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("quoted-assembly-source"), S8(".c"));
+    String8 helper = buster_test_temporary_path(arena, S8("quoted-assembly-helper"), S8(".c"));
+    String8 listing = buster_test_temporary_path(arena, S8("quoted-assembly-listing"), S8(".s"));
+    String8 object = buster_test_temporary_path(arena, S8("quoted-assembly-source"), S8(".o"));
+    String8 helper_object = buster_test_temporary_path(arena, S8("quoted-assembly-helper"), S8(".o"));
+    String8 executable = buster_test_temporary_path(arena, S8("quoted-assembly-run"), S8(".out"));
+    bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(
+        S8("extern int quote_observer(char const*);\nint main(void) { return quote_observer(\"encoding\"); }\n"))) &&
+        file_write(helper, BUSTER_SLICE_TO_BYTE_SLICE(
+        S8("int quote_observer(char const* p) { return p[0] != 'e' || p[1] != 'n' || p[7] != 'g' || p[8] != 0; }\n")));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        String8 helper_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-g0"), S8("-c"), helper, S8("-o"), helper_object};
+        CompilerDriverResult helper_result = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(helper_command)));
+        BUSTER_TEST_RAW(arguments, helper_result.error == COMPILER_DRIVER_ERROR_NONE, helper_result.diagnostic);
+        String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        String8 debug_modes[] = {S8("-g0"), S8("-g")};
+        for (u32 cell = 0; helper_result.error == COMPILER_DRIVER_ERROR_NONE &&
+                           cell < BUSTER_ARRAY_LENGTH(modes) * BUSTER_ARRAY_LENGTH(debug_modes); cell += 1)
+        {
+            u32 mode = cell % (u32)BUSTER_ARRAY_LENGTH(modes);
+            u32 debug = cell / (u32)BUSTER_ARRAY_LENGTH(modes);
+            String8 allocator = string_format(arena, S8("-fregister-allocator={S8}"), modes[mode]);
+            String8 print_command[] = {S8("-target"), S8("x86_64-unknown-linux"), debug_modes[debug], allocator,
+                                       S8("-S"), source, S8("-o"), listing};
+            CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print_command)));
+            BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+            if (printed.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
+                BUSTER_TEST(arguments, string_first_sequence(assembly, S8("\"quote_observer\"")) != BUSTER_STRING_NO_MATCH &&
+                    string_first_sequence(assembly, S8("\".L.cstr.")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_TEST(arguments, (string_first_sequence(assembly, S8(".section .debug_info")) != BUSTER_STRING_NO_MATCH) == (debug != 0));
+                String8 assemble_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-c"), listing, S8("-o"), object};
+                CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                    compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble_command)));
+                BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, assembled.diagnostic);
+                if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+                {
+                    u32 debug_info_count = 0;
+                    for (u32 section = 0; section < assembled.object.section_count; section += 1)
+                    {
+                        if (assembled.object.sections[section].kind == OBJECT_SECTION_DEBUG_INFO &&
+                            assembled.object.sections[section].data.length)
+                        {
+                            debug_info_count += 1;
+                        }
+                    }
+                    BUSTER_TEST(arguments, debug_info_count == debug);
+                }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+                if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+                {
+                    String8 link_command[] = {S8("-g0"), object, helper_object, S8("-o"), executable};
+                    CompilerDriverResult linked = compiler_driver_execute_invocation(arena,
+                        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                    BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                    if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable));
+                    }
+                }
+#endif
+            }
+        }
+    }
+    os_file_delete(source);
+    os_file_delete(helper);
+    os_file_delete(listing);
+    os_file_delete(object);
+    os_file_delete(helper_object);
+    os_file_delete(executable);
     scratch_end(temporary);
     return result;
 }
@@ -17227,6 +17315,93 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_elf_section_hea
     return result;
 }
 
+// Flag-less DWARF section names must survive the driver conversion as
+// nonallocated PROGBITS sections, observed from serialized ELF headers.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bare_dwarf_sections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    static const struct
+    {
+        String8 name;
+        ObjectSectionKind kind;
+    } rows[] = {
+        {S8_INITIALIZER(".debug_info"), OBJECT_SECTION_DEBUG_INFO},
+        {S8_INITIALIZER(".debug_abbrev"), OBJECT_SECTION_DEBUG_ABBREV},
+        {S8_INITIALIZER(".debug_line"), OBJECT_SECTION_DEBUG_LINE},
+        {S8_INITIALIZER(".debug_str"), OBJECT_SECTION_DEBUG_STR},
+        {S8_INITIALIZER(".debug_loc"), OBJECT_SECTION_DEBUG_LOC},
+        {S8_INITIALIZER(".debug_ranges"), OBJECT_SECTION_DEBUG_RANGES},
+        {S8_INITIALIZER(".debug_addr"), OBJECT_SECTION_DEBUG_ADDR},
+        {S8_INITIALIZER(".debug_str_offsets"), OBJECT_SECTION_DEBUG_STR_OFFSETS},
+        {S8_INITIALIZER(".debug_line_str"), OBJECT_SECTION_DEBUG_LINE_STR},
+        {S8_INITIALIZER(".debug_rnglists"), OBJECT_SECTION_DEBUG_RNGLISTS},
+        {S8_INITIALIZER(".debug_loclists"), OBJECT_SECTION_DEBUG_LOCLISTS},
+    };
+    String8 source = S8("");
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+    {
+        source = string_format(arena, S8("{S8}.section {S8}\n.byte {u32}\n"), source, rows[row].name, row + 1);
+    }
+    source = string_format(arena, S8("{S8}.section .debug_addr\n.balign 8\n.quad external\n"), source);
+    String8 input = buster_test_temporary_path(arena, S8("bare-dwarf-sections"), S8(".s"));
+    String8 output = buster_test_temporary_path(arena, S8("bare-dwarf-sections"), S8(".o"));
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            String8 command[] = {S8("-target"), targets[target], S8("-c"), input, S8("-o"), output};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+            {
+                BUSTER_TEST(arguments, compiled.object.section_count == BUSTER_ARRAY_LENGTH(rows) && compiled.object.relocation_count == 1);
+                if (compiled.object.relocation_count == 1)
+                {
+                    ObjectRelocation relocation = compiled.object.relocations[0];
+                    BUSTER_TEST(arguments, relocation.section < compiled.object.section_count &&
+                        compiled.object.sections[relocation.section].kind == OBJECT_SECTION_DEBUG_ADDR && relocation.offset == 8 &&
+                        relocation.addend == 0 && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                        relocation.symbol < compiled.object.symbol_count &&
+                        string_equal(compiled.object.symbols[relocation.symbol].name, S8("external")));
+                }
+                FileMapRead map = file_map_read(arena, output, (FileReadOptions){0});
+                ObjectFile read = object_read(arena, map.bytes, compiled.object.target);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE);
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+                {
+                    u32 type = 0;
+                    u64 flags = UINT64_MAX;
+                    BUSTER_TEST(arguments, compiler_driver_test_elf_section_header(map.bytes, rows[row].name, &type, &flags) &&
+                                           type == 1 && flags == 0);
+                    u64 expected_length = rows[row].kind == OBJECT_SECTION_DEBUG_ADDR ? 16u : 1u;
+                    u32 expected_alignment = rows[row].kind == OBJECT_SECTION_DEBUG_ADDR ? 8u : 1u;
+                    if (row < compiled.object.section_count)
+                    {
+                        ObjectSection section = compiled.object.sections[row];
+                        BUSTER_TEST(arguments, section.kind == rows[row].kind && string_equal(section.name, rows[row].name) &&
+                                               section.alignment == expected_alignment && section.data.length == expected_length &&
+                                               section.data.pointer[0] == row + 1);
+                    }
+                    BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && (u32)rows[row].kind < read.section_count);
+                    if (read.error == OBJECT_ERROR_NONE && (u32)rows[row].kind < read.section_count)
+                    {
+                        ObjectSection section = read.sections[rows[row].kind];
+                        BUSTER_TEST(arguments, section.alignment == expected_alignment && section.data.length == expected_length &&
+                                               section.data.pointer[0] == row + 1);
+                    }
+                }
+                file_map_unmap(map);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_leb(ByteSlice image, u64* cursor, u64 end, u64* value)
 {
     u64 result = 0;
@@ -18042,6 +18217,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pragma_pack_alignment(Un
 }
 #endif
 
+#if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_identifier_list_definitions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source_path = buster_test_temporary_path(arena, S8("buster-identifier-list-definition"), S8(".c"));
+    String8 source = S8(
+        "static int promoted(c, f, n) register char c; float f; int n;\n"
+        "{ return sizeof(c) == 1 && sizeof(f) == 4 && c == 65 && f == 3.5f && n == 9; }\n"
+        "static int omitted(a, b) int a; { return a + b; }\n"
+        "static int prior();\n"
+        "static int prior(v) short v; { return v; }\n"
+        "typedef int After;\n"
+        "After next(After value) { return value; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    if (!promoted((char)65, (float)3.5, 9)) return 1;\n"
+        "    if (omitted(4, 5) != 9) return 2;\n"
+        "    if (prior((short)7) != 7) return 3;\n"
+        "    if (next(11) != 11) return 4;\n"
+        "    return 0;\n"
+        "}\n");
+    bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                            S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
+    for (u32 dialect = 0; written && dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                TemporalArena row = scratch_begin(&arena, 1);
+                String8 image = buster_test_temporary_path(
+                    row.arena, S8("buster-identifier-list-definition"),
+                    string_format(row.arena, S8("-{u32}-{u32}-{u32}.exe"), dialect, frontend, allocator));
+                String8 command[] = {dialects[dialect], frontends[frontend], allocators[allocator], S8("-fverify-codegen"),
+                                     allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                                     S8("-o"), image, source_path};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    row.arena, compiler_driver_parse_arguments(row.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(
+                    row.arena, S8("identifier-list dialect={u32} frontend={u32} allocator={u32}: {S8}"),
+                    dialect, frontend, allocator, compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                                           compiled.codegen_statistics.fallback_function_count == 0,
+                                description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(row.arena, image), description);
+                }
+                scratch_end(row);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18063,7 +18301,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_constant_short_circuit_verification);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bare_dwarf_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_control_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
@@ -18096,6 +18336,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINK_LIBC && !BUSTER_SANITIZE && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pragma_pack_alignment);
+#endif
+#if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_identifier_list_definitions);
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_row_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_runtime_types);

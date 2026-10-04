@@ -1156,6 +1156,15 @@ struct CDeclaration
     u32 declarator_count;
     u32 body_start;
     u32 body_token_count;
+    // A pre-C23 function definition may name its parameters first and type
+    // them in the declarations between the closing ')' and the body.  These
+    // two immutable token ranges keep that grammar out of the ordinary
+    // prototype declarator while letting the semantic pass reuse the block
+    // declaration parser for the types.
+    u32 identifier_list_start;
+    u32 identifier_list_token_count;
+    u32 parameter_declaration_start;
+    u32 parameter_declaration_token_count;
     u32 parameter_start;
     u32 parameter_count;
     u32 alignment_start;
@@ -1169,6 +1178,7 @@ struct CDeclaration
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
+    bool is_identifier_list_definition;
     // A GNU `extern inline` function definition: its body is only for
     // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
     bool is_gnu_inline_only;
@@ -1232,6 +1242,10 @@ struct CParserDeclaration
     u32 declarator_count;
     u32 body_start;
     u32 body_token_count;
+    u32 identifier_list_start;
+    u32 identifier_list_token_count;
+    u32 parameter_declaration_start;
+    u32 parameter_declaration_token_count;
     u32 name_token;
     u32 function_name_token;
     // The body's _Static_assert statements in body order; null for the
@@ -1246,7 +1260,8 @@ struct CParserDeclaration
     bool is_variadic;
     bool seen_equal;
     bool is_declarator_continuation;
-    u8 reserved[2];
+    bool is_identifier_list_definition;
+    u8 reserved[1];
 };
 
 typedef struct CNumberFacts CNumberFacts;

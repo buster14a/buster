@@ -174,6 +174,21 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
         }
     }
 
+#if BUSTER_WINDOWS
+    // The native failure path must preserve GetLastError before gathering its
+    // best-effort resource context. The first non-null page cannot name a
+    // reserved Windows allocation, so MEM_COMMIT rejects it without consuming
+    // memory.
+    {
+        u64 page_size = os_get_page_size();
+        OsCommitFailureContext failure = {0};
+        bool committed = os_commit_diagnose((void*)page_size, page_size, (ProtectionFlags){.read = 1, .write = 1}, false, &failure);
+        BUSTER_TEST(arguments, !committed);
+        BUSTER_TEST(arguments, failure.error.v != 0);
+        BUSTER_TEST(arguments, failure.page_size == page_size);
+    }
+#endif
+
     // Companion to the reserved_size bound: filling an arena up to its
     // reservation stays within bounds and keeps working. Requests past
     // reserved_size abort via BUSTER_VALIDATE, so they cannot be observed
@@ -518,6 +533,17 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, !wait.timed_out);
                 BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
                 BUSTER_TEST(arguments, string_first_sequence(error, diagnostics[mode_index]) != BUSTER_STRING_NO_MATCH);
+                if (mode_index < 2)
+                {
+                    BUSTER_TEST(arguments, string_first_sequence(error, S8("origin=forced-test")) != BUSTER_STRING_NO_MATCH);
+                    BUSTER_TEST(arguments, string_first_sequence(error, S8("address=0x")) != BUSTER_STRING_NO_MATCH);
+                    BUSTER_TEST(arguments, string_first_sequence(error, S8(" size=")) != BUSTER_STRING_NO_MATCH);
+                    BUSTER_TEST(arguments, string_first_sequence(error, S8(" requested_end=")) != BUSTER_STRING_NO_MATCH);
+                    BUSTER_TEST(arguments, string_first_sequence(error, S8(" position=")) != BUSTER_STRING_NO_MATCH);
+                    BUSTER_TEST(arguments, string_first_sequence(error, S8(" os_position=")) != BUSTER_STRING_NO_MATCH);
+                    BUSTER_TEST(arguments, string_first_sequence(error, S8(" reserved=")) != BUSTER_STRING_NO_MATCH);
+                    BUSTER_TEST(arguments, string_first_sequence(error, S8(" page_size=")) != BUSTER_STRING_NO_MATCH);
+                }
             }
         }
     }
