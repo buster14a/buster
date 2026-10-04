@@ -95,6 +95,45 @@ jobs:
         run: |
           clang -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic tools/wild_linker_acceptance.c -o "$RUNNER_TEMP/wild-evaluation/bench"
           "$RUNNER_TEMP/wild-evaluation/bench" "$RUNNER_TEMP/wild-evaluation/build-driver" "$RUNNER_TEMP/wild-evaluation/evidence" "$RUNNER_TEMP/wild-primary-inputs"
+      - name: Retrieve preceding correctness failure for diagnosis
+        if: ${{ always() }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wild-linker-acceptance-37220871120-1
+          run-id: '37220871120'
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/wild-previous-evidence
+      - name: Print compact observations and verifier diagnostics
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          for root in "$RUNNER_TEMP/wild-evaluation/evidence" "$RUNNER_TEMP/wild-previous-evidence"; do
+            for file in summary.csv original-summary.csv build-link-share.csv negative-selection-status.txt cold-cache-status.txt completion.txt; do
+              test ! -f "$root/$file" || { echo "$file"; cat "$root/$file"; }
+            done
+            rg -l 'Verifying|DIEs have overlapping|error:|warning:|Breakpoint 1,|#0 ' "$root" --glob '*.log' | while IFS= read -r file; do
+              echo "$file"
+              head -n 12 "$file"
+              tail -n 15 "$file"
+            done
+          done
+      - name: Retain compact reviewable evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wild-linker-acceptance-compact-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/wild-evaluation/evidence/*.csv
+            ${{ runner.temp }}/wild-evaluation/evidence/*.tsv
+            ${{ runner.temp }}/wild-evaluation/evidence/*.txt
+            ${{ runner.temp }}/wild-evaluation/evidence/*.sha256
+            ${{ runner.temp }}/wild-evaluation/evidence/*.log
+            ${{ runner.temp }}/wild-previous-evidence/*.csv
+            ${{ runner.temp }}/wild-previous-evidence/*.tsv
+            ${{ runner.temp }}/wild-previous-evidence/*.txt
+            ${{ runner.temp }}/wild-previous-evidence/*.sha256
+            ${{ runner.temp }}/wild-previous-evidence/*.log
+          retention-days: 30
       - name: Retain original evidence including setup failures
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
