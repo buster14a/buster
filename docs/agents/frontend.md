@@ -216,6 +216,23 @@ overlapping maximal munch, literal/comment controls, directives, stringification
 paste, separators, nine dialects, canonical IR through both frontend forms and
 a self-checking native driver program.
 
+## Preprocessed punctuator boundaries
+
+The shared lexical separator predicate preserves separate `%` and `=` tokens,
+and separate `=` and `=` tokens, including when a macro expansion's source
+column makes the printed spellings appear adjacent. These boundaries must not
+become the single `%=` or `==` token when another compiler reads `-E` output.
+The assignment punctuator owns the equality join rule; an existing `==` token
+does not require a separator before another `=` merely for maximal munch.
+
+Registered `c_punctuator_separator_tests` uses fixed spelling/id expectations
+for joins and neighboring/digraph/comment controls. It checks exact stdout and
+file preprocessing output, re-lexes both against independent punctuator ids and
+ordinary preprocessing, and requires invalid separate-token expressions to
+remain invalid after an unmodified `.i` round trip. Hosted Linux x86-64 also
+compiles and executes valid `%=` and `==` controls directly and through `.i`
+with both frontend forms and strict code-generation verification.
+
 ## Universal character names in identifiers
 
 C99/GNU99 identifier escapes use [N1256 Annex D](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf),

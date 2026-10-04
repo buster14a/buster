@@ -2,6 +2,7 @@
 // source conditionals inside arguments, and push/pop effects at the rescan
 // cursor. Pin tokens, expansion ownership, diagnostic source attribution and
 // dialect-owned phase-one trigraph translation in c_trigraph_preprocess_tests.
+// c_punctuator_separator_tests pins lexical joins and direct/-E admission parity.
 #include <buster/tests/compiler/frontend/c/macro_conditional_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
@@ -450,10 +451,206 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_trigraph_preprocess_tests(UnitTestArguments
     return result;
 }
 
+typedef struct CTestPunctuatorSeparatorPair CTestPunctuatorSeparatorPair;
+struct CTestPunctuatorSeparatorPair
+{
+    CPunctuator previous;
+    CPunctuator current;
+    String8 previous_spelling;
+    String8 current_spelling;
+    bool separator;
+};
+
+typedef struct CTestPunctuatorSeparatorEmission CTestPunctuatorSeparatorEmission;
+struct CTestPunctuatorSeparatorEmission
+{
+    String8 source;
+    String8 output;
+    CPunctuator first;
+    CPunctuator second;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_punctuator_separator_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTestPunctuatorSeparatorPair pairs[] = {
+        {C_PUNCTUATOR_PERCENT, C_PUNCTUATOR_ASSIGN, S8("%"), S8("="), true},
+        {C_PUNCTUATOR_ASSIGN, C_PUNCTUATOR_ASSIGN, S8("="), S8("="), true},
+        {C_PUNCTUATOR_PERCENT, C_PUNCTUATOR_EQUAL, S8("%"), S8("=="), true},
+        {C_PUNCTUATOR_ASSIGN, C_PUNCTUATOR_EQUAL, S8("="), S8("=="), true},
+        {C_PUNCTUATOR_PERCENT_ASSIGN, C_PUNCTUATOR_ASSIGN, S8("%="), S8("="), false},
+        {C_PUNCTUATOR_EQUAL, C_PUNCTUATOR_ASSIGN, S8("=="), S8("="), false},
+        {C_PUNCTUATOR_EQUAL, C_PUNCTUATOR_EQUAL, S8("=="), S8("=="), false},
+        {C_PUNCTUATOR_PERCENT, C_PUNCTUATOR_SEMICOLON, S8("%"), S8(";"), false},
+        {C_PUNCTUATOR_ASSIGN, C_PUNCTUATOR_SEMICOLON, S8("="), S8(";"), false},
+        {C_PUNCTUATOR_PERCENT, C_PUNCTUATOR_COLON, S8("%"), S8(":"), true},
+        {C_PUNCTUATOR_PERCENT, C_PUNCTUATOR_GREATER, S8("%"), S8(">"), true},
+        {C_PUNCTUATOR_HASH, C_PUNCTUATOR_HASH, S8("%:"), S8("%:"), true},
+        {C_PUNCTUATOR_HASH, C_PUNCTUATOR_ASSIGN, S8("%:"), S8("="), false},
+        {C_PUNCTUATOR_HASH, C_PUNCTUATOR_HASH, S8("#"), S8("#"), true},
+        {C_PUNCTUATOR_LESS, C_PUNCTUATOR_COLON, S8("<"), S8(":"), true},
+        {C_PUNCTUATOR_COLON, C_PUNCTUATOR_GREATER, S8(":"), S8(">"), true},
+        {C_PUNCTUATOR_SLASH, C_PUNCTUATOR_STAR, S8("/"), S8("*"), true},
+        {C_PUNCTUATOR_SLASH, C_PUNCTUATOR_SLASH, S8("/"), S8("/"), true},
+        {C_PUNCTUATOR_PLUS, C_PUNCTUATOR_PLUS, S8("+"), S8("+"), true},
+        {C_PUNCTUATOR_SHIFT_LEFT, C_PUNCTUATOR_ASSIGN, S8("<<"), S8("="), true},
+        {C_PUNCTUATOR_SHIFT_RIGHT, C_PUNCTUATOR_ASSIGN, S8(">>"), S8("="), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pairs); index += 1)
+    {
+        CToken previous = {.kind = C_TOKEN_PUNCTUATOR, .punctuator = (u8)pairs[index].previous};
+        CToken current = {.kind = C_TOKEN_PUNCTUATOR, .punctuator = (u8)pairs[index].current};
+        BUSTER_TEST(arguments, c_token_requires_separator(previous, pairs[index].previous_spelling, current,
+                                                          pairs[index].current_spelling) == pairs[index].separator);
+    }
+
+    CTestPunctuatorSeparatorEmission emitted[] = {
+        {S8("#define P %\nP=\n"), S8("% =\n"), C_PUNCTUATOR_PERCENT, C_PUNCTUATOR_ASSIGN},
+        {S8("#define A =\nA=\n"), S8("= =\n"), C_PUNCTUATOR_ASSIGN, C_PUNCTUATOR_ASSIGN},
+        {S8("#define P %\nP==\n"), S8("% ==\n"), C_PUNCTUATOR_PERCENT, C_PUNCTUATOR_EQUAL},
+        {S8("#define A =\nA==\n"), S8("= ==\n"), C_PUNCTUATOR_ASSIGN, C_PUNCTUATOR_EQUAL},
+        {S8("#define P() %\nP()=\n"), S8("% =\n"), C_PUNCTUATOR_PERCENT, C_PUNCTUATOR_ASSIGN},
+        {S8("#define A() =\nA()=\n"), S8("= =\n"), C_PUNCTUATOR_ASSIGN, C_PUNCTUATOR_ASSIGN},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(emitted); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source_path = buster_test_temporary_path(temporary.arena, S8("punctuator-separator"), S8(".c"));
+        String8 output_path = buster_test_temporary_path(temporary.arena, S8("punctuator-separator"), S8(".i"));
+        bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(emitted[index].source));
+        BUSTER_TEST(arguments, written);
+        if (written)
+        {
+            CPreprocessResult direct = c_preprocess(temporary.arena, emitted[index].source,
+                                                    (CPreprocessOptions){.source_path = source_path});
+            BUSTER_TEST(arguments, direct.error_count == 0);
+            BUSTER_TEST(arguments, direct.token_count == 3);
+            for (u32 file_output = 0; file_output < 2; file_output += 1)
+            {
+                String8 command[] = {S8("-E"), S8("-nostdinc"), S8("-std=c17"), source_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                    temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                if (file_output) invocation.output_path = output_path;
+                CompilerDriverResult printed = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+                if (printed.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 output = file_output ? BYTE_SLICE_TO_STRING(8, file_read(temporary.arena, output_path, (FileReadOptions){0})) : printed.output;
+                    BUSTER_STRING_TEST(arguments, output, emitted[index].output);
+                    CLexResult restored = c_lex(temporary.arena, output);
+                    BUSTER_TEST(arguments, restored.error_count == 0);
+                    u32 token_index = 0;
+                    for (u64 scan = 0; scan < restored.token_count; scan += 1)
+                    {
+                        CToken token = restored.tokens[scan];
+                        if (token.kind != C_TOKEN_NEWLINE && token.kind != C_TOKEN_END_OF_FILE)
+                        {
+                            CPunctuator expected = token_index == 0 ? emitted[index].first : emitted[index].second;
+                            BUSTER_TEST(arguments, token_index < 2 && token.kind == C_TOKEN_PUNCTUATOR && token.punctuator == expected);
+                            if (token_index < direct.token_count && direct.tokens[token_index].kind != C_TOKEN_END_OF_FILE)
+                            {
+                                BUSTER_TEST(arguments, token.kind == direct.tokens[token_index].kind);
+                                BUSTER_TEST(arguments, token.punctuator == direct.tokens[token_index].punctuator);
+                                BUSTER_STRING_TEST(arguments, c_token_spelling(restored.spelling_base, token),
+                                                   c_token_spelling(direct.spelling_base, direct.tokens[token_index]));
+                            }
+                            token_index += 1;
+                        }
+                    }
+                    BUSTER_TEST(arguments, token_index == 2);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    // Both sources are invalid with their two separate tokens. Losing their
+    // boundary would turn them into valid %= or == expressions in the .i file.
+    String8 invalid[] = {
+        S8("#define P %\nint f(void) { int x = 9; x P= 4; return x; }\n"),
+        S8("#define A =\nint f(void) { int x = 9; x A= 4; return x; }\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source_path = buster_test_temporary_path(temporary.arena, S8("punctuator-admission"), S8(".c"));
+        String8 output_path = buster_test_temporary_path(temporary.arena, S8("punctuator-admission"), S8(".i"));
+        bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(invalid[index]));
+        BUSTER_TEST(arguments, written);
+        if (written)
+        {
+            String8 preprocess[] = {S8("-E"), S8("-nostdinc"), S8("-std=c17"), S8("-o"), output_path, source_path};
+            CompilerDriverResult printed = compiler_driver_execute_invocation(
+                temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess)));
+            BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+            if (printed.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                for (u32 staged = 0; staged < 2; staged += 1)
+                {
+                    String8 check[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-std=c17"), staged ? output_path : source_path};
+                    CompilerDriverResult checked = compiler_driver_execute_invocation(
+                        temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(check)));
+                    BUSTER_TEST(arguments, checked.error == COMPILER_DRIVER_ERROR_PARSE || checked.error == COMPILER_DRIVER_ERROR_ANALYSIS ||
+                                           checked.error == COMPILER_DRIVER_ERROR_IR);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    String8 valid = S8("#define REM %=\n#define SAME ==\n"
+                       "int main(void) { int x = 9; x REM 4; return !(x SAME 1); }\n");
+    String8 frontend_flags[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontend_flags); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source_path = buster_test_temporary_path(temporary.arena, S8("punctuator-runtime"), S8(".c"));
+        String8 staged_path = buster_test_temporary_path(temporary.arena, S8("punctuator-runtime"), S8(".i"));
+        String8 output_path = buster_test_temporary_path(temporary.arena, S8("punctuator-runtime"), S8(""));
+        bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(valid));
+        BUSTER_TEST(arguments, written);
+        if (written)
+        {
+            String8 preprocess[] = {S8("-E"), S8("-nostdinc"), S8("-std=c17"), S8("-o"), staged_path, source_path};
+            CompilerDriverResult printed = compiler_driver_execute_invocation(
+                temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess)));
+            BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+            if (printed.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                for (u32 staged = 0; staged < 2; staged += 1)
+                {
+                    String8 command[] = {S8("-nostdinc"), S8("-std=c17"), frontend_flags[frontend], S8("-fverify-codegen"),
+                                         S8("-fno-machine-fallback"), S8("-o"), output_path, staged ? staged_path : source_path};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output_path};
+                        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, spawn.handle != 0);
+                        if (spawn.handle)
+                        {
+                            ProcessWaitResult wait = os_process_wait_deadline(temporary.arena, spawn, 30000000);
+                            BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+#endif
+    return result;
+}
+
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, c_macro_rescan_boundary_tests);
+    BUSTER_TEST_FIXTURE(arguments, c_punctuator_separator_tests);
     BUSTER_TEST_FIXTURE(arguments, c_trigraph_preprocess_tests);
     UnitTestResult demand = c_macro_argument_demand_tests(arguments);
     result.test_count += demand.test_count;
