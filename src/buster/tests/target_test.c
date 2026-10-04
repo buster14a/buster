@@ -1227,17 +1227,20 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_features_subset(diamond_metadata, diamond_rapids_features));
     BUSTER_TEST(arguments, !target_cpu_features_contains(diamond_rapids_features, TARGET_CPU_FEATURE_X86_IBT));
     BUSTER_TEST(arguments, target_cpu_features_contains(diamond_rapids_features, TARGET_CPU_FEATURE_X86_SHSTK));
-    for (u32 model_index = 0; model_index < BUSTER_ARRAY_LENGTH(target_test_x86_clang_reference_models); model_index += 1)
+    for (CpuModel model = CPU_MODEL_AMD_I486; model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS; model += 1)
     {
-        TargetTestX86ClangReferenceModelCase const* model_case = target_test_x86_clang_reference_models + model_index;
-        CpuModel model = model_case->model;
+        bool expected_valid = true;
+        for (u32 legacy_index = 0; legacy_index < BUSTER_ARRAY_LENGTH(ia32_only_models); legacy_index += 1)
+        {
+            expected_valid &= model != ia32_only_models[legacy_index];
+        }
         Target default_target = {
             .cpu_arch = CPU_ARCH_X86_64,
             .cpu_model = model,
             .cpu_features_explicit = true,
             .cpu_features = target_cpu_features_default(CPU_ARCH_X86_64, model),
         };
-        BUSTER_TEST(arguments, target_cpu_features_are_valid(default_target) == model_case->has_long_mode);
+        BUSTER_TEST(arguments, target_cpu_features_are_valid(default_target) == expected_valid);
     }
     BUSTER_TEST(arguments, target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_K8_SSE3),
                                                         TARGET_CPU_FEATURE_X86_SSE3));

@@ -19419,16 +19419,16 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 SliceString8 forms[] = {(SliceString8)BUSTER_ARRAY_TO_SLICE(joined), (SliceString8)BUSTER_ARRAY_TO_SLICE(separated)};
                 for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
                 {
-                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, forms[form]);
-                    BUSTER_TEST(arguments, invocation.error == (x86_mode_cases[mode_index].has_long_mode ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_ARGUMENT));
+                    CompilerDriverInvocation mode_invocation = compiler_driver_parse_arguments(arguments->arena, forms[form]);
+                    BUSTER_TEST(arguments, mode_invocation.error == (x86_mode_cases[mode_index].has_long_mode ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_ARGUMENT));
                     if (x86_mode_cases[mode_index].has_long_mode)
                     {
-                        BUSTER_TEST(arguments, target_cpu_features_are_valid(invocation.target));
-                        BUSTER_TEST(arguments, target_cpu_feature_has(invocation.target, TARGET_CPU_FEATURE_X86_SSE2));
+                        BUSTER_TEST(arguments, target_cpu_features_are_valid(mode_invocation.target));
+                        BUSTER_TEST(arguments, target_cpu_feature_has(mode_invocation.target, TARGET_CPU_FEATURE_X86_SSE2));
                     }
                     else
                     {
-                        BUSTER_STRING_TEST(arguments, invocation.diagnostic,
+                        BUSTER_STRING_TEST(arguments, mode_invocation.diagnostic,
                             string_format(arguments->arena, S8("CPU model is incompatible with target: {S8}"), x86_mode_cases[mode_index].name));
                     }
                 }
