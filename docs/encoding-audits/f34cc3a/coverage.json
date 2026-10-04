@@ -1,0 +1,106 @@
+{
+  "repository": "buster14a/buster",
+  "commit": "f34cc3a56296be1b1244647775e1a40a67dae3ef",
+  "date": "2026-10-04",
+  "issue": "https://github.com/buster14a/buster/issues/2625",
+  "claim_status": "source-confirmed defect with executed external reference evidence; Buster harness unrun",
+  "host": "cloud x86-64 Linux; no laptop or Ryzen 9700X",
+  "target": "AArch64, 32-bit and 64-bit ADD/ADDS/SUB/SUBS extended-register forms",
+  "external_toolchain": {
+    "clang_version": "17.0.0",
+    "clang_reported_source_revision": "10999b6d034fe318f3d56c83bddb6572593a8bb0",
+    "llvm_objdump_version": "17.0.0",
+    "license": "Apache-2.0 WITH LLVM-exception",
+    "license_blob_sha": "fa6ac540007032cbd0ec772a1c72e6cb5527a4fe",
+    "license_verification": "official LLVM source LICENSE.TXT at reported revision; no vendor code imported",
+    "new_dependencies_installed": false
+  },
+  "executed": {
+    "buster_harness": false,
+    "generated_aarch64_code_execution": false,
+    "legal_reference_word_checks": 960,
+    "legal_word_mismatches": 0,
+    "legal_words_disassembled_as_unknown": 0,
+    "reserved_shift_source_checks": 192,
+    "reserved_shift_source_rejections": 192,
+    "reserved_raw_word_decode_checks": 192,
+    "reserved_raw_words_disassembled_as_unknown": 192,
+    "opposite_source_width_spellings": 64,
+    "opposite_source_width_rejections": 60,
+    "opposite_source_width_permissive_acceptances": 4,
+    "initial_negative_driver_exit_status": 1,
+    "initial_negative_driver_expected_rejections": 256,
+    "initial_negative_driver_observed_rejections": 252,
+    "negative_driver_infrastructure_errors": 0,
+    "patch_syntax_check": "git apply --numstat; not an application check against a full checkout"
+  },
+  "source_derived_not_measured": {
+    "legal_reference_cases_rejected_by_pinned_buster_guard": 120,
+    "implemented_extended_register_forms": 8,
+    "options_per_form": 8,
+    "legal_shift_amounts": 5,
+    "register_bit_patterns_per_form_option_shift": 32768,
+    "legal_words_in_bounded_family": 10485760,
+    "legal_words_excluded_by_wrong_guard": 1310720,
+    "fraction_of_bounded_family": 0.125
+  },
+  "reference_sampling": {
+    "register_triples_rd_rn_rm": [
+      [
+        0,
+        1,
+        2
+      ],
+      [
+        30,
+        31,
+        31
+      ],
+      [
+        31,
+        30,
+        0
+      ]
+    ],
+    "legal_reference_cases_formula": "8 * 8 * 5 * 3",
+    "negative_reserved_word_cases_formula": "8 * 8 * 3 * 1",
+    "register_roles": "Rd 31: SP iff S=0, else ZR; Rn 31: SP; Rm 31: ZR"
+  },
+  "authored_buster_regression_unrun": {
+    "positive_input_tuples": 960,
+    "reserved_shift_input_tuples": 576,
+    "opposite_source_width_negative_requests": 960,
+    "u64_max_shift_negative_requests": 8,
+    "out_of_range_register_index_requests": 48,
+    "wrong_register_role_requests": 48,
+    "unique_input_tuples_total": 2600,
+    "entry_points": [
+      "a64_arm_m1_scalar_integer_encode",
+      "a64_arm_m1_scalar_integer_encode_mnemonic",
+      "buster_aarch64_scalar_integer_encode_for_target",
+      "a64_arm_m1_scalar_integer_decode_form"
+    ],
+    "existing_test_file": "src/buster/tests/compiler/assembly/aarch64_encoding_test.c",
+    "status": "candidate only; not compiled, executed, applied, committed, or merged"
+  },
+  "population_inventory_not_test_pass_counts": {
+    "aarch64_typed_scalar_forms": 72,
+    "aarch64_typed_gpr_forms": 80,
+    "aarch64_production_plan_forms": 51,
+    "aarch64_arm_canonical_decoder_rows": 1523,
+    "aarch64_llvm_derived_candidate_rows": 7491,
+    "x86_metadata_rows": 11013,
+    "note": "Overlapping populations; do not sum and do not use catalog sizes as support/coverage counts."
+  },
+  "unverified": [
+    "Full Buster build and existing C harness",
+    "Buster runtime behavior beyond deterministic source predicates",
+    "Whether candidate patch completely resolves every source/target/canonical route",
+    "All register triples other than three sampled ones in the external reference run",
+    "Production codegen reachability of the rejected typed requests",
+    "Other AArch64 instruction families, memory forms, branch relocations, SIMD, privileged and extension-specific combinations",
+    "x86 encoding legality and prefix/displacement combinations beyond representation inventory",
+    "Execution semantics, traps, and CPU behavior",
+    "Vendor-hosted Arm 2026-06 archive contents and declared archive digest"
+  ]
+}

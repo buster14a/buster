@@ -1,0 +1,24 @@
+Publication verification, 2026-10-04. These are integrity checks, not compiler tests.
+Audited source: f34cc3a56296be1b1244647775e1a40a67dae3ef
+
+PASS original ZIP SHA-256:
+8e182a4573b3b390708c28c95608eda5cbdb3740b6039a077f3cd8c618ab2150
+PASS all 22 file hashes listed in the original SHA256SUMS.
+PASS all 23 tar.xz file members byte-identical to corresponding original ZIP members.
+PASS no omitted or extra file members; uncompressed file bytes = 238602.
+Original manifest SHA-256:
+e4f5f6553d1db546196a720276eabc070ba8c565f2a83fb329813bba93050e1b
+
+Published archive SHA-256:
+9be39ee3b3c13f893f8afcac51ea1ae1f50fab3e70508f4ba6b6803da4f27a55
+PASS GitHub create_blob returned the local expected Git blob for archive:
+06aba7ff59d6d7ef4e812a55d031bd41cafa2fed
+PASS GitHub create_blob returned the local expected Git blob for original REPORT.md:
+2b243270e85763ce96cce2ec5e219160a0e039a1
+PASS GitHub create_blob returned the local expected Git blob for original candidate patch:
+d5dd9d362b8cd3488e4bd2fa246bb7544dffcfe9
+
+The archive container was repackaged from ZIP to tar.xz; individual file contents were not edited.
+No reference experiment was rerun for publication.
+NOT RUN: full Buster checkout application check, build, existing C harness, full CI, and AArch64 execution.
+No production source patch applied; no implementation PR or merge is claimed.
