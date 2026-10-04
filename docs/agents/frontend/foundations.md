@@ -338,6 +338,13 @@ without facts for identical bitcode and diagnostics.
   `c_macro_conditional_tests` module compares semantic token sequences with
   independent Clang/GCC preprocessors and runs a Buster-built selected-branch
   fixture through both C lowering modes (GitHub #76).
+- Active `#ifdef`/`#ifndef`, matched `#else`/`#endif`, and `#include`,
+  `#include_next`, or `#import` directives accept trailing tokens after their
+  operand/header name with a `c.extra-directive-tokens` warning; skipped
+  conditional groups do not warn. Function-like macro definitions require a
+  single `#` to precede a parameter, and `defined` cannot be used as a macro
+  name in `#define` or `#undef`. Assembly-comment-line mode retains its
+  stringification compatibility behavior.
 - `c_conditional_number` admits the complete bounded integer spelling, checks
   overflow before accumulation, and leaves its output unchanged on failure.
   Ordinary constants and the x87 initializer folder share it; do not restore a
