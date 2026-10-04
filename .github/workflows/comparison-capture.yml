@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: comparison-capture-${{ github.run_id }}
   cancel-in-progress: false
@@ -17,10 +18,39 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Retain earlier failure receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 37198781376 --repo buster14a/buster -n compiler-debug-comparison-37198781376 -D prior-evidence
+          cat prior-evidence/evidence/clang-debug-debug-build.log prior-evidence/evidence/tcc-debug-link.log prior-evidence/evidence/buster-debug-gdb.log
+      - name: Install debugger from Ubuntu
+        run: sudo apt-get update -qq && sudo apt-get install -y gdb
       - name: Compile standalone C observer
         run: clang -std=c11 -O2 -g -Wall -Wextra -Werror tools/research/debug-comparison-capture.c -o capture
       - name: Run fixed-count cloud diagnostic
         run: ./capture
+      - name: Qualification and host receipts
+        if: ${{ always() }}
+        run: |
+          for f in evidence/host.log evidence/toolchains.log evidence/source-pin.txt evidence/tcc-pin.txt evidence/compiler-sha256.txt evidence/*preflight.log evidence/*link.log evidence/*debug-build.log evidence/*gdb.log; do echo "FILE $f"; cat "$f"; done
+          cat evidence/CMakeCache.txt evidence/compile_commands.json
+      - name: Raw compilation observations
+        if: ${{ always() }}
+        run: cat evidence/samples.csv
+      - name: Raw runtime observations
+        if: ${{ always() }}
+        run: |
+          for f in evidence/*runtime-*.log; do echo "FILE $f"; cat "$f"; done
+      - name: Code and debug sizes and disassembly
+        if: ${{ always() }}
+        run: |
+          for a in buster-debug clang-debug gcc-debug tcc-debug clang-O2-g gcc-O2-g; do
+            echo "ARM $a"
+            size -A evidence/$a-kernels.o evidence/$a-tiny.o evidence/$a-functions256.o evidence/$a-functions2048.o
+            objdump -drwC -Mintel evidence/$a-kernels.o
+          done
+          cat evidence/artifacts-sha256.txt evidence/sample-artifact-hashes.txt
       - name: Preserve successful and failed observations
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -28,6 +58,7 @@ jobs:
           name: compiler-debug-comparison-${{ github.run_id }}
           path: |
             evidence
+            prior-evidence
             tools/research/debug-comparison-capture.c
             .github/workflows/comparison-capture.yml
           retention-days: 30
