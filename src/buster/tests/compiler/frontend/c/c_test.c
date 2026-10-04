@@ -8672,11 +8672,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_hexadecimal_escapes(UnitTestArgum
     return result;
 }
 
-// Tokens whose spellings reach and cross 0xFFFF bytes: the fixtures for the
-// CToken u16 length escape. Every length assertion goes through
-// c_token_spelling, never the raw field, so the same fixtures hold before
-// and after the field narrows. Covered: the boundary spelling lengths just
-// below, at, and above the escape through lex, preprocess, parse and IR
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_stringify_backslashes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8714,6 +8709,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_stringify_backslashes(UnitTestAr
     return result;
 }
 
+// Tokens whose spellings reach and cross 0xFFFF bytes: the fixtures for the
+// CToken u16 length escape. Every length assertion goes through
+// c_token_spelling, never the raw field, so the same fixtures hold before
+// and after the field narrows. Covered: the boundary spelling lengths just
+// below, at, and above the escape through lex, preprocess, parse and IR
 // decode; the SIMD/scalar lexer differential over each; a >64 KB character
 // literal; an unterminated >64 KB literal (both lexer paths must agree on
 // it); and the two synthesized-spelling producers of oversized string
