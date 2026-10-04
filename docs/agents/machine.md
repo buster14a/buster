@@ -23,8 +23,8 @@ MIR identity casts of structs and unions copy the complete
 resolved layout between value frame homes on x86-64 and AArch64. The frontend
 keeps these casts on aggregate comma results to preserve their non-lvalue
 semantics. `compiler_driver_test_aggregate_comma` covers calls, initializers,
-returns, partial eightbytes and tail fields with canonical FAST disabled,
-both frontend forms and all four allocators; desktop lanes execute the native
+returns, partial eightbytes and tail fields with both frontend forms and all
+four allocators; desktop lanes execute the native
 fixture as well as compiling both architectures.
 
 ## Machine instruction selection and scheduling
@@ -858,7 +858,7 @@ fixture as well as compiling both architectures.
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain
   their sign-extension constraints. High-bit unsigned switch constants must
-  encode without canonical fallback.
+  encode through MIR without fallback.
 - The f32/f64-to-u64 biased conversions compare against **2^63 in the source
   format**. X86 conversion code uses `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
   `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
@@ -972,12 +972,14 @@ The same memory effects and source/destination ownership apply in every allocato
 
 ## MIR-only cutover boundary
 
-Native module generation removes the direct canonical emitter body and its
-unreferenced private helper chain atomically with dispatch. Failed generation
+Native module generation uses MIR for every retained allocator spelling. The
+direct emitter body and its unreferenced private helper chain are removed.
+Failed generation
 publishes no code/data images, entries, relocations, unwind descriptors or debug
 rows; diagnostics and attempted-work counters remain available. The external
-archived reference remains the differential oracle. Issue #514 retains cleanup
-of legacy result fields, public helper interfaces and documentation.
+archived reference remains the differential oracle. Legacy fallback telemetry
+is retained only while the census/result schema migrates; it cannot enable
+direct production emission.
 
 Native selectors accept any valid canonical entry block. They emit that block
 first, remap expanded MIR block ranges and CFG edges, and capture arguments in
