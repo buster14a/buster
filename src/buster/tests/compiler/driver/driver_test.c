@@ -12749,9 +12749,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(Unit
             String8 context = string_format(case_arena, S8("parameter alignment {S8} {S8}"), optimizations[optimization_index].flag, allocators[index].flag);
             // The explicit allocator follows -O: optimization presets must not
             // silently replace the allocator whose coverage this case claims.
-            bool native_allocator = allocators[index].mode != CODEGEN_REGISTER_ALLOCATOR_NONE;
             String8 compile[] = {optimizations[optimization_index].flag, allocators[index].flag, S8("-fverify-codegen"),
-                                native_allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"), S8("-c"),
+                                S8("-fno-machine-fallback"), S8("-c"),
                                 S8("src/buster/tests/compiler/driver/fixtures/parameter_alignment/callee.c"), S8("-o"), object};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(case_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
             BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE, context);
@@ -12763,7 +12762,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(Unit
                 BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, context);
                 BUSTER_TEST_RAW(arguments, built.codegen_statistics.verified_ir_module_count == 1, context);
                 BUSTER_TEST_RAW(arguments, built.codegen_statistics.function_count == 5 && built.codegen_statistics.fallback_function_count == 0, context);
-                BUSTER_TEST_RAW(arguments, built.codegen_statistics.verified_mir_function_count == (native_allocator ? 5u : 0u), context);
+                BUSTER_TEST_RAW(arguments, built.codegen_statistics.verified_mir_function_count == 5u, context);
                 if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object)
                 {
                     String8 link[] = {host_objects[0], host_objects[1], object, S8("-o"), output};
@@ -18261,7 +18260,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_identifier_list_definiti
                     row.arena, S8("buster-identifier-list-definition"),
                     string_format(row.arena, S8("-{u32}-{u32}-{u32}.exe"), dialect, frontend, allocator));
                 String8 command[] = {dialects[dialect], frontends[frontend], allocators[allocator], S8("-fverify-codegen"),
-                                     allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                                     S8("-fno-machine-fallback"),
                                      S8("-o"), image, source_path};
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(
                     row.arena, compiler_driver_parse_arguments(row.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));

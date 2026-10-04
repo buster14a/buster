@@ -1045,8 +1045,9 @@ Complex comparisons/truth conversion and floating classification combine
 Boolean comparisons with `IR_BINARY_BOOLEAN_AND`/`IR_BINARY_BOOLEAN_OR`.
 Their canonical verifier case requires matching Boolean value operands and a
 Boolean value result. Integer bitwise opcodes still require integer operands.
-Both native canonical emitters implement these Boolean operations as well as
-the existing machine selectors, including canonical fallback for x87 functions.
+Native machine selectors implement these Boolean operations. The public `none`
+allocator selects MIR-stack; unsupported native shapes are refused rather than
+falling back to a direct canonical emitter.
 
 A `_Bool` destination is one rule for every scalar source (C 6.3.1.2): the
 result is 0 exactly when the whole value compares equal to 0.
@@ -1296,4 +1297,5 @@ differential harness runs it with Clang/GCC at O0/O2; expected values are litera
 constants, not inferred from Buster. The fixed-range fixture additionally checks
 the aligned-base case against Clang. `c_test_enum_runtime` runs these two sources
 and the bit-field source in all four native allocator modes with strict codegen
-verification, rejecting machine fallback outside NONE.
+verification. Native NONE uses MIR-stack, so no mode has a direct-emitter
+fallback.

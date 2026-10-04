@@ -4,14 +4,14 @@
 
 The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
 
-`machine_x64_select_switch`, `machine_a64_select_switch` and the direct
-canonical emitters compare matching selector-width bit images. Mask raw keys
+`machine_x64_select_switch` and `machine_a64_select_switch` compare matching
+selector-width bit images for every native allocator spelling. Mask raw keys
 and any excess register bits at that boundary, while leaving the caller's
 immediates and targets unchanged. Signedness does not change SWITCH equality.
 The registered raw-ARGUMENT controls and the exact contract are described in
 [IR validation boundaries](../ir-validation-boundaries.md#switch-case-images).
 
-Canonical fallback identity casts of structs and unions copy the complete
+MIR identity casts of structs and unions copy the complete
 resolved layout between value frame homes on x86-64 and AArch64. The frontend
 keeps these casts on aggregate comma results to preserve their non-lvalue
 semantics. `compiler_driver_test_aggregate_comma` covers calls, initializers,
@@ -35,9 +35,9 @@ fixture as well as compiling both architectures.
   side effects across every native allocator spelling and frontend form.
 
 - System V indirect variadic calls keep the vector-register count in AL
-  through the call instruction. The canonical emitter reloads the callee from
-  its frame home into caller-saved R10 after argument staging; the MIR allocators
-  reserve the same indirect-call register. `compiler_driver_test_sysv_indirect_variadic`
+  through the call instruction. MIR allocators reserve caller-saved R10 for
+  the indirect callee while staging arguments, including under the NONE
+  compatibility spelling. `compiler_driver_test_sysv_indirect_variadic`
   checks counts 0/1/8 and floating arguments crossing the register/stack boundary
   against aligned foreign assembly and host-compiled `va_arg` callees. It covers
   both frontend forms and every allocator on all four System V x86-64 targets;
@@ -387,8 +387,8 @@ fixture as well as compiling both architectures.
   limbs, CFG joins use the canonical pair mapping, and ordinary loads/stores
   copy all sixteen bytes. Variadic prologues save all sixteen XMM bytes, and
   each VECTOR read consumes one FP cursor slot.
-  The shared direct oracle also copies both register-save/overflow halves
-  and aligns the overflow cursor after an eight-byte stack argument.
+  The archived direct oracle also copied both register-save/overflow halves
+  and aligned the overflow cursor after an eight-byte stack argument.
   `basic_c_sysv_sseup.c` requires strict MIR across four SysV targets, all
   allocators, both frontend forms and PIC settings; matching native hosts
   link `host_sysv_sseup.c` independently in both call directions. Nested
@@ -412,10 +412,10 @@ fixture as well as compiling both architectures.
   result-pointer ABI for single-lane float vectors. This known cross-compiler
   mismatch is not interpreted as a successful differential run. The original
   narrow signature, vector-load and 32-byte Win64 baseline split-reference
-  refusals are strict successes. Fallback telemetry uses a valid canonical-only
-  inline-assembly transaction, while a malformed literal-register fixture owns
-  the artifact-preservation failure control; ABI retirement no longer doubles
-  as a negative test.
+  refusals are strict successes. The retired fallback-telemetry control used a
+  valid canonical-only inline-assembly transaction. Current unsupported assembly
+  controls require structured refusal and preserve existing output artifacts;
+  ABI retirement no longer doubles as a negative test.
 - X86 vector arithmetic keeps native EVEX rows for their encodable operations
   and expands the remaining integer/floating operations into ordinary scalar
   MIR lanes. Exact-width reads and writes preserve short-vector boundaries;
@@ -494,21 +494,21 @@ fixture as well as compiling both architectures.
   The x86 selector emits no cache operation. AArch64 selects one constrained
   barrier row with begin/end in X9/X10, X9/X11 clobbered, and NZCV defined. Its
   data-clean and instruction-invalidate walks cover aligned four-byte granules
-  through the exclusive end, with DSB/ISB barriers. The direct AArch64 oracle
-  uses the same alignment rule; an unaligned start must not skip a final line.
+  through the exclusive end, with DSB/ISB barriers. The archived direct AArch64
+  oracle used the same alignment rule; an unaligned start must not skip a final line.
 - Sixteen-byte AArch64 atomic loads and stores select constrained pair rows.
   A load uses LDXP/LDAXP, writes the observed halves back with STXP (STLXP for
   sequential consistency), and retries until the read is single-copy atomic.
   A store stages both halves, clears any promoted aggregate padding in the high
   half, arms the monitor with LDXP or LDAXP, and retries STXP/STLXP until the
   replacement lands whole. The rows
-  preserve the direct emitter's memory-order strengths on every desktop ABI.
+  preserve the archived direct emitter's memory-order strengths on every desktop ABI.
   Sixteen-byte exchange, arithmetic/bitwise RMW and compare-exchange use
   constrained update rows with full-width integer input/result frame slots.
   RMW reloads its unchanged operand on each retry and propagates carry/borrow
   across both limbs. CAS compares both halves, selects the observed pair on
   mismatch, and still completes STXP/STLXP before returning: an unvalidated
-  LDXP may be a torn read. The direct oracle follows the same corrected rule.
+  LDXP may be a torn read. The archived direct oracle used the same corrected rule.
   Every frame load precedes LDXP on each retry; only register operations
   occur before STXP, preserving the exclusive-loop progress guarantee.
   Both rows declare X9/X11-X14 clobbers and flag definitions; CAS additionally
@@ -567,8 +567,9 @@ fixture as well as compiling both architectures.
   arguments, mixed floating parameters and caller-value preservation. The
   `win64_aligned.c` regression exercises 32/64/128-byte argument alignments
   across host/MIR boundaries, including raw variadic argument pointers and
-  every sixteen-byte dynamic-stack residue modulo 128. Fixed calls also execute
-  through the direct backend; wide variadic reads use all three MIR allocators.
+  every sixteen-byte dynamic-stack residue modulo 128. Recorded fixed-call
+  coverage also included the retired direct backend; wide variadic reads used
+  all three explicit MIR allocators. Current NONE selects MIR-stack.
 - Windows/UEFI x86-64 128-bit integer arguments use the same one-pointer
   placement and sixteen-aligned private copies as indirect aggregates. A
   128-bit integer result travels whole in XMM0, without a hidden result
@@ -579,8 +580,9 @@ fixture as well as compiling both architectures.
   calls cross the host/MIR boundary in both directions without a PE loader;
   they cover register and stack arguments, indirect calls, copied lists,
   high limbs, private parameter writes, and forty-byte variadic aggregates.
-  The direct backend still lacks wide variadic reads, so this fixture's
-  complete module is a MIR gate rather than a NONE differential gate.
+  The retired direct backend lacked wide variadic reads, so the recorded
+  complete-module gate used MIR. Current NONE selects MIR-stack and is not an
+  independent direct-backend differential oracle.
 - Windows/UEFI x86-64 sixty-four-byte vector signatures use the existing ZMM
   vocabulary on AVX-512 targets. Arguments occupy one pointer slot with an
   aligned private copy; callers stage register values through a frame slot,
@@ -591,10 +593,11 @@ fixture as well as compiling both architectures.
   `win64_vector.c` crosses Clang/MIR boundaries in both directions on capable
   hosts, checks every result lane, caller preservation, raw variadic pointer
   alignment, and live dynamic allocations. The fixed subset also executes
-  through NONE. Smaller vectors and model-dependent register splitting retain
-  the direct fallback; this change does not replace their representation.
+  through NONE, which now selects MIR-stack. Smaller vectors and model-dependent
+  register splitting retain their MIR representation and admission rules;
+  unsupported shapes are refused without a direct fallback.
 - Windows/UEFI x86-64 MIR frames larger than one page reuse
-  `codegen_x64_emit_windows_stack_allocate`, the direct emitter's bounded
+  `codegen_x64_emit_windows_stack_allocate`, the retained shared bounded
   R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
   large frame requires one allocation unwind action and a bounded prologue.
   `MachineEncodeResult.frame_allocation_offset` supplies its actual byte offset
@@ -626,7 +629,8 @@ fixture as well as compiling both architectures.
   transport. A consumed floating multiply quiets special inputs and raises
   invalid for signaling NaNs; finite inputs are masked to zero before that row,
   preserving subnormals even with flush-to-zero enabled. No libcall is used;
-  the canonical `none` emitter builds the same image with the same rows.
+  the public `none` spelling selects MIR-stack and builds the same image with
+  the same rows.
   `compiler_driver_test_aarch64_float_to_f128` retains the original created-NaN
   fixture and tests independent binary128 byte cases under every allocator.
   Native Linux AArch64 exchanges producer/consumer roles with the configured
@@ -679,12 +683,13 @@ fixture as well as compiling both architectures.
   The registered finite-input fixture decodes IEEE images with integer
   operations and requires strict compilation across all desktop AArch64
   targets, all MIR allocators, and both frontend forms; native hosts execute
-  the same cases, retaining NONE as the direct reference.
+  the same cases. The archived direct reference is historical evidence; current
+  NONE selects MIR-stack.
 - AArch64 leading/trailing-zero counts use importer-generated CLZ and RBIT
   forms for ordinary 32/64-bit scalar rows. A 128-bit count operates on both
   slot-backed limbs, selecting the primary limb's count or 64 plus the other
   count with ordinary scalar MIR. Publish a zero high result limb, including
-  the direct oracle's all-zero-pair result of 128. Never truncate the operand
+  the archived direct oracle's all-zero-pair result of 128. Never truncate the operand
   to a single limb or leave stale high result bytes. Preserve existing replay
   opcode numbers by appending new rows. The registered zero-count fixture
   covers every one-bit position and both frontend forms, with strict MIR
@@ -711,9 +716,10 @@ fixture as well as compiling both architectures.
   matrix retains both original over-aligned stack fixtures, all six AArch64
   targets, allocator modes, frontend forms and PIC settings. Native AArch64
   desktop hosts also link the independent host observer in both directions
-  for all three MIR allocators. NONE stays an object control: the archived
-  direct reference fails independently compiled split-composite and packed
-  Darwin call boundaries, so it is not used as their semantic oracle.
+  for all three explicit MIR allocators in the recorded matrix. Its direct
+  NONE path stayed an object control: the archived direct reference failed
+  independently compiled split-composite and packed Darwin call boundaries.
+  Current NONE selects MIR-stack and is not an independent semantic oracle.
 - Win64 x86-64 dynamic frames establish RBP at the bottom of the fixed
   allocation, after the probe, so PE unwind records retain SET_FPREG. Encoding
   rebases logical frame offsets once at the existing exact/fast memory paths.
@@ -764,7 +770,7 @@ fixture as well as compiling both architectures.
   following arguments. `va_copy` copies all 32 bytes; `va_end` emits no write.
   Lists passed by value use the existing AAPCS64 indirect aggregate argument
   plan and a private callee copy, not the original producer's cursor.
-  The direct oracle and MIR also reconstruct three/four-double HFAs,
+  MIR also reconstructs three/four-double HFAs, as the archived direct oracle did,
   64/128-bit short vectors and up to four-vector HVAs from independent V
   slots. An ordinary composite above sixteen bytes consumes one GP pointer
   and copies exactly the object size, including a short tail. Its pointed-to
@@ -837,15 +843,16 @@ fixture as well as compiling both architectures.
   in parallel. Each row snapshots zero-extended results to a private frame
   object before ordinary stores publish output places. XGETBV requires XSAVE
   on the compile target. Partial-width, read/write, partial-output and other
-  assembly shapes retain their existing fallback; these rows do not implement
-  unrestricted inline assembly.
+  assembly shapes use the general MIR assembly admission rules, with unsupported
+  shapes refused; these constrained rows do not implement unrestricted inline
+  assembly.
 - The x86 exact-emission bridge represents a full-width 32-bit immediate as
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain
   their sign-extension constraints. High-bit unsigned switch constants must
   encode without canonical fallback.
 - The f32/f64-to-u64 biased conversions compare against **2^63 in the source
-  format**. Both x86 emitters use `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
+  format**. X86 conversion code uses `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
   `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
   integer bit the final bias restores.
 - AArch64 symbol addresses on macOS/iOS use ADRP/ADD with Mach-O PAGE21 and
@@ -869,9 +876,9 @@ fixture as well as compiling both architectures.
   model, so an absent provider stays zero and a present provider retains its
   actual function address; its direct calls still use PLT32. A thread-local
   address is the thread-local model's to pick -- `codegen_thread_local_model` reads the
-  same flag and answers general-dynamic under it. The canonical emitter and
-  machine path make the same call/address distinctions, so the four
-  allocators cannot disagree. One object-writer decision follows from the
+  same flag and answers general-dynamic under it. All four allocator spellings
+  use MIR with these shared canonical-IR symbol rules; NONE selects MIR-stack.
+  One object-writer decision follows from the
   model rather than from a relocation:
   an unwind record's function pointer is relocated against a local text symbol
   with the function's own offset, because an FDE naming a preemptible function
