@@ -432,6 +432,89 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
         }
     }
 
+    // A reservation that is not a page multiple ends in a committed partial
+    // page that decommit never discards. A later zeroed allocation must clear
+    // what was written there, with or without a complete middle page to
+    // discard, over repeated cycles, after a failed discard, and after
+    // retirement hands the mapping to a pooled reuse. Page-aligned and
+    // sub-page reservations are the controls.
+    {
+        u64 page_size = os_get_page_size();
+        u64 tail = 128;
+        u64 decommit_start = align_forward_unchecked(arena_minimum_position, page_size);
+        u64 reserved_sizes[] = {page_size * 3 + tail, page_size + tail, page_size * 4, arena_minimum_position + tail};
+        for (u64 shape = 0; shape < BUSTER_ARRAY_LENGTH(reserved_sizes); shape += 1)
+        {
+            u64 reserved_size = reserved_sizes[shape];
+            u64 payload = reserved_size - arena_minimum_position;
+            bool discards = decommit_start < (reserved_size & ~(page_size - 1));
+#if defined(__APPLE__)
+            u64 expected_dirty_position = reserved_size;
+#else
+            u64 expected_dirty_position = (reserved_size & (page_size - 1)) ? reserved_size : decommit_start;
+#endif
+            Arena* arena = arena_create((ArenaCreation){.reserved_size = reserved_size, .granularity = 64, .initial_size = reserved_size, .flags = {.no_pool = 1}});
+            BUSTER_TEST(arguments, arena != 0);
+            if (arena)
+            {
+                u8* bytes = arena_allocate(arena, u8, payload);
+                BUSTER_TEST(arguments, arena->os_position == reserved_size);
+                for (u32 cycle = 0; cycle < 3; cycle += 1)
+                {
+                    memset(bytes, 0x5a, payload);
+                    if (discards && cycle == 1)
+                    {
+                        // A refused discard leaves every byte and all accounting in place.
+                        arena_test_fail_next_decommit();
+                        BUSTER_TEST(arguments, !arena_set_position_and_decommit(arena, arena_minimum_position));
+                        BUSTER_TEST(arguments, arena->position == reserved_size && arena->os_position == reserved_size);
+                        BUSTER_TEST(arguments, arena_dirty_position(arena) == reserved_size);
+                        BUSTER_TEST(arguments, bytes[0] == 0x5a && bytes[payload - 1] == 0x5a);
+                    }
+                    BUSTER_TEST(arguments, arena_set_position_and_decommit(arena, arena_minimum_position));
+                    BUSTER_TEST(arguments, arena->position == arena_minimum_position);
+                    BUSTER_TEST(arguments, arena_dirty_position(arena) == expected_dirty_position);
+                    u8* zeroed = arena_allocate_zeroed(arena, u8, payload);
+                    BUSTER_TEST(arguments, zeroed == bytes);
+                    u8 nonzero = 0;
+                    for (u64 index = 0; index < payload; index += 1)
+                    {
+                        nonzero |= zeroed[index];
+                    }
+                    BUSTER_TEST(arguments, nonzero == 0);
+                }
+                BUSTER_TEST(arguments, arena_destroy(arena, 1));
+            }
+        }
+
+        arena_pool_release_thread();
+        u64 reserved_size = page_size * 3 + tail;
+        u64 payload = reserved_size - arena_minimum_position;
+        ArenaCreation shape = {.reserved_size = reserved_size, .granularity = 64, .initial_size = reserved_size, .flags = {.pool_reuse = 1}};
+        Arena* arena = arena_create(shape);
+        BUSTER_TEST(arguments, arena != 0);
+        if (arena)
+        {
+            u8* bytes = arena_allocate(arena, u8, payload);
+            memset(bytes, 0x5a, payload);
+            arena_retire(arena, 0);
+            Arena* reused = arena_create(shape);
+            BUSTER_TEST(arguments, reused == arena);
+            if (reused)
+            {
+                u8* zeroed = arena_allocate_zeroed(reused, u8, payload);
+                u8 nonzero = 0;
+                for (u64 index = 0; index < payload; index += 1)
+                {
+                    nonzero |= zeroed[index];
+                }
+                BUSTER_TEST(arguments, nonzero == 0);
+                BUSTER_TEST(arguments, arena_destroy(reused, 1));
+            }
+            arena_pool_release_thread();
+        }
+    }
+
     // prefault_pages is advisory at the arena boundary too. An arena that did
     // not ask must issue no request; an arena that asked gets one request per
     // commitment, initial and incremental alike; and a refused request must

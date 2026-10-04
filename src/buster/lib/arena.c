@@ -104,6 +104,7 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_GLOBAL_LOCAL void arena_commit_failure(Arena*
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_reserve;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_commit;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_decommit;
 
 void arena_test_fail_next_reserve(void)
 {
@@ -120,6 +121,11 @@ void arena_test_fill_releases(bool enabled)
 void arena_test_fail_next_commit(void)
 {
     arena_fail_next_commit = true;
+}
+
+void arena_test_fail_next_decommit(void)
+{
+    arena_fail_next_decommit = true;
 }
 #endif
 
@@ -152,6 +158,22 @@ BUSTER_GLOBAL_LOCAL ArenaCommitAttempt arena_commit_attempt(void* address, u64 s
 #endif
     {
         result.succeeded = os_commit_diagnose(address, size, protection, prefault, &result.failure);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool arena_decommit_attempt(void* address, u64 size)
+{
+    bool result = false;
+#if BUSTER_INCLUDE_TESTS
+    if (arena_fail_next_decommit)
+    {
+        arena_fail_next_decommit = false;
+    }
+    else
+#endif
+    {
+        result = os_decommit(address, size);
     }
     return result;
 }
@@ -279,7 +301,7 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
     {
         // Pages handed back to the OS carry no released-range poison with them.
         BUSTER_ARENA_UNPOISON((u8*)arena + decommit_start, decommit_end - decommit_start);
-        result = os_decommit((u8*)arena + decommit_start, decommit_end - decommit_start);
+        result = arena_decommit_attempt((u8*)arena + decommit_start, decommit_end - decommit_start);
         if (result)
         {
             // A sub-page-granularity arena can have a committed partial page
@@ -295,10 +317,14 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
         // Recommit can expose the old contents, including earlier rewinds.
         arena_set_position_unchecked(arena, position);
 #else
-        // Bytes beyond the native decommit boundary are freshly zeroed if
-        // they are committed again; retain the prefix that can still carry
-        // old contents, including a partial page below that boundary.
-        arena->dirty_position = BUSTER_MIN(BUSTER_MAX(arena->dirty_position, arena->position), decommit_start);
+        // Discarded pages are freshly zeroed if they are committed again;
+        // retain the prefix that can still carry old contents, including a
+        // partial page below decommit_start. The partial final page of a
+        // reservation that is not a page multiple lies above decommit_end and
+        // is never discarded. One watermark cannot describe the zero gap below
+        // it, so written bytes there keep the whole high-water mark dirty.
+        u64 dirty_position = BUSTER_MAX(arena->dirty_position, arena->position);
+        arena->dirty_position = dirty_position > decommit_end ? dirty_position : BUSTER_MIN(dirty_position, decommit_start);
         arena->position = position;
 #endif
     }

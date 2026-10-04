@@ -149,6 +149,9 @@ BUSTER_F_DECL void arena_allocate_commit(Arena* arena, u64 aligned_size_after);
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL void arena_test_fail_next_reserve(void);
 BUSTER_F_DECL void arena_test_fail_next_commit(void);
+// The next arena_set_position_and_decommit on this thread reports a failed OS
+// discard without issuing it.
+BUSTER_F_DECL void arena_test_fail_next_decommit(void);
 // While enabled, arena_release_to_position also overwrites what it releases
 // with ARENA_TEST_RELEASE_FILL, so a reference that outlives its phase reads
 // a recognizable pattern in builds without AddressSanitizer. Process-wide,
