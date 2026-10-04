@@ -3,6 +3,7 @@
  * either fixes validate-buster-v1 (submit) or names one registry service recipe
  * (submit-recipe), which bq_recipe_service admits exactly as for the client.
  * bq_cli owns dispatch and diagnostics; bq_response_write prints bounded receipts.
+ * bq_mcp_run adapts the same socket protocol to bounded stdio MCP.
  * Tests include this entry point, as the existing throughput tests do.
  */
 #ifndef _GNU_SOURCE
@@ -179,6 +180,8 @@ BUSTER_GLOBAL_LOCAL bool bq_response_write(u32 operation, BqPacket const* respon
     return written;
 }
 
+#include "mcp.c"
+
 BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output, FILE* diagnostics)
 {
     BqPacket request = {0};
@@ -199,7 +202,14 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     u64 id = 0;
     u64 argument = 0;
     u64 attempt = 0;
-    if (argc == 5 && !strcmp(argv[1], "unpack-export"))
+    if (argc == 3 && !strcmp(argv[1], "mcp"))
+    {
+        valid = true;
+        error = bq_mcp_run(argv[2], input, output);
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 5 && !strcmp(argv[1], "unpack-export"))
     {
         valid = true;
         error = bq_export_unpack(argv[2], argv[3], argv[4]);
@@ -449,7 +459,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "fake-reconcile DIR JOB TOKEN | materialize DIR INSTALLED_ROOT WORKSPACE_ROOT | "
                     "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | "
                     "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR | rpc SOCKET | "
-                    "client SOCKET capabilities/submit/status/result/cancel/logs ... | "
+                    "mcp SOCKET | client SOCKET capabilities/submit/status/result/cancel/logs ... | "
                     "gateway capabilities | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway submit-recipe RECIPE KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway status/result/cancel JOB | gateway logs JOB [AFTER_SEQUENCE] | "

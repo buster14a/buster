@@ -5679,6 +5679,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_large_source_manifest(void)
 #endif
 
 #include "export_tests.c"
+#include "mcp_tests.c"
 
 BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 {
@@ -5695,6 +5696,8 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #endif
     bq_test_codec();
     bq_test_typed_client();
+    bq_test_mcp_protocol();
+    bq_test_mcp_receipts();
 #ifndef _WIN32
     bq_test_physical_temp_paths();
     bq_test_workspace_root_group_policy();
@@ -5730,6 +5733,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     printf("SGID_SANDBOX_TEST service status=unsupported-architecture\n");
 #endif
     bq_test_transport_boundaries();
+    bq_test_mcp_socket();
     bq_test_worker_deadlines();
     bq_test_worker_lease_handoff();
     bq_test_worker_lease_handoff_negative(0);
