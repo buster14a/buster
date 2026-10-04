@@ -116,6 +116,9 @@ BUSTER_F_DECL bool os_process_group_ownership_loss_self_test(void);
 BUSTER_F_DECL bool os_process_group_escaped_capture_self_test(Arena* arena);
 #endif
 #if BUSTER_LINUX
+BUSTER_F_DECL bool os_linux_proc_context_select_self_test(String8 status, s32 process_id, bool identity_valid,
+                                                           u32* namespace_index, u32* namespace_depth);
+BUSTER_F_DECL bool os_linux_proc_context_live_self_test(void);
 BUSTER_F_DECL bool os_linux_process_stat_parse_self_test(void);
 BUSTER_F_DECL bool os_linux_process_group_churn_self_test(Arena* arena);
 #endif

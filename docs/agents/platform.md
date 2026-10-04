@@ -120,6 +120,26 @@ failure, compare live descriptor/handle counts, exercise an unrelated
 inheritable object, an exact hostile-PATH environment, and a subprocess that
 closes descriptors 0-2 before spawning with capture.
 
+Linux process-group cleanup reads `self/status` from its retained procfs
+descriptor. `NSpid` lists the procfs mount's namespace followed by successively
+nested namespaces; the final coordinate is the caller's active namespace and
+must equal `getpid()`. Numeric IDs may repeat across levels. Context selection
+uses that ordered coordinate, retains the procfs and PID-namespace identities,
+and rejects missing/malformed/duplicate fields or a mismatching final ID. Leader
+identity checks, exact-child reservations and the two matching census snapshots
+remain required before successful cleanup.
+
+Registered Linux `os_tests` exercise the production raw-status context selection
+with unique/repeated IDs, nonfinal-only matches, invalid identity prerequisites,
+zero/negative/mismatching current IDs and malformed fields. A real procfs context
+open/close control checks descriptor release; the exited private-group control
+uses a three-second deadline. These fixtures do not create nested PID namespaces
+or claim attribution for unrelated historical process-group failures. The field
+ordering follows the Linux man-pages project's
+[`proc_pid_status(5)`](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html)
+and namespace-local numbering follows
+[`pid_namespaces(7)`](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
+
 ## Deterministic captured-pipe replay
 
 Ordinary POSIX `os_process_wait_deadline` drains the blocking pipes created by
