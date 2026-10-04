@@ -19,6 +19,12 @@ deployed public protocol uses one fixed `github-actions` principal. A personal
 client must be explicitly admitted into that trust boundary; this adapter does
 not introduce per-user authentication or change the runner's pinned sudo policy.
 
+The adapter submits directly to the daemon; it does not dispatch a GitHub
+workflow. Direct owner-authenticated MCP/CLI submission is the intended normal
+path. The existing protected CI gateway can remain another client of the same
+queue. The broader native experiment capability likewise requires no PR or
+branch for each private program bundle.
+
 The installed daemon is synchronous: during an admitted job it stops serving
 ordinary control requests until cleanup. An MCP call can therefore return a
 transport error without cancelling or resubmitting the job. Retrying submission

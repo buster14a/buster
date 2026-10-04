@@ -7,6 +7,12 @@ Compiler throughput and generated-program runtime are independent optional
 measurements. A custom workload must be data selected by immutable identity,
 rather than another compiled-in generator name for each benchmark.
 
+MCP and CLI submissions go directly to the authenticated durable service and
+return a job ID. Ordinary execution and benchmarks require no workflow
+dispatch, PR, repository branch or per-experiment GitHub approval. CI is an
+optional client of the same queue. The service authenticates its owner;
+repository contribution permissions do not authorize execution.
+
 The current service does not implement that execution path. Its requests
 bind compiler revisions and an installed recipe, with no separate workload
 identity. The MCP adapter reports this limitation and rejects custom source,
