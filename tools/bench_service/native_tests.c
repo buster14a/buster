@@ -271,6 +271,168 @@ BUSTER_GLOBAL_LOCAL void bq_test_native_materialization_execution(void)
         bq_material_test_end(&fixture);
     }
 }
+BUSTER_GLOBAL_LOCAL void bq_test_native_collector_failures(void)
+{
+#if defined(__x86_64__)
+    BqFixture fixture;
+    if (bq_test_begin(&fixture))
+    {
+        int prior_subreaper = 0;
+        BQ_CHECK(prctl(PR_GET_CHILD_SUBREAPER, &prior_subreaper, 0, 0, 0) == 0 &&
+                 prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0);
+        for (u32 kind = 0; kind < 7; kind += 1)
+        {
+            char path[512], log_path[512];
+            snprintf(path, sizeof(path), "%s/native-negative-%u", fixture.path, kind);
+            snprintf(log_path, sizeof(log_path), "%s/native-log-%u", fixture.path, kind);
+            u8 bytes[256]; bq_test_native_program(bytes);
+            if (kind == 0)
+            {
+                u8 const code[] = {0xb8,60,0,0,0,0xbf,125,0,0,0,0x0f,0x05};
+                memcpy(bytes + 128, code, sizeof(code));
+            }
+            else if (kind == 1) { bytes[128] = 0x0f; bytes[129] = 0x0b; }
+            else if (kind == 2) { bytes[128] = 0xeb; bytes[129] = 0xfe; }
+            else if (kind == 4) { bytes[152] = 0xeb; bytes[153] = 0xe6; }
+            else if (kind == 5)
+            {
+                u8 const code[] = {0xb8,57,0,0,0,0x0f,0x05,0x85,0xc0,0x75,2,0xeb,0xfe,
+                    0xb8,60,0,0,0,0x31,0xff,0x0f,0x05};
+                memcpy(bytes + 128, code, sizeof(code));
+            }
+            else if (kind == 6)
+            {
+                u8 const code[] = {0xb8,112,0,0,0,0x0f,0x05,0x31,0xff,0x83,0xf8,0xff,
+                    0x40,0x0f,0x95,0xc7,0xb8,60,0,0,0,0x0f,0x05};
+                memcpy(bytes + 128, code, sizeof(code));
+            }
+            int executable = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            BQ_CHECK(executable >= 0 && write(executable, bytes, sizeof(bytes)) == sizeof(bytes) && fchmod(executable, 0500) == 0);
+            if (executable >= 0) close(executable);
+            executable = open(path, O_RDONLY | O_CLOEXEC);
+            int log = open(log_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            BQ_CHECK(executable >= 0 && log >= 0);
+            TpDescriptorLaunch launch = {.executable = kind == 3 ? -1 : executable, .log = log, .file_limit = 4096};
+            char* const arguments[] = {"program", NULL};
+            TpProcess result = tp_process_internal(arguments, NULL, NULL, 1, -1, 0, &launch);
+            if (kind == 0) BQ_CHECK(!result.launch_error && result.exit_code == 125 && !result.signal_number && !result.timed_out);
+            else if (kind == 1) BQ_CHECK(!result.launch_error && result.signal_number == SIGILL && !result.timed_out);
+            else if (kind == 2) BQ_CHECK(!result.launch_error && result.signal_number == SIGKILL && result.timed_out);
+            else if (kind == 3) BQ_CHECK(result.launch_stage == TP_LAUNCH_EXEC && (result.launch_error == EBADF || result.launch_error == EINVAL) && result.exit_code == 125);
+            else if (kind == 4) BQ_CHECK(!result.launch_error && result.signal_number == SIGXFSZ && !result.timed_out);
+            else if (kind == 5) BQ_CHECK(result.launch_stage == TP_LAUNCH_GROUP && result.launch_error == EBUSY && result.exit_code == 0);
+            else if (kind == 6) BQ_CHECK(!result.launch_error && result.exit_code == 0 && !result.signal_number && !result.timed_out);
+            struct stat info = {0};
+            BQ_CHECK(result.wall_seconds > 0 && result.diagnostics_available == 15 &&
+                     fstat(log, &info) == 0 && info.st_size <= 4096);
+            if (log >= 0) close(log);
+            if (executable >= 0) close(executable);
+            BQ_CHECK(unlink(path) == 0 && unlink(log_path) == 0);
+        }
+        BQ_CHECK(prctl(PR_SET_CHILD_SUBREAPER, prior_subreaper, 0, 0, 0) == 0);
+        bq_test_end(&fixture);
+    }
+#endif
+}
+
+/* Actual fresh-process samples from an immutable disposable microkernel.
+ * The lower helper uses the fixture UID/CPU only inside this fork; the public
+ * helper retains fixed NSS credentials and CPU 2. No manager is launched. */
+BUSTER_GLOBAL_LOCAL void bq_test_native_runtime(void)
+{
+    BqMaterialFixture fixture;
+    if (bq_material_test_begin(&fixture, 0))
+    {
+        bq_test_native_profile_install(&fixture);
+        char recipes[512], profile[512];
+        snprintf(recipes, sizeof(recipes), "%s/recipes", fixture.installed);
+        snprintf(profile, sizeof(profile), "%s/recipes/" BQ_RUNTIME_RECIPE ".recipe", fixture.installed);
+        BQ_CHECK(chmod(fixture.installed, 0700) == 0 && chmod(recipes, 0700) == 0 &&
+                 bq_test_write_path(profile, bq_runtime_profile, 0400) && chmod(recipes, 0500) == 0 &&
+                 chmod(fixture.installed, 0500) == 0);
+        u8 bytes[256]; bq_test_native_program(bytes);
+        char identity[65] = {0};
+        BQ_CHECK(bq_test_native_upload(&fixture.queue.queue, bytes, identity));
+        BqRequest request;
+        String8 fields[] = {S8("github-actions"), S8("runtime-fixture"), S8(BQ_RUNTIME_RECIPE),
+            string_from_pointer(identity), string_from_pointer(identity)};
+        BQ_CHECK(bq_request_make(fields, &request) == BQ_OK);
+        BqState old = {0};
+        BQ_CHECK(bq_apply(&old, 5, BQ_SUBMIT, 1, request.bytes, request.size) == BQ_BAD_REQUEST);
+        u64 id = 0, token = 0;
+        BQ_CHECK(bq_submit(&fixture.queue.queue, &request, &id) == BQ_OK &&
+                 bq_materialize(&fixture.queue.queue, string_from_pointer(fixture.installed),
+                     string_from_pointer(fixture.workspaces), &id, &token) == BQ_OK);
+        char source[512], scratch[512];
+        snprintf(source, sizeof(source), "%s/job-%" PRIu64 "-attempt-%" PRIu64 "/candidate/source",
+            fixture.workspaces, (uint64_t)id, (uint64_t)token);
+        snprintf(scratch, sizeof(scratch), "%s/job-%" PRIu64 "-attempt-%" PRIu64 "/test-native-runtime",
+            fixture.workspaces, (uint64_t)id, (uint64_t)token);
+        BQ_CHECK(mkdir(scratch, 0700) == 0 && bq_native_sampler(source, identity) == BQ_CONFIGURATION_MISMATCH);
+#if defined(__x86_64__)
+        int stream[2]; BQ_CHECK(pipe2(stream, O_CLOEXEC) == 0);
+        pid_t child = fork(); BQ_CHECK(child >= 0);
+        if (child == 0)
+        {
+            close(stream[0]);
+            FILE* output = fdopen(stream[1], "w");
+            BqError error = output && chdir(scratch) == 0 ? bq_native_sample(source, identity, geteuid(), -1, output) : BQ_IO;
+            if (output) fclose(output);
+            _exit(error == BQ_OK ? 0 : 126);
+        }
+        close(stream[1]);
+        char records[BQ_RUNTIME_RECORD_CAP + 1] = {0}; u32 length = 0;
+        for (bool reading = true; reading && length < BQ_RUNTIME_RECORD_CAP;)
+        {
+            ssize_t count = read(stream[0], records + length, BQ_RUNTIME_RECORD_CAP - length);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) reading = false;
+            else length += (u32)count;
+        }
+        close(stream[0]); int status = 0;
+        BQ_CHECK(child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+                 bq_native_runtime_records(records, length, identity, -1, true, NULL) && !strstr(records, "native-fixture"));
+        BQ_CHECK(!bq_native_runtime_records(records, length, identity, 2, true, NULL) &&
+                 !bq_native_runtime_records(records, length - 1, identity, -1, true, NULL));
+        char altered[BQ_RUNTIME_RECORD_CAP + 1]; memcpy(altered, records, length + 1);
+        char* row = strstr(altered, "row=sample,0,");
+        BQ_CHECK(row != NULL);
+        if (row) { row[11] = '1'; BQ_CHECK(!bq_native_runtime_records(altered, length, identity, -1, true, NULL)); }
+        memcpy(altered, records, length + 1); altered[40] ^= 1;
+        BQ_CHECK(!bq_native_runtime_records(altered, length, identity, -1, true, NULL));
+        char log_path[512]; snprintf(log_path, sizeof(log_path), "%s/native-run-0.log", scratch);
+        FILE* log = fopen(log_path, "r"); char transcript[64] = {0};
+        BQ_CHECK(log && fread(transcript, 1, sizeof(transcript), log) == 15 && !strcmp(transcript, "native-fixture\n"));
+        if (log) fclose(log);
+        /* Production validation checks the service's declared CPU, not the
+         * fixture's locally unrestricted timing. Fixture rows are separately
+         * rebound to exercise sealing/export; they are never host evidence. */
+        char* cpu = strstr(records, "cpu=-1\n"); BQ_CHECK(cpu != NULL);
+        if (cpu)
+        {
+            memmove(cpu + 5, cpu + 6, length - (u32)(cpu - records) - 5);
+            cpu[4] = '2'; length -= 1;
+        }
+        BqJob* job = bq_job(&fixture.queue.queue.state, id);
+        BqWorkerConfig config = {.workspace_root = string_from_pointer(fixture.workspaces), .production_path = true};
+        BqWorkerFinalization finalization = {.config = &config, .result_directory = -1};
+        BQ_CHECK(bq_worker_result_open(&config, job, &finalization, true) == BQ_OK);
+        char job_text[32], token_text[32];
+        snprintf(job_text, sizeof(job_text), "%" PRIu64, (uint64_t)id);
+        snprintf(token_text, sizeof(token_text), "%" PRIu64, (uint64_t)token);
+        BQ_CHECK(bq_worker_result_control_publish(&finalization, "native-stage.log", records, length, 0400) == BQ_OK &&
+                 bq_native_result_publish(&finalization, BQ_RECIPE_NATIVE_RUNTIME, job_text, token_text,
+                     fixture.workspaces, identity, identity, finalization.result_root, 0, false, BQ_OK) == BQ_OK &&
+                 bq_worker_result_validate(&config, job, &finalization) == BQ_OK &&
+                 bq_worker_finish(&fixture.queue.queue, &config, job, BQ_SUCCEEDED, BQ_OK, &finalization) == BQ_OK &&
+                 job->result_bound && bq_export_prepare(&fixture.queue.queue, job) == BQ_OK);
+        if (finalization.masked) BQ_CHECK(sigprocmask(SIG_SETMASK, &finalization.prior_mask, NULL) == 0);
+        if (finalization.result_directory >= 0) close(finalization.result_directory);
+#endif
+        bq_material_test_end(&fixture);
+    }
+}
+
 /* Fake manager observations exercise the real reservation/lease/cleanup
  * state machine. Execution and sealed export are covered separately above. */
 BUSTER_GLOBAL_LOCAL void bq_test_native_worker_outcomes(void)

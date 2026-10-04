@@ -1824,6 +1824,8 @@ BUSTER_GLOBAL_LOCAL u32 bq_worker_test_finish_checkpoints;
 BUSTER_GLOBAL_LOCAL u32 bq_worker_test_cancel_during_finish;
 #endif
 
+BUSTER_GLOBAL_LOCAL bool bq_worker_result_control_read(int parent, char const* name, char* body, u32 capacity, u32* length);
+
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* config, BqJob const* job,
                                                        BqWorkerFinalization* finalization);
 BUSTER_GLOBAL_LOCAL BqError bq_worker_result_evidence(BqJob const* job, BqOutcome outcome, BqError reason,
@@ -2721,12 +2723,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
          * three complete capture records and an unauthorized A/B decision. */
         bytes[used] = 0;
         bool zen5 = bq_request_recipe(&job->request) == BQ_RECIPE_ZEN5_CALIBRATION;
-        bool native = bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_EXECUTE;
+        bool native = bq_recipe_native(bq_request_recipe(&job->request));
         char const* text = (char const*)bytes;
         char prefix[BQ_RECIPE_NAME_CAP + 96];
         int prefix_length = snprintf(prefix, sizeof(prefix),
                                      "schema=1\nrecipe=%s\nstatus=succeeded\nstage=%s\nprocess-result=success\n",
-                                     finalization->recipe.name, native ? BQ_NATIVE_STAGE_NAME : zen5 ? "complete" : "throughput");
+                                     finalization->recipe.name, native ? (bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_RUNTIME ? BQ_RUNTIME_STAGE_NAME : BQ_NATIVE_STAGE_NAME) : zen5 ? "complete" : "throughput");
         bool lines = prefix_length > 0 && (u32)prefix_length < sizeof(prefix) && used >= (u32)prefix_length &&
                      !memcmp(bytes, prefix, (u32)prefix_length) &&
                      bq_worker_result_line(text, job_line) && bq_worker_result_line(text, token_line) &&
@@ -2739,9 +2741,36 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
             int identity_length = snprintf(identity_line, sizeof(identity_line), "program-manifest-sha256=%s", candidate_text);
             lines = identity_length > 0 && (u32)identity_length < sizeof(identity_line) &&
                     bq_worker_result_line(text, identity_line) && bq_worker_result_line(text, "stage-exit-status=0") &&
-                    bq_worker_result_line(text, "operation=execute-once") &&
+                    bq_worker_result_line(text, bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_RUNTIME ? "operation=runtime-samples" : "operation=execute-once") &&
                     bq_worker_result_line(text, "compilation=unavailable") &&
-                    bq_worker_result_line(text, "benchmark-metrics=unavailable");
+                    bq_worker_result_line(text, bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_RUNTIME ? "benchmark-metrics=process-latency-wall-cpu-rss-wait4" : "benchmark-metrics=unavailable") &&
+                    (bq_request_recipe(&job->request) != BQ_RECIPE_NATIVE_RUNTIME ||
+                     (bq_worker_result_line(text, "qualification=diagnostic-only") &&
+                      bq_worker_result_line(text, "warmups=2") && bq_worker_result_line(text, "samples=9") &&
+                      bq_worker_result_line(text, "sample-records=runtime-samples.txt") &&
+                      bq_worker_result_line(text, "oracle=exit-zero-unchecked-transcript")));
+        }
+        if (lines && bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_RUNTIME)
+        {
+            char records[BQ_RUNTIME_RECORD_CAP + 1], digest[65], expected_digest[65];
+            u32 record_length = 0;
+            BqRuntimeSummary summary = {0};
+            lines = bq_worker_result_control_read(finalization->result_directory, "runtime-samples.txt",
+                                                     records, BQ_RUNTIME_RECORD_CAP, &record_length) &&
+                    bq_native_runtime_records(records, record_length, candidate_text, 2, true, &summary) &&
+                    bq_worker_result_digest_line(text, "sample-records-sha256=", expected_digest);
+            if (lines)
+            {
+                bq_native_hash(records, record_length, digest);
+                char expected_summary[256];
+                int summary_length = snprintf(expected_summary, sizeof(expected_summary),
+                    "median-wall-ns=%" PRIu64 "\nminimum-wall-ns=%" PRIu64 "\nmaximum-wall-ns=%" PRIu64
+                    "\nmedian-cpu-ns=%" PRIu64 "\nmaximum-rss-bytes=%" PRIu64 "\n",
+                    (uint64_t)summary.median_wall_ns, (uint64_t)summary.minimum_wall_ns, (uint64_t)summary.maximum_wall_ns,
+                    (uint64_t)summary.median_cpu_ns, (uint64_t)summary.maximum_rss_bytes);
+                lines = !strcmp(digest, expected_digest) && summary_length > 0 &&
+                        (u32)summary_length < sizeof(expected_summary) && strstr(text, expected_summary) != NULL;
+            }
         }
         else if (lines && zen5)
         {
@@ -2757,7 +2786,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
                     bq_worker_result_line(text, "aa-decision=not-evaluated") &&
                     !strstr(text, "\nab-authorized=true");
         }
-        else if (lines)
+        else if (lines && !native)
         {
             lines = bq_worker_result_line(text, base_binary_line) && bq_worker_result_line(text, candidate_binary_line) &&
                     bq_worker_result_line(text, "driver=/usr/local/libexec/buster-bench-build") &&
@@ -3277,13 +3306,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
             }
             /* A failure names a stage of its own recipe (zen5: its phases). */
             bool zen5 = bq_request_recipe(&job->request) == BQ_RECIPE_ZEN5_CALIBRATION;
-            bool native = bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_EXECUTE;
+            bool native = bq_recipe_native(bq_request_recipe(&job->request));
             char const* validate_stages[] = {"stage=base-generate", "stage=base-build", "stage=candidate-generate",
                                              "stage=candidate-build", "stage=throughput"};
             char const* zen5_stages[] = {"stage=arguments", "stage=source", "stage=builds", "stage=oracle",
                                          "stage=pmu", "stage=plan", "stage=captures"};
-            bool stage = (bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_EXECUTE &&
-                          bq_worker_result_line(manifest_body, "stage=" BQ_NATIVE_STAGE_NAME)) ||
+            bool stage = (native &&
+                          bq_worker_result_line(manifest_body, bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_RUNTIME ?
+                              "stage=" BQ_RUNTIME_STAGE_NAME : "stage=" BQ_NATIVE_STAGE_NAME)) ||
                          bq_worker_result_line(manifest_body, "stage=prepare") ||
                          bq_worker_result_line(manifest_body, "stage=worker");
             for (u32 index = 0; !zen5 && !native && index < BUSTER_ARRAY_LENGTH(validate_stages); index += 1)
@@ -3652,7 +3682,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop_children(BqWorkerConfig const* config
     /* Every typed stage unit the broker can start under this outer unit:
      * the validation recipe's five and zen5_stage.h's thirteen. */
     char const* stages[] = {"base-generate", "base-build", "candidate-generate",
-                            "candidate-build", "throughput", BQ_ZEN5_STAGE_NAMES, BQ_NATIVE_STAGE_NAME};
+                            "candidate-build", "throughput", BQ_ZEN5_STAGE_NAMES, BQ_NATIVE_STAGE_NAME, BQ_RUNTIME_STAGE_NAME};
     BqError error = BQ_OK;
     for (u32 index = 0; error == BQ_OK && index < BUSTER_ARRAY_LENGTH(stages); index += 1)
     {
@@ -3948,7 +3978,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering)
     {
         /* The broker's recipe selector picks the outer unit's recipe. */
-        char const* verb = !strcmp(finalization.recipe.name, BQ_NATIVE_RECIPE) ? BQ_NATIVE_OUTER_VERB :
+        char const* verb = !strcmp(finalization.recipe.name, BQ_RUNTIME_RECIPE) ? BQ_RUNTIME_OUTER_VERB :
+                           !strcmp(finalization.recipe.name, BQ_NATIVE_RECIPE) ? BQ_NATIVE_OUTER_VERB :
                            strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE) ? "start-outer" : BQ_ZEN5_STAGE_OUTER_VERB;
         char const* arguments[] = {BQ_SYSTEMD_BROKER, verb, job_id, attempt_token,
                                    base_revision_text, candidate_revision_text, NULL};
@@ -4173,7 +4204,7 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
     if (error == BQ_OK)
     {
         raise(SIGSTOP);
-        char const* executable = recipe == BQ_RECIPE_NATIVE_EXECUTE ? "/usr/local/libexec/buster-bench-service" : BQ_RECIPE_EXECUTABLE;
+        char const* executable = bq_recipe_native(recipe) ? "/usr/local/libexec/buster-bench-service" : BQ_RECIPE_EXECUTABLE;
         char const* arguments[] = {executable, files.command, job_id_text, attempt_token_text,
                                    workspace_text, base_text, candidate_text, result_text, NULL};
         execv(executable, (char* const*)arguments);

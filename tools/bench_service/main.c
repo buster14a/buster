@@ -17,6 +17,8 @@
 #include "exclusive_admission.c"
 #include "workspace.c"
 #include "worker_linux.c"
+#include "native_subject.c"
+#include "native_runtime.c"
 #include "native_execution.c"
 #include "export.c"
 #include "protocol.c"
@@ -52,9 +54,9 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
         *operation = BQ_OP_CAPABILITIES;
         valid = true;
     }
-    else if (argc == 3 && !strcmp(argv[0], "submit-program"))
+    else if (argc == 3 && (!strcmp(argv[0], "submit-program") || !strcmp(argv[0], "submit-runtime")))
     {
-        String8 fields[BQ_FIELD_COUNT] = {S8("github-actions"), string_from_pointer(argv[1]), S8(BQ_NATIVE_RECIPE),
+        String8 fields[BQ_FIELD_COUNT] = {S8("github-actions"), string_from_pointer(argv[1]), !strcmp(argv[0], "submit-runtime") ? S8(BQ_RUNTIME_RECIPE) : S8(BQ_NATIVE_RECIPE),
             string_from_pointer(argv[2]), string_from_pointer(argv[2])};
         BqRequest submission;
         valid = bq_request_make(fields, &submission) == BQ_OK;
@@ -242,10 +244,17 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         handled = true;
         simple_diagnostic = true;
     }
-    else if (argc == 8 && !strcmp(argv[1], "native-driver"))
+    else if (argc == 4 && !strcmp(argv[1], "native-sampler"))
     {
         valid = true;
-        error = bq_native_driver(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
+        error = bq_native_sampler(argv[2], argv[3]);
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 8 && (!strcmp(argv[1], "native-driver") || !strcmp(argv[1], "native-runtime-driver")))
+    {
+        valid = true;
+        error = bq_native_driver(!strcmp(argv[1], "native-runtime-driver") ? BQ_RECIPE_NATIVE_RUNTIME : BQ_RECIPE_NATIVE_EXECUTE, argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
         handled = true;
         simple_diagnostic = true;
     }

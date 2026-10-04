@@ -1,5 +1,6 @@
 /* Native regression executable, following tools/throughput/tests.c.
- * No network, benchmark samples or alternative model. Deadline coverage uses
+ * No network or alternative model. Native sample coverage runs only fixed
+ * disposable microkernels and never represents installed-host evidence. Deadline coverage uses
  * only bounded local helper processes and a monotonic timer.
  * Fixture byte edits model durable crash prefixes; they do not simulate a disk
  * cache losing power. Every recovery verdict comes from bq_open/bq_replay.
@@ -2358,7 +2359,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     BQ_CHECK(bq_transport_queue_admissible(&incompatible));
 #ifdef __linux__
     BQ_CHECK(strstr(bq_capabilities_v2, "local-recipes=fake-success-v1,fake-failure-v1") != NULL);
-    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1 "
+    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1,native-runtime-v1 "
                                         "blocked-recipes=native-retirement-performance-v1\n") != NULL);
     /* Served zen5 fits because the redundant profile/retirement words went. */
     BQ_CHECK(strstr(bq_capabilities_v2, "retirement=blocked") == NULL &&
@@ -2902,7 +2903,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
     BqError error = BQ_OK;
     fake->starts += 1;
     fake->argv_valid = count == 6 && !strcmp(argv[0], BQ_SYSTEMD_BROKER) &&
-        (!strcmp(argv[1], "start-outer") || !strcmp(argv[1], BQ_NATIVE_OUTER_VERB)) && !strcmp(argv[2], "1") && argv[3][0] &&
+        (!strcmp(argv[1], "start-outer") || !strcmp(argv[1], BQ_NATIVE_OUTER_VERB) || !strcmp(argv[1], BQ_RUNTIME_OUTER_VERB)) && !strcmp(argv[2], "1") && argv[3][0] &&
         strlen(argv[4]) == 64 && strlen(argv[5]) == 64 &&
         bq_test_worker_probe_locked(fixture->lease);
     fake->inherited_lease = -1;
@@ -5768,6 +5769,8 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_native_staging_refusal();
     bq_test_native_rejections();
     bq_test_native_materialization_execution();
+    bq_test_native_collector_failures();
+    bq_test_native_runtime();
     bq_test_native_worker_outcomes();
     bq_test_transport_boundaries();
     bq_test_mcp_socket();
@@ -5838,7 +5841,9 @@ int main(int argc, char** argv)
         bq_test_native_staging_refusal();
         bq_test_native_rejections();
         bq_test_native_materialization_execution();
-        bq_test_native_worker_outcomes();
+        bq_test_native_collector_failures();
+    bq_test_native_runtime();
+    bq_test_native_worker_outcomes();
         printf("NATIVE_EXECUTION_SELF_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);
         result = bq_test_failures ? 1 : 0;
     }

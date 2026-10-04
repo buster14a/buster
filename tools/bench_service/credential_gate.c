@@ -31,7 +31,7 @@
 #define BQ_GATE_THROUGHPUT "/usr/local/libexec/buster-bench-throughput"
 #define BQ_GATE_MAX_GROUPS 32
 /* Stages 0..5 are the smoke recipe's; 16..28 are the zen5 stages. */
-#define BQ_GATE_LAST_STAGE BQ_NATIVE_STAGE
+#define BQ_GATE_LAST_STAGE BQ_RUNTIME_STAGE
 
 static bool bq_gate_decimal(char const* text, unsigned long* output)
 {
@@ -162,6 +162,8 @@ static bool bq_gate_program(unsigned long stage, char const* program, char const
                                                           stage <= BQ_GATE_LAST_STAGE));
     if (ok && stage == 0)
         ok = !strcmp(program, BQ_GATE_SERVICE) && !strcmp(first_argument, "worker-unit");
+    else if (ok && stage == BQ_RUNTIME_STAGE)
+        ok = !strcmp(program, BQ_GATE_SERVICE) && !strcmp(first_argument, "native-sampler");
     else if (ok && stage == BQ_NATIVE_STAGE)
         ok = !strcmp(program, BQ_GATE_SERVICE) && !strcmp(first_argument, "native-payload");
     else if (ok && stage == 5)
@@ -209,7 +211,10 @@ static int bq_gate_self_test(void)
     BQ_GATE_CHECK(bq_gate_program(BQ_NATIVE_STAGE, BQ_GATE_SERVICE, "native-payload") &&
                   !bq_gate_program(BQ_NATIVE_STAGE, BQ_GATE_SERVICE, "worker-unit") &&
                   !bq_gate_program(BQ_NATIVE_STAGE, "/tmp/program", "native-payload") &&
-                  !bq_gate_program(BQ_NATIVE_STAGE + 1, BQ_GATE_SERVICE, "native-payload"));
+                  !bq_gate_program(BQ_RUNTIME_STAGE + 1, BQ_GATE_SERVICE, "native-payload"));
+    BQ_GATE_CHECK(bq_gate_program(BQ_RUNTIME_STAGE, BQ_GATE_SERVICE, "native-sampler") &&
+                  !bq_gate_program(BQ_RUNTIME_STAGE, BQ_GATE_SERVICE, "native-payload") &&
+                  !bq_gate_program(BQ_NATIVE_STAGE, BQ_GATE_SERVICE, "native-sampler"));
     /* Every argv the broker builds from the shared contract passes here. */
     for (unsigned index = 0; index < BQ_ZEN5_STAGE_COUNT; index += 1)
     {

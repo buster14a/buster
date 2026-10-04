@@ -16,7 +16,8 @@
 #define BQ_SCHEMA_MATERIALIZATION 2u
 #define BQ_SCHEMA_WORKER 3u
 #define BQ_SCHEMA_NATIVE 4u
-#define BQ_SCHEMA BQ_SCHEMA_NATIVE
+#define BQ_SCHEMA_RUNTIME 6u
+#define BQ_SCHEMA BQ_SCHEMA_RUNTIME
 #define BQ_CONTROL_SCHEMA 2u
 #define BQ_PENDING_CAP 8u
 /* Lifetime caps (#2114). Nothing durable encodes them: journal frames carry
@@ -79,7 +80,8 @@ typedef enum BqRecipe
     BQ_RECIPE_VALIDATE_BUSTER,
     BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED,
     BQ_RECIPE_ZEN5_CALIBRATION,
-    BQ_RECIPE_NATIVE_EXECUTE
+    BQ_RECIPE_NATIVE_EXECUTE,
+    BQ_RECIPE_NATIVE_RUNTIME
 } BqRecipe;
 
 typedef struct BqRecipeFiles
@@ -91,6 +93,11 @@ typedef struct BqRecipeFiles
     char outcome[BQ_RECIPE_FILE_CAP + 1];
     char command[BQ_RECIPE_COMMAND_CAP + 1];
 } BqRecipeFiles;
+
+typedef struct BqRuntimeSummary
+{
+    u64 median_wall_ns, minimum_wall_ns, maximum_wall_ns, median_cpu_ns, maximum_rss_bytes;
+} BqRuntimeSummary;
 
 typedef struct BqRequest
 {
@@ -189,6 +196,8 @@ BUSTER_F_DECL String8 bq_recipe_name(BqRecipe recipe);
 BUSTER_F_DECL String8 bq_recipe_profile(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files);
 BUSTER_F_DECL bool bq_recipe_admitted(BqRecipe recipe);
+BUSTER_GLOBAL_LOCAL bool bq_native_runtime_records(char const* bytes, u32 length, char const* identity, int cpu, bool require_success, BqRuntimeSummary* summary);
+BUSTER_F_DECL bool bq_recipe_native(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_service(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_blocked(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_fake(BqRequest const* request);

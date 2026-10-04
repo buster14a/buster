@@ -39,11 +39,11 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
 #endif
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
-    "schema=2 journal=4 legacy-journal=1 executor=supervisor pending=8 jobs=512\n"
-    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1 "
+    "schema=2 journal=6 legacy-journal=1 executor=supervisor pending=8 jobs=512\n"
+    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1,native-runtime-v1 "
     "blocked-recipes=native-retirement-performance-v1\n"
     "validity=not-evaluated materialization=read-only workspace=per-attempt\n"
-    "worker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic "
+    "worker=fixed-systemd-service admission=idle-only-atomic "
     "export=1 "
 #ifdef __linux__
     "transport=unix-seqpacket authentication=peer-uid-gid\n"

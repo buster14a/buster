@@ -943,3 +943,5 @@ evidence with injected replay tests; these are not claims about a deployed host
 or a measured result.
 No credentials, server settings, benchmark thresholds, production runner
 ownership or parent-issue closure are authorized by this implementation.
+
+Custom static-program timing is the separate fixed `native-runtime-v1` recipe; see [NATIVE_RUNTIME.md](NATIVE_RUNTIME.md) for its raw samples, launch boundary, containment and diagnostic limits.

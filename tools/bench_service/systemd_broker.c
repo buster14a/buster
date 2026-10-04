@@ -90,7 +90,7 @@ enum { BQ_BROKER_OUTER = 0, BQ_BROKER_BASE_GENERATE = 1, BQ_BROKER_BASE_BUILD = 
 enum { BQ_BROKER_TERM = 1, BQ_BROKER_KILL = 2, BQ_BROKER_CONT = 3 };
 /* The smoke recipe is the zero selector every smoke and signal request keeps;
  * 1 is the #1020 retirement selector, which this broker does not serve. */
-enum { BQ_BROKER_RECIPE_SMOKE = 0, BQ_BROKER_RECIPE_RETIREMENT = 1, BQ_BROKER_RECIPE_ZEN5 = 2, BQ_BROKER_RECIPE_NATIVE = 3 };
+enum { BQ_BROKER_RECIPE_SMOKE = 0, BQ_BROKER_RECIPE_RETIREMENT = 1, BQ_BROKER_RECIPE_ZEN5 = 2, BQ_BROKER_RECIPE_NATIVE = 3, BQ_BROKER_RECIPE_RUNTIME = 4 };
 
 typedef struct BqBrokerRequest
 {
@@ -180,9 +180,21 @@ static bool bq_broker_zen5_stage(uint32_t stage)
     return zen5;
 }
 
+static bool bq_broker_native_stage(uint32_t stage)
+{
+    bool native = stage == BQ_NATIVE_STAGE || stage == BQ_RUNTIME_STAGE;
+    return native;
+}
+
+static bool bq_broker_native_recipe(uint32_t recipe)
+{
+    bool native = recipe == BQ_BROKER_RECIPE_NATIVE || recipe == BQ_BROKER_RECIPE_RUNTIME;
+    return native;
+}
+
 static bool bq_broker_known_stage(uint32_t stage)
 {
-    bool known = stage <= BQ_BROKER_THROUGHPUT_STAGE || bq_broker_zen5_stage(stage) || stage == BQ_NATIVE_STAGE;
+    bool known = stage <= BQ_BROKER_THROUGHPUT_STAGE || bq_broker_zen5_stage(stage) || bq_broker_native_stage(stage);
     return known;
 }
 
@@ -192,7 +204,8 @@ static char const* bq_broker_stage_name(uint32_t stage)
     char const* name = stage >= BQ_BROKER_BASE_GENERATE && stage <= BQ_BROKER_THROUGHPUT_STAGE ?
                        bq_broker_stages[stage] :
                        bq_broker_zen5_stage(stage) ? bq_broker_zen5_stages[stage - BQ_BROKER_ZEN5_FIRST_STAGE] :
-                       stage == BQ_NATIVE_STAGE ? BQ_NATIVE_STAGE_NAME : NULL;
+                       stage == BQ_NATIVE_STAGE ? BQ_NATIVE_STAGE_NAME :
+                       stage == BQ_RUNTIME_STAGE ? BQ_RUNTIME_STAGE_NAME : NULL;
     return name;
 }
 
@@ -244,14 +257,14 @@ static bool bq_broker_revision(char const value[65])
 static bool bq_broker_request_recipe_valid(BqBrokerRequest const* request)
 {
     bool zen5 = request->recipe == BQ_BROKER_RECIPE_ZEN5;
-    bool native = request->recipe == BQ_BROKER_RECIPE_NATIVE;
+    bool native = bq_broker_native_recipe(request->recipe);
     bool ok = request->runtime_max_usec == 0 && (request->recipe == BQ_BROKER_RECIPE_SMOKE || zen5 || native);
     if (ok && request->stage == BQ_BROKER_OUTER)
         ok = (!zen5 && !native) || (!strcmp(request->base, request->candidate) && (!native || strlen(request->base) == 64));
     else if (ok)
-        ok = native ? request->stage == BQ_NATIVE_STAGE && strlen(request->base) == 64 &&
+        ok = native ? request->stage == (request->recipe == BQ_BROKER_RECIPE_RUNTIME ? BQ_RUNTIME_STAGE : BQ_NATIVE_STAGE) && strlen(request->base) == 64 &&
                       !strcmp(request->base, request->candidate) :
-                      request->stage != BQ_NATIVE_STAGE && zen5 == bq_broker_zen5_stage(request->stage);
+                      !bq_broker_native_stage(request->stage) && zen5 == bq_broker_zen5_stage(request->stage);
     return ok;
 }
 
@@ -445,11 +458,16 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
         }
         else
         {
-            if (request->stage == BQ_NATIVE_STAGE)
+            if (bq_broker_native_stage(request->stage))
             {
                 bq_broker_add_format(command, "--property=ReadOnlyPaths=%s %s", paths.attempt, BQ_BROKER_INSTALLED);
                 bq_broker_add_format(command, "--property=ReadWritePaths=%s", paths.native_scratch);
                 bq_broker_add_format(command, "--working-directory=%s", paths.native_scratch);
+                if (request->stage == BQ_RUNTIME_STAGE)
+                {
+                    bq_broker_add_format(command, "--property=TemporaryFileSystem=%s:rw,size=16M,mode=1777,nodev,nosuid,noexec /tmp:rw,size=8M,mode=1777,nodev,nosuid,noexec /var/tmp:rw,size=8M,mode=1777,nodev,nosuid,noexec", paths.native_scratch);
+                    bq_broker_add(command, "--property=LimitFSIZE=1048576");
+                }
             }
             else if (zen5_stage)
             {
@@ -493,7 +511,8 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
             bq_broker_add(command, BQ_BROKER_LEASE);
             bq_broker_add_format(command, "%" PRIu64, request->job);
             bq_broker_add_format(command, "%" PRIu64, request->attempt);
-            bq_broker_add(command, request->recipe == BQ_BROKER_RECIPE_NATIVE ? BQ_NATIVE_RECIPE :
+            bq_broker_add(command, request->recipe == BQ_BROKER_RECIPE_RUNTIME ? BQ_RUNTIME_RECIPE :
+                                   request->recipe == BQ_BROKER_RECIPE_NATIVE ? BQ_NATIVE_RECIPE :
                                    request->recipe == BQ_BROKER_RECIPE_ZEN5 ? BQ_ZEN5_STAGE_RECIPE :
                                    "validate-buster-v1");
             bq_broker_add(command, BQ_BROKER_WORKSPACES);
@@ -501,10 +520,10 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
             bq_broker_add(command, request->candidate);
             bq_broker_add_format(command, "%s", paths.result);
         }
-        else if (request->stage == BQ_NATIVE_STAGE)
+        else if (bq_broker_native_stage(request->stage))
         {
             bq_broker_add(command, BQ_BROKER_SERVICE);
-            bq_broker_add(command, "native-payload");
+            bq_broker_add(command, request->stage == BQ_RUNTIME_STAGE ? "native-sampler" : "native-payload");
             bq_broker_add_format(command, "%s", paths.candidate_source);
             bq_broker_add(command, request->candidate);
         }
@@ -747,7 +766,7 @@ static bool bq_broker_manifest(BqBrokerRequest const* request, BqBrokerPaths con
     char const* workspace = candidate ? paths->candidate_source : paths->base_source;
     unsigned char source_bytes[65536], copy_bytes[65536];
     size_t source_size = 0, copy_size = 0;
-    bool native = request->recipe == BQ_BROKER_RECIPE_NATIVE;
+    bool native = bq_broker_native_recipe(request->recipe);
     bool ok = native ?
               bq_broker_format(installed, sizeof(installed), "%s/native-blobs/%s", BQ_BROKER_QUEUE, revision) &&
               bq_broker_directory(installed, service_uid, false) &&
@@ -863,7 +882,7 @@ static int bq_broker_start_writable(BqBrokerRequest const* request, BqBrokerPath
     int result = 0;
     if (request->stage == BQ_BROKER_CANDIDATE_GENERATE)
         result = bq_broker_format(output, capacity, "%s", paths->candidate_staging) ? 1 : -1;
-    else if (request->stage == BQ_NATIVE_STAGE)
+    else if (bq_broker_native_stage(request->stage))
         result = bq_broker_format(output, capacity, "%s", paths->native_scratch) ? 1 : -1;
     else if (bq_broker_zen5_stage(request->stage))
         result = bq_zen5_stage_command(request->stage - BQ_BROKER_ZEN5_FIRST_STAGE, paths->attempt, &zen5) &&
@@ -889,7 +908,7 @@ static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid,
         ok = bq_broker_manifest(request, &paths, service_uid, false) &&
              bq_broker_manifest(request, &paths, service_uid, true) &&
              bq_broker_installed_binary(BQ_BROKER_SERVICE, false) &&
-             (request->recipe == BQ_BROKER_RECIPE_NATIVE ||
+             (bq_broker_native_recipe(request->recipe) ||
               (bq_broker_installed_binary(BQ_BROKER_BUILD, false) &&
                bq_broker_installed_binary(BQ_BROKER_THROUGHPUT, false))) &&
              bq_broker_installed_binary(BQ_BROKER_GATE, true);
@@ -924,7 +943,7 @@ static bool bq_broker_unit_from_text(char const* unit, BqBrokerRequest* request)
     }
     BqBrokerPaths paths;
     bool found = false;
-    for (unsigned stage = 0; ok && !found && stage <= BQ_NATIVE_STAGE; stage += 1)
+    for (unsigned stage = 0; ok && !found && stage <= BQ_RUNTIME_STAGE; stage += 1)
     {
         candidate.stage = stage;
         found = bq_broker_known_stage(stage) && bq_broker_paths(&candidate, &paths) && !strcmp(paths.unit, unit);
@@ -974,7 +993,8 @@ static char const* bq_broker_stage_program(uint32_t stage, bool verb)
 {
     char const* result = NULL;
     if (stage == BQ_BROKER_OUTER) result = verb ? "worker-unit" : BQ_BROKER_SERVICE;
-    else if (stage == BQ_NATIVE_STAGE) result = verb ? "native-payload" : BQ_BROKER_SERVICE;
+    else if (bq_broker_native_stage(stage)) result = !verb ? BQ_BROKER_SERVICE :
+                                                     stage == BQ_RUNTIME_STAGE ? "native-sampler" : "native-payload";
     else if (stage == BQ_BROKER_THROUGHPUT_STAGE) result = verb ? "run" : BQ_BROKER_THROUGHPUT;
     else if (stage <= BQ_BROKER_CANDIDATE_BUILD)
         result = !verb ? BQ_BROKER_BUILD :
@@ -1910,7 +1930,7 @@ static int bq_broker_client(BqBrokerRequest const* request)
 static bool bq_broker_stage(char const* name, uint32_t* stage)
 {
     bool found = false;
-    for (uint32_t index = 1; !found && index <= BQ_NATIVE_STAGE; index += 1)
+    for (uint32_t index = 1; !found && index <= BQ_RUNTIME_STAGE; index += 1)
     {
         if (bq_broker_stage_name(index) && !strcmp(name, bq_broker_stage_name(index)))
         {
@@ -1927,10 +1947,11 @@ static bool bq_broker_cli(int argc, char** argv, BqBrokerRequest* request)
     request->magic = BQ_BROKER_MAGIC;
     request->version = BQ_BROKER_VERSION;
     bool ok = false;
-    if (argc == 6 && (!strcmp(argv[1], "start-outer") || !strcmp(argv[1], BQ_ZEN5_STAGE_OUTER_VERB) || !strcmp(argv[1], BQ_NATIVE_OUTER_VERB)))
+    if (argc == 6 && (!strcmp(argv[1], "start-outer") || !strcmp(argv[1], BQ_ZEN5_STAGE_OUTER_VERB) || !strcmp(argv[1], BQ_NATIVE_OUTER_VERB) || !strcmp(argv[1], BQ_RUNTIME_OUTER_VERB)))
     {
         request->operation = BQ_BROKER_START;
-        request->recipe = !strcmp(argv[1], BQ_NATIVE_OUTER_VERB) ? BQ_BROKER_RECIPE_NATIVE :
+        request->recipe = !strcmp(argv[1], BQ_RUNTIME_OUTER_VERB) ? BQ_BROKER_RECIPE_RUNTIME :
+                          !strcmp(argv[1], BQ_NATIVE_OUTER_VERB) ? BQ_BROKER_RECIPE_NATIVE :
                           !strcmp(argv[1], BQ_ZEN5_STAGE_OUTER_VERB) ? BQ_BROKER_RECIPE_ZEN5 : BQ_BROKER_RECIPE_SMOKE;
         ok = bq_broker_decimal(argv[2], &request->job) &&
              bq_broker_decimal(argv[3], &request->attempt) &&
@@ -1954,7 +1975,8 @@ static bool bq_broker_cli(int argc, char** argv, BqBrokerRequest* request)
         {
             memcpy(request->base, argv[5], strlen(argv[5]));
             memcpy(request->candidate, argv[6], strlen(argv[6]));
-            request->recipe = request->stage == BQ_NATIVE_STAGE ? BQ_BROKER_RECIPE_NATIVE :
+            request->recipe = request->stage == BQ_RUNTIME_STAGE ? BQ_BROKER_RECIPE_RUNTIME :
+                              request->stage == BQ_NATIVE_STAGE ? BQ_BROKER_RECIPE_NATIVE :
                               bq_broker_zen5_stage(request->stage) ? BQ_BROKER_RECIPE_ZEN5 : BQ_BROKER_RECIPE_SMOKE;
         }
     }
@@ -2364,7 +2386,7 @@ static int bq_broker_self_test(void)
     }
     request.stage = BQ_BROKER_THROUGHPUT_STAGE + 1;
     BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
-    request.stage = BQ_NATIVE_STAGE + 1;
+    request.stage = BQ_RUNTIME_STAGE + 1;
     BQ_BROKER_CHECK(!bq_broker_command(&request, &start_groups, &command));
     BQ_BROKER_CHECK(bq_broker_zen5_self_test(&request, &start_groups));
     BqBrokerRequest native = {.magic = BQ_BROKER_MAGIC, .version = BQ_BROKER_VERSION,
@@ -2383,6 +2405,19 @@ static int bq_broker_self_test(void)
         bq_broker_has_argument(&command, "--property=CapabilityBoundingSet=") &&
         bq_broker_has_argument(&command, "--property=SystemCallFilter=@system-service") &&
         bq_broker_property_count(&command, "--property=ReadWritePaths=") == 1);
+    BqBrokerRequest runtime = native;
+    runtime.recipe = BQ_BROKER_RECIPE_RUNTIME; runtime.stage = BQ_RUNTIME_STAGE;
+    BQ_BROKER_CHECK(bq_broker_command(&runtime, &start_groups, &command) &&
+        bq_broker_has_argument(&command, "native-sampler") &&
+        bq_broker_has_argument(&command, "--uid=buster-bench-candidate") &&
+        bq_broker_has_argument(&command, "--property=LimitFSIZE=1048576") &&
+        bq_broker_property_count(&command, "--property=TemporaryFileSystem=") == 1 &&
+        bq_broker_has_argument(&command, "--property=SystemCallFilter=@system-service"));
+    runtime.stage = BQ_NATIVE_STAGE;
+    BQ_BROKER_CHECK(!bq_broker_command(&runtime, &start_groups, &command));
+    runtime.stage = BQ_BROKER_OUTER;
+    BQ_BROKER_CHECK(bq_broker_command(&runtime, &start_groups, &command) &&
+                   bq_broker_has_argument(&command, BQ_RUNTIME_RECIPE));
     BqBrokerRequest refused = native;
     refused.recipe = BQ_BROKER_RECIPE_SMOKE;
     BQ_BROKER_CHECK(!bq_broker_command(&refused, &start_groups, &command));
