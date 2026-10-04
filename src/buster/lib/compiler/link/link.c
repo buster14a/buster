@@ -3173,10 +3173,13 @@ ObjectFile link_windows_libc_runtime_object(Arena* arena, Target target)
 // same relaxation `ld` performs when a position-independent object ends up in
 // an executable rather than in a shared library.
 //
-//   initial-exec, seven bytes ending at the patched field:
+//   initial-exec, seven bytes ending at the patched field, either the ADD
+//   form this compiler emits or the MOV form foreign objects carry:
 //     REX.W 03 modrm(00 reg 101) disp32   add reg, [rip + sym@GOTTPOFF]
+//     REX.W 8b modrm(00 reg 101) disp32   mov reg, [rip + sym@GOTTPOFF]
 //   becomes
 //     REX.W 81 modrm(11 000 reg) imm32    add reg, tpoff
+//     REX.W c7 modrm(11 000 reg) imm32    mov reg, tpoff
 //   The GOT operand's register is the modrm reg field and the immediate
 //   form's is the rm field, so REX.R moves to REX.B with it.
 //
@@ -7062,7 +7065,9 @@ struct LinkElfPicImage
     LinkError error;
     bool shared;
     bool static_tls;
-    u8 reserved[2];
+    // See NativeExecutableLinkResult.position_independent_relocation.
+    bool position_independent_relocation;
+    u8 reserved[1];
 };
 
 BUSTER_GLOBAL_LOCAL bool link_elf_symbol_is_thread_local(ObjectSymbol const* symbol)
@@ -7107,6 +7112,44 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_fail(LinkElfPicImage* image, LinkError err
     {
         image->error = error;
         image->symbol = symbol;
+    }
+}
+
+// Whether the refused kind is one position-independent code emits itself:
+// GOT, PLT, or a dynamic/initial-exec TLS model. Refusing one of these cannot
+// be fixed by recompiling with -fPIC, which the driver hint would suggest.
+BUSTER_GLOBAL_LOCAL bool link_elf_pic_relocation_is_position_independent(ObjectRelocationKind kind)
+{
+    bool result;
+    switch (kind)
+    {
+    case OBJECT_RELOCATION_X86_64_GOTPCREL:
+    case OBJECT_RELOCATION_X86_64_GOTPCRELX:
+    case OBJECT_RELOCATION_X86_64_REX_GOTPCRELX:
+    case OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX:
+    case OBJECT_RELOCATION_X86_64_PLT32:
+    case OBJECT_RELOCATION_X86_64_TLSGD:
+    case OBJECT_RELOCATION_X86_64_TLSLD:
+    case OBJECT_RELOCATION_X86_64_GOTTPOFF:
+    case OBJECT_RELOCATION_X86_64_DTPOFF32:
+    case OBJECT_RELOCATION_X86_64_DTPOFF64:
+        result = true;
+        break;
+    default:
+        result = false;
+        break;
+    }
+    return result;
+}
+
+// Same first-error rule as link_elf_pic_fail, additionally recording whether
+// the refused relocation is a position-independent kind.
+BUSTER_GLOBAL_LOCAL void link_elf_pic_fail_relocation(LinkElfPicImage* image, ObjectRelocation const* relocation, String8 symbol)
+{
+    if (image->error == LINK_ERROR_NONE)
+    {
+        image->position_independent_relocation = link_elf_pic_relocation_is_position_independent(relocation->kind);
+        link_elf_pic_fail(image, LINK_ERROR_RELOCATION, symbol);
     }
 }
 
@@ -7379,7 +7422,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
             }
             if (!valid)
             {
-                link_elf_pic_fail(image, LINK_ERROR_RELOCATION, symbol->name);
+                link_elf_pic_fail_relocation(image, relocation, symbol->name);
             }
         }
         image->actions[index] = (u8)action;
@@ -7643,7 +7686,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
         }
         if (!valid)
         {
-            link_elf_pic_fail(image, LINK_ERROR_RELOCATION, symbol->name);
+            link_elf_pic_fail_relocation(image, relocation, symbol->name);
         }
     }
 }
@@ -7792,6 +7835,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         link_elf_pic_plan(&image);
         result.error = image.error;
         result.symbol = image.symbol;
+        result.position_independent_relocation = image.position_independent_relocation;
     }
     String8 soname = shared ? link_elf_linker_argument_soname(options) : (String8){0};
     u32 needed_library_count = options.dynamic_library_count + 1;
@@ -8019,6 +8063,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
             link_elf_pic_relocate(&image, bytes, section_offsets, plt_offset, got_offset, thread_local_size, &relocation_cursor);
             result.error = image.error;
             result.symbol = image.symbol;
+            result.position_independent_relocation = image.position_independent_relocation;
         }
         if (result.error == LINK_ERROR_NONE && relocation_cursor != plt_relocation_offset)
         {

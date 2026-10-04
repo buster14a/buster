@@ -12106,6 +12106,10 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_le[BUSTER_X86_METADATA_TLS_GD_SIZ
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_gd_indirect_call[BUSTER_X86_METADATA_TLS_GD_SIZE - 8];
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ie[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_add[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
+// Foreign objects carry the same initial-exec pair as a MOV: the load is
+// `mov reg, [rip + tls]` and relaxes to `mov reg, tpoff` rather than ADD.
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ie_mov[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_mov[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
 // Local dynamic's LEA and direct CALL, and the -fno-plt indirect CALL that can
 // stand in for the direct one.
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ld[BUSTER_X86_METADATA_TLS_LD_SIZE];
@@ -12235,6 +12239,20 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tls_prepare(u8 requested)
                 valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_add[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
                                                       S8("ADD"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
                                                       BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32);
+                operands[1] = (BusterX86MetadataPhysicalOperand){
+                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                    .memory = {.symbol = S8("tls"), .has_symbol = true, .has_displacement = true,
+                               .rip_relative = true, .address_size = 64, .scale = 1},
+                };
+                valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_ie_mov[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
+                                                      S8("MOV"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
+                                                      BUSTER_X86_METADATA_RELOCATION_PC32);
+                operands[1] = (BusterX86MetadataPhysicalOperand){
+                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .width = 32, .has_symbol = true, .symbol = S8("tls"),
+                };
+                valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_mov[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
+                                                      S8("MOV"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
+                                                      BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32);
             }
             if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_IE;
         }
@@ -12317,12 +12335,19 @@ bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86Metadata
                 for (u32 reg = 0; reg < 16; reg += 1)
                 {
                     // REX.X/B are ignored for this RIP-relative input, but B
-                    // selects the output register in ADD reg,imm32. Never
+                    // selects the output register in ADD/MOV reg,imm32. Never
                     // carry ignored input bits into a different operand role.
                     if ((sequence[0] & 0xfcu) == buster_x86_metadata_tls_ie[reg][0] &&
                         memcmp(sequence + 1, buster_x86_metadata_tls_ie[reg] + 1, BUSTER_X86_METADATA_TLS_IE_OFFSET - 1) == 0)
                     {
                         replacement = buster_x86_metadata_tls_add[reg];
+                        size = BUSTER_X86_METADATA_TLS_IE_SIZE;
+                        break;
+                    }
+                    if ((sequence[0] & 0xfcu) == buster_x86_metadata_tls_ie_mov[reg][0] &&
+                        memcmp(sequence + 1, buster_x86_metadata_tls_ie_mov[reg] + 1, BUSTER_X86_METADATA_TLS_IE_OFFSET - 1) == 0)
+                    {
+                        replacement = buster_x86_metadata_tls_mov[reg];
                         size = BUSTER_X86_METADATA_TLS_IE_SIZE;
                         break;
                     }

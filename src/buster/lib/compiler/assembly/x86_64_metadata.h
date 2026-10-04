@@ -1120,6 +1120,12 @@ BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_selection(Bus
 // call opcode and answers with its size; the local-exec replacement is
 // `mov rax, fs:0` behind data16 prefixes and has no offset field, because
 // each variable's DTPOFF32 names its own offset from the block.
+//
+// Initial exec appears in two spellings. Buster emits
+// `add reg, [rip + x@gottpoff]` and foreign objects GCC and Clang produce
+// carry `mov reg, [rip + x@gottpoff]`; both relax to the matching reg,imm32
+// form (`REX.W 81/c7 modrm(11 000 reg) imm32`), with the input's ignored REX
+// low bits never carried into the output's REX.B register selector.
 typedef enum BusterX86MetadataTlsModel
 {
     BUSTER_X86_METADATA_TLS_GENERAL_DYNAMIC,

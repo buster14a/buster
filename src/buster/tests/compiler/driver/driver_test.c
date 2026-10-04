@@ -14486,6 +14486,251 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_dynamic_tls(UnitTe
     scratch_end(temporary);
     return result;
 }
+
+// Hand-built ELF input for the driver tests below: one text section carrying
+// the given bytes, symbols and relocations, written through the ordinary ELF
+// writer so the driver reads exactly what a foreign assembler would emit.
+BUSTER_GLOBAL_LOCAL ObjectFile compiler_driver_test_elf_object(Arena* arena, ByteSlice text, ObjectSymbol* symbols, u32 symbol_count,
+                                                               ObjectRelocation* relocations, u32 relocation_count)
+{
+    ObjectSection* sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
+    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+    {
+        sections[kind] = (ObjectSection){
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
+            .kind = (ObjectSectionKind)kind,
+            .alignment = object_section_default_alignment((ObjectSectionKind)kind),
+        };
+    }
+    sections[OBJECT_SECTION_TEXT].data = text;
+    return (ObjectFile){
+        .sections = sections,
+        .symbols = symbols,
+        .relocations = relocations,
+        .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        .section_count = OBJECT_SECTION_COUNT,
+        .symbol_count = symbol_count,
+        .relocation_count = relocation_count,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_object_write(Arena* arena, String8 path, ObjectFile* object)
+{
+    ObjectArtifact artifact = object_write(arena, object, OBJECT_FORMAT_ELF64);
+    bool result = artifact.error == OBJECT_ERROR_NONE;
+    if (result)
+    {
+        result = file_write(path, artifact.bytes);
+    }
+    return result;
+}
+
+// Initial-exec TLS in the MOV spelling GCC and Clang emit for `extern
+// __thread` (issue 2578): `mov reg, [rip + x@GOTTPOFF]` relaxes to
+// `mov reg, tpoff`, both for a hand-built object (which also exercises the
+// REX.B register) and for real GCC/Clang objects at -O2, -O0, -fno-pie and
+// -fPIC -ftls-model=initial-exec, linked fixed-address and PIE and run.  A
+// GOTTPOFF on an unrecognized instruction is still refused -- and the refusal
+// no longer blames -fPIC, since that relocation kind is already one
+// position-independent code emits.  An absolute relocation stays refused
+// WITH the hint.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_initial_exec_tls_mov_form(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 directory = buster_test_temporary_path(arena, S8("buster-initial-exec-tls-mov"), S8(""));
+    os_make_directory(directory);
+    String8 main_source = S8("__thread int tv = 41;\n"
+                             "int get(void);\n"
+                             "int main(void)\n"
+                             "{\n"
+                             "    return get() != 82;\n"
+                             "}\n");
+    String8 main_path = string_format_z(arena, S8("{S8}/main.c"), directory);
+    // mov rax,[rip+tv@GOTTPOFF]; mov eax,fs:[rax];
+    // mov r11,[rip+tv@GOTTPOFF]; add eax,fs:[r11]; ret -- returns 2*tv.
+    u8 get_text[22] = {
+        0x48, 0x8b, 0x05, 0x00, 0x00, 0x00, 0x00, 0x64, 0x8b, 0x00,
+        0x4c, 0x8b, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x64, 0x41, 0x03, 0x03, 0xc3,
+    };
+    ObjectSymbol mov_symbols[] = {
+        {.name = S8("get"), .section = OBJECT_SECTION_TEXT, .size = sizeof(get_text), .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("tv"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
+         .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES},
+    };
+    ObjectRelocation mov_relocations[] = {
+        {.addend = -4, .offset = 3, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_X86_64_GOTTPOFF},
+        {.addend = -4, .offset = 13, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_X86_64_GOTTPOFF},
+    };
+    ObjectFile mov_object = compiler_driver_test_elf_object(arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(get_text), mov_symbols,
+                                                          BUSTER_ARRAY_LENGTH(mov_symbols), mov_relocations, BUSTER_ARRAY_LENGTH(mov_relocations));
+    String8 mov_object_path = string_format_z(arena, S8("{S8}/mov.o"), directory);
+    BUSTER_TEST(arguments, file_write(main_path, BUSTER_SLICE_TO_BYTE_SLICE(main_source)) &&
+                               compiler_driver_test_elf_object_write(arena, mov_object_path, &mov_object));
+    for (u32 image = 0; image < 2; image += 1)
+    {
+        String8 program_path = string_format_z(arena, S8("{S8}/mov-{u32}"), directory, image);
+        String8 command[] = {S8("-g0"), image ? S8("-pie") : S8("-no-pie"), S8("-o"), program_path, main_path, mov_object_path};
+        CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("initial-exec MOV TLS link image {u32}: {S8}\n"), image, linked.diagnostic);
+        }
+        String8 output = {0};
+        BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE &&
+                                   compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output));
+    }
+    // The same relaxation against the objects the bug report came from.
+    String8 foreign_source = S8("extern __thread int tv;\n"
+                                "int get(void)\n"
+                                "{\n"
+                                "    return tv;\n"
+                                "}\n");
+    String8 foreign_main_source = S8("__thread int tv = 41;\n"
+                                     "int get(void);\n"
+                                     "int main(void)\n"
+                                     "{\n"
+                                     "    return get() != 41;\n"
+                                     "}\n");
+    String8 foreign_path = string_format_z(arena, S8("{S8}/foreign.c"), directory);
+    String8 foreign_main_path = string_format_z(arena, S8("{S8}/foreign-main.c"), directory);
+    BUSTER_TEST(arguments, file_write(foreign_path, BUSTER_SLICE_TO_BYTE_SLICE(foreign_source)) &&
+                               file_write(foreign_main_path, BUSTER_SLICE_TO_BYTE_SLICE(foreign_main_source)));
+    String8 compilers[] = {executable_resolve_in_path(arena, S8("gcc")), executable_resolve_in_path(arena, S8("clang"))};
+    String8 compiler_names[] = {S8("gcc"), S8("clang")};
+    String8 variants[][3] = {
+        {S8("-O2"), {0}, {0}},
+        {S8("-O0"), {0}, {0}},
+        {S8("-O2"), S8("-fno-pie"), {0}},
+        {S8("-O2"), S8("-fPIC"), S8("-ftls-model=initial-exec")},
+    };
+    u32 compiler_count = 0;
+    for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+    {
+        if (!compilers[compiler].length)
+        {
+            arguments->show(arguments, S8("initial-exec MOV TLS: {S8} not installed, skipped\n"), compiler_names[compiler]);
+            continue;
+        }
+        compiler_count += 1;
+        for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(variants); variant += 1)
+        {
+            String8 object_path = string_format_z(arena, S8("{S8}/foreign-{u32}-{u32}.o"), directory, compiler, variant);
+            String8 compile[8] = {0};
+            u32 compile_count = 0;
+            compile[compile_count++] = compilers[compiler];
+            for (u32 flag = 0; flag < 3 && variants[variant][flag].length; flag += 1)
+            {
+                compile[compile_count++] = variants[variant][flag];
+            }
+            compile[compile_count++] = S8("-c");
+            compile[compile_count++] = S8("-o");
+            compile[compile_count++] = object_path;
+            compile[compile_count++] = foreign_path;
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8){compile, compile_count}, (SliceString8){0}, (SliceString8){0},
+                                                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            bool compiled = spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST(arguments, compiled);
+            if (!compiled)
+            {
+                continue;
+            }
+            // The object must carry the MOV form this test is about.
+            FileMapRead object_map = file_map_read(arena, object_path, (FileReadOptions){0});
+            ObjectFile object = object_read(arena, object_map.bytes, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX});
+            u32 got_tp_offset_count = 0;
+            bool mov_form = true;
+            for (u32 index = 0; object.error == OBJECT_ERROR_NONE && index < object.relocation_count; index += 1)
+            {
+                ObjectRelocation* relocation = object.relocations + index;
+                if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF)
+                {
+                    got_tp_offset_count += 1;
+                    ByteSlice text = object.sections[relocation->section].data;
+                    mov_form = mov_form && relocation->offset >= 2 && relocation->offset <= text.length &&
+                               text.pointer[relocation->offset - 2] == 0x8b;
+                }
+            }
+            BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE && got_tp_offset_count != 0 && mov_form);
+            file_map_unmap(object_map);
+            for (u32 image = 0; image < 2; image += 1)
+            {
+                String8 program_path = string_format_z(arena, S8("{S8}/foreign-{u32}-{u32}-{u32}"), directory, compiler, variant, image);
+                String8 command[] = {S8("-g0"), image ? S8("-pie") : S8("-no-pie"), S8("-o"), program_path, foreign_main_path, object_path};
+                CompilerDriverResult linked = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    arguments->show(arguments, S8("initial-exec MOV TLS link {S8} variant {u32} image {u32}: {S8}\n"),
+                                    compiler_names[compiler], variant, image, linked.diagnostic);
+                }
+                String8 output = {0};
+                BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE &&
+                                           compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output));
+            }
+        }
+    }
+    BUSTER_TEST(arguments, compiler_count != 0);
+    // A GOTTPOFF on an instruction the recipe does not know stays refused,
+    // but without the -fPIC hint: recompiling cannot change a GOT kind.
+    // lea rax,[rip+tv@GOTTPOFF]; ret
+    u8 lea_text[8] = {0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00, 0xc3};
+    ObjectSymbol lea_symbols[] = {
+        {.name = S8("get"), .section = OBJECT_SECTION_TEXT, .size = sizeof(lea_text), .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("tv"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
+         .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES},
+    };
+    ObjectRelocation lea_relocations[] = {
+        {.addend = -4, .offset = 3, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_X86_64_GOTTPOFF},
+    };
+    ObjectFile lea_object = compiler_driver_test_elf_object(arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(lea_text), lea_symbols,
+                                                          BUSTER_ARRAY_LENGTH(lea_symbols), lea_relocations, BUSTER_ARRAY_LENGTH(lea_relocations));
+    String8 lea_object_path = string_format_z(arena, S8("{S8}/lea.o"), directory);
+    String8 lea_program_path = string_format_z(arena, S8("{S8}/lea"), directory);
+    BUSTER_TEST(arguments, compiler_driver_test_elf_object_write(arena, lea_object_path, &lea_object));
+    {
+        String8 command[] = {S8("-g0"), S8("-pie"), S8("-o"), lea_program_path, main_path, lea_object_path};
+        CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_LINK &&
+                                   string_first_sequence(linked.diagnostic, S8("relocation")) != BUSTER_STRING_NO_MATCH &&
+                                   string_first_sequence(linked.diagnostic, S8("-fPIC")) == BUSTER_STRING_NO_MATCH);
+    }
+    // An absolute address keeps the hint: that one really is a fixed-address
+    // object in a position-independent image.
+    // mov eax,[plain]; ret
+    u8 absolute_text[8] = {0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0xc3};
+    ObjectSymbol absolute_symbols[] = {
+        {.name = S8("get_plain"), .section = OBJECT_SECTION_TEXT, .size = sizeof(absolute_text), .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("plain"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+    };
+    ObjectRelocation absolute_relocations[] = {
+        {.offset = 3, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S},
+    };
+    ObjectFile absolute_object = compiler_driver_test_elf_object(arena, (ByteSlice)BUSTER_ARRAY_TO_SLICE(absolute_text), absolute_symbols,
+                                                                 BUSTER_ARRAY_LENGTH(absolute_symbols), absolute_relocations,
+                                                                 BUSTER_ARRAY_LENGTH(absolute_relocations));
+    String8 absolute_object_path = string_format_z(arena, S8("{S8}/absolute.o"), directory);
+    String8 absolute_program_path = string_format_z(arena, S8("{S8}/absolute"), directory);
+    String8 absolute_main_source = S8("int plain = 1;\n"
+                                      "int get_plain(void);\n"
+                                      "int main(void)\n"
+                                      "{\n"
+                                      "    return get_plain() != 1;\n"
+                                      "}\n");
+    String8 absolute_main_path = string_format_z(arena, S8("{S8}/absolute-main.c"), directory);
+    BUSTER_TEST(arguments, file_write(absolute_main_path, BUSTER_SLICE_TO_BYTE_SLICE(absolute_main_source)) &&
+                               compiler_driver_test_elf_object_write(arena, absolute_object_path, &absolute_object));
+    {
+        String8 command[] = {S8("-g0"), S8("-pie"), S8("-o"), absolute_program_path, absolute_main_path, absolute_object_path};
+        CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_LINK &&
+                                   string_first_sequence(linked.diagnostic, S8("relocation")) != BUSTER_STRING_NO_MATCH &&
+                                   string_first_sequence(linked.diagnostic, S8("-fPIC")) != BUSTER_STRING_NO_MATCH);
+    }
+    scratch_end(temporary);
+    return result;
+}
 #endif
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
@@ -18401,6 +18646,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_imported_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_position_independent_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_dynamic_tls);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_initial_exec_tls_mov_form);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_link_tls_sites);
 #endif
 

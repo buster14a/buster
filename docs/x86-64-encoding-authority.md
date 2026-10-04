@@ -47,7 +47,7 @@ not just function names containing `encode`.
 | `codegen.c:codegen_canonical_x64_thread_local_general_dynamic` | Migrated: raw 16-byte TLSGD sequence becomes a metadata-owned recipe. |
 | `machine_x86_64.c:MACHINE_X64_TLS_GENERAL_DYNAMIC`, via `machine_x64_emit_literal_bytes` | Migrated: same recipe; literal helper removed. |
 | `link.c:link_elf_relax_thread_local`, general-dynamic arm | Migrated: metadata-derived FS MOV + fixed-displacement LEA replacement. |
-| The same function, initial-exec arm | Migrated: metadata-derived ADD input/output forms, not manual REX/ModRM surgery. |
+| The same function, initial-exec arm | Migrated: metadata-derived input/output forms, not manual REX/ModRM surgery; #2578 added the foreign-object MOV spelling beside the ADD one. |
 | `link.c:link_forwarding_runtime_object` | Migrated in the [forwarding follow-up](x86-64-forwarding-authority.md): metadata-prepared XOR/JMP recipes; object ABI policy stays in the linker. |
 | `link.c:link_x86_relax_got_reference` | Migrated: bounded section adapter carrying the psABI spelling and addend; metadata derives and validates every conversion the psABI table names, and the patch each replacement takes. Was the MOV/LEA pair alone (#267) until #78 opened the rest. |
 | `assembly_unit.c:assembly_unit_directive_align` | Migrated: shared target-aware derived padding. Explicit source fill stays data; #228 partial AArch64-word policy is preserved. |
@@ -236,7 +236,7 @@ all of its consumers and opcode-changing relaxations use the same authority.
 ## 3. Implemented first family: ELF TLS address sequences
 
 The closed slice is the existing x86-64 general-dynamic address sequence and its
-local-exec replacement, plus the existing initial-exec ADD relaxation. Ordinary
+local-exec replacement, plus the existing initial-exec ADD and MOV relaxations (#2578). Ordinary
 MOV, LEA, ADD and CALL forms already use metadata in source assembly and both
 backends. This migration removes the four TLS-specific exceptions around them;
 it does not attempt to migrate every instruction bearing those mnemonics.
