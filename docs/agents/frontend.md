@@ -228,8 +228,9 @@ does not require a separator before another `=` merely for maximal munch.
 Registered `c_punctuator_separator_tests` uses fixed spelling/id expectations
 for joins and neighboring/digraph/comment controls. It checks exact stdout and
 file preprocessing output, re-lexes both against independent punctuator ids and
-ordinary preprocessing, and requires invalid separate-token expressions to
-remain invalid after an unmodified `.i` round trip. Hosted Linux x86-64 also
+ordinary preprocessing, and requires object compilation to reject invalid
+separate-token expressions after an unmodified `.i` round trip while preserving
+the output sentinel. Hosted Linux x86-64 also
 compiles and executes valid `%=` and `==` controls directly and through `.i`
 with both frontend forms and strict code-generation verification.
 

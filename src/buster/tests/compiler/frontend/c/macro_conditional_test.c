@@ -575,6 +575,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_punctuator_separator_tests(UnitTestArgument
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         String8 source_path = buster_test_temporary_path(temporary.arena, S8("punctuator-admission"), S8(".c"));
         String8 output_path = buster_test_temporary_path(temporary.arena, S8("punctuator-admission"), S8(".i"));
+        String8 object_path = buster_test_temporary_path(temporary.arena, S8("punctuator-admission"), S8(".o"));
+        String8 sentinel = S8("preserve invalid-source output");
         bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(invalid[index]));
         BUSTER_TEST(arguments, written);
         if (written)
@@ -587,11 +589,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_punctuator_separator_tests(UnitTestArgument
             {
                 for (u32 staged = 0; staged < 2; staged += 1)
                 {
-                    String8 check[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-std=c17"), staged ? output_path : source_path};
+                    BUSTER_TEST(arguments, file_write(object_path, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                    String8 check[] = {S8("-c"), S8("-nostdinc"), S8("-std=c17"), S8("-o"), object_path, staged ? output_path : source_path};
                     CompilerDriverResult checked = compiler_driver_execute_invocation(
                         temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(check)));
-                    BUSTER_TEST(arguments, checked.error == COMPILER_DRIVER_ERROR_PARSE || checked.error == COMPILER_DRIVER_ERROR_ANALYSIS ||
-                                           checked.error == COMPILER_DRIVER_ERROR_IR);
+                    String8 diagnostic = string_format(temporary.arena, S8("punctuator refusal case={u32} staged={u32} error={u32}: {S8}"),
+                                                       index, staged, (u32)checked.error, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_PARSE || checked.error == COMPILER_DRIVER_ERROR_ANALYSIS ||
+                                               checked.error == COMPILER_DRIVER_ERROR_IR, diagnostic);
+                    BUSTER_TEST(arguments, !checked.has_object);
+                    BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(temporary.arena, object_path, (FileReadOptions){0})), sentinel);
                 }
             }
         }
