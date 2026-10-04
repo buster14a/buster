@@ -1,0 +1,53 @@
+302-    BUILD_ARGUMENT_CONFIGURATION,
+303-    BUILD_ARGUMENT_CHECK_OPTIONAL_WARNINGS,
+304-    BUILD_ARGUMENT_DEVELOPER_TARGETS,
+305-    BUILD_ARGUMENT_FUZZ,
+306-    BUILD_ARGUMENT_INCLUDE_TESTS,
+307-    BUILD_ARGUMENT_INSTRUMENT,
+308-    BUILD_ARGUMENT_LIMIT,
+309-    BUILD_ARGUMENT_LINK_LIBC,
+310:    BUILD_ARGUMENT_LINKER,
+311-    BUILD_ARGUMENT_LTO,
+312-    BUILD_ARGUMENT_NO_CHECK_OPTIONAL_WARNINGS,
+313-    BUILD_ARGUMENT_NO_CI,
+314-    BUILD_ARGUMENT_NO_DEVELOPER_TARGETS,
+315-    BUILD_ARGUMENT_NO_FUZZ,
+316-    BUILD_ARGUMENT_NO_INCLUDE_TESTS,
+317-    BUILD_ARGUMENT_NO_INSTRUMENT,
+318-    BUILD_ARGUMENT_NO_LINK_LIBC,
+--
+348-    [BUILD_ARGUMENT_CONFIGURATION] = S8_INITIALIZER("--configuration"),
+349-    [BUILD_ARGUMENT_CHECK_OPTIONAL_WARNINGS] = S8_INITIALIZER("--check-optional-warnings"),
+350-    [BUILD_ARGUMENT_DEVELOPER_TARGETS] = S8_INITIALIZER("--developer-targets"),
+351-    [BUILD_ARGUMENT_FUZZ] = S8_INITIALIZER("--fuzz"),
+352-    [BUILD_ARGUMENT_INCLUDE_TESTS] = S8_INITIALIZER("--include-tests"),
+353-    [BUILD_ARGUMENT_INSTRUMENT] = S8_INITIALIZER("--instrument"),
+354-    [BUILD_ARGUMENT_LIMIT] = S8_INITIALIZER("--limit"),
+355-    [BUILD_ARGUMENT_LINK_LIBC] = S8_INITIALIZER("--link-libc"),
+356:    [BUILD_ARGUMENT_LINKER] = S8_INITIALIZER("--linker"),
+357-    [BUILD_ARGUMENT_LTO] = S8_INITIALIZER("--lto"),
+358-    [BUILD_ARGUMENT_NO_CHECK_OPTIONAL_WARNINGS] = S8_INITIALIZER("--no-check-optional-warnings"),
+359-    [BUILD_ARGUMENT_NO_CI] = S8_INITIALIZER("--no-ci"),
+360-    [BUILD_ARGUMENT_NO_DEVELOPER_TARGETS] = S8_INITIALIZER("--no-developer-targets"),
+361-    [BUILD_ARGUMENT_NO_FUZZ] = S8_INITIALIZER("--no-fuzz"),
+362-    [BUILD_ARGUMENT_NO_INCLUDE_TESTS] = S8_INITIALIZER("--no-include-tests"),
+363-    [BUILD_ARGUMENT_NO_INSTRUMENT] = S8_INITIALIZER("--no-instrument"),
+364-    [BUILD_ARGUMENT_NO_LINK_LIBC] = S8_INITIALIZER("--no-link-libc"),
+--
+41492-                string8_list_push(arena, &build_targets, value);
+41493-            }
+41494-            else
+41495-            {
+41496-                result = PROCESS_RESULT_FAILED;
+41497-            }
+41498-        }
+41499-        break;
+41500:        case BUILD_ARGUMENT_LINKER:
+41501-        {
+41502-            String8 value = {0};
+41503-            if (command == BUILD_COMMAND_GENERATE && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
+41504-            {
+41505-                generate.linker = value;
+41506-                generate.linker_set = true;
+41507-            }
+41508-            else
