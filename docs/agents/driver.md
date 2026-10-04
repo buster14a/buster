@@ -116,10 +116,15 @@ metadata tables, about 20 ms that used to land in input 0's `codegen` phase),
 and primes first-touch page faults: it commits and touches a pooled TU arena
 (`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
 reuses) and the calling thread's scratch arenas once per thread, plus the
-result arena when a single input compiles in it. No warm-up input is needed. Residual first-input effects are cache warmth only; on
-identical inputs input 0 stays within a small factor of a later copy, which
-`compiler_driver_test_input_metrics` bounds. Lane workers' own arenas are not
-primed.
+result arena when a single input compiles in it. No warm-up input is needed.
+`compiler_driver_test_input_metrics` observes the completed setup calls and
+the real serial input boundaries through a private, test-only calling-thread
+observer. It detects incomplete setup at an input start, setup during or after
+an input, and unbalanced intervals; malformed event streams check those
+negative cases. Correctness does not compare real-clock durations of tiny twin
+compilations: scheduling, source mapping and object publication can change
+their ratio independently of setup order. Phase timings remain diagnostic.
+Lane workers' own arenas are not primed or observed by this serial test seam.
 
 **Intervals.** Every per-input offset and the header's `wall_ns` count
 monotonic nanoseconds from one origin: `ide cc` takes it right after argument
