@@ -538,7 +538,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_punctuator_separator_tests(UnitTestArgument
                     String8 output = file_output ? BYTE_SLICE_TO_STRING(8, file_read(temporary.arena, output_path, (FileReadOptions){0})) : printed.output;
                     BUSTER_STRING_TEST(arguments, output, emitted[index].output);
                     CLexResult restored = c_lex(temporary.arena, output);
-                    BUSTER_TEST(arguments, restored.error_count == 0);
+                    BUSTER_TEST(arguments, restored.diagnostic_count == 0);
                     u32 token_index = 0;
                     for (u64 scan = 0; scan < restored.token_count; scan += 1)
                     {
