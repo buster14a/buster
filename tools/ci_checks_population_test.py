@@ -1,0 +1,590 @@
+#!/usr/bin/env python3
+"""Offline reader controls; synthetic timings are never campaign evidence."""
+import copy
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest import mock
+
+import ci_checks_population as population
+import ci_checks_qualification as qualification
+import github_ci_time as github
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CATALOGUE = ROOT / "docs/ci-checks-native-census-d69.json"
+
+
+def reference(root, name, value):
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+    return {"path": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def observed_platforms(catalogue, profile_index=0):
+    platforms = copy.deepcopy(catalogue["platforms"])
+    for platform in platforms.values():
+        platform["census"] = {row: copy.deepcopy(censuses[profile_index % len(censuses)])
+                              for row, censuses in platform["census"].items()}
+    return platforms
+
+
+class NativeCatalogueTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.catalogue = json.loads(CATALOGUE.read_text(encoding="utf-8"))
+
+    def observation(self, profile_index=0):
+        return {"platforms": observed_platforms(self.catalogue, profile_index)}
+
+    def variable_row(self, observation):
+        choices = [(platform, row) for platform, item in self.catalogue["platforms"].items()
+                   for row, censuses in item["census"].items() if len(censuses) > 1]
+        self.assertTrue(choices, "The authentic catalogue must retain the observed CPU variation")
+        platform, row = choices[0]
+        return observation["platforms"][platform]["census"][row]
+
+    def assert_refused(self, observation):
+        with self.assertRaises((ValueError, KeyError, TypeError)):
+            population.validate_census(observation, self.catalogue)
+
+    def test_all_complete_authentic_profile_censuses_are_admitted(self):
+        for index in (0, 1):
+            with self.subTest(profile_index=index):
+                population.validate_census(self.observation(index), self.catalogue)
+
+    def test_unknown_full_profile_is_not_inferred_from_assertion_totals(self):
+        for field in ("feature_words", "simd_512_base", "simd_512", "architecture", "feature_source"):
+            observation = self.observation()
+            profile = self.variable_row(observation)["native_host_profile"]
+            if field == "feature_words":
+                profile[field][0] ^= 1
+            elif field.startswith("simd_"):
+                profile[field] = not profile[field]
+            else:
+                profile[field] = "unknown"
+            with self.subTest(field=field):
+                self.assert_refused(observation)
+
+    def test_complete_row_module_and_assertion_obligations_are_exact(self):
+        for change in ("remove-row", "extra-row", "remove-module", "extra-module", "assertions", "passed",
+                       "failed", "status", "index", "inventory", "skipped_table_audits", "external"):
+            observation = self.observation()
+            platform = next(iter(observation["platforms"].values()))
+            census = next(iter(platform["census"].values()))
+            module_name = next(iter(census["modules"]))
+            module = census["modules"][module_name]
+            if change == "remove-row":
+                platform["census"].pop(next(iter(platform["census"])))
+            elif change == "extra-row":
+                platform["census"]["unexpected-row"] = copy.deepcopy(census)
+            elif change == "remove-module":
+                del census["modules"][module_name]
+            elif change == "extra-module":
+                census["modules"]["unexpected-module"] = copy.deepcopy(module)
+            elif change in ("assertions", "passed", "failed", "index"):
+                module[change] += 1
+            elif change == "status":
+                module[change] = "failure"
+            elif change == "inventory":
+                census[change] = census[change][:-1]
+            elif change == "skipped_table_audits":
+                census[change].append("unexpected-module")
+            else:
+                census[change] = {"unexpected": 1}
+            with self.subTest(change=change):
+                self.assert_refused(observation)
+
+    def test_platform_identity_and_selected_rows_remain_strict(self):
+        for field in ("identity", "selected", "platforms"):
+            observation = self.observation()
+            if field == "platforms":
+                observation["platforms"].pop(next(iter(observation["platforms"])))
+            else:
+                platform = next(iter(observation["platforms"].values()))
+                platform[field] = {} if field == "identity" else platform[field][:-1]
+            with self.subTest(field=field):
+                self.assert_refused(observation)
+
+    def test_profile_flags_and_assertion_census_require_exact_json_types(self):
+        for field in ("simd_512_base", "simd_512", "assertions", "index"):
+            observation = self.observation()
+            census = self.variable_row(observation)
+            if field.startswith("simd_"):
+                census["native_host_profile"][field] = int(census["native_host_profile"][field])
+            else:
+                module = next(iter(census["modules"].values()))
+                module[field] = float(module[field])
+            with self.subTest(field=field):
+                self.assert_refused(observation)
+
+
+class PopulationEpochTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.catalogue = json.loads(CATALOGUE.read_text(encoding="utf-8"))
+        self.origin = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        prepared = population.prepare(self.root / "declaration.json")
+        self.declaration = prepared["declaration"]
+        receipt = dict(id=123456, issue_url="https://api.github.com/repos/buster14a/buster/issues/2610",
+                       url="https://api.github.com/repos/buster14a/buster/issues/comments/123456",
+                       html_url="https://github.com/buster14a/buster/issues/2610#issuecomment-123456",
+                       body=prepared["publication_marker"], created_at=self.stamp(0), updated_at=self.stamp(0))
+        self.campaign = dict(schema=population.SCHEMA, declaration=self.declaration,
+                             publication=reference(self.root, "publication.json", receipt), attempts=[])
+        self.observations = {}
+        self.fixed_inventory = False
+        order = [population.VARIANTS[letter] for block in population.BLOCKS for letter in block]
+        for ordinal, variant in enumerate(order, 1):
+            run = self.run_fixture(ordinal, variant)
+            run_ref = reference(self.root, f"runs/{ordinal}.json", run)
+            sample_ref = reference(self.root, f"samples/{ordinal}.json",
+                                   dict(variant=variant, run=dict(run_ref, path="../" + run_ref["path"]), synthetic_id=ordinal))
+            self.campaign["attempts"].append(dict(ordinal=ordinal, run=run_ref, sample=sample_ref,
+                                                   intake_completed_at=self.stamp(ordinal * 2000 + 1100)))
+            self.observations[ordinal] = dict(variant=variant, run_id=run["id"], head_sha=run["head_sha"],
+                                             workflow_blob_sha=run["workflow_blob_sha"], conditions={"synthetic": "constant"},
+                                             platforms=observed_platforms(self.catalogue, ordinal % 2))
+        self.refresh_inventory()
+
+    def stamp(self, seconds):
+        return (self.origin + timedelta(seconds=seconds)).isoformat()
+
+    def run_fixture(self, ordinal, variant):
+        created = ordinal * 2000
+        elapsed = 850 if variant == "split-overlap" else 1000
+        names = list(github.combination_jobs("split" if variant == "split-overlap" else "combined"))
+        # Real upstream timestamp/inventory checks run on these synthetic API records.
+        # Native receipt/census replay is covered by the unchanged sample tests.
+        step_names = ("Combination matrix (Windows)", "Combination matrix (Linux, macOS)", "Install verified Zig",
+                      "Desktop result and reproduction", "Retain desktop logs", "Workflow tool regression tests",
+                      "Bootstrap wrapper regression tests", "Execution-mode matrix (Windows)", "Execution-mode matrix",
+                      "Native configuration differential matrix", "Test (iOS simulator)", "Test (Android)",
+                      "Validate every GitHub workflow", "Require every shard", "Verify every desktop partition exists",
+                      "Build compiler and boot both architectures in all allocators",
+                      "Exercise analyzer failure and coverage controls", "Compare reference analysis and aggregate all module shards")
+        jobs = []
+        for index, name in enumerate(names):
+            if variant == "split-overlap":
+                duration = 40 if index < 26 else 10
+            elif name == "Windows x86-64 checks":
+                duration = 100 if variant == "combined-overlap" else 90
+            else:
+                duration = 45 if variant == "combined-overlap" else 48
+            end = elapsed if name == "CI complete" else 10 + duration
+            jobs.append(dict(id=ordinal * 100 + index, name=name, run_attempt=1, status="completed", conclusion="success",
+                             labels=["synthetic"], created_at=self.stamp(created + 1),
+                             started_at=self.stamp(created + end - duration), completed_at=self.stamp(created + end),
+                             steps=[dict(name=step, status="completed", conclusion="success") for step in step_names]))
+        return dict(id=100000 + ordinal, path=".github/workflows/ci.yml", event="workflow_dispatch",
+                    head_branch=qualification.COHORT_BRANCHES[qualification.PROSPECTIVE_COHORT][variant],
+                    head_sha=self.catalogue["head_sha"], workflow_blob_sha=self.catalogue["workflow_blob_sha"],
+                    status="completed", conclusion="success", run_attempt=1, created_at=self.stamp(created), jobs=jobs)
+
+    def replace_record(self, retained_reference, change):
+        path = self.root / retained_reference["path"]
+        value = json.loads(path.read_text(encoding="utf-8"))
+        change(value)
+        refreshed = reference(self.root, str(path.relative_to(self.root)), value)
+        retained_reference.update(refreshed)
+
+    def change_declaration(self, change):
+        self.replace_record(self.campaign["declaration"], change)
+        self.replace_record(self.campaign["publication"],
+                            lambda receipt: receipt.update(body=population.marker(self.campaign["declaration"]["sha256"])))
+
+    def refresh_inventory(self, records=None):
+        if records is None:
+            fields = ("id", "head_sha", "head_branch", "created_at", "run_attempt", "status", "conclusion", "event", "path")
+            runs = [json.loads((self.root / attempt["run"]["path"]).read_text()) for attempt in self.campaign["attempts"]]
+            records = [{field: run[field] for field in fields} for run in runs]
+        pages = []
+        for index in range(max(1, (len(records) + 99) // 100)):
+            response = reference(self.root, f"inventory/page-{index + 1}.json",
+                                 dict(total_count=len(records), workflow_runs=records[index * 100:(index + 1) * 100]))
+            pages.append(dict(page=index + 1, response=dict(response, path="../" + response["path"])))
+        inventory = dict(schema="buster-ci-checks-dispatch-inventory-v1",
+                         endpoint="https://api.github.com/repos/buster14a/buster/actions/workflows/ci.yml/runs",
+                         event="workflow_dispatch", created_after=self.stamp(0), per_page=100,
+                         collected_at=self.stamp(80000), pages=pages)
+        self.campaign["dispatch_inventory"] = reference(self.root, "inventory/manifest.json", inventory)
+
+    def inventory_records(self):
+        value = json.loads((self.root / self.campaign["dispatch_inventory"]["path"]).read_text())
+        records = []
+        for page in value["pages"]:
+            path = (self.root / self.campaign["dispatch_inventory"]["path"]).parent / page["response"]["path"]
+            records.extend(json.loads(path.read_text())["workflow_runs"])
+        return records
+
+    def change_inventory_page(self, index, change):
+        manifest_path = self.root / self.campaign["dispatch_inventory"]["path"]
+        manifest = json.loads(manifest_path.read_text())
+        page_ref = manifest["pages"][index]["response"]
+        page_path = (manifest_path.parent / page_ref["path"]).resolve()
+        value = json.loads(page_path.read_text())
+        change(value)
+        updated = reference(self.root, str(page_path.relative_to(self.root)), value)
+        updated["path"] = "../" + updated["path"]
+        self.replace_record(self.campaign["dispatch_inventory"], lambda value: value["pages"][index].update(response=updated))
+
+    def unrelated_dispatches(self, count):
+        records = []
+        for index in range(count):
+            run = self.run_fixture(1, "combined-overlap")
+            fields = ("id", "head_sha", "head_branch", "created_at", "run_attempt", "status", "conclusion", "event", "path")
+            record = {field: run[field] for field in fields}
+            record.update(id=200000 + index, head_branch="unrelated-dispatch", created_at=self.stamp(1000 + index))
+            records.append(record)
+        return records
+
+    def report(self):
+        if not self.fixed_inventory:
+            self.refresh_inventory()
+        path = self.root / "campaign.json"
+        reference(self.root, path.name, self.campaign)
+        def observed(root, item, cohort_name):
+            self.assertEqual(cohort_name, qualification.PROSPECTIVE_COHORT)
+            return copy.deepcopy(self.observations[item["synthetic_id"]])
+        with mock.patch.object(qualification, "sample", side_effect=observed):
+            result = population.qualify(path)
+        return result
+
+    def assert_pending_error(self, report, stop_ordinal=None):
+        self.assertEqual(report["status"], "pending")
+        self.assertEqual(report["timing_status"], "pending")
+        self.assertFalse(report["performance_accepted"])
+        self.assertTrue(report["errors"])
+        if stop_ordinal is not None:
+            self.assertEqual(report["stop_ordinal"], stop_ordinal)
+
+    def test_prepare_freezes_exact_bindings_and_never_overwrites(self):
+        declaration, catalogue = population.read_declaration(self.root, self.declaration)
+        prepared = population.prepare(self.root / "second-declaration.json")
+        self.assertFalse(prepared["performance_accepted"])
+        self.assertFalse(prepared["sampling_authorized"])
+        self.assertEqual(declaration["reader_sha256"], population.reader_bindings())
+        self.assertEqual(declaration["catalogue"]["sha256"], population.digest(CATALOGUE))
+        self.assertEqual(catalogue, self.catalogue)
+        self.assertEqual(declaration["blocks"], ["CAB", "ACB", "CBA", "BAC", "BCA", "ABC", "ABC", "CBA", "ACB", "BCA", "BAC", "CAB"])
+        self.assertEqual(declaration["excluded_runs"], [37191738110, 37193669465])
+        frozen_digest = population.digest(self.root / "declaration.json")
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            population.prepare(self.root / "declaration.json")
+        self.assertEqual(population.digest(self.root / "declaration.json"), frozen_digest)
+
+    def test_complete_heterogeneous36_retains_profiles_and_exact_ratio_boundaries(self):
+        report = self.report()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["timing_status"], "accepted")
+        self.assertTrue(report["timing_contract_met"])
+        self.assertEqual(report["status"], "pending")
+        self.assertFalse(report["performance_accepted"])
+        self.assertEqual(len(report["samples"]), 36)
+        self.assertEqual(len(report["dispatches"]), 36)
+        self.assertEqual(report["issues"]["2119"]["time_ratio"], .90)
+        self.assertEqual(report["issues"]["2120"]["time_ratio"], .85)
+        self.assertTrue(all(issue["runner_seconds_ratio"] == 1.05 for issue in report["issues"].values()))
+        self.assertTrue(report["pending_reviews"])
+        heterogeneous = [rows for rows in report["native_populations"].values() if len(rows) > 1]
+        self.assertTrue(heterogeneous)
+        for profiles in report["native_populations"].values():
+            self.assertEqual(sum(sum(profile["variants"].values()) for profile in profiles), 36)
+
+    def test_each_timing_threshold_rejects_a_complete_campaign_above_boundary(self):
+        for variant, job_name in (("combined-all-builds", "Windows x86-64 checks"),
+                                  ("split-overlap", "CI complete"), ("split-overlap", "Workflow lint")):
+            saved = copy.deepcopy(self.campaign)
+            for attempt in self.campaign["attempts"]:
+                ordinal = attempt["ordinal"]
+                if self.observations[ordinal]["variant"] == variant:
+                    def change(run):
+                        job = next(job for job in run["jobs"] if job["name"] == job_name)
+                        finish = github.timestamp(job["completed_at"]) + timedelta(seconds=.1)
+                        job["completed_at"] = finish.isoformat()
+                    self.replace_record(attempt["run"], change)
+                    sample_ref = attempt["sample"]
+                    self.replace_record(sample_ref, lambda item: item["run"].update(sha256=attempt["run"]["sha256"]))
+            with self.subTest(variant=variant, job=job_name):
+                report = self.report()
+                self.assertEqual(report["errors"], [])
+                self.assertEqual(report["status"], "rejected")
+                self.assertEqual(report["timing_status"], "rejected")
+                self.assertFalse(report["performance_accepted"])
+            self.campaign = saved
+            # Restore bytes whose digest was changed by the control.
+            for attempt in self.campaign["attempts"]:
+                ordinal = attempt["ordinal"]
+                run = self.run_fixture(ordinal, self.observations[ordinal]["variant"])
+                attempt["run"] = reference(self.root, f"runs/{ordinal}.json", run)
+                attempt["sample"] = reference(self.root, f"samples/{ordinal}.json",
+                    dict(variant=self.observations[ordinal]["variant"], run=dict(attempt["run"], path=f"../runs/{ordinal}.json"), synthetic_id=ordinal))
+
+    def test_ratio_of_variant_medians_is_not_median_of_paired_ratios(self):
+        observations = []
+        for variant in qualification.VARIANTS:
+            for index in range(12):
+                windows = {"combined-overlap": 70 if index < 6 else 130,
+                           "combined-all-builds": 81 if index < 6 else 99,
+                           "split-overlap": 0}[variant]
+                timing = dict(elapsed_seconds=850 if variant == "split-overlap" else 1000,
+                              runner_seconds=1000 if variant == "combined-overlap" else 1050)
+                if variant != "split-overlap":
+                    timing["windows_checks_seconds"] = windows
+                observations.append(dict(variant=variant, timing=timing))
+        summary, issues = population.timing_verdict(observations)
+        self.assertEqual(summary["combined-overlap"]["windows_checks_seconds"]["median"], 100)
+        self.assertEqual(summary["combined-all-builds"]["windows_checks_seconds"]["median"], 90)
+        self.assertEqual(issues["2119"]["time_ratio"], .90)
+        self.assertGreater((81 / 70 + 99 / 130) / 2, .90)
+        self.assertEqual(issues["2119"]["timing_status"], "accepted")
+
+    def test35_sample_prefix_is_pending_and_preserves_every_observation(self):
+        self.campaign["attempts"].pop()
+        report = self.report()
+        self.assert_pending_error(report)
+        self.assertEqual(len(report["samples"]), 35)
+        self.assertEqual(len(report["dispatches"]), 35)
+        self.assertTrue(report["native_populations"])
+
+    def test_more_than36_dispatches_exceeds_frozen_budget(self):
+        extra = copy.deepcopy(self.campaign["attempts"][-1])
+        extra["ordinal"] = 37
+        self.campaign["attempts"].append(extra)
+        report = self.report()
+        self.assert_pending_error(report)
+        self.assertEqual(len(report["dispatches"]), 37)
+        self.assertEqual(report["samples"], [])
+
+    def test_exhaustive_inventory_rejects_omitted_failure_and_renumbered_successful_subset(self):
+        records = self.inventory_records()
+        records[7]["conclusion"] = "failure"
+        self.refresh_inventory(records)
+        self.fixed_inventory = True
+        self.campaign["attempts"].pop(7)
+        for ordinal, attempt in enumerate(self.campaign["attempts"], 1):
+            attempt["ordinal"] = ordinal
+        report = self.report()
+        self.assert_pending_error(report)
+        self.assertIn("actual dispatch history", report["errors"][0])
+        self.assertEqual(report["samples"], [])
+
+    def test_inventory_cannot_select36_from37_actual_campaign_dispatches(self):
+        records = self.inventory_records()
+        extra = copy.deepcopy(records[-1])
+        extra.update(id=100037, created_at=self.stamp(74000), conclusion="cancelled")
+        self.refresh_inventory(records + [extra])
+        self.fixed_inventory = True
+        report = self.report()
+        self.assert_pending_error(report)
+        self.assertIn("actual dispatch history", report["errors"][0])
+        self.assertEqual(report["samples"], [])
+
+    def test_every_inventory_metadata_field_must_match_retained_attempt(self):
+        records = self.inventory_records()
+        for field in ("head_sha", "head_branch", "run_attempt", "status", "conclusion", "created_at"):
+            altered = copy.deepcopy(records)
+            replacement = {"head_sha": "0" * 40, "head_branch": qualification.COHORT_BRANCHES[qualification.PROSPECTIVE_COHORT]["split-overlap"], "run_attempt": 2, "status": "in_progress",
+                           "conclusion": "failure", "created_at": self.stamp(4200)}[field]
+            altered[1][field] = replacement
+            self.refresh_inventory(altered)
+            self.fixed_inventory = True
+            with self.subTest(field=field):
+                report = self.report()
+                self.assert_pending_error(report)
+                self.assertIn("differs from retained attempt", report["errors"][0])
+
+    def test_complete_paginated_inventory_includes_other_refs_without_counting_them(self):
+        records = self.inventory_records()
+        self.refresh_inventory(records + self.unrelated_dispatches(105))
+        self.fixed_inventory = True
+        report = self.report()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["timing_status"], "accepted")
+        self.assertEqual(report["dispatch_inventory"]["api_runs"], 141)
+        self.assertEqual(report["dispatch_inventory"]["campaign_dispatches"], 36)
+        self.assertEqual(report["dispatch_inventory"]["complete_pages"], 2)
+
+    def test_incomplete_reordered_duplicate_and_unstable_api_pages_fail_closed(self):
+        records = self.inventory_records() + self.unrelated_dispatches(105)
+        for change in ("missing-page", "reordered-page", "duplicate-page", "truncated-page", "changed-total", "duplicate-run"):
+            self.refresh_inventory(records)
+            self.fixed_inventory = True
+            if change == "missing-page":
+                self.replace_record(self.campaign["dispatch_inventory"], lambda value: value["pages"].pop())
+            elif change == "reordered-page":
+                self.replace_record(self.campaign["dispatch_inventory"], lambda value: value["pages"].reverse())
+            elif change == "duplicate-page":
+                self.replace_record(self.campaign["dispatch_inventory"], lambda value: value["pages"].__setitem__(1, copy.deepcopy(value["pages"][0])))
+            elif change == "truncated-page":
+                self.change_inventory_page(0, lambda page: page["workflow_runs"].pop())
+            elif change == "changed-total":
+                self.change_inventory_page(1, lambda page: page.update(total_count=142))
+            else:
+                self.change_inventory_page(1, lambda page: page["workflow_runs"][0].update(id=records[0]["id"]))
+            with self.subTest(change=change):
+                report = self.report()
+                self.assert_pending_error(report)
+                self.assertEqual(report["samples"], [])
+
+    def test_inventory_capture_scope_limit_and_time_are_mandatory(self):
+        records = self.inventory_records()
+        for change in ("api-limit", "before-intake", "scope", "empty-pages", "outside-scope"):
+            self.refresh_inventory(records)
+            self.fixed_inventory = True
+            if change == "api-limit":
+                self.refresh_inventory(records + self.unrelated_dispatches(965))
+            elif change == "before-intake":
+                self.replace_record(self.campaign["dispatch_inventory"], lambda value: value.update(collected_at=self.stamp(73000)))
+            elif change == "scope":
+                self.replace_record(self.campaign["dispatch_inventory"], lambda value: value.update(created_after=self.stamp(1)))
+            elif change == "empty-pages":
+                self.replace_record(self.campaign["dispatch_inventory"], lambda value: value.update(pages=[]))
+            else:
+                self.change_inventory_page(0, lambda page: page["workflow_runs"][0].update(event="push"))
+            with self.subTest(change=change):
+                report = self.report()
+                self.assert_pending_error(report)
+                self.assertEqual(report["samples"], [])
+
+    def test_original_A1_B1_and_duplicate_runs_never_enter_replacement_epoch(self):
+        for run_id in (37191738110, 37193669465, 100001):
+            self.replace_record(self.campaign["attempts"][1]["run"], lambda run: run.update(id=run_id))
+            with self.subTest(run_id=run_id):
+                report = self.report()
+                self.assert_pending_error(report, None if run_id == 100001 else 2)
+                self.assertEqual(len(report["samples"]), 0 if run_id == 100001 else 1)
+
+    def test_missing_ordinal_or_wrong_variant_stops_at_first_invalid_slot(self):
+        for change in ("missing-ordinal", "duplicate-ordinal", "wrong-variant"):
+            saved = copy.deepcopy(self.campaign)
+            attempt = self.campaign["attempts"][1]
+            if change == "missing-ordinal":
+                del attempt["ordinal"]
+            elif change == "duplicate-ordinal":
+                attempt["ordinal"] = 1
+            else:
+                self.replace_record(attempt["run"], lambda run: run.update(head_branch=qualification.COHORT_BRANCHES[qualification.PROSPECTIVE_COHORT]["split-overlap"]))
+            with self.subTest(change=change):
+                report = self.report()
+                self.assert_pending_error(report, 2)
+            self.campaign = saved
+
+    def test_reruns_failures_and_cancellations_stop_before_later_dispatches(self):
+        for change in (dict(run_attempt=2), dict(conclusion="failure"), dict(conclusion="cancelled"),
+                       dict(status="in_progress", conclusion=None)):
+            self.replace_record(self.campaign["attempts"][7]["run"], lambda run: run.update({"run_attempt": 1, "status": "completed", "conclusion": "success", **change}))
+            with self.subTest(change=change):
+                report = self.report()
+                self.assert_pending_error(report, 8)
+                self.assertEqual(len(report["samples"]), 7)
+                self.assertEqual(report["dispatches_after_stop"], list(range(9, 37)))
+
+    def test_missing_intake_and_samples_cannot_be_replaced_by_later_successes(self):
+        for field in ("intake_completed_at", "sample"):
+            saved = self.campaign["attempts"][1][field]
+            self.campaign["attempts"][1][field] = None
+            with self.subTest(field=field):
+                report = self.report()
+                self.assert_pending_error(report, 2)
+                self.assertEqual(len(report["samples"]), 1)
+            self.campaign["attempts"][1][field] = saved
+
+    def test_overlap_and_late_archive_intake_block_next_dispatch(self):
+        for intake_seconds in (self.stamp(2849), self.stamp(4001)):
+            self.campaign["attempts"][0]["intake_completed_at"] = intake_seconds
+            with self.subTest(intake=intake_seconds):
+                report = self.report()
+                self.assert_pending_error(report, 1 if intake_seconds == self.stamp(2849) else 2)
+        self.campaign["attempts"][0]["intake_completed_at"] = self.stamp(3100)
+        self.replace_record(self.campaign["attempts"][1]["run"], lambda run: run.update(created_at=self.stamp(2849)))
+        self.assert_pending_error(self.report(), 2)
+
+    def test_metadata_tail_is_excluded_from_metric_but_not_chronology(self):
+        # Parser consistency control only: frozen workflow dependencies normally
+        # finish this metadata job before the required workloads.
+        run = self.run_fixture(1, "split-overlap")
+        run["jobs"].append(dict(id=199, name=github.MAIN_REUSE_JOB, run_attempt=1, status="completed", conclusion="success",
+                                created_at=self.stamp(2001), started_at=self.stamp(3400), completed_at=self.stamp(3500), steps=[]))
+        timing, end = population.job_timing(run, "split-overlap")
+        self.assertEqual(timing["elapsed_seconds"], 850)
+        self.assertEqual(timing["runner_seconds"], 1150)
+        self.assertEqual(end, github.timestamp(self.stamp(3500)))
+        self.campaign["attempts"][0]["run"] = reference(self.root, "runs/1.json", run)
+        self.assert_pending_error(self.report(), 1)
+
+    def test_declaration_receipt_must_precede_first_dispatch_and_remain_original(self):
+        for change in (dict(created_at=self.stamp(2000), updated_at=self.stamp(2000)),
+                       dict(created_at=self.stamp(2001), updated_at=self.stamp(2001)),
+                       dict(created_at=self.stamp(0), updated_at=self.stamp(1)),
+                       dict(issue_url="https://api.github.com/repos/buster14a/buster/issues/2120"),
+                       dict(body="CI_CHECKS_POPULATION_DECLARATION_V1 sha256=" + "0" * 64)):
+            saved = copy.deepcopy(self.campaign["publication"])
+            original = json.loads((self.root / saved["path"]).read_text())
+            self.replace_record(self.campaign["publication"], lambda receipt: receipt.update(change))
+            with self.subTest(change=change):
+                self.assert_pending_error(self.report())
+            self.campaign["publication"] = reference(self.root, saved["path"], original)
+
+    def test_publication_marker_must_be_unique_and_original_retained_bytes_match_digest(self):
+        receipt_ref = self.campaign["publication"]
+        self.replace_record(receipt_ref, lambda receipt: receipt.update(body=receipt["body"] + "\n" + receipt["body"]))
+        self.assert_pending_error(self.report())
+        self.replace_record(receipt_ref, lambda receipt: receipt.update(body=receipt["body"].splitlines()[0]))
+        path = self.root / receipt_ref["path"]
+        path.write_text(path.read_text() + " ", encoding="utf-8")
+        report = self.report()
+        self.assert_pending_error(report)
+        self.assertIn("digest mismatch", report["errors"][0])
+
+    def test_declaration_source_tree_workflow_producer_catalogue_reader_pins_are_enforced(self):
+        for field in ("head_sha", "workflow_blob_sha", "source_tree", "producer_blobs", "reader_sha256", "catalogue", "blocks", "seed", "excluded_runs"):
+            original = json.loads((self.root / self.campaign["declaration"]["path"]).read_text())
+            def change(declaration):
+                if field in ("head_sha", "workflow_blob_sha"):
+                    declaration["cohort"][field] = "0" * 40
+                elif field in ("producer_blobs", "reader_sha256"):
+                    key = next(iter(declaration[field]))
+                    declaration[field][key] = "0" * len(declaration[field][key])
+                elif field == "catalogue":
+                    declaration[field]["sha256"] = "0" * 64
+                elif field == "blocks":
+                    declaration[field].reverse()
+                elif field == "excluded_runs":
+                    declaration[field] = []
+                else:
+                    declaration[field] = "0" * len(declaration[field])
+            self.change_declaration(change)
+            with self.subTest(field=field):
+                self.assert_pending_error(self.report())
+            self.change_declaration(lambda declaration: (declaration.clear(), declaration.update(original)))
+
+    def test_every_sample_is_bound_to_run_source_workflow_and_conditions(self):
+        for field in ("run_id", "head_sha", "workflow_blob_sha", "conditions"):
+            original = copy.deepcopy(self.observations[8])
+            self.observations[8][field] = 999999 if field == "run_id" else {"changed": True} if field == "conditions" else "0" * 40
+            with self.subTest(field=field):
+                self.assert_pending_error(self.report(), 8)
+            self.observations[8] = original
+
+    def test_unknown_profile_stops_epoch_and_retains_full_observed_census(self):
+        observation = self.observations[1]
+        platform = next(iter(observation["platforms"].values()))
+        census = next(iter(platform["census"].values()))
+        census["native_host_profile"]["feature_words"][0] ^= 1
+        report = self.report()
+        self.assert_pending_error(report, 1)
+        self.assertEqual(len(report["samples"]), 1)
+        self.assertEqual(report["samples"][0]["platforms"], observation["platforms"])
+        self.assertTrue(report["native_populations"])
+        self.assertEqual(report["dispatches_after_stop"], list(range(2, 37)))
+
+
+if __name__ == "__main__":
+    unittest.main()

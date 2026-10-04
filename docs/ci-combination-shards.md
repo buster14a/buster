@@ -276,6 +276,14 @@ four-CPU budget; builds may still overlap a test phase, which the
 
 ## Further checks partition qualification (#2120)
 
+The historical exact-nine contract below remains unchanged. The explicitly
+approved replacement for standard-hosted native-profile variation is the
+[prospective population comparison](ci-checks-population.md), owned by #2610.
+Its separate reader retains complete per-profile assertion obligations and
+requires a frozen declaration, exhaustive dispatch history and population/
+operational disposition; it does not reinterpret historical samples or
+establish performance acceptance by itself.
+
 Partition version 2 assigns every original policy row to one of four owners:
 `release` (unsanitized optimized Clang), `sanitized-debug`, `sanitized-release`,
 and `portability`. `checks` selects the union of the three non-Release owners;

@@ -80,6 +80,8 @@ jobs:
           python3 -B tools/ci_unit_tests_measure_test.py -v
           python3 -B tools/ci_unit_tests_campaign_test.py -v
           python3 -B tools/ci_checks_qualification_test.py -v
+          python3 -B tools/ci_checks_population_test.py -v
+          python3 -B tools/ci_checks_dispatch_inventory_test.py -v
           python3 -B tools/ci_checks_sample_test.py -v
           python3 -B tools/ci_checks_tools_test.py -v
           python3 -B tools/ci_job_environment_test.py -v
