@@ -80,9 +80,12 @@ jobs:
           lscpu >> "$evidence/host.txt"
           free -h >> "$evidence/host.txt"
           nproc >> "$evidence/host.txt"
-          cat /proc/self/status /proc/loadavg /sys/fs/cgroup/cpu.max >> "$evidence/host.txt"
+          cat /proc/self/status /proc/loadavg /proc/self/cgroup >> "$evidence/host.txt"
+          for limit in /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu/cpu.cfs_quota_us /sys/fs/cgroup/cpu/cpu.cfs_period_us; do
+            if test -f "$limit"; then echo "$limit" >> "$evidence/host.txt"; cat "$limit" >> "$evidence/host.txt"; fi
+          done
           cat /etc/os-release >> "$evidence/host.txt"
-          ps -eo pid,pcpu,pmem,comm --sort=-pcpu | head -n 20 >> "$evidence/host.txt"
+          ps -eo pid,pcpu,pmem,comm --sort=-pcpu | sed -n '1,20p' >> "$evidence/host.txt"
           df -T . >> "$evidence/host.txt"
           clang --version > "$evidence/toolchains.txt"
           gcc --version >> "$evidence/toolchains.txt"
@@ -116,11 +119,11 @@ jobs:
             for file in summary.csv original-summary.csv build-link-share.csv negative-selection-status.txt cold-cache-status.txt completion.txt; do
               test ! -f "$root/$file" || { echo "$file"; cat "$root/$file"; }
             done
-            rg -l 'Verifying|DIEs have overlapping|error:|warning:|Breakpoint 1,|#0 ' "$root" --glob '*.log' | while IFS= read -r file; do
+            if rg -l 'Verifying|DIEs have overlapping|error:|warning:|Breakpoint 1,|#0 ' "$root" --glob '*.log' | while IFS= read -r file; do
               echo "$file"
               head -n 12 "$file"
               tail -n 15 "$file"
-            done
+            done; then :; else test "$?" -eq 1; fi
           done
       - name: Retain compact reviewable evidence
         if: ${{ always() }}
