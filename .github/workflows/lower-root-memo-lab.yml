@@ -7,21 +7,27 @@ name: Lower root-memo lab (temporary, #1700)
 # counts operations and checks output identity, and interleave_pairs.py times
 # the plain compilers on SQLite 3.53.4 and the pinned unity unit.
 on:
-  workflow_dispatch:
-    inputs:
-      baseline_ref:
-        description: Baseline commit
-        default: 94976eccad9c31776cf264a33dcda960dd8ed51a
-        required: true
-        type: string
-      pairs:
-        description: Measured timing pairs per workload
-        default: '12'
-        required: true
-        type: string
+  push:
+    branches:
+      - devin/1700-lowering-scan-census
+  pull_request:
+    paths:
+      - '.github/workflows/lower-root-memo-lab.yml'
+      - 'src/buster/lib/compiler/frontend/c/**'
+      - 'src/buster/lib/compiler/work_ledger.h'
+      - 'tools/work_ledger/**'
+      - 'docs/performance-audits/evidence/2026-10-04T114428Z/interleave_pairs.py'
 
 permissions:
   contents: read
+
+concurrency:
+  group: lower-root-memo-lab-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BASELINE_REF: 94976eccad9c31776cf264a33dcda960dd8ed51a
+  TIMING_PAIRS: '12'
 
 jobs:
   lab:
@@ -31,12 +37,12 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ inputs.baseline_ref }}
+          ref: ${{ env.BASELINE_REF }}
           path: baseline
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
           persist-credentials: false
       - name: Record identities
