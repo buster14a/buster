@@ -29,6 +29,8 @@
 //   c_source_metrics_file_row                  the per-file attribution rows
 //   c_ucn_decode, c_ucn_identifier_allowed      dialect-owned identifier escapes
 //   c_lex_validate_word_utf8                   bounded word encoding checks
+//   c_punctuator_canonical                     digraph meaning at emission,
+//                                              preserving physical spellings
 //   c_lex_scan_one, c_lex_scalar               the scalar lexer
 //   c_lex_compact_tables_build,                the SIMD lexer (Validark
 //   c_lex_compact                              method, AGENTS.md): one
@@ -71,7 +73,8 @@
 //   c_preprocess_pragma_*,                     pragmas: once, pack, push/pop
 //   c_preprocess_expansion_pragma              macro effects at the rescan cursor
 //   c_include_read .. c_include_name           include resolution and the
-//                                              builtin resource headers
+//                                              builtin resource headers,
+//                                              including stddef request guards
 //   CIncludeGuardState, CIncludeFileTable      shared #import, #pragma once,
 //                                              and #ifndef guard identity
 //   c_preprocess_command_operations,           ordered command-line macro
@@ -1981,6 +1984,24 @@ BUSTER_C_INTERNAL u16 c_token_push_long_length(CTranslatedSource translated, u64
     return exact ? C_TOKEN_LENGTH_OVERSIZED : C_TOKEN_LENGTH_OVERSIZED - 1;
 }
 
+// Spelling ids drive maximal munch; published token ids drive C semantics.
+// Offsets and lengths retain the original spelling for #, ## and -E.
+BUSTER_C_INTERNAL CPunctuator c_punctuator_canonical(CPunctuator punctuator)
+{
+    CPunctuator result;
+    switch (punctuator)
+    {
+    case C_PUNCTUATOR_LEFT_BRACKET_DIGRAPH: result = C_PUNCTUATOR_LEFT_BRACKET; break;
+    case C_PUNCTUATOR_RIGHT_BRACKET_DIGRAPH: result = C_PUNCTUATOR_RIGHT_BRACKET; break;
+    case C_PUNCTUATOR_LEFT_BRACE_DIGRAPH: result = C_PUNCTUATOR_LEFT_BRACE; break;
+    case C_PUNCTUATOR_RIGHT_BRACE_DIGRAPH: result = C_PUNCTUATOR_RIGHT_BRACE; break;
+    case C_PUNCTUATOR_HASH_DIGRAPH: result = C_PUNCTUATOR_HASH; break;
+    case C_PUNCTUATOR_HASH_HASH_DIGRAPH: result = C_PUNCTUATOR_HASH_HASH; break;
+    default: result = punctuator; break;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL void c_token_push(CLexResult* result, CTranslatedSource translated, u64 start, u64 end, CTokenKind kind, CPunctuator punctuator)
 {
     u64 length = end - start;
@@ -2129,7 +2150,7 @@ BUSTER_C_INTERNAL u64 c_punctuator_length(String8 source, u64 offset, CPunctuato
             }
             if (match)
             {
-                *punctuator_out = (CPunctuator)punctuator_index;
+                *punctuator_out = c_punctuator_canonical((CPunctuator)punctuator_index);
                 return punctuator.length;
             }
         }
@@ -2866,7 +2887,7 @@ BUSTER_C_INTERNAL void c_lex_compact_tables_build(void)
                 c_lex_pair_column[second] = (u8)column_count++;
             }
             BUSTER_CHECK(row_count <= C_LEX_PAIR_TABLE_SIZE && column_count <= C_LEX_PAIR_TABLE_SIZE);
-            c_lex_pair_punctuators[c_lex_pair_row[first]][c_lex_pair_column[second]] = (u8)index;
+            c_lex_pair_punctuators[c_lex_pair_row[first]][c_lex_pair_column[second]] = (u8)c_punctuator_canonical((CPunctuator)index);
         }
         else if (spelling.length == 3)
         {
@@ -3325,7 +3346,7 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
             __m512i triple_ids = _mm512_maskz_permutex2var_epi8((__mmask64)punctuator3, triple_low, chunk0, triple_high);
             punctuator_vector = _mm512_mask_mov_epi8(punctuator_vector, (__mmask64)punctuator2, pair_ids);
             punctuator_vector = _mm512_mask_mov_epi8(punctuator_vector, (__mmask64)punctuator3, triple_ids);
-            punctuator_vector = _mm512_mask_set1_epi8(punctuator_vector, (__mmask64)punctuator4, (char)C_PUNCTUATOR_HASH_HASH_DIGRAPH);
+            punctuator_vector = _mm512_mask_set1_epi8(punctuator_vector, (__mmask64)punctuator4, (char)C_PUNCTUATOR_HASH_HASH);
         }
 
         // Nothing left over may reach the emitter: a byte that is neither a
@@ -3627,7 +3648,7 @@ u64 c_test_lex_punctuator_nfa_mismatches(void)
                     bool is_three = (triple & C_LEX_NFA_ELLIPSIS) != 0 || ((triple & C_LEX_NFA_SHIFT_ASSIGN) != 0 && repeated);
                     bool is_two = (pair & C_LEX_NFA_PAIR_CHANNELS) != 0 || ((pair & C_LEX_NFA_DOUBLE) != 0 && repeated);
                     u64 emitted_length = is_four ? 4 : is_three ? 3 : is_two ? 2 : 1;
-                    u8 emitted_punctuator = (u8)C_PUNCTUATOR_HASH_HASH_DIGRAPH;
+                    u8 emitted_punctuator = (u8)C_PUNCTUATOR_HASH_HASH;
                     if (emitted_length == 3)
                     {
                         emitted_punctuator = c_lex_triple_punctuators[first];
@@ -4775,17 +4796,16 @@ BUSTER_C_INTERNAL bool c_token_identifier_is_literal_prefix(String8 spelling)
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 current)
+BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 previous_spelling, String8 current)
 {
     char8 first = current.length ? current.pointer[0] : 0;
     bool result = false;
     switch ((CPunctuator)previous.punctuator)
     {
-    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
-    case C_PUNCTUATOR_HASH_DIGRAPH: result = first == '%'; break;
+    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>' || first == '='; break;
     case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
     case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
-    case C_PUNCTUATOR_EQUAL:
+    case C_PUNCTUATOR_ASSIGN:
     case C_PUNCTUATOR_EXCLAMATION:
     case C_PUNCTUATOR_STAR:
     case C_PUNCTUATOR_CARET: result = first == '='; break;
@@ -4794,7 +4814,7 @@ BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 current
     case C_PUNCTUATOR_SLASH: result = first == '/' || first == '*' || first == '='; break;
     case C_PUNCTUATOR_PLUS: result = first == '+' || first == '='; break;
     case C_PUNCTUATOR_MINUS: result = first == '-' || first == '>' || first == '='; break;
-    case C_PUNCTUATOR_HASH: result = first == '#'; break;
+    case C_PUNCTUATOR_HASH: result = previous_spelling.length == 2 ? first == '%' : first == '#'; break;
     case C_PUNCTUATOR_COLON: result = first == '>'; break;
     case C_PUNCTUATOR_DOT: result = first == '.'; break;
     case C_PUNCTUATOR_SHIFT_LEFT:
@@ -4834,7 +4854,7 @@ bool c_token_requires_separator(CToken previous, String8 previous_spelling, CTok
     {
         result = (previous.punctuator == C_PUNCTUATOR_DOT && current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length &&
                   current_spelling.pointer[0] != '.') ||
-                 (current.kind == C_TOKEN_PUNCTUATOR && c_token_punctuators_join(previous, current_spelling));
+                 (current.kind == C_TOKEN_PUNCTUATOR && c_token_punctuators_join(previous, previous_spelling, current_spelling));
     }
     return result;
 }
@@ -8723,18 +8743,40 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
     }
     else if (string_equal(name, S8("stddef.h")))
     {
-        source = S8("#ifndef __BUSTER_PTRDIFF_T\n"
+        // Partial resource-header requests must not claim unrelated names.
+        // Each definition has its own guard so later full includes complete it.
+        source = S8("#if !defined(__need_ptrdiff_t) && !defined(__need_size_t) && "
+                    "!defined(__need_rsize_t) && !defined(__need_wchar_t) && "
+                    "!defined(__need_NULL) && !defined(__need_max_align_t) && "
+                    "!defined(__need_offsetof) && !defined(__need_nullptr_t)\n"
+                    "#define __BUSTER_STDDEF_ALL\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_ptrdiff_t)\n"
+                    "#ifndef __BUSTER_PTRDIFF_T\n"
                     "#define __BUSTER_PTRDIFF_T\n"
                     "typedef __PTRDIFF_TYPE__ ptrdiff_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_size_t)\n"
                     "#ifndef __BUSTER_SIZE_T\n"
                     "#define __BUSTER_SIZE_T\n"
                     "typedef __SIZE_TYPE__ size_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__need_rsize_t) || (defined(__BUSTER_STDDEF_ALL) && "
+                    "defined(__STDC_WANT_LIB_EXT1__) && __STDC_WANT_LIB_EXT1__ >= 1)\n"
+                    "#ifndef __BUSTER_RSIZE_T\n"
+                    "#define __BUSTER_RSIZE_T\n"
+                    "typedef __SIZE_TYPE__ rsize_t;\n"
+                    "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_wchar_t)\n"
                     "#ifndef __BUSTER_WCHAR_T\n"
                     "#define __BUSTER_WCHAR_T\n"
                     "typedef __WCHAR_TYPE__ wchar_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_max_align_t)\n"
                     "#ifndef __BUSTER_MAX_ALIGN_T\n"
                     "#define __BUSTER_MAX_ALIGN_T\n"
                     "typedef union {\n"
@@ -8742,21 +8784,32 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
                     "    long double real;\n"
                     "} max_align_t;\n"
                     "#endif\n"
-                    "#if __STDC_VERSION__ >= 202311L\n"
+                    "#endif\n"
+                    "#if __STDC_VERSION__ >= 202311L && "
+                    "(defined(__BUSTER_STDDEF_ALL) || defined(__need_nullptr_t))\n"
+                    "#ifndef __BUSTER_NULLPTR_T\n"
+                    "#define __BUSTER_NULLPTR_T\n"
                     "typedef typeof(nullptr) nullptr_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_NULL)\n"
                     "#ifndef NULL\n"
                     "#define NULL ((void *)0)\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_offsetof)\n"
                     "#define offsetof(type, member) "
                     "__builtin_offsetof(type, member)\n"
+                    "#endif\n"
+                    "#undef __BUSTER_STDDEF_ALL\n"
                     "#undef __need_ptrdiff_t\n"
                     "#undef __need_size_t\n"
                     "#undef __need_rsize_t\n"
                     "#undef __need_wchar_t\n"
                     "#undef __need_NULL\n"
                     "#undef __need_max_align_t\n"
-                    "#undef __need_offsetof\n");
+                    "#undef __need_offsetof\n"
+                    "#undef __need_nullptr_t\n");
     }
     else if (string_equal(name, S8("limits.h")))
     {

@@ -38,9 +38,11 @@ The native MIR selectors and direct emitters form matching selector/key images
 at the existing SWITCH boundary. Their 32/64-bit machine comparisons clear any
 extension beyond a narrower semantic width; 32-bit selectors compare at
 32 bits, and 64-bit selectors preserve the full image. Source keys and targets
-remain unchanged. LLVM's typed case constants and eBPF's existing image
-normalization use the same equality. Remaining Wasm normalization and runtime
-verification are tracked in [#2385](https://github.com/buster14a/buster/issues/2385).
+remain unchanged. LLVM's typed case constants, eBPF's image normalization and
+the direct Wasm emitter use the same equality. Wasm compares zero-extended
+selector-width images in its existing i32/i64 carrier, masking raw keys at
+the SWITCH boundary independently of signedness
+([#2385](https://github.com/buster14a/buster/issues/2385)).
 
 Registered `codegen_test_canonical_switch_key_images` redirects a lowered C
 SWITCH to its original typed ARGUMENT, bypassing C's integer promotion. It
@@ -50,6 +52,24 @@ cover singleton aliases, low/full-width all-ones keys, positive/default controls
 and a distinct high 64-bit key. Unsanitized desktop runs call the emitted
 function through a matching host C signature and check integer bit-vector
 expectations; sanitizer/mobile runs retain validation and emission controls.
+
+### Direct Wasm SWITCH execution
+
+Registered `compiler_driver_test_wasm_switch_images` commits typed ARGUMENT and
+SWITCH rows directly, preserving narrow types without C integer promotions.
+Signed/unsigned 8/16/32/64-bit functions cover raw singleton aliases,
+low/full-width all-ones keys, multiple distinct cases, shared destinations and
+the final default. The 64-bit control distinguishes 7 from `0x100000007`.
+Canonical preparation validates the module before emission; snapshots require
+the source selector, raw keys and target order to remain unchanged.
+
+Each Wasm32/Wasm64 module is emitted twice and must be byte-identical. An inline
+Node oracle uses independent BigInt bit-vector equality, thirteen literal
+expectations, exhaustive 8-bit inputs, wider boundaries, signed images and dirty
+carrier bits. Each pointer-width run requires 8,845 export calls. The existing
+bounded Node runner requires a normal zero exit, empty stderr and the exact
+terminal summary. SHA-256 and before/after file comparisons bind execution to
+the compiler's original bytes. Missing Node reports an execution skip.
 
 ## Scalar binary operation families
 
@@ -64,6 +84,49 @@ vector operations retain their separate rules.
 all 33 scalar arithmetic/comparison operations with matching and wrong-family
 operands. It pins `IR_VALIDATION_OPERATION` at the binary row for every
 wrong-family case and preserves Boolean, pointer and vector controls.
+
+## Label provenance validation work
+
+Global label-address relocations resolve their function owner through a lazy,
+module-local scratch index. The first lookup indexes each function once and
+subsequent lookups use a half-full hash table. Duplicate symbol ownership keeps
+the first function in module order, including its lowered-state check. Modules
+without label relocations allocate no owner index. Symbol kind/definition,
+block bounds, addends, initializer extents and relocation overlap remain
+independent rejection conditions (#2444).
+
+Label sets and provenance paths retain their caller-supplied order. Validation
+borrows ordered arrays and constructs immutable radix-sorted scratch views for
+larger unordered arrays; sets of at most eight IDs use bounded small-set work.
+Uniqueness checks adjacent IDs, set relations merge sorted views, and shape
+validation uses indexed membership plus coverage marks sized to the aggregate
+set rather than the function's entire block universe. The complete value check
+reuses its shape proof instead of recomputing uniqueness (#2445).
+Each path's temporary block sort rewinds after updating coverage, so resident
+scratch is bounded by the aggregate set, the largest path set and the path-order
+view even when many paths share one unordered block array. The cumulative
+requested-byte counter still counts those repeated temporary copies.
+
+Path shape validation checks adjacent intervals in offset order after proving
+their extents cannot overflow. Exact subrange transfer walks sorted source and
+result views together, translating offsets and preserving size, label sets and
+non-label flags. Missing and extra result paths both fail; touching intervals
+remain disjoint (#2446). These views live only for their validation call and
+never certify future mutations or replace the strict canonical-input boundary.
+
+Transfer and standalone parameter-provenance checks first require backing for
+their nonempty block/path arrays, including nested path block sets and every
+aggregate/incoming operand. Malformed metadata therefore refuses before a
+provenance query can traverse it; this is a backing check rather than another
+complete shape or uniqueness proof (#2480).
+
+The optional allocation-diagnostic counters report actual element visits,
+membership/hash probes and requested scratch bytes for these mechanisms.
+Fixed radix-bucket setup, memory copies and allocator overhead are not counted
+as element comparisons. Geometric registered regressions constrain the work
+and compare independent malformed-input expectations. Whole-compiler timing
+and hosted noise are reported separately; a better scaling bound is not an
+end-to-end throughput measurement.
 
 ## A certificate describes one input
 

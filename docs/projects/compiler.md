@@ -27,6 +27,24 @@ The target/ABI/mode and limitations in each detailed contract remain decisive.
 External GPU tool orchestration is not direct C-to-GPU code generation, and a
 produced object is not executed-semantics evidence.
 
+## JIT runtime admission
+
+The reusable [object JIT](../../src/buster/lib/compiler/jit/jit.h) links
+host-native text/data with explicit host bindings. It has no initializer or
+finalizer execution protocol, so a nonempty INIT_ARRAY or FINI_ARRAY returns
+`JIT_ERROR_INIT_FINI_UNSUPPORTED` before scratch/image allocation. Section size
+includes both stored bytes and virtual extent. Zero-size arrays without
+relocations remain inert placeholders; relocations in an empty array are
+invalid input, while ordinary debug-only relocations remain ignored.
+
+Registered `jit_tests` check direct and serialized native-format objects with
+legitimate function-pointer entries, malformed relocation controls, zero-size
+placeholders and normal text/data symbol lookup. The trusted hot-reload
+consumer independently refuses constructor/destructor-bearing modules through
+its existing module-state policy; its lifecycle self-test covers both cases.
+Linking and releasing a JIT mapping do not execute runtime initialization or
+finalization.
+
 ## Validation and work
 
 Use the existing [test/CI guide](../agents/testing.md), focused regression cases

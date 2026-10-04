@@ -120,6 +120,26 @@ failure, compare live descriptor/handle counts, exercise an unrelated
 inheritable object, an exact hostile-PATH environment, and a subprocess that
 closes descriptors 0-2 before spawning with capture.
 
+Linux process-group cleanup reads `self/status` from its retained procfs
+descriptor. `NSpid` lists the procfs mount's namespace followed by successively
+nested namespaces; the final coordinate is the caller's active namespace and
+must equal `getpid()`. Numeric IDs may repeat across levels. Context selection
+uses that ordered coordinate, retains the procfs and PID-namespace identities,
+and rejects missing/malformed/duplicate fields or a mismatching final ID. Leader
+identity checks, exact-child reservations and the two matching census snapshots
+remain required before successful cleanup.
+
+Registered Linux `os_tests` exercise the production raw-status context selection
+with unique/repeated IDs, nonfinal-only matches, invalid identity prerequisites,
+zero/negative/mismatching current IDs and malformed fields. A real procfs context
+open/close control checks descriptor release; the exited private-group control
+uses a three-second deadline. These fixtures do not create nested PID namespaces
+or claim attribution for unrelated historical process-group failures. The field
+ordering follows the Linux man-pages project's
+[`proc_pid_status(5)`](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html)
+and namespace-local numbering follows
+[`pid_namespaces(7)`](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
+
 ## Deterministic captured-pipe replay
 
 Ordinary POSIX `os_process_wait_deadline` drains the blocking pipes created by
@@ -228,6 +248,26 @@ intact, and a real commit failure is reported without an advisory request
 having been made — none of which needs privileges or real memory exhaustion.
 The `commit_prefault` child-process failure mode asserts the fatal commit
 diagnostic with prefaulting requested.
+
+## Arena discard and zeroed reuse
+
+`arena_set_position_and_decommit` discards only complete native pages beyond
+the retained position. Legal sub-page granularities and non-page-sized
+reservations can leave a partial tail page above the discarded range. If any
+previous allocation reached that tail, its dirty watermark remains conservative
+through rewind, recommit and pooled reuse, so `arena_allocate_zeroed_bytes`
+clears the retained bytes. When no dirty bytes survive above the discarded end,
+non-Apple platforms can lower the mark to the retained prefix. Darwin preserves
+the mark for discarded pages as well because its discard may preserve contents.
+A failed discard leaves the logical cursor, committed extent and dirty mark
+unchanged; a rewind with no complete page to discard still succeeds.
+
+Registered `arena_tests` exercise actual create/allocate/decommit/recommit calls
+for dirty partial tails, complete-page and untouched-tail controls, sub-page
+reservations, no-discard rewinds, repeated cycles and retirement/pool reuse.
+The private `arena_internal.h` one-shot seam skips one discard attempt on the
+calling thread to check failure-state and payload preservation. It does not
+represent an observed native OS failure.
 
 ## Exclusive directory ownership
 

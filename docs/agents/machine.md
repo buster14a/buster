@@ -4,8 +4,16 @@
 
 The canonical-to-machine ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+The typed AArch64 ADD/SUB extended-register recipe chooses Rm width from both
+the instruction width and the extension option. Every 32-bit form uses Wm,
+including UXTX and SXTX; a 64-bit form uses Xm only for UXTX/SXTX. Shifts 0–4
+are legal, while 5–7 are reserved. Rn 31 denotes SP/WSP; Rd 31 denotes SP/WSP
+for ADD/SUB and ZR for ADDS/SUBS; Rm 31 denotes ZR. The registered
+`aarch64_encoding_tests` checks literal raw-word decoding, independent field
+images, wrong widths/register roles and unchanged outputs after rejection.
+
 `machine_x64_select_switch` and `machine_a64_select_switch` compare matching
-selector-width bit images. Mask raw keys
+selector-width bit images for every native allocator spelling. Mask raw keys
 and any excess register bits at that boundary, while leaving the caller's
 immediates and targets unchanged. Signedness does not change SWITCH equality.
 The registered raw-ARGUMENT controls and the exact contract are described in
@@ -35,9 +43,9 @@ fixture as well as compiling both architectures.
   side effects across every native allocator spelling and frontend form.
 
 - System V indirect variadic calls keep the vector-register count in AL
-  through the call instruction. MIR call staging retains the callee in
-  caller-saved R10 after argument preparation; every allocator reserves that
-  indirect-call register. `compiler_driver_test_sysv_indirect_variadic`
+  through the call instruction. MIR allocators reserve caller-saved R10 for
+  the indirect callee while staging arguments, including under the NONE
+  compatibility spelling. `compiler_driver_test_sysv_indirect_variadic`
   checks counts 0/1/8 and floating arguments crossing the register/stack boundary
   against aligned foreign assembly and host-compiled `va_arg` callees. It covers
   both frontend forms and every allocator on all four System V x86-64 targets;
@@ -176,6 +184,19 @@ fixture as well as compiling both architectures.
   variadic signature checks the general incoming-address expansion past 4095
   bytes. Darwin callers extend narrow integer register arguments to 32 bits
   before physical-register staging, as required by its public ABI.
+- x86-64 variadic calls with a tail reuse selector-owned shape and placement
+  rows. Capacity grows to exactly the current call's argument count; fixed
+  calls and tail-free variadic calls borrow the signature plan and request no
+  such rows. Every growth corresponds to an old per-call request, bounding
+  cumulative logical bytes by the old sum even for increasing arities. Each
+  call copies its fixed prefix and replaces its active tail records before
+  synchronous staging; MIR retains no workspace pointers. Failed planning
+  never stages partially classified rows. `machine_test_x64_variadic_workspace`
+  checks long-short-long shape changes, changed fixed prefixes, direct/indirect
+  calls, SysV AL counts and stack releases. The registered driver fixture
+  checks all four allocators and both frontend forms on five x86-64 targets,
+  with matching desktop SysV hosts executing against foreign `va_arg` probes.
+  This storage bound is not a measured compile-time or RSS speedup.
 - The x86-64 encoder applies the verified local rewrites of the
   [machine rewrite campaign](../machine-rewrite-campaign.md), each an encoding
   choice under a precondition it decides locally: frame chunks use disp8
@@ -216,6 +237,22 @@ fixture as well as compiling both architectures.
   opcode classifiers. The [metadata ownership inventory](../machine-metadata-ownership.md)
   documents every shared record's producer, consumer, publication and invalidation.
   Explicit barrier/vector membership is not a latency or hazard model.
+- QUALITY switch functions use the same placement path: the shared prepass
+  supplies loop spans and complete predecessor adjacency for block operands,
+  switch tables (including duplicate/default destinations), indirect branches
+  and asm-goto. Split entry/exit analysis consumes that adjacency, with entry
+  installs restricted to forward unconditional branches; ambiguous entries and
+  landing pads with predecessors outside the region remain ineligible. The
+  verified synthetic MIR fixture fixes table backedges and duplicate/default
+  predecessor counts independently of selector layout. The C switch fixture
+  covers loops, shared destinations, fallthrough, default-only switches, all
+  allocators and both frontend memory forms.
+  Its private input lives at
+  `src/buster/tests/compiler/codegen/fixtures/quality_switch_cfg.c`; the
+  registered machine module stringifies those same C tokens into its compiler
+  input, preserving the separately approved frozen `tests/` retirement corpus
+  and running on mobile without a separately staged source file. Directly
+  compiling the private input keeps its ordinary C function definitions.
 - QUALITY placement accumulates exact u64 weighted traffic for values and loop
   regions, including split-boundary costs. A u32 edit count and maximum weight
   4096 bound a traffic sum below 2^44. The heap preserves its strict-greater tie
@@ -358,8 +395,8 @@ fixture as well as compiling both architectures.
   limbs, CFG joins use the canonical pair mapping, and ordinary loads/stores
   copy all sixteen bytes. Variadic prologues save all sixteen XMM bytes, and
   each VECTOR read consumes one FP cursor slot.
-  The archived direct oracle also copies both register-save/overflow halves
-  and aligns the overflow cursor after an eight-byte stack argument.
+  The archived direct oracle also copied both register-save/overflow halves
+  and aligned the overflow cursor after an eight-byte stack argument.
   `basic_c_sysv_sseup.c` requires strict MIR across four SysV targets, all
   allocators, both frontend forms and PIC settings; matching native hosts
   link `host_sysv_sseup.c` independently in both call directions. Nested
@@ -383,10 +420,10 @@ fixture as well as compiling both architectures.
   result-pointer ABI for single-lane float vectors. This known cross-compiler
   mismatch is not interpreted as a successful differential run. The original
   narrow signature, vector-load and 32-byte Win64 baseline split-reference
-  refusals are strict successes. Fallback telemetry uses a valid canonical-only
-  inline-assembly transaction, while a malformed literal-register fixture owns
-  the artifact-preservation failure control; ABI retirement no longer doubles
-  as a negative test.
+  refusals are strict successes. The retired fallback-telemetry control used a
+  valid canonical-only inline-assembly transaction. Current unsupported assembly
+  controls require structured refusal and preserve existing output artifacts;
+  ABI retirement no longer doubles as a negative test.
 - X86 vector arithmetic keeps native EVEX rows for their encodable operations
   and expands the remaining integer/floating operations into ordinary scalar
   MIR lanes. Exact-width reads and writes preserve short-vector boundaries;
@@ -465,8 +502,8 @@ fixture as well as compiling both architectures.
   The x86 selector emits no cache operation. AArch64 selects one constrained
   barrier row with begin/end in X9/X10, X9/X11 clobbered, and NZCV defined. Its
   data-clean and instruction-invalidate walks cover aligned four-byte granules
-  through the exclusive end, with DSB/ISB barriers. The archived direct AArch64 oracle
-  uses the same alignment rule; an unaligned start must not skip a final line.
+  through the exclusive end, with DSB/ISB barriers. The archived direct AArch64
+  oracle used the same alignment rule; an unaligned start must not skip a final line.
 - Sixteen-byte AArch64 atomic loads and stores select constrained pair rows.
   A load uses LDXP/LDAXP, writes the observed halves back with STXP (STLXP for
   sequential consistency), and retries until the read is single-copy atomic.
@@ -479,7 +516,7 @@ fixture as well as compiling both architectures.
   RMW reloads its unchanged operand on each retry and propagates carry/borrow
   across both limbs. CAS compares both halves, selects the observed pair on
   mismatch, and still completes STXP/STLXP before returning: an unvalidated
-  LDXP may be a torn read. The archived direct oracle follows the same corrected rule.
+  LDXP may be a torn read. The archived direct oracle used the same corrected rule.
   Every frame load precedes LDXP on each retry; only register operations
   occur before STXP, preserving the exclusive-loop progress guarantee.
   Both rows declare X9/X11-X14 clobbers and flag definitions; CAS additionally
@@ -538,9 +575,9 @@ fixture as well as compiling both architectures.
   arguments, mixed floating parameters and caller-value preservation. The
   `win64_aligned.c` regression exercises 32/64/128-byte argument alignments
   across host/MIR boundaries, including raw variadic argument pointers and
-  every sixteen-byte dynamic-stack residue modulo 128. Fixed calls also execute
-  through every retained allocator spelling, including the MIR_STACK `none`
-  alias; wide variadic reads use the same MIR path.
+  every sixteen-byte dynamic-stack residue modulo 128. Recorded fixed-call
+  coverage also included the retired direct backend; wide variadic reads used
+  all three explicit MIR allocators. Current NONE selects MIR-stack.
 - Windows/UEFI x86-64 128-bit integer arguments use the same one-pointer
   placement and sixteen-aligned private copies as indirect aggregates. A
   128-bit integer result travels whole in XMM0, without a hidden result
@@ -551,8 +588,9 @@ fixture as well as compiling both architectures.
   calls cross the host/MIR boundary in both directions without a PE loader;
   they cover register and stack arguments, indirect calls, copied lists,
   high limbs, private parameter writes, and forty-byte variadic aggregates.
-  The archived direct backend lacked wide variadic reads; `none` is now a
-  MIR_STACK compatibility spelling rather than an independent direct baseline.
+  The retired direct backend lacked wide variadic reads, so the recorded
+  complete-module gate used MIR. Current NONE selects MIR-stack and is not an
+  independent direct-backend differential oracle.
 - Windows/UEFI x86-64 sixty-four-byte vector signatures use the existing ZMM
   vocabulary on AVX-512 targets. Arguments occupy one pointer slot with an
   aligned private copy; callers stage register values through a frame slot,
@@ -563,10 +601,11 @@ fixture as well as compiling both architectures.
   `win64_vector.c` crosses Clang/MIR boundaries in both directions on capable
   hosts, checks every result lane, caller preservation, raw variadic pointer
   alignment, and live dynamic allocations. The fixed subset also executes
-  through NONE. Smaller vectors and model-dependent register splitting retain
-  the MIR shape rules; unsupported shapes fail with a diagnostic.
+  through NONE, which now selects MIR-stack. Smaller vectors and model-dependent
+  register splitting retain their MIR representation and admission rules;
+  unsupported shapes are refused without a direct fallback.
 - Windows/UEFI x86-64 MIR frames larger than one page reuse
-  `codegen_x64_emit_windows_stack_allocate`, the shared bounded
+  `codegen_x64_emit_windows_stack_allocate`, the retained shared bounded
   R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
   large frame requires one allocation unwind action and a bounded prologue.
   `MachineEncodeResult.frame_allocation_offset` supplies its actual byte offset
@@ -598,7 +637,8 @@ fixture as well as compiling both architectures.
   transport. A consumed floating multiply quiets special inputs and raises
   invalid for signaling NaNs; finite inputs are masked to zero before that row,
   preserving subnormals even with flush-to-zero enabled. No libcall is used;
-  all retained allocator spellings use these rows, with `none` aliasing MIR_STACK.
+  the public `none` spelling selects MIR-stack and builds the same image with
+  the same rows.
   `compiler_driver_test_aarch64_float_to_f128` retains the original created-NaN
   fixture and tests independent binary128 byte cases under every allocator.
   Native Linux AArch64 exchanges producer/consumer roles with the configured
@@ -651,7 +691,8 @@ fixture as well as compiling both architectures.
   The registered finite-input fixture decodes IEEE images with integer
   operations and requires strict compilation across all desktop AArch64
   targets, all MIR allocators, and both frontend forms; native hosts execute
-  the same cases, with NONE retained as a MIR_STACK compatibility spelling.
+  the same cases. The archived direct reference is historical evidence; current
+  NONE selects MIR-stack.
 - AArch64 leading/trailing-zero counts use importer-generated CLZ and RBIT
   forms for ordinary 32/64-bit scalar rows. A 128-bit count operates on both
   slot-backed limbs, selecting the primary limb's count or 64 plus the other
@@ -683,9 +724,10 @@ fixture as well as compiling both architectures.
   matrix retains both original over-aligned stack fixtures, all six AArch64
   targets, allocator modes, frontend forms and PIC settings. Native AArch64
   desktop hosts also link the independent host observer in both directions
-  for all three MIR allocators. NONE stays an object control: the archived
-  direct reference fails independently compiled split-composite and packed
-  Darwin call boundaries, so it is not used as their semantic oracle.
+  for all three explicit MIR allocators in the recorded matrix. Its direct
+  NONE path stayed an object control: the archived direct reference failed
+  independently compiled split-composite and packed Darwin call boundaries.
+  Current NONE selects MIR-stack and is not an independent semantic oracle.
 - Win64 x86-64 dynamic frames establish RBP at the bottom of the fixed
   allocation, after the probe, so PE unwind records retain SET_FPREG. Encoding
   rebases logical frame offsets once at the existing exact/fast memory paths.
@@ -736,7 +778,7 @@ fixture as well as compiling both architectures.
   following arguments. `va_copy` copies all 32 bytes; `va_end` emits no write.
   Lists passed by value use the existing AAPCS64 indirect aggregate argument
   plan and a private callee copy, not the original producer's cursor.
-  The archived direct oracle and MIR also reconstruct three/four-double HFAs,
+  MIR also reconstructs three/four-double HFAs, as the archived direct oracle did,
   64/128-bit short vectors and up to four-vector HVAs from independent V
   slots. An ordinary composite above sixteen bytes consumes one GP pointer
   and copies exactly the object size, including a short tail. Its pointed-to
@@ -794,6 +836,14 @@ fixture as well as compiling both architectures.
   hatch. X86 RIP-relative `lea` label addresses use the final block relocation;
   control-like `call`/`xbegin` label references and AArch64 label-address/call
   forms that the canonical backend did not support remain fail-closed controls.
+- Scalar x86 inline assembly admits SAR/SHL/SHR/SAL, including AT&T byte,
+  word, dword and qword suffixes, with immediate or CL counts. The shared
+  assembler validates count registers, widths and immediate bounds. Explicit
+  `cc` clobbers remain part of the closed transaction. INT imm8 and INT3 also
+  use checked metadata; generating a breakpoint does not execute it during
+  compiler validation. `machine_test_x64_inline_shift_breakpoint` checks fixed
+  encodings, rejected neighbouring operands and native shift results across
+  both frontend forms and every allocator.
 - x86 CPUID/XGETBV literal assembly with complete 32-bit pure outputs and
   separate fixed inputs selects constrained machine rows. Numeric/named ties
   retain the input's fixed register. CPUID consumes RAX/RCX together and
@@ -801,15 +851,16 @@ fixture as well as compiling both architectures.
   in parallel. Each row snapshots zero-extended results to a private frame
   object before ordinary stores publish output places. XGETBV requires XSAVE
   on the compile target. Partial-width, read/write, partial-output and other
-  assembly shapes fail diagnostically; these rows do not implement
-  unrestricted inline assembly.
+  assembly shapes use the general MIR assembly admission rules, with unsupported
+  shapes refused; these constrained rows do not implement unrestricted inline
+  assembly.
 - The x86 exact-emission bridge represents a full-width 32-bit immediate as
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain
   their sign-extension constraints. High-bit unsigned switch constants must
   encode through MIR without fallback.
 - The f32/f64-to-u64 biased conversions compare against **2^63 in the source
-  format**. Native x86 MIR emission uses `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
+  format**. X86 conversion code uses `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
   `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
   integer bit the final bias restores.
 - AArch64 symbol addresses on macOS/iOS use ADRP/ADD with Mach-O PAGE21 and
@@ -828,20 +879,23 @@ fixture as well as compiling both architectures.
   undefined x86-64 ELF functions use `R_X86_64_PLT32` even in the default
   model so external linkers can put `-c` objects in PIE executables; under
   `-fPIC`, a call to any interposable symbol also uses PLT32. Internal and
-  hidden symbols keep the rip-relative form, and a thread-local address is
-  the thread-local model's to pick -- `codegen_thread_local_model` reads the
-  same flag and answers general-dynamic under it. The machine selector writes
-  a `MachineSymbolReference` beside each call-target row and derives the module
-  relocation from it, so all four allocators make the same distinction. One
-  object-writer decision follows from the model rather than from a relocation:
+  hidden symbols keep the rip-relative form. On Linux x86-64, an undefined
+  default-visible weak function address uses GOTPCREL even in the default
+  model, so an absent provider stays zero and a present provider retains its
+  actual function address; its direct calls still use PLT32. A thread-local
+  address is the thread-local model's to pick -- `codegen_thread_local_model` reads the
+  same flag and answers general-dynamic under it. All four allocator spellings
+  use MIR with these shared canonical-IR symbol rules; NONE selects MIR-stack.
+  One object-writer decision follows from the
+  model rather than from a relocation:
   an unwind record's function pointer is relocated against a local text symbol
   with the function's own offset, because an FDE naming a preemptible function
   is the same PC-relative reference to an interposable symbol that `ld`
   refuses in the body.
-- On x86-64 ELF, `-fPIE`/`-fpie` are rejected because PIE-specific reference
-  selection is not implemented. Mach-O, COFF, UEFI, eBPF and Wasm keep their
-  existing accepted no-op behavior. `-fno-pic` clears the PIC model;
-  `-fno-pie` remains an accepted no-op.
+- `-fPIE`/`-fpie` select the same position-independent code model as `-fPIC`
+  on every target. The last positive spelling wins; `-fno-pie` cancels only
+  a PIE spelling, whereas `-fno-pic` clears either model. Target-specific
+  code generation still decides where the selected model changes references.
 - The built-in linker binds every name in its image: `PLT32` patches the same
   rel32 `PC32` does. The ELF reader preserves `GOTPCREL`, `GOTPCRELX`,
   `REX_GOTPCRELX` and `CODE_4_GOTPCRELX` as distinct relocation kinds.
@@ -854,6 +908,22 @@ fixture as well as compiling both architectures.
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
   sequence too (`link_elf_relax_local_dynamic`).
+  Initial-exec accepts both ADD and MOV GOT loads. Metadata derives the
+  seven-byte ADD/MOV immediate replacement for all sixteen registers and
+  validates the non-field bytes before touching caller storage; the TLS
+  test's independent byte oracles cover both forms and malformed envelopes.
+
+The x86 inline-assembly vocabulary admits zero-operand `rdtsc` and `rdtscp`
+through the shared assembler. `AssemblyEncodeOptions.inline_assembly` supplies
+the existing RDTSCP metadata row's feature token only for that zero-operand
+instruction; standalone and module-level assembly keep target feature gating.
+GNU fixed outputs or explicit clobbers name
+RAX/RDX and, for RDTSCP, RCX; ordinary transaction staging preserves live
+values and captures the declared 32-bit outputs. Memory and flags effects
+remain source-declared. `machine_test_x64_inline_timestamps` checks exact
+instruction bytes, output registers, clobbers and rejected operand forms
+across native targets, frontend forms and allocator modes. Runtime availability
+and ordering of timestamp reads remain the caller's responsibility.
 
 ## Wide integer conversion rounding
 
@@ -876,6 +946,13 @@ chains them against every pending slot access. No architecture-specific
 scheduler exception is needed. The stack-alias tests explicitly recognize
 incoming reads independently of that metadata; otherwise a missing descriptor
 bit could disappear from both the scheduler and its test oracle.
+
+Windows AArch64 pre-C23 unprototyped calls use the same integer-register
+argument image as variadic calls. Both the machine caller plan and the callee's
+entry capture classify those promoted values with `IR_ABI_USE_VARIADIC_ARGUMENT`,
+but only a real variadic function emits `MACHINE_A64_VA_HOME_WINDOWS` or owns a
+`va_list` save area. Keep those properties separate when changing parameter
+placement.
 
 ## AArch64 large aggregate copies
 

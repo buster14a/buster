@@ -386,6 +386,25 @@ int generic_fd_to_posix(OsFileDescriptor* fd)
     return (int)((u64)fd - 1);
 }
 #elif defined(_WIN32)
+// TinyCC has neither psapi.h nor its import stubs. This is the fixed ABI of
+// PROCESS_MEMORY_COUNTERS; resolve the existing kernel32 export at runtime.
+typedef struct OsProcessMemoryCounters OsProcessMemoryCounters;
+struct OsProcessMemoryCounters
+{
+    DWORD cb;
+    DWORD page_fault_count;
+    SIZE_T peak_working_set_size;
+    SIZE_T working_set_size;
+    SIZE_T quota_peak_paged_pool_usage;
+    SIZE_T quota_paged_pool_usage;
+    SIZE_T quota_peak_non_paged_pool_usage;
+    SIZE_T quota_non_paged_pool_usage;
+    SIZE_T pagefile_usage;
+    SIZE_T peak_pagefile_usage;
+};
+
+BUSTER_GLOBAL_LOCAL ProcessResourceStatus os_windows_process_memory_counters(HANDLE handle, OsProcessMemoryCounters* counters, OsError* error);
+
 BUSTER_GLOBAL_LOCAL DWORD os_windows_protection_flags(ProtectionFlags flags)
 {
     DWORD result;
@@ -589,18 +608,60 @@ OsPrefaultResult os_prefault(void* address, u64 size)
     return result;
 }
 
-bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault)
+#if defined(_WIN32)
+BUSTER_GLOBAL_LOCAL void os_windows_commit_failure_context(OsCommitFailureContext* context)
+{
+    // Use runtime lookup because TinyCC's kernel32 import stubs do not carry
+    // GlobalMemoryStatusEx. These observations are diagnostic only; failure to
+    // query either source must not overwrite the native commit error.
+    typedef BOOL(WINAPI* GlobalMemoryStatusExProc)(MEMORYSTATUSEX*);
+    GlobalMemoryStatusExProc global_memory_status_ex =
+        (GlobalMemoryStatusExProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GlobalMemoryStatusEx");
+    MEMORYSTATUSEX status = {0};
+    status.dwLength = sizeof(status);
+    if (global_memory_status_ex && global_memory_status_ex(&status))
+    {
+        context->system_commit_limit_bytes = status.ullTotalPageFile;
+        context->system_commit_available_bytes = status.ullAvailPageFile;
+        context->physical_available_bytes = status.ullAvailPhys;
+        context->system_memory_observed = true;
+    }
+
+    OsProcessMemoryCounters counters = {0};
+    OsError ignored_error = {0};
+    if (os_windows_process_memory_counters(GetCurrentProcess(), &counters, &ignored_error) == PROCESS_RESOURCE_OBSERVED)
+    {
+        context->process_commit_bytes = (u64)counters.pagefile_usage;
+        context->process_memory_observed = true;
+    }
+}
+#endif
+
+bool os_commit_diagnose(void* address, u64 size, ProtectionFlags protection, bool prefault, OsCommitFailureContext* failure_context)
 {
     bool result = 1;
+    OsCommitFailureContext context = {0};
 
 #if defined(__linux__) || defined(__APPLE__)
     int protection_flags = os_posix_protection_flags(protection);
     int os_result = mprotect(address, size, protection_flags);
     result = os_result == 0;
+    if (!result && failure_context)
+    {
+        context.error = os_get_last_error();
+        context.page_size = os_get_page_size();
+    }
 #elif defined(_WIN32)
     DWORD protection_flags = os_windows_protection_flags(protection);
     void* os_result = VirtualAlloc(address, size, MEM_COMMIT, protection_flags);
     result = os_result != 0;
+    if (!result && failure_context)
+    {
+        // No call may intervene between VirtualAlloc and this capture.
+        context.error = os_get_last_error();
+        context.page_size = os_get_page_size();
+        os_windows_commit_failure_context(&context);
+    }
 #endif
 
     // Strictly subordinate and strictly advisory: the request is issued only
@@ -614,7 +675,16 @@ bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefaul
 #if BUSTER_BENCH_ALLOCATIONS
     arena_benchmark_event(ARENA_BENCHMARK_OS_COMMIT, S8(__FILE__), S8(__func__), __LINE__, size, 0, 0, 0, result);
 #endif
+    if (failure_context)
+    {
+        *failure_context = context;
+    }
     return result;
+}
+
+bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault)
+{
+    return os_commit_diagnose(address, size, protection, prefault, 0);
 }
 
 bool os_protect(void* address, u64 size, ProtectionFlags protection)
@@ -4343,16 +4413,26 @@ BUSTER_GLOBAL_LOCAL bool os_linux_same_file_identity(struct stat left, struct st
 
 BUSTER_GLOBAL_LOCAL bool os_linux_process_status_namespace_index(OsLinuxProcessStatus status, pid_t process_id, u32* namespace_index)
 {
-    u32 matches = 0;
-    for (u32 index = 0; index < status.namespace_depth; index += 1)
+    // self/status lists the procfs namespace first and this process's active
+    // namespace last. Namespace-local numeric IDs may repeat across levels.
+    bool result = status.valid && status.namespace_depth && status.namespace_depth <= OS_LINUX_PID_NAMESPACE_DEPTH_LIMIT;
+    if (result)
     {
-        if (status.namespace_process_ids[index] == process_id)
-        {
-            *namespace_index = index;
-            matches += 1;
-        }
+        u32 index = status.namespace_depth - 1;
+        result = process_id > 0 && status.namespace_process_ids[index] == process_id;
+        if (result) { *namespace_index = index; }
     }
-    return matches == 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_linux_proc_context_select_self(OsLinuxProcContext* context, char* bytes, u64 length, pid_t process_id)
+{
+    OsLinuxProcessStatus self = {0};
+    context->current_namespace_depth = 0;
+    context->current_namespace_index = 0;
+    context->valid = context->valid && os_linux_process_status_parse(bytes, length, 0, &self) &&
+        os_linux_process_status_namespace_index(self, process_id, &context->current_namespace_index);
+    if (context->valid) { context->current_namespace_depth = self.namespace_depth; }
 }
 
 BUSTER_GLOBAL_LOCAL OsLinuxProcContext os_linux_proc_context_open(void)
@@ -4364,15 +4444,11 @@ BUSTER_GLOBAL_LOCAL OsLinuxProcContext os_linux_proc_context_open(void)
     char bytes[16384];
     u64 length = 0;
     bool vanished = false;
-    OsLinuxProcessStatus self = {0};
     if (result.valid)
     {
-        result.valid = os_linux_proc_read_at(result.descriptor, "self/status", bytes, sizeof(bytes), &length, &vanished) &&
-            os_linux_process_status_parse(bytes, length, 0, &self);
+        result.valid = os_linux_proc_read_at(result.descriptor, "self/status", bytes, sizeof(bytes), &length, &vanished);
     }
-    pid_t self_process_id = getpid();
-    result.current_namespace_depth = self.namespace_depth;
-    result.valid = result.valid && os_linux_process_status_namespace_index(self, self_process_id, &result.current_namespace_index);
+    os_linux_proc_context_select_self(&result, bytes, length, getpid());
     return result;
 }
 
@@ -4642,6 +4718,26 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_group_is_quiescent(Arena* arena, const
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool os_linux_proc_context_select_self_test(String8 status, s32 process_id, bool identity_valid,
+                                             u32* namespace_index, u32* namespace_depth)
+{
+    OsLinuxProcContext context = {.descriptor = -1, .valid = identity_valid};
+    os_linux_proc_context_select_self(&context, (char*)status.pointer, status.length, (pid_t)process_id);
+    *namespace_index = context.current_namespace_index;
+    *namespace_depth = context.current_namespace_depth;
+    return context.valid;
+}
+
+bool os_linux_proc_context_live_self_test(void)
+{
+    OsLinuxProcContext context = os_linux_proc_context_open();
+    bool result = context.valid && context.current_namespace_depth &&
+        context.current_namespace_index == context.current_namespace_depth - 1;
+    bool closed = os_linux_proc_context_close(&context);
+    result = result && closed && context.descriptor == -1 && !context.valid;
+    return result;
+}
+
 bool os_linux_process_group_churn_self_test(Arena* arena)
 {
     pid_t leader = fork();
@@ -4727,10 +4823,11 @@ bool os_linux_process_stat_parse_self_test(void)
         .valid = true,
     };
     u32 namespace_index = 0;
-    result = os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && namespace_index == 1 && result;
+    result = os_linux_process_status_namespace_index(mapping, 7, &namespace_index) && namespace_index == 2 && result;
+    result = !os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && result;
     result = !os_linux_process_status_namespace_index(mapping, 8, &namespace_index) && result;
     mapping.namespace_process_ids[2] = 12;
-    result = !os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && result;
+    result = os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && namespace_index == 2 && result;
     OsLinuxProcessGroupMember members[] = {
         {.proc_process_id = 999, .local_process_id = 12, .namespace_process_ids = {999, 12}, .namespace_depth = 2},
     };
@@ -5067,23 +5164,6 @@ bool os_process_group_ownership_loss_self_test(void)
 #endif
 
 #if BUSTER_WINDOWS
-// TinyCC has neither psapi.h nor its import stubs. This is the fixed ABI of
-// PROCESS_MEMORY_COUNTERS; resolve the existing kernel32 export at runtime.
-typedef struct OsProcessMemoryCounters OsProcessMemoryCounters;
-struct OsProcessMemoryCounters
-{
-    DWORD cb;
-    DWORD page_fault_count;
-    SIZE_T peak_working_set_size;
-    SIZE_T working_set_size;
-    SIZE_T quota_peak_paged_pool_usage;
-    SIZE_T quota_paged_pool_usage;
-    SIZE_T quota_peak_non_paged_pool_usage;
-    SIZE_T quota_non_paged_pool_usage;
-    SIZE_T pagefile_usage;
-    SIZE_T peak_pagefile_usage;
-};
-
 BUSTER_GLOBAL_LOCAL ProcessResourceStatus os_windows_process_memory_counters(HANDLE handle, OsProcessMemoryCounters* counters, OsError* error)
 {
     ProcessResourceStatus result = PROCESS_RESOURCE_UNSUPPORTED;
@@ -6158,17 +6238,28 @@ u64 os_get_page_size(void)
     return page_size;
 }
 
-// Resident set size of this process, right now. Used to budget a memory limit
-// against what a process has *already* used rather than from zero; returns 0
-// where the platform does not report it, which every caller has to treat as
-// "no information" rather than "no memory".
-u64 os_get_resident_memory_size(void)
+// Resident set size of this process: the current value, or the process
+// peak when `peak` is set. Apple reports only the peak through this path, so
+// both queries answer the peak there. Returns 0 where the platform does not
+// report it, which every caller has to treat as "no information" rather than
+// "no memory".
+BUSTER_GLOBAL_LOCAL u64 os_resident_memory(bool peak)
 {
     u64 result = 0;
 #if defined(__linux__)
+    if (peak)
+    {
+        // ru_maxrss is the process high water, in kilobytes on Linux.
+        struct rusage usage;
+        memset(&usage, 0, sizeof(usage));
+        if (getrusage(RUSAGE_SELF, &usage) == 0)
+        {
+            result = (u64)usage.ru_maxrss * 1024;
+        }
+    }
     // /proc/self/statm is "size resident shared ..." in pages. The second
     // field is what /proc/self/status calls VmRSS, without the string parse.
-    int statm_fd = open("/proc/self/statm", O_RDONLY);
+    int statm_fd = peak ? -1 : open("/proc/self/statm", O_RDONLY);
     if (statm_fd >= 0)
     {
         char statm_buffer[128];
@@ -6209,6 +6300,7 @@ u64 os_get_resident_memory_size(void)
 #elif defined(__APPLE__)
     // ru_maxrss is a peak rather than the current value, and is in bytes on
     // Apple where Linux reports kilobytes.
+    BUSTER_UNUSED(peak);
     struct rusage usage;
     memset(&usage, 0, sizeof(usage));
     if (getrusage(RUSAGE_SELF, &usage) == 0)
@@ -6220,10 +6312,22 @@ u64 os_get_resident_memory_size(void)
     OsError error = {0};
     if (os_windows_process_memory_counters(GetCurrentProcess(), &counters, &error) == PROCESS_RESOURCE_OBSERVED)
     {
-        result = (u64)counters.working_set_size;
+        result = (u64)(peak ? counters.peak_working_set_size : counters.working_set_size);
     }
 #endif
     return result;
+}
+
+// Used to budget a memory limit against what a process has *already* used
+// rather than from zero.
+u64 os_get_resident_memory_size(void)
+{
+    return os_resident_memory(false);
+}
+
+u64 os_get_peak_resident_memory_size(void)
+{
+    return os_resident_memory(true);
 }
 
 u64 os_get_physical_memory_size(void)

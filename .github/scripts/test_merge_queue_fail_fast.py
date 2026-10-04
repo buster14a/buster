@@ -702,7 +702,8 @@ class StepDeadlineTests(unittest.TestCase):
         # Qualification dispatches expand checks; merge groups retain the
         # combined matrix that this watcher budgets.
         self.assertIn("        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && "
-                      "github.ref == 'refs/heads/codex/ci-checks-split-overlap' && "
+                      "(github.ref == 'refs/heads/codex/ci-checks-split-overlap' || "
+                      "github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && "
                       "'[\"release\", \"checks\", \"sanitized-debug\", \"sanitized-release\", \"portability\"]' || "
                       "'[\"release\", \"checks\"]') }}\n", test_job)
         lanes = re.findall(r"^          - name: (.+)\n(?:            \w+: .+\n)*?"

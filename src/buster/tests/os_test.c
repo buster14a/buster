@@ -1876,9 +1876,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
         if (spawn.handle)
         {
-            ProcessWaitResult wait_result = os_process_wait_sync(arguments->arena, spawn);
+            ProcessWaitResult wait_result = os_process_wait_deadline(arguments->arena, spawn, 3000000);
             BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
             BUSTER_TEST(arguments, wait_result.platform_status == 0);
+            BUSTER_TEST(arguments, !wait_result.timed_out && !wait_result.process_tree_cleanup_failed);
             BUSTER_TEST(arguments, !wait_result.process_group_reservation_retained);
             BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
         }
@@ -1899,6 +1900,65 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     // buffered by the owned group are retained before the foreign FD closes.
     BUSTER_TEST(arguments, os_process_group_escaped_capture_self_test(arguments->arena));
 #if BUSTER_LINUX
+    // Exercise the production raw-status context selection, including repeated
+    // numeric IDs. Only the final hierarchy coordinate belongs to this caller.
+    {
+        typedef struct OsTestProcContextCase OsTestProcContextCase;
+        struct OsTestProcContextCase
+        {
+            String8 status;
+            s32 process_id;
+            bool identity_valid;
+            bool valid;
+            u32 namespace_depth;
+            u32 namespace_index;
+        };
+        OsTestProcContextCase cases[] = {
+            {S8("Pid:\t41\nNSpid:\t41\n"), 41, true, true, 1, 0},
+            {S8("Pid:\t10041\nNSpid:\t10041\t41\n"), 41, true, true, 2, 1},
+            {S8("Pid:\t10041\nNSpid:\t10041\t42\t41\n"), 41, true, true, 3, 2},
+            {S8("Pid:\t41\nNSpid:\t41\t41\n"), 41, true, true, 2, 1},
+            {S8("Pid:\t10041\nNSpid:\t10041\t41\t41\n"), 41, true, true, 3, 2},
+            {S8("Pid:\t41\nNSpid:\t41\t42\t41\n"), 41, true, true, 3, 2},
+            {S8("Pid:\t41\nNSpid:\t41\t41\t41\n"), 41, true, true, 3, 2},
+            {S8("Pid:\t41\nNSpid:\t41\t42\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t10041\nNSpid:\t10041\t41\t42\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\t41\n"), 42, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\t41\n"), 41, false, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\n"), 41, false, false, 0, 0},
+            {S8("Pid:\t0\nNSpid:\t0\n"), 0, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\n"), -1, true, false, 0, 0},
+            {S8("Pid:\t41\n"), 41, true, false, 0, 0},
+            {S8("NSpid:\t41\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t42\t41\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nPid:\t41\nNSpid:\t41\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\t41\nNSpid:\t41\t41\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\tbroken\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\t2147483648\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\t-41\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41"
+                " 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41\n"), 41, true, true, 32, 31},
+            {S8("Pid:\t41\nNSpid:\t41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41"
+                " 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41\n"), 41, true, false, 0, 0},
+            {S8(""), 41, true, false, 0, 0},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            OsTestProcContextCase test = cases[index];
+            u32 namespace_index = UINT32_MAX;
+            u32 namespace_depth = UINT32_MAX;
+            bool valid = os_linux_proc_context_select_self_test(test.status, test.process_id, test.identity_valid,
+                &namespace_index, &namespace_depth);
+            BUSTER_TEST(arguments, valid == test.valid);
+            BUSTER_TEST(arguments, namespace_index == test.namespace_index);
+            BUSTER_TEST(arguments, namespace_depth == test.namespace_depth);
+        }
+        u64 resources_before = os_process_spawn_test_resource_count();
+        BUSTER_TEST(arguments, resources_before != UINT64_MAX);
+        BUSTER_TEST(arguments, os_linux_proc_context_live_self_test());
+        BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
+    }
     // /proc stat parsing must use the final command-name parenthesis and fail
     // closed on mismatched identities or malformed group fields.
     BUSTER_TEST(arguments, os_linux_process_stat_parse_self_test());

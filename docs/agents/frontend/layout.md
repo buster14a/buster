@@ -9,6 +9,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   model and returns stable integer facts without entering the live declaration
   machine. Enum consumers retain the explicit ENUM compatibility mode until
   their declaration preparation is migrated (#1247).
+- Record definitions in expression type names are registered in the containing
+  C scope as their keyword is reached. Their braces hold member declarations;
+  the block binder skips those bodies instead of opening a local scope or
+  parsing a bit-field's colon as a local declarator trailer. The existing type
+  parser owns widths and nested record definitions, while array-bound tokens
+  keep source-point identifier bindings after nested enumeration constants are
+  published in the containing scope. This includes
+  `sizeof` operands in returns, arguments and controlling expressions.
+  `c_test_expression_aggregate_bit_fields` checks these contexts, unnamed and
+  zero-width members, typedef-named anonymous members, arithmetic widths, tag visibility and local/member name
+  separation across six target layouts and both frontend forms. Its embedded
+  runtime source checks fixed sizes and unevaluated width operands in all four
+  native allocators; invalid member declarations retain structured diagnostics.
 - A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
   alignment above the native stack's sixteen-byte guarantee, both canonical
   and machine emitters compute `align_down(old_sp - size, alignment)` and
@@ -264,9 +277,13 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   at 32 bits before converting back. Boolean results use truth conversion.
   The computed value supplies the result without a second volatile load.
   Assignment-expression destination calls are prepared before place lowering;
-  the retained place carries their result into the store exactly once. The
-  runtime fixture includes `get_fields()->c = 9` in a local initializer, whose
-  returned value is 1 and whose destination call must run once.
+  the retained place carries their result into the store exactly once. A
+  parenthesized base followed by a member or subscript suffix remains on the
+  place machine; only a group enclosing the complete destination needs value
+  recovery. The runtime fixture includes `get_fields()->c = 9` in a local
+  initializer, whose returned value is 1 and whose destination call must run
+  once. `c_test_parenthesized_bit_field_assignment_values` covers grouped
+  record and pointer bases as statements and values (GitHub #1413).
   `compiler_driver_test_bit_field_assignment_results` covers both frontend
   forms and all four allocators, with ordinary, volatile and split packed
   fields, postfix controls, full-width fields and terminating update loops.

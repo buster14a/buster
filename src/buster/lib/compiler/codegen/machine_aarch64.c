@@ -3436,13 +3436,19 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
             IrTypeId argument_type_id = argument_index < callee_type->parameter_count
                                             ? callee_type->parameter_types[argument_index]
                                             : function->values[instruction->operands[argument_index + 1].value].canonical_type;
-            bool windows_variadic = callee_type->is_variadic && selector->target.os == OPERATING_SYSTEM_WINDOWS;
+            // Windows uses the integer-register argument image for both a
+            // variadic call and a pre-C23 unprototyped call.  The latter is
+            // not a variadic function -- it owns no va_list save area -- but
+            // its promoted values cross this call boundary by the same ABI
+            // route.
+            bool windows_integer_arguments = selector->target.os == OPERATING_SYSTEM_WINDOWS &&
+                                             (callee_type->is_variadic || callee_type->is_unprototyped);
             bool anonymous_darwin = callee_type->is_variadic && argument_index >= callee_type->parameter_count &&
                 (selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS);
-            IrAbiUse use = windows_variadic || argument_index >= callee_type->parameter_count ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT;
+            IrAbiUse use = windows_integer_arguments || argument_index >= callee_type->parameter_count ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT;
             planned = machine_a64_value_shape(program, argument_type_id, selector->target, use, plan->argument_shapes + argument_index) &&
                       machine_a64_place_variadic_argument(plan->argument_shapes + argument_index,
-                          ir_type_from_id(&program->types, argument_type_id), windows_variadic, anonymous_darwin,
+                          ir_type_from_id(&program->types, argument_type_id), windows_integer_arguments, anonymous_darwin,
                           darwin ? &packed_stack_bytes : 0,
                           &call_integer_count, &call_float_count, &plan->stack_part_count, plan->argument_placements + argument_index);
             if (planned)
@@ -6006,13 +6012,15 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         u32 packed_stack_bytes = 0;
         bool darwin = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
         bool windows_variadic = function_type->is_variadic && target.os == OPERATING_SYSTEM_WINDOWS;
+        bool windows_integer_arguments = target.os == OPERATING_SYSTEM_WINDOWS &&
+                                         (function_type->is_variadic || function_type->is_unprototyped);
         for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
         {
             if (!machine_a64_value_shape(program, function_type->parameter_types[parameter_index], target,
-                                         windows_variadic ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT,
+                                         windows_integer_arguments ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT,
                                          signature_parameter_shapes + parameter_index) ||
                 !machine_a64_place_variadic_argument(signature_parameter_shapes + parameter_index,
-                                            ir_type_from_id(&program->types, function_type->parameter_types[parameter_index]), windows_variadic, false,
+                                            ir_type_from_id(&program->types, function_type->parameter_types[parameter_index]), windows_integer_arguments, false,
                                             darwin ? &packed_stack_bytes : 0,
                                             &signature_integer_count, &signature_float_count,
                                             &signature_stack_part_count, signature_parameter_placements + parameter_index))
@@ -8883,6 +8891,12 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
         case MACHINE_A64_LEA_SYMBOL:
             capacity64 += 16;
             break;
+        case MACHINE_A64_TLS_WINDOWS:
+            capacity64 += 28;
+            break;
+        case MACHINE_A64_TLS_DARWIN:
+            capacity64 += 16;
+            break;
         case MACHINE_A64_RET:
             capacity64 += 20 + (large_save_offset ? 8u : 0u) + (u64)frame_chunk_words * 4 + (u64)push_count * 4;
             break;
@@ -10338,9 +10352,13 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                     u32 index_fields[] = {destination, MACHINE_A64_X10, 3, destination};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, index_fields, BUSTER_ARRAY_LENGTH(index_fields));
                     machine_a64_emit_generated_unsigned_memory(&encoder, destination, destination, 0, 8, false);
+                    MachineCallSite* offset_high_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                    *offset_high_site = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
+                        .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
+                    machine_a64_emit(&encoder, UINT32_C(0x91400000) | (destination << 5) | destination);
                     MachineCallSite* offset_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                     *offset_site = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
-                        .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
+                        .is_thread_local = 1, .thread_local_low = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
                     u32 offset_fields[] = {destination, destination, 0};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, offset_fields, BUSTER_ARRAY_LENGTH(offset_fields));
                 }

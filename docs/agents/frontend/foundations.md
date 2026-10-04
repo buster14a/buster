@@ -97,6 +97,20 @@ the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The
 strict `basic_c_statement_expression_value.c` corpus checks both goto arms.
 
+Label candidates exclude aggregate member bodies: `int : 0` and a typedef
+spelling such as `Word : 0` are bit-fields, not function labels. The existing
+position-index delimiter stack retains the nearest brace's context, and its
+window walk merges label and delimiter events in source order. Parenthesis and
+bracket groups inherit that context; a nested GNU statement-expression brace
+opens a statement context. Both label-table sizing and filling use the filtered
+positions, while a caller without an index uses the same brace classification
+through `c_parse_label_candidate_at`. No block is predeclared for a field colon.
+`c_test_expression_aggregate_bit_fields` checks typedef-named and repeated
+anonymous members, genuine typedef-named and statement-expression labels,
+indexed and unindexed lowering, both frontend forms and all native allocators.
+The tiled position-index regression compares the window and scalar populations
+with anonymous member colons shifted across window boundaries.
+
 A named label can re-enter a token range after control skipped an ordinary
 automatic declaration. Fixed-size objects in a labeled function therefore
 receive their canonical local/place rows before the entry block terminates;
@@ -593,6 +607,24 @@ without facts for identical bitcode and diagnostics.
   duplicated, stale or incomplete keys search the type table (#1467);
   `c_test_aggregate_unique_search` requires zero lowering search rows for
   unique tags.
+- Static aggregate inference and materialization reserve frame, designator and
+  suspended GNU-range storage from the smaller of the token span and published
+  canonical type count. Active frames follow one by-value containment path;
+  resolved layouts cannot contain their own type by value. Brace elision and
+  borrowed designator continuations preserve that path, and range contexts
+  initialize strict descendants. Flat element counts therefore do not create
+  one work row per leaf. The work-array and range-payload reservations are
+  checked against remaining scratch before allocation and refuse with a
+  structured initializer-capacity diagnostic when they cannot fit.
+  `c_test_initializer_stack_capacity` executes inference and byte materialization
+  for 1,000,001 synthetic integer leaves in bounded scratch, checks every output
+  byte against independent digit values, and retains exhausted-scratch refusal.
+  Its complete frontend source covers the original 190,001-element failure
+  shape in both modes plus borrowed, inferred, nested-range, compound-literal
+  and relocation controls. Translation-unit query storage has its separate
+  reservation boundary; this does not promise arbitrary source sizes or OOM
+  recovery at unguarded allocation sites.
+
 - Each aggregate initializer context retains a `CIrInitializerRelocationExtent`.
   Before clearing a subobject, it incorporates only relocation records appended
   since the preceding query. Clears wholly outside the occupied extent skip
@@ -1013,8 +1045,9 @@ Complex comparisons/truth conversion and floating classification combine
 Boolean comparisons with `IR_BINARY_BOOLEAN_AND`/`IR_BINARY_BOOLEAN_OR`.
 Their canonical verifier case requires matching Boolean value operands and a
 Boolean value result. Integer bitwise opcodes still require integer operands.
-Both native machine selectors implement these Boolean operations. Unsupported
-x87 shapes fail diagnostically instead of selecting the retired emitter.
+Native machine selectors implement these Boolean operations. The public `none`
+allocator selects MIR-stack; unsupported native shapes are refused rather than
+falling back to a direct canonical emitter.
 
 A `_Bool` destination is one rule for every scalar source (C 6.3.1.2): the
 result is 0 exactly when the whole value compares equal to 0.
@@ -1264,4 +1297,5 @@ differential harness runs it with Clang/GCC at O0/O2; expected values are litera
 constants, not inferred from Buster. The fixed-range fixture additionally checks
 the aligned-base case against Clang. `c_test_enum_runtime` runs these two sources
 and the bit-field source in all four native allocator modes with strict codegen
-verification, rejecting machine fallback outside NONE.
+verification. Native NONE uses MIR-stack, so no mode has a direct-emitter
+fallback.
