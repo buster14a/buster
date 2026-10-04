@@ -12126,12 +12126,16 @@ BUSTER_C_INTERNAL bool c_ir_ext80_static_scalar_target(Target target, IrType* ty
            type->layout.size == 16 && layout.endianness == TARGET_ENDIAN_LITTLE;
 }
 
-// A binary128 static object stores the constant evaluator's exact two-limb
-// image; the transport predicate already proved the little-endian layout.
+// Static binary128 storage needs the exact little-endian image, independently
+// of whether this target can transport runtime values through its call ABI.
 BUSTER_C_INTERNAL bool c_ir_binary128_static_target(Target target, IrType* type)
 {
+    TargetDataLayout layout = target_data_layout(target);
+    bool wasm_storage = (target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64) &&
+                        layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 128 &&
+                        layout.long_double_type.size == 16 && layout.long_double_type.alignment == 16;
     return type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && type->layout.size == 16 &&
-           c_ir_target_supports_f128_transport(target);
+           (wasm_storage || c_ir_target_supports_f128_transport(target));
 }
 
 BUSTER_C_INTERNAL bool c_ir_ext80_global_literal(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, u32 start, u32 end,
@@ -12259,6 +12263,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
     }
     if (type_value->bit_width > 64)
     {
+        if (type_value->bit_width == 128 && (builder->target.cpu_arch == CPU_ARCH_WASM32 || builder->target.cpu_arch == CPU_ARCH_WASM64))
+        {
+            builder->failure_message = S8("C IR lowering does not yet support runtime binary128 values on WebAssembly");
+        }
         return IR_VALUE_ID_INVALID;
     }
     u64 bits = 0;

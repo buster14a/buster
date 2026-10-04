@@ -884,10 +884,10 @@ fixture as well as compiling both architectures.
   with the function's own offset, because an FDE naming a preemptible function
   is the same PC-relative reference to an interposable symbol that `ld`
   refuses in the body.
-- On x86-64 ELF, `-fPIE`/`-fpie` are rejected because PIE-specific reference
-  selection is not implemented. Mach-O, COFF, UEFI, eBPF and Wasm keep their
-  existing accepted no-op behavior. `-fno-pic` clears the PIC model;
-  `-fno-pie` remains an accepted no-op.
+- `-fPIE`/`-fpie` select the same position-independent code model as `-fPIC`
+  on every target. The last positive spelling wins; `-fno-pie` cancels only
+  a PIE spelling, whereas `-fno-pic` clears either model. Target-specific
+  code generation still decides where the selected model changes references.
 - The built-in linker binds every name in its image: `PLT32` patches the same
   rel32 `PC32` does. The ELF reader preserves `GOTPCREL`, `GOTPCRELX`,
   `REX_GOTPCRELX` and `CODE_4_GOTPCRELX` as distinct relocation kinds.
@@ -900,6 +900,10 @@ fixture as well as compiling both architectures.
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
   sequence too (`link_elf_relax_local_dynamic`).
+  Initial-exec accepts both ADD and MOV GOT loads. Metadata derives the
+  seven-byte ADD/MOV immediate replacement for all sixteen registers and
+  validates the non-field bytes before touching caller storage; the TLS
+  test's independent byte oracles cover both forms and malformed envelopes.
 
 The x86 inline-assembly vocabulary admits zero-operand `rdtsc` and `rdtscp`
 through the shared assembler. `AssemblyEncodeOptions.inline_assembly` supplies

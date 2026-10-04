@@ -116,10 +116,15 @@ metadata tables, about 20 ms that used to land in input 0's `codegen` phase),
 and primes first-touch page faults: it commits and touches a pooled TU arena
 (`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
 reuses) and the calling thread's scratch arenas once per thread, plus the
-result arena when a single input compiles in it. No warm-up input is needed. Residual first-input effects are cache warmth only; on
-identical inputs input 0 stays within a small factor of a later copy, which
-`compiler_driver_test_input_metrics` bounds. Lane workers' own arenas are not
-primed.
+result arena when a single input compiles in it. No warm-up input is needed.
+`compiler_driver_test_input_metrics` observes the completed setup calls and
+the real serial input boundaries through a private, test-only calling-thread
+observer. It detects incomplete setup at an input start, setup during or after
+an input, and unbalanced intervals; malformed event streams check those
+negative cases. Correctness does not compare real-clock durations of tiny twin
+compilations: scheduling, source mapping and object publication can change
+their ratio independently of setup order. Phase timings remain diagnostic.
+Lane workers' own arenas are not primed or observed by this serial test seam.
 
 **Intervals.** Every per-input offset and the header's `wall_ns` count
 monotonic nanoseconds from one origin: `ide cc` takes it right after argument
@@ -223,7 +228,15 @@ through `-mattr=+feature,-feature`, and x86 assembly dialect selection through
 `-masm=att|intel`. CPU and feature options also accept separated values. CPU names use the canonical
 spellings printed by `cpu_model_to_string_os`, such as `baseline`, `native`,
 `haswell`, `znver5`, and `apple-m4`; incompatible target/model pairs are
-diagnosed. `-v` reports the selected CPU, the sorted effective feature set,
+diagnosed. x86-64 CPU selection requires AMD64 long mode: the historical
+`i486`, `pentium`, `k6`, `k6-2`, `k6-3`, `geode`, `athlon` and `athlon-xp`
+spellings are recognized but refused for x86-64, including through `-mcpu`.
+K8, Core 2 and newer represented x86-64 models remain available.
+Host detection falls back to the dynamic `native` identity if a virtualized
+family/model description names a processor incompatible with the executing
+architecture; independently probed host features are preserved. Explicit
+`-march`/`-mcpu` requests still receive the incompatibility diagnostic.
+`-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
@@ -786,7 +799,12 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
   fixed-address writer. `.rodata`, the initializer arrays, `.dynamic` and
   `.got` sit under `PT_GNU_RELRO`; `PT_GNU_STACK` is not executable.
 - Thread-local storage in a PIE is relaxed to local-exec as in a fixed-address
-  executable. In a shared object general-dynamic keeps its `__tls_get_addr`
+  executable. Initial-exec accepts both Buster's `add reg,[rip+x@GOTTPOFF]`
+  and GCC/Clang's `mov reg,[rip+x@GOTTPOFF]`: each becomes the same-length
+  ADD or sign-extending MOV immediate, with REX.R moved to REX.B. Metadata
+  validates the instruction envelope before writing; arbitrary field bytes
+  and ignored input REX.X/B bits never change the destination register.
+  In a shared object general-dynamic keeps its `__tls_get_addr`
   call with a `DTPMOD64`/`DTPOFF64` pair, initial-exec gets `TPOFF64` and
   `DF_STATIC_TLS`, and local-exec is refused.
 - Local-dynamic TLS, which this compiler never emits but GCC and Clang do for a
@@ -812,6 +830,15 @@ headers exist, and the `-fPIC` refusal.
 local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
 runs them, the shared object under both a Buster PIE and the host toolchain.
 AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
+
+`compiler_driver_test_initial_exec_tls` serializes independent MOV-form ELF
+fixtures using rax and r8, then links and executes them as fixed-address and
+PIE images. Available GCC/Clang compilers add default `-O2`, `-O0 -fno-pie`
+and `-O2 -fPIC -ftls-model=initial-exec` objects, with host-linked controls and
+initialized/zero TLS reads before and after mutation. Malformed MOV sites
+fail without replacing output. The driver emits its `-fPIC` hint only when
+the ELF planner identifies a refused fixed-address relocation; generic
+relocation failures, including malformed TLS sites, do not imply that cause.
 
 ## Pass-through options
 

@@ -22,6 +22,8 @@
 // the optional independent Clang cross-assembly observer.
 // compiler_driver_test_bare_dwarf_sections checks flag-less DWARF source names
 // through serialized ELF allocation flags and object-reader identities.
+// compiler_driver_test_initial_exec_tls checks foreign MOV GOTTPOFF sites and
+// fixed/PIE execution, including malformed-site diagnostics and retained output.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -14174,6 +14176,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
         arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(non_pic_link)));
     BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_RELOCATION);
     BUSTER_STRING_TEST(arguments, refused.native_link.symbol, S8("non_pic_external"));
+    BUSTER_TEST(arguments, refused.native_link.requires_position_independent_objects);
     BUSTER_TEST(arguments, string_ends_with_sequence(refused.diagnostic, S8("needs objects compiled with -fPIC)")));
 
     // A CPython extension, where the interpreter and its headers exist.
@@ -14364,6 +14367,178 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_link_tls_sites(UnitTestA
                 arena_destroy(invocation_arena, 1);
             }
         }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Foreign initial-exec TLS uses a GOT load, whereas Buster emits a GOT ADD.
+// Hand-built ELF bytes and GCC/Clang objects must link in both executable kinds.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_initial_exec_tls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 directory = buster_test_temporary_path(arena, S8("buster-initial-exec-tls"), S8(""));
+    os_make_directory(directory);
+    String8 main_source = S8("__thread int ie_value = 41;\n"
+                             "__thread int ie_zero;\n"
+                             "int foreign_entry(void);\n"
+                             "int foreign_zero(void);\n"
+                             "int main(void)\n"
+                             "{\n"
+                             "    int failed = foreign_entry() != 41 || foreign_zero() != 0;\n"
+                             "    ie_value = 17; ie_zero = 9;\n"
+                             "    return failed || foreign_entry() != 17 || foreign_zero() != 9;\n"
+                             "}\n");
+    String8 foreign_source = S8("extern __thread int ie_value;\n"
+                                "extern __thread int ie_zero;\n"
+                                "int foreign_entry(void) { return ie_value; }\n"
+                                "int foreign_zero(void) { return ie_zero; }\n");
+    String8 main_path = string_format_z(arena, S8("{S8}/main.c"), directory);
+    String8 foreign_path = string_format_z(arena, S8("{S8}/foreign.c"), directory);
+    String8 main_object = string_format_z(arena, S8("{S8}/main.o"), directory);
+    bool written = file_write(main_path, BUSTER_SLICE_TO_BYTE_SLICE(main_source)) &&
+                   file_write(foreign_path, BUSTER_SLICE_TO_BYTE_SLICE(foreign_source));
+    BUSTER_TEST(arguments, written);
+    String8 main_compile[] = {S8("-g0"), S8("-c"), main_path, S8("-o"), main_object};
+    CompilerDriverResult main_built = written ? compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(main_compile))) : (CompilerDriverResult){0};
+    bool prepared = written && main_built.error == COMPILER_DRIVER_ERROR_NONE;
+    BUSTER_TEST(arguments, prepared);
+    // Independent psABI byte fixture: r8 exercises the REX.R -> REX.B move;
+    // rax covers the ordinary register. Each second instruction reads FS:[reg].
+    u8 text[] = {
+        0x4c, 0x8b, 0x05, 0, 0, 0, 0, 0x64, 0x41, 0x8b, 0x00, 0xc3,
+        0x48, 0x8b, 0x05, 0, 0, 0, 0, 0x64, 0x8b, 0x00, 0xc3,
+    };
+    ObjectSymbol symbols[] = {
+        {.name = S8("foreign_entry"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .size = 12, .global = true},
+        {.name = S8("foreign_zero"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .value = 12, .size = 11, .global = true},
+        {.name = S8("ie_value"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
+         .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES},
+        {.name = S8("ie_zero"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
+         .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES},
+    };
+    ObjectRelocation relocations[] = {
+        {.section = OBJECT_SECTION_TEXT, .offset = 3, .symbol = 2, .kind = OBJECT_RELOCATION_X86_64_GOTTPOFF, .addend = -4},
+        {.section = OBJECT_SECTION_TEXT, .offset = 15, .symbol = 3, .kind = OBJECT_RELOCATION_X86_64_GOTTPOFF, .addend = -4},
+    };
+    ObjectSection sections[OBJECT_SECTION_COUNT];
+    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+    {
+        sections[kind] = (ObjectSection){
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
+            .kind = (ObjectSectionKind)kind,
+            .alignment = object_section_default_alignment((ObjectSectionKind)kind),
+        };
+    }
+    sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(text);
+    ObjectFile raw = {.sections = sections, .symbols = symbols, .relocations = relocations,
+                      .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                      .section_count = OBJECT_SECTION_COUNT, .symbol_count = BUSTER_ARRAY_LENGTH(symbols),
+                      .relocation_count = BUSTER_ARRAY_LENGTH(relocations)};
+    String8 compilers[] = {executable_resolve_in_path(arena, S8("gcc")), executable_resolve_in_path(arena, S8("clang"))};
+    String8 optimization[] = {S8("-O2"), S8("-O0"), S8("-O2")};
+    String8 code_model[] = {S8("-g0"), S8("-fno-pie"), S8("-fPIC")};
+    for (u32 fixture = 0; prepared && fixture < 7; fixture += 1)
+    {
+        String8 object_path = string_format_z(arena, S8("{S8}/foreign-{u32}.o"), directory, fixture);
+        bool compiled = false;
+        if (fixture == 0)
+        {
+            ObjectArtifact artifact = object_write(arena, &raw, OBJECT_FORMAT_ELF64);
+            compiled = artifact.error == OBJECT_ERROR_NONE && file_write(object_path, artifact.bytes);
+        }
+        else
+        {
+            u32 compiler = (fixture - 1) / 3;
+            u32 variant = (fixture - 1) % 3;
+            if (!compilers[compiler].length)
+            {
+                if (!variant) arguments->show(arguments, S8("initial-exec TLS: {S8} not installed, skipped\n"), compiler ? S8("clang") : S8("gcc"));
+                continue;
+            }
+            String8 command[] = {compilers[compiler], optimization[variant], code_model[variant],
+                                 variant == 2 ? S8("-ftls-model=initial-exec") : S8("-g0"),
+                                 S8("-c"), foreign_path, S8("-o"), object_path};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                     .use_process_environment = true, .search_path = true});
+            ProcessWaitResult wait = child.handle ? os_process_wait_deadline(arena, child, 30000000) : (ProcessWaitResult){0};
+            compiled = child.handle && !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS;
+            if (!compiled) arguments->show(arguments, S8("initial-exec TLS compile: {S8}\n"),
+                (String8){(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length});
+        }
+        BUSTER_TEST(arguments, compiled);
+        if (!compiled) continue;
+        FileMapRead map = file_map_read(arena, object_path, (FileReadOptions){0});
+        ObjectFile object = object_read(arena, map.bytes, raw.target);
+        u32 mov_sites = 0;
+        for (u32 index = 0; object.error == OBJECT_ERROR_NONE && index < object.relocation_count; index += 1)
+        {
+            ObjectRelocation* relocation = object.relocations + index;
+            if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF && relocation->section < object.section_count)
+            {
+                ByteSlice bytes = object.sections[relocation->section].data;
+                bool bounded = relocation->offset >= 3 && relocation->offset <= bytes.length && bytes.length - relocation->offset >= 4;
+                if (bounded)
+                {
+                    u8 const* site = bytes.pointer + relocation->offset - 3;
+                    mov_sites += (site[0] & 0xf8u) == 0x48 && site[1] == 0x8b && (site[2] & 0xc7u) == 5;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE && mov_sites >= 2);
+        file_map_unmap(map);
+        for (u32 pie = 0; pie < 2; pie += 1)
+        {
+            String8 program = string_format_z(arena, S8("{S8}/program-{u32}-{u32}"), directory, fixture, pie);
+            String8 reference = string_format_z(arena, S8("{S8}/reference-{u32}-{u32}"), directory, fixture, pie);
+            String8 host[] = {S8(BUSTER_HOST_C_COMPILER), S8(BUSTER_HOST_C_COMPILER_ARG1), pie ? S8("-pie") : S8("-no-pie"),
+                             main_path, object_path, S8("-o"), reference};
+            // Preserve a separate compiler argument (e.g. zig cc), without an
+            // empty argv entry when the configured compiler needs none.
+            if (!host[1].length) memmove(host + 1, host + 2, sizeof(host[0]) * (BUSTER_ARRAY_LENGTH(host) - 2));
+            u32 host_count = (u32)BUSTER_ARRAY_LENGTH(host) - (u32)!S8(BUSTER_HOST_C_COMPILER_ARG1).length;
+            ProcessSpawnResult child = os_process_spawn((SliceString8){host, host_count}, (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                     .use_process_environment = true, .search_path = true});
+            ProcessWaitResult wait = child.handle ? os_process_wait_deadline(arena, child, 30000000) : (ProcessWaitResult){0};
+            String8 output = {0};
+            bool oracle = child.handle && !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS &&
+                          compiler_driver_test_image_run(arguments, arena, &reference, 1, directory, &output);
+            BUSTER_TEST(arguments, oracle);
+            String8 command[] = {S8("-g0"), pie ? S8("-pie") : S8("-no-pie"), main_object, object_path, S8("-o"), program};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+                arguments->show(arguments, S8("initial-exec TLS fixture {u32} pie {u32}: {S8}\n"), fixture, pie, linked.diagnostic);
+            BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE &&
+                                   compiler_driver_test_image_run(arguments, arena, &program, 1, directory, &output));
+        }
+    }
+    // A malformed IE opcode remains a relocation failure; it cannot establish
+    // a PIC defect, and failed links preserve existing output bytes.
+    text[1] = 0x8a;
+    ObjectArtifact malformed = object_write(arena, &raw, OBJECT_FORMAT_ELF64);
+    String8 malformed_path = string_format_z(arena, S8("{S8}/malformed.o"), directory);
+    bool malformed_written = malformed.error == OBJECT_ERROR_NONE && file_write(malformed_path, malformed.bytes);
+    BUSTER_TEST(arguments, malformed_written);
+    for (u32 pie = 0; prepared && malformed_written && pie < 2; pie += 1)
+    {
+        String8 program = string_format_z(arena, S8("{S8}/refused-{u32}"), directory, pie);
+        ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(S8("existing output survives malformed initial-exec TLS"));
+        BUSTER_TEST(arguments, file_write(program, sentinel));
+        String8 command[] = {pie ? S8("-pie") : S8("-no-pie"), main_object, malformed_path, S8("-o"), program};
+        CompilerDriverResult linked = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_LINK && linked.native_link.error == LINK_ERROR_RELOCATION);
+        BUSTER_STRING_TEST(arguments, linked.native_link.symbol, S8("ie_value"));
+        BUSTER_TEST(arguments, !linked.native_link.requires_position_independent_objects &&
+                               string_first_sequence(linked.diagnostic, S8("-fPIC")) == BUSTER_STRING_NO_MATCH);
+        ByteSlice retained = file_read(arena, program, (FileReadOptions){0});
+        BUSTER_TEST(arguments, retained.length == sentinel.length && memory_compare(retained.pointer, sentinel.pointer, sentinel.length));
     }
     scratch_end(temporary);
     return result;
@@ -18406,6 +18581,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_imported_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_position_independent_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_dynamic_tls);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_initial_exec_tls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_link_tls_sites);
 #endif
 
@@ -19398,6 +19574,50 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(incompatible_cpu_command_line));
     BUSTER_TEST(arguments, incompatible_cpu.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, incompatible_cpu.diagnostic, S8("CPU model is incompatible with target: apple-m4"));
+    typedef struct CompilerDriverX86ModeCase CompilerDriverX86ModeCase;
+    struct CompilerDriverX86ModeCase
+    {
+        String8 name;
+        bool has_long_mode;
+    };
+    CompilerDriverX86ModeCase x86_mode_cases[] = {
+        {S8("i486"), false}, {S8("pentium"), false}, {S8("k6"), false}, {S8("k6-2"), false},
+        {S8("k6-3"), false}, {S8("geode"), false}, {S8("athlon"), false}, {S8("athlon-xp"), false},
+        {S8("baseline"), true}, {S8("k8"), true}, {S8("k8-sse3"), true}, {S8("amdfam10"), true},
+        {S8("core2"), true}, {S8("bonnell"), true}, {S8("haswell"), true}, {S8("znver5"), true},
+    };
+    String8 cpu_mode_options[] = {S8("-march"), S8("-mcpu")};
+    for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(x86_mode_cases); mode_index += 1)
+    {
+        for (u32 option_index = 0; option_index < BUSTER_ARRAY_LENGTH(cpu_mode_options); option_index += 1)
+        {
+            for (u32 target_first = 0; target_first < 2; target_first += 1)
+            {
+                String8 target_option = S8("--target=x86_64-linux");
+                String8 selection = string_format(arguments->arena, S8("{S8}={S8}"), cpu_mode_options[option_index], x86_mode_cases[mode_index].name);
+                String8 joined[] = {target_first ? target_option : selection, target_first ? selection : target_option, S8("-c"), S8("source.c")};
+                String8 separated[] = {target_first ? target_option : cpu_mode_options[option_index],
+                                       target_first ? cpu_mode_options[option_index] : x86_mode_cases[mode_index].name,
+                                       target_first ? x86_mode_cases[mode_index].name : target_option, S8("-c"), S8("source.c")};
+                SliceString8 forms[] = {(SliceString8)BUSTER_ARRAY_TO_SLICE(joined), (SliceString8)BUSTER_ARRAY_TO_SLICE(separated)};
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+                {
+                    CompilerDriverInvocation mode_invocation = compiler_driver_parse_arguments(arguments->arena, forms[form]);
+                    BUSTER_TEST(arguments, mode_invocation.error == (x86_mode_cases[mode_index].has_long_mode ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_ARGUMENT));
+                    if (x86_mode_cases[mode_index].has_long_mode)
+                    {
+                        BUSTER_TEST(arguments, target_cpu_features_are_valid(mode_invocation.target));
+                        BUSTER_TEST(arguments, target_cpu_feature_has(mode_invocation.target, TARGET_CPU_FEATURE_X86_SSE2));
+                    }
+                    else
+                    {
+                        BUSTER_STRING_TEST(arguments, mode_invocation.diagnostic,
+                            string_format(arguments->arena, S8("CPU model is incompatible with target: {S8}"), x86_mode_cases[mode_index].name));
+                    }
+                }
+            }
+        }
+    }
     String8 unknown_cpu_command_line[] = {
         S8("-march=future-fast"),
         S8("-c"),

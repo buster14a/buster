@@ -42,6 +42,8 @@
 // -fkeep-going continues past them. compiler_driver_metrics_format at the end
 // renders the -fmetrics-out records (schema: docs/agents/driver.md). A null
 // metrics pointer is the ordinary compile: no clock reads.
+// The test-only compiler_driver_test_setup_order observer checks completed
+// setup against real serial unit boundaries without comparing wall times.
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
 // compiler_driver_elf_library_roots shares target/sysroot search roots between
 // export discovery and static-library lookup; explicit -L roots come first.
@@ -3782,8 +3784,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
 }
 
 // A failed native link names its reason and symbol. A relocation refused in
-// a position-independent image is almost always an object compiled for a
-// fixed address, so the diagnostic says what the image needs instead. A
+// a position-independent image receives the PIC hint only when its refused
+// address model establishes that cause. Malformed sites and TLS failures do
+// not say anything about the input's code model. A
 // failed artifact write names the operating-system error that refused it.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link)
 {
@@ -3798,7 +3801,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena,
     }
     else
     {
-        String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION
+        String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION &&
+                       link.requires_position_independent_objects
                            ? S8(" (a position-independent image needs objects compiled with -fPIC)") : S8("");
         diagnostic = string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
     }
@@ -4812,6 +4816,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_unit(Arena* are
     if (metrics)
     {
         *metrics = (CompilerDriverUnitMetrics){.origin = invocation.metrics_origin, .active = COMPILER_DRIVER_PHASE_READ};
+#if BUSTER_INCLUDE_TESTS
+        compiler_driver_test_setup_order_event(COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN);
+#endif
         metrics->start_nanoseconds = timestamp_ns_between(metrics->origin, timestamp_take());
         metrics->last_nanoseconds = metrics->start_nanoseconds;
     }
@@ -4819,6 +4826,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_unit(Arena* are
     if (metrics)
     {
         compiler_driver_phase_begin(metrics, metrics->active);
+#if BUSTER_INCLUDE_TESTS
+        compiler_driver_test_setup_order_event(COMPILER_DRIVER_TEST_SETUP_INPUT_END);
+#endif
     }
     return result;
 }
@@ -4925,6 +4935,57 @@ BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(compiler_driver_section_classes) == OBJECT_S
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL u32 compiler_driver_function_limit_override;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool compiler_driver_setup_order_armed;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CompilerDriverTestSetupOrder compiler_driver_setup_order;
+
+void compiler_driver_test_setup_order_begin(void)
+{
+    compiler_driver_setup_order = (CompilerDriverTestSetupOrder){0};
+    compiler_driver_setup_order_armed = true;
+}
+
+void compiler_driver_test_setup_order_event(CompilerDriverTestSetupEvent event)
+{
+    if (compiler_driver_setup_order_armed)
+    {
+        CompilerDriverTestSetupOrder* order = &compiler_driver_setup_order;
+        switch (event)
+        {
+        case COMPILER_DRIVER_TEST_SETUP_COMPILER:
+        case COMPILER_DRIVER_TEST_SETUP_TARGET:
+        case COMPILER_DRIVER_TEST_SETUP_ARENAS:
+            order->order_errors += (u32)(order->input_starts != 0 || order->input_open || (order->completed_setup & (u32)event) != 0);
+            order->completed_setup |= (u32)event;
+            break;
+        case COMPILER_DRIVER_TEST_SETUP_INPUT_BEGIN:
+            order->order_errors += (u32)(order->completed_setup != BUSTER_COMPILER_DRIVER_TEST_SETUP_COMPLETE || order->input_open);
+            order->input_starts += 1;
+            order->input_open = true;
+            break;
+        case COMPILER_DRIVER_TEST_SETUP_INPUT_END:
+            order->order_errors += (u32)!order->input_open;
+            order->input_ends += 1;
+            order->input_open = false;
+            break;
+        default:
+            order->order_errors += 1;
+            break;
+        }
+    }
+}
+
+CompilerDriverTestSetupOrder compiler_driver_test_setup_order_end(void)
+{
+    if (compiler_driver_setup_order_armed)
+    {
+        compiler_driver_setup_order.order_errors += (u32)(compiler_driver_setup_order.input_open ||
+                                                           compiler_driver_setup_order.input_starts != compiler_driver_setup_order.input_ends);
+    }
+    CompilerDriverTestSetupOrder result = compiler_driver_setup_order;
+    compiler_driver_setup_order = (CompilerDriverTestSetupOrder){0};
+    compiler_driver_setup_order_armed = false;
+    return result;
+}
 
 void compiler_driver_test_set_function_limit(u32 limit)
 {
@@ -5495,8 +5556,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         // One-time table preparation is driver setup, not the first input's
         // work: fill it before any measured interval opens.
         compiler_prewarm();
+#if BUSTER_INCLUDE_TESTS
+        compiler_driver_test_setup_order_event(COMPILER_DRIVER_TEST_SETUP_COMPILER);
+#endif
         codegen_prewarm_for_target(invocation.target);
+#if BUSTER_INCLUDE_TESTS
+        compiler_driver_test_setup_order_event(COMPILER_DRIVER_TEST_SETUP_TARGET);
+#endif
         compiler_driver_prime_arenas(arena, invocation.input_count == 1);
+#if BUSTER_INCLUDE_TESTS
+        compiler_driver_test_setup_order_event(COMPILER_DRIVER_TEST_SETUP_ARENAS);
+#endif
     }
     if (invocation.input_count <= 1 && !invocation.library_count &&
         (!invocation.input_count || (!compiler_driver_object_input(invocation.input_paths[0]) && !compiler_driver_archive_input(invocation.input_paths[0]))))

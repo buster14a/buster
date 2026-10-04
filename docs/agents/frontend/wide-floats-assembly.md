@@ -348,6 +348,16 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   the one in the instruction's IR literal (`codegen_assembly_durable_name`).
   Labels are refused inside a template rather than defined, because a template
   is emitted once per instruction rather than once per file.
+- Both WebAssembly C layouts use sixteen-byte, sixteen-byte-aligned IEEE
+  binary128 `long double`, including Memory64. Layout queries and the
+  `__SIZEOF_LONG_DOUBLE__` / `__LDBL_*` predefines retain that ABI independently
+  of operation support. Scalar and aggregate static initializers store the
+  exact binary128 byte image; `c_ir_binary128_static_target` admits this storage
+  without enabling the native `c_ir_target_supports_f128_transport` ABI gate.
+  Runtime binary128 literals and parameter/return transport retain explicit
+  unsupported diagnostics. `c_test_wasm_long_double_storage` checks precision,
+  record offsets, array stride, constant images, direct Wasm emission and both
+  frontend SSA forms. Emitting a module in this test does not execute it.
 - The Wasm64 backend consumes canonical IR directly. Unsupported ABI or
   instruction shapes must be diagnosed; never silently fall back to a native
   backend.

@@ -487,8 +487,9 @@ module-local function through all four allocator modes, requires PLT32 for the
 import and PC32 for the local call, and links/runs each default-model object
 with the configured host compiler as a PIE. It also verifies that a direct-call
 only function value leaves no separate address relocation. The argument-policy
-regression requires `-fPIE` and `-fpie` to be rejected on x86-64 ELF and remain
-accepted on Mach-O, COFF, UEFI, eBPF and Wasm. The existing fixtures preserve
+regression requires `-fPIE` and `-fpie` to select the position-independent model
+on every target, with the last positive spelling winning and `-fno-pie`
+cancelling only a PIE spelling. The existing fixtures preserve
 signed absolute `R_X86_64_32S` and GOTPCREL coverage; the indexed fixture makes
 both GCC and Clang produce those forms.
 The fixture is compiled `-O2`, because that is where both narrow an address to
