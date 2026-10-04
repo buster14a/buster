@@ -75,6 +75,17 @@ the end of the child's log. It also keeps the whole log as `LOG.line-N` under th
 test root, which the harness artifacts upload. The desktop matrix also retains
 these parent diagnostics and the child-log tail in `combinations.log`.
 
+Source-to-object admission failures additionally name the first failed predicate,
+the attempted command, and the original process result, including launch stage.
+The private process group's raw PID/PGID is not returned by this result API.
+If the workload-admission success fixture unexpectedly fails, it prints the
+original nested command, log, metrics and artifact file identities before a
+later self-test clears the root. Text is limited to 65,536 bytes per file and
+reports truncation; binaries are identified by SHA-256 and size. This bounded
+console packet helps diagnose the failed invocation. It does not replace the
+full original files in a harness artifact or establish a historical failure's
+cause. Admission predicates, deadlines and exit codes remain unchanged.
+
 POSIX launch failures preserve the failing setup/exec stage and errno through
 a small close-on-exec error pipe. Child reporting uses no allocation or buffered
 stdio, and parent reads are nonblocking after the waited child exits. A missing
