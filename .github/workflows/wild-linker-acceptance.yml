@@ -151,15 +151,6 @@ jobs:
         run: |
           clang -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic tools/wild_linker_acceptance.c -o "$RUNNER_TEMP/wild-evaluation/bench"
           "$RUNNER_TEMP/wild-evaluation/bench" "$RUNNER_TEMP/wild-evaluation/build-driver" "$RUNNER_TEMP/wild-evaluation/evidence" "$RUNNER_TEMP/wild-primary-inputs"
-      - name: Print compact observations and verifier diagnostics
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          for root in "$RUNNER_TEMP/wild-evaluation/evidence"; do
-            for file in summary.csv original-summary.csv build-link-share.csv negative-selection-status.txt cold-cache-status.txt completion.txt; do
-              test ! -f "$root/$file" || { echo "$file"; cat "$root/$file"; }
-            done
-          done
       - name: Retain compact reviewable evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

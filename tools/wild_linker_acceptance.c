@@ -93,7 +93,7 @@ static void traced_inputs(const char* cell, const char* command, const char* dir
                 const char* path = first[1] == '/' ? first + 1 : format("%s/%s", directory, first + 1);
                 char resolved[4096];
                 struct stat st;
-                if (realpath(path, resolved) && !stat(resolved, &st) && S_ISREG(st.st_mode))
+                if (realpath(path, resolved) && strncmp(resolved, "/proc/", 6) && strncmp(resolved, "/sys/", 5) && !stat(resolved, &st) && S_ISREG(st.st_mode))
                 {
                     if (strchr(resolved, '\n') || strchr(resolved, '\\')) fail("unhandled trace filename");
                     fprintf(manifest_paths, "%s\n", resolved);
@@ -274,7 +274,7 @@ int main(int argc, char** argv)
         fprintf(summary, "cell,n,median_A_ms,median_B_ms,mad_A_ms,mad_B_ms,median_paired_B_over_A,ci95_low,ci95_high\n");
         self_test();
         write_text(format("%s/method.txt", evidence),
-            "Independent direct-linker replay from #2646 frozen artifacts, unchanged source baseline 3b79a042. Same objects, scripts and system inputs hashed before/after; complete successful read-open traces retained.\n"
+            "Independent direct-linker replay from #2646 frozen artifacts, unchanged source baseline 3b79a042. Same objects, scripts and regular filesystem system inputs hashed before/after; read-open traces retained, including excluded dynamic /proc and /sys host telemetry.\n"
             "Direct timing excludes compiler-driver startup, includes /bin/sh and fork/wait (<1ms self-control); output close without fsync, warm page-cache. Original release package binaries, default threads and matched --threads=1. No LTO. Explicit --no-gc-sections (ide/small), --gc-sections (hot_reload requirement), --no-fork (wait4 covers complete linker lifetime), --icf=none and identical fixed 20-byte benchmark-only build ID override differing upstream defaults.\n"
             "wait4 user/system and linker process high-water RSS for no-fork direct cells; build/smoke process-tree peaks are not summed. Prior forked observations have incomplete CPU/RSS accounting and remain exploratory. Bootstrap intervals are descriptive for the observed hosted VM; no dedicated-host claim.\n"
             "Build link share uses the actual Ninja output step duration; end-to-end includes driver/Ninja/compilation. Clean samples n=7; edits n=21 per variant.\n");
