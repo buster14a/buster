@@ -1,0 +1,105 @@
+name: Lower root-memo lab (temporary, #1700)
+
+# Branch-only measurement for the #1700 census and the one-pass root
+# classification prototype. It is removed before the branch is merged; the
+# audit cites its run. Baseline and candidate are both built with the hosted
+# Clang (the documented hosted bootstrap exception), the work-ledger corpus
+# counts operations and checks output identity, and interleave_pairs.py times
+# the plain compilers on SQLite 3.53.4 and the pinned unity unit.
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Baseline commit
+        default: 94976eccad9c31776cf264a33dcda960dd8ed51a
+        required: true
+        type: string
+      pairs:
+        description: Measured timing pairs per workload
+        default: '12'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  lab:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.baseline_ref }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Record identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          { printf 'baseline=%s\n' "$(git -C baseline rev-parse HEAD)"; printf 'candidate=%s\n' "$(git -C candidate rev-parse HEAD)"; } | tee out/revisions.txt
+          clang --version | tee out/toolchain.txt
+          lscpu | tee out/lscpu.txt
+          nproc | tee out/nproc.txt
+          uname -a | tee out/uname.txt
+      - name: Fetch pinned SQLite amalgamation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p external
+          curl --fail --location https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip -o external/sqlite-amalgamation.zip
+          printf '%s  %s\n' 1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d external/sqlite-amalgamation.zip | sha256sum --check
+          unzip -q external/sqlite-amalgamation.zip -d external
+          sha256sum external/sqlite-amalgamation-3530400/sqlite3.c external/sqlite-amalgamation-3530400/shell.c | tee out/sqlite-inputs.sha256
+      - name: Build baseline and candidate subjects (ledger and plain)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash candidate/tools/work_ledger/build_subject.sh "$PWD/baseline" "$PWD/out/subject-baseline" 2>&1 | tee out/build-baseline.log
+          bash candidate/tools/work_ledger/build_subject.sh "$PWD/candidate" "$PWD/out/subject-candidate" 2>&1 | tee out/build-candidate.log
+          sha256sum out/subject-*/ide-* | tee out/compilers.sha256
+      - name: Work-ledger corpus (operation counts and output identity)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for subject in baseline candidate; do
+            python3 candidate/tools/work_ledger/run_corpus.py --subject "$subject" \
+              --ledger-compiler "out/subject-$subject/ide-ledger" --plain-compiler "out/subject-$subject/ide-plain" \
+              --self-host-root "$PWD/baseline" --fixtures "$PWD/baseline/tools/work_ledger/fixtures.txt" \
+              --sqlite-root "$PWD/external/sqlite-amalgamation-3530400" \
+              --output "out/ledger-$subject" 2>&1 | tail -20
+          done
+          python3 candidate/tools/work_ledger/ledger_report.py "baseline=out/ledger-baseline/results.json" "candidate=out/ledger-candidate/results.json" \
+            --output out/ledger-report.md --json out/ledger-summary.json
+          grep -E "^(# |\| (lower|rederive|machine|output)|.*identical)" out/ledger-report.md | head -80 || true
+          rm -rf out/ledger-*/artifacts out/ledger-*/ledger-artifacts
+      - name: Paired timing of the plain compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > out/workloads.json <<EOF
+          [
+            {"name": "sqlite3-g0", "cwd": "$PWD/external/sqlite-amalgamation-3530400",
+             "argv": ["cc", "-g0", "-O2", "-I.", "-DSQLITE_THREADSAFE=1", "-DSQLITE_ENABLE_MATH_FUNCTIONS", "-DSQLITE_ENABLE_COLUMN_METADATA", "-march=znver3", "-c", "sqlite3.c"]},
+            {"name": "unity-g0", "cwd": "$PWD/baseline",
+             "argv": ["cc", "-Isrc", "-DBUSTER_UNITY_BUILD=1", "-DBUSTER_INCLUDE_TESTS=0", "-g0", "-march=znver3", "-c", "src/buster/apps/ide/ide.c"]}
+          ]
+          EOF
+          python3 candidate/docs/performance-audits/evidence/2026-10-04T114428Z/interleave_pairs.py \
+            --baseline out/subject-baseline/ide-plain --candidate out/subject-candidate/ide-plain \
+            --workloads out/workloads.json --pairs "${{ inputs.pairs }}" --cpu 1 --output out/timing 2>&1 | tee out/timing.log
+          rm -f out/timing/*.o
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: lower-root-memo-lab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out
+          retention-days: 30
+          if-no-files-found: error
