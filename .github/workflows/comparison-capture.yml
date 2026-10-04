@@ -2,7 +2,7 @@ name: Bounded compiler debug comparison
 on:
   push:
     branches: [codex/2334-debug-comparison-capture]
-    paths: [.github/workflows/comparison-capture.yml]
+    paths: [.github/workflows/comparison-capture.yml, tools/research/debug-comparison-capture.c]
   workflow_dispatch:
 permissions:
   contents: read
