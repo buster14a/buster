@@ -3,7 +3,7 @@ name: Wild linker AArch64 qualification
 # Explicitly scoped research execution. Never selects a self-hosted machine.
 on:
   push:
-    branches: [codex/2645-wild-arm-evidence]
+    branches: ['codex/2645-wild-arm-evidence']
   workflow_dispatch:
 
 permissions:
@@ -30,6 +30,19 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Pin repaired combined source without changing benchmark inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wild-arm-harness" "$RUNNER_TEMP/wild-evaluation/evidence"
+          cp tools/wild_linker_arm_smoke.c tools/wild_linker_bench.c "$RUNNER_TEMP/wild-arm-harness/"
+          git rev-parse HEAD > "$RUNNER_TEMP/wild-evaluation/evidence/harness-source.txt"
+          sha256sum "$RUNNER_TEMP/wild-arm-harness/"*.c > "$RUNNER_TEMP/wild-evaluation/evidence/harness.sha256"
+          cp "$RUNNER_TEMP/wild-arm-harness/"*.c "$RUNNER_TEMP/wild-evaluation/evidence/"
+          git fetch --no-tags origin 86f26a1c7338c89ebe11f7fe60bc2904a7686526
+          git checkout --detach 86f26a1c7338c89ebe11f7fe60bc2904a7686526
+          git diff --check HEAD^1 HEAD
+          printf 'PASS git diff --check HEAD^1 HEAD at 86f26a1c7338c89ebe11f7fe60bc2904a7686526\n' > "$RUNNER_TEMP/wild-evaluation/evidence/diff-check.txt"
       - name: Install independent validation tools
         run: |
           sudo apt-get update -qq
@@ -85,7 +98,8 @@ jobs:
           grep -n -C 8 -- 'BUILD_ARGUMENT_LINKER' build.c > "$evidence/linker-selection-source.txt"
       - name: Run native C evaluation harness
         run: |
-          clang -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic tools/wild_linker_arm_smoke.c -o "$RUNNER_TEMP/wild-evaluation/bench"
+          "$RUNNER_TEMP/wild-evaluation/build-driver" source_size --base HEAD^1 > "$RUNNER_TEMP/wild-evaluation/evidence/source-size.txt"
+          clang -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic "$RUNNER_TEMP/wild-arm-harness/wild_linker_arm_smoke.c" -o "$RUNNER_TEMP/wild-evaluation/bench"
           "$RUNNER_TEMP/wild-evaluation/bench" "$RUNNER_TEMP/wild-evaluation/build-driver" "$RUNNER_TEMP/wild-evaluation/evidence"
       - name: Retain original evidence including setup failures
         if: ${{ always() }}
