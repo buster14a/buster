@@ -7,6 +7,11 @@ name: Research probe - C frontend validate-then-discard cost
 # that pass; the probe is never a production candidate. Not for main.
 
 on:
+  # push trigger on the probe branch only: workflow_dispatch cannot be
+  # dispatched until the file exists on the default branch.
+  push:
+    branches:
+      - devin/rederive-validation-probe
   workflow_dispatch:
     inputs:
       pairs:
