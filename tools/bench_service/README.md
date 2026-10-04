@@ -5,9 +5,11 @@ real installed-input materialization boundary and a Linux containment
 supervisor. Linux also provides a long-lived local service endpoint: it owns
 the single queue writer, authenticates Unix peer credentials, and dispatches
 bounded public control frames. Installed execution is selected through a
-compiled recipe registry; request bytes never select a program or command.
-The current executable recipe returns only typed build-driver failures until
-its operator-installed dependencies are available.
+compiled recipe registry; request bytes select immutable inputs while host
+commands remain fixed. [Native execution](NATIVE_EXECUTION.md) adds private
+immutable program upload and one contained static-program recipe (#2648).
+Installed recipes require their reviewed operator-installed profiles and
+helpers before execution is available.
 This does not change server configuration, measure performance or qualify a
 9700X.
 Do not close #437 or accept compiler performance changes because these tests
@@ -17,9 +19,11 @@ pass.
 
 `worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU` is the Linux
 single-job supervisor. A request may name only an admitted service recipe:
-`validate-buster-v1` or `zen5-calibration-v1` (one revision named twice). It
-cannot supply a
-program, argument, unit name, resource property, cgroup path or timeout. The
+`validate-buster-v1`, `zen5-calibration-v1` (one revision named twice), or
+`native-execute-v1` (one uploaded manifest SHA256 named twice). It cannot supply
+a host command, argument, unit name, resource property, cgroup path or timeout.
+The native recipe runs the fixed service coordinator and candidate helper
+described in [NATIVE_EXECUTION.md](NATIVE_EXECUTION.md). The
 service sends a typed job/attempt request to the root-owned
 `buster-bench-systemd-broker` socket. The broker constructs the fixed
 `/usr/bin/systemd-run --wait --service-type=exec` invocation of

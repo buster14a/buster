@@ -24,13 +24,14 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include "zen5_stage.h"
+#include "native_profile.h"
 
 #define BQ_GATE_SERVICE "/usr/local/libexec/buster-bench-service"
 #define BQ_GATE_BUILD "/usr/local/libexec/buster-bench-build"
 #define BQ_GATE_THROUGHPUT "/usr/local/libexec/buster-bench-throughput"
 #define BQ_GATE_MAX_GROUPS 32
 /* Stages 0..5 are the smoke recipe's; 16..28 are the zen5 stages. */
-#define BQ_GATE_LAST_STAGE (BQ_ZEN5_STAGE_FIRST_NUMBER + BQ_ZEN5_STAGE_COUNT - 1u)
+#define BQ_GATE_LAST_STAGE BQ_NATIVE_STAGE
 
 static bool bq_gate_decimal(char const* text, unsigned long* output)
 {
@@ -145,7 +146,7 @@ static bool bq_gate_privileges(void)
 static bool bq_gate_zen5(unsigned long stage, char const* program, char const* first_argument)
 {
     unsigned long index = stage - BQ_ZEN5_STAGE_FIRST_NUMBER;
-    bool ok = stage >= BQ_ZEN5_STAGE_FIRST_NUMBER && stage <= BQ_GATE_LAST_STAGE;
+    bool ok = stage >= BQ_ZEN5_STAGE_FIRST_NUMBER && stage < BQ_NATIVE_STAGE;
     if (ok && index < BQ_ZEN5_STAGE_ORACLE)
         ok = !strcmp(program, BQ_ZEN5_STAGE_DRIVER) && !strcmp(first_argument, index % 2u == 0 ? "generate" : "build");
     else if (ok && index == BQ_ZEN5_STAGE_PMU)
@@ -161,6 +162,8 @@ static bool bq_gate_program(unsigned long stage, char const* program, char const
                                                           stage <= BQ_GATE_LAST_STAGE));
     if (ok && stage == 0)
         ok = !strcmp(program, BQ_GATE_SERVICE) && !strcmp(first_argument, "worker-unit");
+    else if (ok && stage == BQ_NATIVE_STAGE)
+        ok = !strcmp(program, BQ_GATE_SERVICE) && !strcmp(first_argument, "native-payload");
     else if (ok && stage == 5)
         ok = !strcmp(program, BQ_GATE_THROUGHPUT) && !strcmp(first_argument, "run");
     else if (ok && stage >= BQ_ZEN5_STAGE_FIRST_NUMBER)
@@ -203,6 +206,10 @@ static int bq_gate_self_test(void)
                   !bq_gate_program(27, BQ_GATE_BUILD, BQ_ZEN5_STAGE_CAPTURE_VERB));
     BQ_GATE_CHECK(!bq_gate_program(6, BQ_GATE_BUILD, "generate") && !bq_gate_program(15, BQ_GATE_BUILD, "build") &&
                   !bq_gate_program(29, BQ_GATE_BUILD, "generate") && !bq_gate_program(29, BQ_GATE_BUILD, "build"));
+    BQ_GATE_CHECK(bq_gate_program(BQ_NATIVE_STAGE, BQ_GATE_SERVICE, "native-payload") &&
+                  !bq_gate_program(BQ_NATIVE_STAGE, BQ_GATE_SERVICE, "worker-unit") &&
+                  !bq_gate_program(BQ_NATIVE_STAGE, "/tmp/program", "native-payload") &&
+                  !bq_gate_program(BQ_NATIVE_STAGE + 1, BQ_GATE_SERVICE, "native-payload"));
     /* Every argv the broker builds from the shared contract passes here. */
     for (unsigned index = 0; index < BQ_ZEN5_STAGE_COUNT; index += 1)
     {

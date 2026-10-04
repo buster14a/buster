@@ -1262,7 +1262,9 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
         if (made)
         {
             String8 revision = bq_field(&job->request, 3 + subject);
-            made = bq_copy_manifest(installed, source, revision) && bq_make_sources_read_only(source) && fsync(subject_fd) == 0;
+            made = (bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_EXECUTE ?
+                    bq_native_materialize(queue, source, revision) : bq_copy_manifest(installed, source, revision)) &&
+                   bq_make_sources_read_only(source) && fsync(subject_fd) == 0;
         }
         if (source >= 0)
         {

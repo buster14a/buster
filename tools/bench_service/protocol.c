@@ -18,7 +18,7 @@ typedef enum BqOperation
     BQ_OP_CAPABILITIES = 1, BQ_OP_SUBMIT, BQ_OP_STATUS, BQ_OP_RESULT,
     BQ_OP_CANCEL, BQ_OP_LOGS, BQ_OP_FAKE_RUN, BQ_OP_FAKE_RECONCILE,
     BQ_OP_MATERIALIZE, BQ_OP_WORKSPACE_RECONCILE, BQ_OP_WORKER_RUN,
-    BQ_OP_SUBMIT_EXCLUSIVE, BQ_OP_EXPORT
+    BQ_OP_SUBMIT_EXCLUSIVE, BQ_OP_EXPORT, BQ_OP_NATIVE_BEGIN, BQ_OP_NATIVE_WRITE, BQ_OP_NATIVE_FINISH
 } BqOperation;
 
 typedef struct BqPacket
@@ -39,8 +39,8 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
 #endif
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
-    "schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=512\n"
-    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1 "
+    "schema=2 journal=4 legacy-journal=1 executor=supervisor pending=8 jobs=512\n"
+    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1 "
     "blocked-recipes=native-retirement-performance-v1\n"
     "validity=not-evaluated materialization=read-only workspace=per-attempt\n"
     "worker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic "
@@ -135,6 +135,18 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
         {
             valid = false;
         }
+        else if (operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH)
+        {
+            valid = request->size >= BQ_CONTROL_HEADER + 72 && length == 76 &&
+                    bq_native_hex(data + 12) && bq_u64(data + 4) <= bq_u64(arguments + 64);
+            if (valid)
+            {
+                char manifest[BQ_NATIVE_MANIFEST_CAP], identity[65];
+                int count = bq_native_manifest(manifest, arguments, bq_u64(arguments + 64), identity);
+                valid = count > 0 && !memcmp(identity, data + 12, 64) &&
+                        (operation != BQ_OP_NATIVE_FINISH || bq_u64(data + 4) == bq_u64(arguments + 64));
+            }
+        }
         else if (operation == BQ_OP_CAPABILITIES)
         {
             valid = request->size == BQ_CONTROL_HEADER && length > 4;
@@ -228,6 +240,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         else if (queue->poisoned || queue->journal_fd < 0)
         {
             error = BQ_IO;
+        }
+        else if (schema == BQ_CONTROL_SCHEMA && operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH)
+        {
+            char identity[65];
+            u64 cursor = 0;
+            error = bq_native_upload(queue, operation - BQ_OP_NATIVE_BEGIN + 1, body, length, identity, &cursor);
+            output_size = 76;
+            bq_put64(output + 4, cursor);
+            memcpy(output + 12, identity, 64);
         }
         else if ((operation == BQ_OP_SUBMIT || operation == BQ_OP_SUBMIT_EXCLUSIVE) && length <= BQ_REQUEST_CAP)
         {
