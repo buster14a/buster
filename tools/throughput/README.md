@@ -84,6 +84,16 @@ a normal child result. The native self-test checks all four refusals, the valid
 exit 125 control and repeated descriptor cleanup. This diagnoses a refusal; it
 does not explain an unreproduced transient OS error or retry the invocation.
 
+Group setup accepts `setpgid(0,0)`'s `EPERM` only when a fresh `getpgrp()` equals
+the child's own `getpid()`, proving the required private-group postcondition.
+Another group or any other error remains a launch failure with its captured
+errno. The native self-test exercises actual session-leader `EPERM`, ordinary
+group creation, an already private group's synthetic redundant refusal, and
+wrong-group/other-error refusals in two directly owned children with two-second
+deadlines and descriptor census. `THROUGHPUT_GROUP_POSTCONDITION` records these
+kernel witnesses. This does not establish the historical macOS refusal's cause;
+those incidents did not retain the failed child's group state.
+
 The POSIX summary-write fixture keeps its real one-byte `RLIMIT_FSIZE` failure
 and three-second child deadline. It restores the saved limit only after
 comparison has closed the reports, then emits `SUMMARY_WRITE_FAILURE` with the
