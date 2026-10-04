@@ -10171,11 +10171,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     {
         C_DEFINE_TYPE_MACRO("__GNUC_STDC_INLINE__", S8("1"));
     }
-    // This is Clang-suitable alignment, intentionally not abi_max_alignment;
-    // #2513 changes that independent ABI property.
     C_DEFINE_TYPE_MACRO("__CHAR_BIT__", S8("8"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_SIZE_T__", string_format(arena, S8("{u32}"), layout.pointer.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_PTRDIFF_T__", string_format(arena, S8("{u32}"), layout.pointer.size));
+    // This is Clang-suitable alignment, intentionally not abi_max_alignment;
+    // #2513 changes that independent ABI property.
     C_DEFINE_TYPE_MACRO("__BIGGEST_ALIGNMENT__",
                         options.target.cpu_arch == CPU_ARCH_BPFEL || (apple_target && options.target.cpu_arch == CPU_ARCH_AARCH64) ? S8("8") : S8("16"));
     String8 pointer_signed_max = layout.pointer.size == 8 ? S8("9223372036854775807") : S8("2147483647");
