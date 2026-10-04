@@ -16280,11 +16280,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     reference.result = reference_result;
     c_ir_append_instruction(builder, reference, reference_source);
 
-    // The declaration's attribute is the general answer -- glibc marks exit,
-    // abort and longjmp with it -- and the three names remain because a
-    // platform's headers may declare the assertion helpers without one.
-    bool noreturn = signature.is_noreturn || string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
-                    string_equal(target->name, S8("__assert_perror_fail"));
+    // The bound declaration owns call effects; the name may identify a
+    // returning function with internal linkage or a different assembler name.
+    bool noreturn = signature.is_noreturn;
     bool terminates = noreturn && !c_ir_lowering_resumes_after_call(builder);
     // A void call still needs an expression-machine placeholder. Emit it
     // before a terminating call so UNREACHABLE follows the call immediately;

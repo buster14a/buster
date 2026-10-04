@@ -394,3 +394,22 @@ allocators and both frontend SSA forms on eligible hosts. Semantic checks
 for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
+
+## Resolved non-returning call effects (#1350)
+
+`c_ir_emit_call_target` uses the resolved signature's `is_noreturn` contract.
+The C name and assembler name identify the callee; they do not independently
+add a non-returning effect. This keeps continuation after a returning internal
+function named `abort` and agrees with indirect calls. Explicit standard/GNU
+attributes and effects on later declarations remain authoritative. Existing
+void placeholders, call consumers and terminator ordering remain unchanged.
+
+The registered `c_test_resolved_call_effects` validates named returning and
+marked callers in GNU17/GNU23, six native data models and both frontend forms.
+It checks exact CALL counts, RETURN/UNREACHABLE presence and canonical validity.
+Independent runtime oracles cover direct, parenthesized, macro, pointer and
+shadowed calls, storage live after a call, conditional continuation, used integer
+results and an explicit assembler name. Supported desktop execution covers all
+four allocator modes and both forms with strict codegen verification. Standard,
+GNU and later-declaration non-returning helpers each exit through the explicitly
+marked `_Exit`; a continuation that executes instead fails the runtime oracle.

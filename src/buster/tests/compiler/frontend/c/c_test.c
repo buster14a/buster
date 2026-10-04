@@ -6214,6 +6214,197 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_noreturn(UnitTestArgumen
     return result;
 }
 
+// #1350: resolved declaration effects outrank a call target's spelling.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_resolved_call_effects(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8(
+            "static volatile unsigned seen; static unsigned calls;\n"
+            "static void abort(void) { calls += 1; seen = 41u; }\n"
+            "static void renamed(void) { calls += 1; seen = 29u; }\n"
+            "static int __assert_fail(int value) { calls += 1; return value + 7; }\n"
+            "static int __assert_perror_fail(int value) { calls += 1; return value + 9; }\n"
+            "#define CALL_ABORT() abort()\n"
+            "int effect_direct(void) { calls = 0; seen = 0; abort(); return seen == 41u && calls == 1; }\n"
+            "int effect_paren(void) { calls = 0; seen = 0; (abort)(); return seen == 41u && calls == 1; }\n"
+            "int effect_pointer(void) { void (*callee)(void) = abort; calls = 0; seen = 0; callee(); return seen == 41u && calls == 1; }\n"
+            "int effect_shadow(void) { void (*abort)(void) = renamed; calls = 0; seen = 0; abort(); return seen == 29u && calls == 1; }\n"
+            "int effect_macro(void) { calls = 0; seen = 0; CALL_ABORT(); return seen == 41u && calls == 1; }\n"
+            "int effect_lifetime(void) { unsigned values[2] = {3u, 5u}; calls = 0; seen = 0; abort(); return values[0] + values[1] + seen == 49u && calls == 1; }\n"
+            "int effect_assert_statement(void) { calls = 0; __assert_fail(5); return calls == 1; }\n"
+            "int effect_assert_value(void) { calls = 0; int value = __assert_fail(5); return value == 12 && calls == 1; }\n"
+            "int effect_perror_statement(void) { calls = 0; __assert_perror_fail(5); return calls == 1; }\n"
+            "int effect_conditional(int condition) { calls = 0; seen = 0; if (condition) { abort(); seen += 1; } return seen + calls; }\n"
+            "int main(void) { return !effect_direct() || !effect_paren() || !effect_pointer() || !effect_shadow() || !effect_macro() || !effect_lifetime() ||\n"
+            " !effect_assert_statement() || !effect_assert_value() || !effect_perror_statement() || effect_conditional(1) != 43 || effect_conditional(0) != 0; }\n"),
+        S8(
+            "static unsigned calls;\n"
+            "static int abort(int value) __asm__(\"private_returning_abort\");\n"
+            "static int abort(int value) { calls += 1; return value + 3; }\n"
+            "int effect_asm_direct(void) { calls = 0; int value = abort(4); return value == 7 && calls == 1; }\n"
+            "int effect_asm_paren(void) { calls = 0; int value = (abort)(5); return value == 8 && calls == 1; }\n"
+            "int effect_asm_pointer(void) { int (*callee)(int) = abort; calls = 0; int value = callee(6); return value == 9 && calls == 1; }\n"
+            "int main(void) { return !effect_asm_direct() || !effect_asm_paren() || !effect_asm_pointer(); }\n"),
+        S8(
+            "_Noreturn void _Exit(int status);\n"
+            "static _Noreturn void standard_marked(int status) { _Exit(status); }\n"
+            "static void gnu_marked(int status) __attribute__((noreturn));\n"
+            "static void gnu_marked(int status) { _Exit(status); }\n"
+            "static void late_marked(int status);\n"
+            "static __attribute__((noreturn)) void late_marked(int status) { _Exit(status); }\n"
+            "int effect_standard(void) { standard_marked(0); }\n"
+            "int effect_gnu(void) { gnu_marked(0); }\n"
+            "int effect_late(void) { late_marked(0); }\n"
+            "int main(int argc, char **argv) { if (argc == 1) standard_marked(0); else if (argc == 2) gnu_marked(0); else late_marked(0); return 7; }\n"),
+    };
+    typedef struct CTestCallEffectExpected CTestCallEffectExpected;
+    struct CTestCallEffectExpected
+    {
+        u32 program;
+        String8 name;
+        bool is_noreturn;
+    };
+    CTestCallEffectExpected expected[] = {
+        {0, S8("effect_direct"), false},
+        {0, S8("effect_paren"), false},
+        {0, S8("effect_pointer"), false},
+        {0, S8("effect_shadow"), false},
+        {0, S8("effect_macro"), false},
+        {0, S8("effect_lifetime"), false},
+        {0, S8("effect_assert_statement"), false},
+        {0, S8("effect_assert_value"), false},
+        {0, S8("effect_perror_statement"), false},
+        {0, S8("effect_conditional"), false},
+        {1, S8("effect_asm_direct"), false},
+        {1, S8("effect_asm_paren"), false},
+        {1, S8("effect_asm_pointer"), false},
+        {2, S8("effect_standard"), true},
+        {2, S8("effect_gnu"), true},
+        {2, S8("effect_late"), true},
+    };
+    for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
+    {
+        for (u32 target_index = 0; target_index < 6; target_index += 1)
+        {
+            Target target = target_native;
+            target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+            target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+            for (u32 dialect = 0; dialect < 2; dialect += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, sources[program], (CPreprocessOptions){
+                        .target = target, .data_layout = target_data_layout(target),
+                        .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                    });
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("resolved-call-effects.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                    {
+                        BUSTER_TEST_RAW(arguments, false, lowered.diagnostics[index].message);
+                    }
+                    if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified &&
+                                                  lowered.program->module_count == 1))
+                    {
+                        IrModule* module = lowered.program->modules;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                        u32 checked = 0;
+                        u32 expected_count = 0;
+                        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+                        {
+                            CTestCallEffectExpected entry = expected[index];
+                            if (entry.program != program)
+                            {
+                                continue;
+                            }
+                            expected_count += 1;
+                            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                            {
+                                IrFunction* function = module->functions + function_index;
+                                if (!string_equal(function->name, entry.name))
+                                {
+                                    continue;
+                                }
+                                u32 call_count = 0;
+                                bool unreachable = false;
+                                bool returns = false;
+                                for (u32 row = 0; row < function->instruction_count; row += 1)
+                                {
+                                    IrOpcode opcode = function->instructions[row].opcode;
+                                    call_count += opcode == IR_OPCODE_CALL;
+                                    unreachable |= opcode == IR_OPCODE_UNREACHABLE;
+                                    returns |= opcode == IR_OPCODE_RETURN;
+                                }
+                                BUSTER_TEST_RAW(arguments, call_count == 1 && (entry.is_noreturn ? (unreachable && !returns) : (returns && !unreachable)),
+                                    string_format(temporary.arena, S8("call effect {S8} program={u32} target={u32} dialect={u32} form={u32}"),
+                                        entry.name, program, target_index, dialect, form));
+                                checked += 1;
+                            }
+                        }
+                        BUSTER_TEST(arguments, checked == expected_count);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+    for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
+    {
+        String8 path = buster_test_temporary_path(arguments->arena, S8("resolved-call-effects"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sources[program]))))
+        {
+            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+            {
+                for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                {
+                    for (u32 form = 0; form < 2; form += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        String8 output = buster_test_temporary_path(temporary.arena, S8("resolved-call-effects-run"), S8(".exe"));
+                        String8 command[] = {S8("-nostdinc"), S8("-fno-builtin"), dialects[dialect], modes[mode],
+                            form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        invocation.reject_machine_fallback = mode != 0;
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        String8 context = string_format(temporary.arena, S8("call effect program={u32} {S8} {S8} form={u32}"),
+                            program, dialects[dialect], modes[mode], form);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                            string_format(temporary.arena, S8("{S8}: {S8}"), context, compiled.diagnostic));
+                        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            u32 execution_count = program == 2 ? 3 : 1;
+                            for (u32 run_index = 0; run_index < execution_count; run_index += 1)
+                            {
+                                String8 run[] = {output, S8("gnu"), S8("late")};
+                                ProcessSpawnResult child = os_process_spawn((SliceString8){.pointer = run, .length = run_index + 1},
+                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                                {
+                                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                        string_format(temporary.arena, S8("{S8} run={u32} status={u32} timed_out={u32}"),
+                                            context, run_index, execution.platform_status, (u32)execution.timed_out));
+                                }
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // A noreturn call whose value a return, initializer, or switch consumes
 // leaves its block open for the consumer's own rows (issue #1503): the
 // return continuation used to find the block already closed and the body
@@ -35003,6 +35194,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
     BUSTER_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operands);
     BUSTER_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operand_runtime);
+    BUSTER_TEST_FIXTURE(arguments, c_test_resolved_call_effects);
     BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);
     BUSTER_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
     BUSTER_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
