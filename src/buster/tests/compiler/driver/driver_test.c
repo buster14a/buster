@@ -14532,7 +14532,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_initial_exec_tls(UnitTes
         BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_LINK && linked.native_link.error == LINK_ERROR_RELOCATION);
         BUSTER_STRING_TEST(arguments, linked.native_link.symbol, S8("ie_value"));
         BUSTER_TEST(arguments, !linked.native_link.requires_position_independent_objects &&
-                               string_first_sequence(linked.diagnostic, S8("-fPIC")) == linked.diagnostic.length);
+                               string_first_sequence(linked.diagnostic, S8("-fPIC")) == BUSTER_STRING_NO_MATCH);
         ByteSlice retained = file_read(arena, program, (FileReadOptions){0});
         BUSTER_TEST(arguments, retained.length == sentinel.length && memory_compare(retained.pointer, sentinel.pointer, sentinel.length));
     }
