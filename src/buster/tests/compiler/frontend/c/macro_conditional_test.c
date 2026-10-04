@@ -458,6 +458,226 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
     UnitTestResult demand = c_macro_argument_demand_tests(arguments);
     result.test_count += demand.test_count;
     result.succeeded_test_count += demand.succeeded_test_count;
+    struct
+    {
+        String8 source;
+        String8 expected;
+        u32 warning_line;
+    } trailing_conditionals[] = {
+        {S8("#ifndef FOO_H\n#define FOO_H\nint a;\n#endif FOO_H\n"), S8("int a;"), 4},
+        {S8("#ifdef FOO\nint no;\n#else FOO\nint yes;\n#endif\n"), S8("int yes;"), 3},
+        {S8("#if 0\n#else !0\nint yes;\n#endif\n"), S8("int yes;"), 2},
+        {S8("#if 1\nint yes;\n#endif ;\n"), S8("int yes;"), 3},
+        {S8("#ifdef A B\nint no;\n#endif\n"), S8(""), 1},
+        {S8("#define A\n#ifndef A B\nint no;\n#else\nint yes;\n#endif\n"), S8("int yes;"), 2},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(trailing_conditionals); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult actual = c_preprocess(temporary.arena, trailing_conditionals[case_index].source,
+                                                (CPreprocessOptions){.source_path = S8("trailing-conditional.c")});
+        CLexResult expected = c_lex(temporary.arena, trailing_conditionals[case_index].expected);
+        BUSTER_TEST(arguments, actual.error_count == 0);
+        BUSTER_TEST(arguments, actual.warning_count == 1);
+        BUSTER_TEST(arguments, actual.diagnostic_count == 1);
+        if (BUSTER_REQUIRE(arguments, actual.diagnostic_count == 1))
+        {
+            CDiagnostic diagnostic = actual.diagnostics[0];
+            BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS);
+            BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_WARNING);
+            BUSTER_TEST(arguments, diagnostic.location.line == trailing_conditionals[case_index].warning_line);
+            BUSTER_TEST(arguments, diagnostic.location.column == 2);
+        }
+        u64 actual_index = 0;
+        u64 expected_index = 0;
+        while (actual_index < actual.token_count && expected_index < expected.token_count)
+        {
+            while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
+            {
+                actual_index += 1;
+            }
+            while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+            {
+                expected_index += 1;
+            }
+            if (actual_index < actual.token_count && expected_index < expected.token_count)
+            {
+                BUSTER_TEST(arguments, actual.tokens[actual_index].kind == expected.tokens[expected_index].kind);
+                BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
+                                   c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
+                actual_index += 1;
+                expected_index += 1;
+            }
+        }
+        while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
+        {
+            actual_index += 1;
+        }
+        while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+        {
+            expected_index += 1;
+        }
+        BUSTER_TEST(arguments, actual_index == actual.token_count);
+        BUSTER_TEST(arguments, expected_index == expected.token_count);
+        scratch_end(temporary);
+    }
+    String8 no_warning_conditionals[] = {
+        S8("#if 1\n#endif // FOO\n"),
+        S8("#if 1\n#endif /* FOO */\n"),
+        S8("#if 0\n#ifdef A B\n#else C\n#endif D\n#endif\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(no_warning_conditionals); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult actual = c_preprocess(temporary.arena, no_warning_conditionals[case_index],
+                                                (CPreprocessOptions){.source_path = S8("trailing-conditional-controls.c")});
+        BUSTER_TEST(arguments, actual.error_count == 0);
+        BUSTER_TEST(arguments, actual.warning_count == 0);
+        BUSTER_TEST(arguments, actual.diagnostic_count == 0);
+        scratch_end(temporary);
+    }
+    TemporalArena include_files = scratch_begin(&arguments->arena, 1);
+    String8 include_root = buster_test_temporary_path(include_files.arena, S8("trailing-directive-include"), S8(".dir"));
+    String8 include_header = string_format_z(include_files.arena, S8("{S8}/hdr"), include_root);
+    bool include_files_ready = include_root.pointer && os_make_directory_attempt(include_root) &&
+                               file_write(include_header, BUSTER_SLICE_TO_BYTE_SLICE(S8("int header_token;\n")));
+    BUSTER_TEST(arguments, include_files_ready);
+    if (include_files_ready)
+    {
+        String8 include_sources[] = {S8("#include \"hdr\" extra\n"), S8("#include <hdr> extra\n")};
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(include_sources); case_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&include_files.arena, 1);
+            CPreprocessResult actual = c_preprocess(temporary.arena, include_sources[case_index],
+                                                    (CPreprocessOptions){.source_path = S8("trailing-include.c"),
+                                                                         .include_paths = &include_root,
+                                                                         .include_path_count = 1});
+            CLexResult expected = c_lex(temporary.arena, S8("int header_token;"));
+            BUSTER_TEST(arguments, actual.error_count == 0);
+            BUSTER_TEST(arguments, actual.warning_count == 1);
+            BUSTER_TEST(arguments, actual.diagnostic_count == 1);
+            if (BUSTER_REQUIRE(arguments, actual.diagnostic_count == 1))
+            {
+                CDiagnostic diagnostic = actual.diagnostics[0];
+                BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS);
+                BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_WARNING);
+                BUSTER_TEST(arguments, diagnostic.location.line == 1);
+                BUSTER_TEST(arguments, diagnostic.location.column == 2);
+            }
+            u64 actual_index = 0;
+            u64 expected_index = 0;
+            while (actual_index < actual.token_count && expected_index < expected.token_count)
+            {
+                while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
+                {
+                    actual_index += 1;
+                }
+                while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+                {
+                    expected_index += 1;
+                }
+                if (actual_index < actual.token_count && expected_index < expected.token_count)
+                {
+                    BUSTER_TEST(arguments, actual.tokens[actual_index].kind == expected.tokens[expected_index].kind);
+                    BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
+                                       c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
+                    actual_index += 1;
+                    expected_index += 1;
+                }
+            }
+            while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
+            {
+                actual_index += 1;
+            }
+            while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+            {
+                expected_index += 1;
+            }
+            BUSTER_TEST(arguments, actual_index == actual.token_count);
+            BUSTER_TEST(arguments, expected_index == expected.token_count);
+            scratch_end(temporary);
+        }
+    }
+    scratch_end(include_files);
+    struct
+    {
+        String8 source;
+        u32 line;
+        u32 column;
+    } invalid_macro_definitions[] = {
+        {S8("#define g(x) # y\n#ifdef g\nint wrong;\n#else\nint not_defined;\n#endif\n"), 1, 14},
+        {S8("#define g(x) x #\n"), 1, 16},
+        {S8("#define defined 1\n"), 1, 9},
+        {S8("#undef defined\n"), 1, 8},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid_macro_definitions); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult actual = c_preprocess(temporary.arena, invalid_macro_definitions[case_index].source,
+                                                (CPreprocessOptions){.source_path = S8("invalid-macro-definition.c")});
+        BUSTER_TEST(arguments, actual.error_count == 1);
+        BUSTER_TEST(arguments, actual.warning_count == 0);
+        BUSTER_TEST(arguments, actual.diagnostic_count == 1);
+        if (BUSTER_REQUIRE(arguments, actual.diagnostic_count == 1))
+        {
+            CDiagnostic diagnostic = actual.diagnostics[0];
+            BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_MACRO_DEFINITION);
+            BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_ERROR);
+            BUSTER_TEST(arguments, diagnostic.location.line == invalid_macro_definitions[case_index].line);
+            BUSTER_TEST(arguments, diagnostic.location.column == invalid_macro_definitions[case_index].column);
+        }
+        if (case_index == 0)
+        {
+            CLexResult expected = c_lex(temporary.arena, S8("int not_defined;"));
+            u64 actual_index = 0;
+            u64 expected_index = 0;
+            while (actual_index < actual.token_count && expected_index < expected.token_count)
+            {
+                while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
+                {
+                    actual_index += 1;
+                }
+                while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+                {
+                    expected_index += 1;
+                }
+                if (actual_index < actual.token_count && expected_index < expected.token_count)
+                {
+                    BUSTER_TEST(arguments, actual.tokens[actual_index].kind == expected.tokens[expected_index].kind);
+                    BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
+                                       c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
+                    actual_index += 1;
+                    expected_index += 1;
+                }
+            }
+            while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
+            {
+                actual_index += 1;
+            }
+            while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+            {
+                expected_index += 1;
+            }
+            BUSTER_TEST(arguments, actual_index == actual.token_count);
+            BUSTER_TEST(arguments, expected_index == expected.token_count);
+        }
+        scratch_end(temporary);
+    }
+    String8 valid_macro_definitions = S8("#define s(x) #x\n"
+                                         "#define v(...) #__VA_ARGS__\n"
+                                         "#define h(x) a ## x\n"
+                                         "#define H # y\n");
+    TemporalArena valid_macro_temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult valid_macros = c_preprocess(valid_macro_temporary.arena, valid_macro_definitions,
+                                                  (CPreprocessOptions){.source_path = S8("valid-macro-definitions.c")});
+    BUSTER_TEST(arguments, valid_macros.diagnostic_count == 0);
+    scratch_end(valid_macro_temporary);
+    TemporalArena assembly_macro_temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult assembly_macro = c_preprocess(assembly_macro_temporary.arena, S8("#define g(x) # y\n"),
+                                                    (CPreprocessOptions){.source_path = S8("assembly-macro-definition.c"),
+                                                                         .assembly_comment_lines = true});
+    BUSTER_TEST(arguments, assembly_macro.diagnostic_count == 0);
+    scratch_end(assembly_macro_temporary);
     String8 source = S8("#define ENABLED 1\n"
                         "#define MISSING_VALUE 0\n"
                         "#define ID(x) x\n"
