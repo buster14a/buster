@@ -152,7 +152,8 @@ int main(int argc, char **argv)
     (void)argc; (void)argv;
     mkdir("secondary-evidence", 0755); mkdir("external", 0755);
     setup();
-    if (failures) return 1;
+    if (failures == 0)
+    {
     generate();
     command("exec gcc -O2 -g -march=x86-64 -fno-pie -c secondary-evidence/caller.c -o secondary-evidence/caller.o", "caller-build");
     FILE *csv = fopen("secondary-evidence/samples.csv", "w");
@@ -221,6 +222,7 @@ int main(int argc, char **argv)
     /* A bounded text receipt also survives browser artifact-download restrictions.
      * Excludes executable objects: the normal uploaded artifact retains those. */
     if (system("tar -czf secondary-replay-receipt.tar.gz secondary-evidence/*.c secondary-evidence/*.csv secondary-evidence/*.txt secondary-evidence/*.log secondary-evidence/CMakeCache.txt secondary-evidence/compile_commands.json secondary-evidence/qbe-LICENSE secondary-evidence/qbe-README secondary-evidence/cproc-LICENSE secondary-evidence/config.h secondary-evidence/config.mk && sha256sum secondary-replay-receipt.tar.gz && base64 -w 4000 secondary-replay-receipt.tar.gz")) failures++;
-    fprintf(stderr, "capture failures=%d; debugger/unsupported failures are retained\n", failures);
+    }
+    fprintf(stderr, "capture failures=%d; unsupported failures are retained\n", failures);
     return failures != 0;
 }
