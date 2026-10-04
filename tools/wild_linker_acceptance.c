@@ -138,8 +138,10 @@ static void direct_cell(const char* cell, const char* compiler_command, const ch
     {
         must("direct-validated-link", commands_pair[i]);
         const char* saved = format("%s/%s-%s.elf", evidence, cell, names[i]);
-        must("direct-output-metadata", format("cp %s %s && stat -c 'bytes=%%s' %s && sha256sum %s && size -A %s && readelf -W -h -l -S -d %s && llvm-dwarfdump --verify %s",
-             quote(binary), quote(saved), quote(saved), quote(saved), quote(saved), quote(saved), quote(saved)));
+        must("direct-output-metadata", format("cp %s %s && stat -c 'bytes=%%s' %s && sha256sum %s && size -A %s && readelf -W -h -l -S -d %s",
+             quote(binary), quote(saved), quote(saved), quote(saved), quote(saved), quote(saved)));
+        BenchResult dwarf = run_command("direct-dwarf-verifier", names[i], -1, format("llvm-dwarfdump --verify --error-display=summary %s", quote(saved)));
+        if (dwarf.status) ++failures;
         must("direct-runtime", runtime);
         must("direct-repeat", commands_pair[i]);
         must("direct-repeat-byte-identity", format("cmp %s %s", quote(binary), quote(saved)));
