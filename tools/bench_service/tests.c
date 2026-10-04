@@ -572,7 +572,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_end(BqFixture* fixture)
         while (stream && (entry = readdir(stream)) != NULL)
         {
             if (!strncmp(entry->d_name, "failure-", 8) || !strncmp(entry->d_name, "attempt-", 8) ||
-                !strncmp(entry->d_name, "cleanup-", 8) || !strncmp(entry->d_name, "worker-", 7))
+                !strncmp(entry->d_name, "cleanup-", 8) || !strncmp(entry->d_name, "worker-", 7) ||
+                !strncmp(entry->d_name, "export-", 7))
             {
                 BQ_CHECK(unlinkat(directory, entry->d_name, 0) == 0);
             }
@@ -580,6 +581,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_end(BqFixture* fixture)
         if (stream)
         {
             closedir(stream);
+        }
+        int blobs = openat(directory, "native-blobs", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (blobs >= 0)
+        {
+            BQ_CHECK(bq_remove_workspace_payload(blobs) && unlinkat(directory, "native-blobs", AT_REMOVEDIR) == 0);
+            close(blobs);
         }
         BQ_CHECK(unlinkat(directory, "journal", 0) == 0);
         BQ_CHECK(unlinkat(directory, "writer.lock", 0) == 0);
@@ -2328,7 +2335,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     BQ_CHECK(bq_transport_queue_admissible(&incompatible));
 #ifdef __linux__
     BQ_CHECK(strstr(bq_capabilities_v2, "local-recipes=fake-success-v1,fake-failure-v1") != NULL);
-    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1,zen5-calibration-v1 "
+    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1 "
                                         "blocked-recipes=native-retirement-performance-v1\n") != NULL);
     /* Served zen5 fits because the redundant profile/retirement words went. */
     BQ_CHECK(strstr(bq_capabilities_v2, "retirement=blocked") == NULL &&
@@ -2872,7 +2879,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
     BqError error = BQ_OK;
     fake->starts += 1;
     fake->argv_valid = count == 6 && !strcmp(argv[0], BQ_SYSTEMD_BROKER) &&
-        !strcmp(argv[1], "start-outer") && !strcmp(argv[2], "1") && argv[3][0] &&
+        (!strcmp(argv[1], "start-outer") || !strcmp(argv[1], BQ_NATIVE_OUTER_VERB)) && !strcmp(argv[2], "1") && argv[3][0] &&
         strlen(argv[4]) == 64 && strlen(argv[5]) == 64 &&
         bq_test_worker_probe_locked(fixture->lease);
     fake->inherited_lease = -1;
@@ -5679,6 +5686,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_large_source_manifest(void)
 #endif
 
 #include "export_tests.c"
+#include "native_tests.c"
 
 BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 {
@@ -5729,6 +5737,11 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #else
     printf("SGID_SANDBOX_TEST service status=unsupported-architecture\n");
 #endif
+    bq_test_native_upload_recovery();
+    bq_test_native_staging_refusal();
+    bq_test_native_rejections();
+    bq_test_native_materialization_execution();
+    bq_test_native_worker_outcomes();
     bq_test_transport_boundaries();
     bq_test_worker_deadlines();
     bq_test_worker_lease_handoff();
@@ -5791,7 +5804,17 @@ int main(int argc, char** argv)
     int result;
 #ifdef __linux__
     bool helper = argc == 10 && !strcmp(argv[1], "fixed-recipe-helper");
-    if (argc == 2 && !strcmp(argv[1], "--export-only"))
+    if (argc == 2 && !strcmp(argv[1], "--native-only"))
+    {
+        bq_test_native_upload_recovery();
+        bq_test_native_staging_refusal();
+        bq_test_native_rejections();
+        bq_test_native_materialization_execution();
+        bq_test_native_worker_outcomes();
+        printf("NATIVE_EXECUTION_SELF_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);
+        result = bq_test_failures ? 1 : 0;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "--export-only"))
     {
         bq_test_export_inventory();
         bq_test_export(true);

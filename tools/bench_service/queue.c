@@ -3,6 +3,8 @@
  */
 #include "queue.h"
 #include "zen5_calibration_profile.h"
+#include "native_profile.h"
+BUSTER_GLOBAL_LOCAL char const bq_native_profile[] = BQ_NATIVE_PROFILE;
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
@@ -139,6 +141,7 @@ BqRecipe bq_recipe_from_name(String8 name)
                       string_equal(name, S8("validate-buster-v1")) ? BQ_RECIPE_VALIDATE_BUSTER :
                       string_equal(name, S8("native-retirement-performance-v1")) ?
                       BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED :
+                      string_equal(name, S8(BQ_NATIVE_RECIPE)) ? BQ_RECIPE_NATIVE_EXECUTE :
                       string_equal(name, S8("zen5-calibration-v1")) ? BQ_RECIPE_ZEN5_CALIBRATION : BQ_RECIPE_UNKNOWN;
     return result;
 }
@@ -157,6 +160,7 @@ String8 bq_recipe_name(BqRecipe recipe)
     else if (recipe == BQ_RECIPE_VALIDATE_BUSTER) result = S8("validate-buster-v1");
     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
         result = S8("native-retirement-performance-v1");
+    else if (recipe == BQ_RECIPE_NATIVE_EXECUTE) result = S8(BQ_NATIVE_RECIPE);
     else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION) result = S8("zen5-calibration-v1");
     return result;
 }
@@ -169,6 +173,8 @@ String8 bq_recipe_profile(BqRecipe recipe)
     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
         result = (String8){(char8*)bq_native_retirement_blocked_profile,
                            sizeof(bq_native_retirement_blocked_profile) - 1};
+    else if (recipe == BQ_RECIPE_NATIVE_EXECUTE)
+        result = (String8){(char8*)bq_native_profile, sizeof(bq_native_profile) - 1};
     else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION)
         result = (String8){(char8*)bq_zen5_calibration_profile, sizeof(bq_zen5_calibration_profile) - 1};
     return result;
@@ -179,10 +185,11 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
     String8 name = bq_recipe_name(recipe);
     char const* profile_suffix = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? ".blocked" : ".recipe";
     char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" :
-                          recipe == BQ_RECIPE_ZEN5_CALIBRATION ? "bench_service_zen5_recipe" : "";
+                          recipe == BQ_RECIPE_ZEN5_CALIBRATION ? "bench_service_zen5_recipe" :
+                          recipe == BQ_RECIPE_NATIVE_EXECUTE ? "native-driver" : "";
     bool described = files && (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
                                recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ||
-                               recipe == BQ_RECIPE_ZEN5_CALIBRATION);
+                               recipe == BQ_RECIPE_ZEN5_CALIBRATION || recipe == BQ_RECIPE_NATIVE_EXECUTE);
     if (files) *files = (BqRecipeFiles){0};
     int name_length = described && name.length <= BQ_RECIPE_NAME_CAP ?
                       snprintf(files->name, sizeof(files->name), "%.*s", (int)name.length, name.pointer) : -1;
@@ -208,13 +215,15 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
 bool bq_recipe_admitted(BqRecipe recipe)
 {
     bool result = recipe == BQ_RECIPE_FAKE_SUCCESS || recipe == BQ_RECIPE_FAKE_FAILURE ||
-                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
+                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
+                  recipe == BQ_RECIPE_NATIVE_EXECUTE;
     return result;
 }
 
 bool bq_recipe_service(BqRecipe recipe)
 {
-    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
+    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
+                  recipe == BQ_RECIPE_NATIVE_EXECUTE;
     return result;
 }
 
@@ -249,6 +258,8 @@ bool bq_request_valid(BqRequest const* request)
               /* zen5-calibration-v1 measures one immutable source named twice. */
               (bq_recipe_from_name(recipe) != BQ_RECIPE_ZEN5_CALIBRATION ||
                (base.length == 40 && string_equal(base, candidate))) &&
+              (bq_recipe_from_name(recipe) != BQ_RECIPE_NATIVE_EXECUTE ||
+               (base.length == 64 && string_equal(base, candidate))) &&
               principal.length + key.length + recipe.length + base.length + candidate.length + 20 == request->size;
     return ok;
 }
@@ -370,7 +381,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
         {
             request.size = size;
             memcpy(request.bytes, body, size);
-            if (!bq_request_valid(&request) || (schema == BQ_SCHEMA_LEGACY && bq_recipe_real(&request)))
+            if (!bq_request_valid(&request) || (schema == BQ_SCHEMA_LEGACY && bq_recipe_real(&request)) ||
+                (schema < BQ_SCHEMA_NATIVE && bq_request_recipe(&request) == BQ_RECIPE_NATIVE_EXECUTE))
             {
                 error = BQ_BAD_REQUEST;
             }
@@ -497,13 +509,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                 bool advance = next == (u32)job->phase + 1 && next <= BQ_FINISHED;
                 bool cancel_cleanup = job->cancel_requested && job->phase < BQ_CLEANING && next == BQ_CLEANING;
                 bool failure_outcome = outcome == (u32)(job->cancel_requested ? BQ_CANCELLED : BQ_FAILED) ||
-                                       (schema == BQ_SCHEMA && !job->cancel_requested && outcome == BQ_INTERRUPTED);
+                                       (schema >= BQ_SCHEMA_WORKER && !job->cancel_requested && outcome == BQ_INTERRUPTED);
                 bool failure_cleanup = schema >= BQ_SCHEMA_MATERIALIZATION && bq_recipe_real(&job->request) &&
                                        job->phase < BQ_CLEANING && next == BQ_CLEANING &&
                                        failure_outcome;
                 if (next == BQ_FINALIZING)
                 {
-                    bool worker_terminal = schema == BQ_SCHEMA && bq_recipe_real(&job->request) &&
+                    bool worker_terminal = schema >= BQ_SCHEMA_WORKER && bq_recipe_real(&job->request) &&
                                            outcome == BQ_SUCCEEDED;
                     expected = worker_terminal ? (BqOutcome)outcome :
                                string_equal(bq_field(&job->request, 2), S8("fake-success-v1")) ? BQ_SUCCEEDED : BQ_FAILED;
@@ -512,7 +524,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                 {
                     expected = BQ_CANCELLED;
                 }
-                if (schema == BQ_SCHEMA && !job->cancel_requested && bq_recipe_real(&job->request) && job->phase == BQ_CLEANING &&
+                if (schema >= BQ_SCHEMA_WORKER && !job->cancel_requested && bq_recipe_real(&job->request) && job->phase == BQ_CLEANING &&
                     next == BQ_FINISHED && outcome == BQ_INTERRUPTED)
                 {
                     expected = BQ_INTERRUPTED;

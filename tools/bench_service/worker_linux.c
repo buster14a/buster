@@ -2721,18 +2721,29 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
          * three complete capture records and an unauthorized A/B decision. */
         bytes[used] = 0;
         bool zen5 = bq_request_recipe(&job->request) == BQ_RECIPE_ZEN5_CALIBRATION;
+        bool native = bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_EXECUTE;
         char const* text = (char const*)bytes;
         char prefix[BQ_RECIPE_NAME_CAP + 96];
         int prefix_length = snprintf(prefix, sizeof(prefix),
                                      "schema=1\nrecipe=%s\nstatus=succeeded\nstage=%s\nprocess-result=success\n",
-                                     finalization->recipe.name, zen5 ? "complete" : "throughput");
+                                     finalization->recipe.name, native ? BQ_NATIVE_STAGE_NAME : zen5 ? "complete" : "throughput");
         bool lines = prefix_length > 0 && (u32)prefix_length < sizeof(prefix) && used >= (u32)prefix_length &&
                      !memcmp(bytes, prefix, (u32)prefix_length) &&
                      bq_worker_result_line(text, job_line) && bq_worker_result_line(text, token_line) &&
                      bq_worker_result_line(text, workspace_line) && bq_worker_result_line(text, result_line) &&
                      bq_worker_result_line(text, base_line) && bq_worker_result_line(text, candidate_line) &&
                      bq_worker_result_digest_line(text, "bundle-sha256=", bundle_digest);
-        if (lines && zen5)
+        if (lines && native)
+        {
+            char identity_line[96];
+            int identity_length = snprintf(identity_line, sizeof(identity_line), "program-manifest-sha256=%s", candidate_text);
+            lines = identity_length > 0 && (u32)identity_length < sizeof(identity_line) &&
+                    bq_worker_result_line(text, identity_line) && bq_worker_result_line(text, "stage-exit-status=0") &&
+                    bq_worker_result_line(text, "operation=execute-once") &&
+                    bq_worker_result_line(text, "compilation=unavailable") &&
+                    bq_worker_result_line(text, "benchmark-metrics=unavailable");
+        }
+        else if (lines && zen5)
         {
             char plan_digest[SHA256_HEX_CAPACITY], capture_digest[SHA256_HEX_CAPACITY];
             lines = bq_worker_result_digest_line(text, "plan-sha256=", plan_digest) &&
@@ -3266,13 +3277,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
             }
             /* A failure names a stage of its own recipe (zen5: its phases). */
             bool zen5 = bq_request_recipe(&job->request) == BQ_RECIPE_ZEN5_CALIBRATION;
+            bool native = bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_EXECUTE;
             char const* validate_stages[] = {"stage=base-generate", "stage=base-build", "stage=candidate-generate",
                                              "stage=candidate-build", "stage=throughput"};
             char const* zen5_stages[] = {"stage=arguments", "stage=source", "stage=builds", "stage=oracle",
                                          "stage=pmu", "stage=plan", "stage=captures"};
-            bool stage = bq_worker_result_line(manifest_body, "stage=prepare") ||
+            bool stage = (bq_request_recipe(&job->request) == BQ_RECIPE_NATIVE_EXECUTE &&
+                          bq_worker_result_line(manifest_body, "stage=" BQ_NATIVE_STAGE_NAME)) ||
+                         bq_worker_result_line(manifest_body, "stage=prepare") ||
                          bq_worker_result_line(manifest_body, "stage=worker");
-            for (u32 index = 0; !zen5 && index < BUSTER_ARRAY_LENGTH(validate_stages); index += 1)
+            for (u32 index = 0; !zen5 && !native && index < BUSTER_ARRAY_LENGTH(validate_stages); index += 1)
                 stage = stage || bq_worker_result_line(manifest_body, validate_stages[index]);
             for (u32 index = 0; zen5 && index < BUSTER_ARRAY_LENGTH(zen5_stages); index += 1)
                 stage = stage || bq_worker_result_line(manifest_body, zen5_stages[index]);
@@ -3638,7 +3652,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop_children(BqWorkerConfig const* config
     /* Every typed stage unit the broker can start under this outer unit:
      * the validation recipe's five and zen5_stage.h's thirteen. */
     char const* stages[] = {"base-generate", "base-build", "candidate-generate",
-                            "candidate-build", "throughput", BQ_ZEN5_STAGE_NAMES};
+                            "candidate-build", "throughput", BQ_ZEN5_STAGE_NAMES, BQ_NATIVE_STAGE_NAME};
     BqError error = BQ_OK;
     for (u32 index = 0; error == BQ_OK && index < BUSTER_ARRAY_LENGTH(stages); index += 1)
     {
@@ -3920,7 +3934,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         if (!canonical || job_length <= 0 || (size_t)job_length >= sizeof(job_id) ||
             token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) ||
             (strcmp(finalization.recipe.name, "validate-buster-v1") &&
-             strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE)) ||
+             strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE) &&
+             strcmp(finalization.recipe.name, BQ_NATIVE_RECIPE)) ||
             !bq_worker_text(base_revision, base_revision_text, sizeof(base_revision_text)) ||
             !bq_worker_text(candidate_revision, candidate_revision_text, sizeof(candidate_revision_text)))
         {
@@ -3933,8 +3948,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering)
     {
         /* The broker's recipe selector picks the outer unit's recipe. */
-        char const* verb = strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE) ? "start-outer" :
-                           BQ_ZEN5_STAGE_OUTER_VERB;
+        char const* verb = !strcmp(finalization.recipe.name, BQ_NATIVE_RECIPE) ? BQ_NATIVE_OUTER_VERB :
+                           strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE) ? "start-outer" : BQ_ZEN5_STAGE_OUTER_VERB;
         char const* arguments[] = {BQ_SYSTEMD_BROKER, verb, job_id, attempt_token,
                                    base_revision_text, candidate_revision_text, NULL};
         error = backend->start(backend, arguments, BUSTER_ARRAY_LENGTH(arguments) - 1);
@@ -4158,9 +4173,10 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
     if (error == BQ_OK)
     {
         raise(SIGSTOP);
-        char const* arguments[] = {BQ_RECIPE_EXECUTABLE, files.command, job_id_text, attempt_token_text,
+        char const* executable = recipe == BQ_RECIPE_NATIVE_EXECUTE ? "/usr/local/libexec/buster-bench-service" : BQ_RECIPE_EXECUTABLE;
+        char const* arguments[] = {executable, files.command, job_id_text, attempt_token_text,
                                    workspace_text, base_text, candidate_text, result_text, NULL};
-        execv(BQ_RECIPE_EXECUTABLE, (char* const*)arguments);
+        execv(executable, (char* const*)arguments);
         error = BQ_CONFIGURATION_MISMATCH;
     }
     bq_worker_lease_release(&lease);

@@ -169,7 +169,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_operation(u32 operation)
 {
     bool public_operation = operation == BQ_OP_CAPABILITIES || operation == BQ_OP_SUBMIT ||
                             operation == BQ_OP_SUBMIT_EXCLUSIVE || operation == BQ_OP_STATUS ||
-                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS || operation == BQ_OP_EXPORT;
+                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS || operation == BQ_OP_EXPORT ||
+                            (operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH);
     BqError error = public_operation ? BQ_OK : BQ_BAD_REQUEST;
     return error;
 }
@@ -198,6 +199,17 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
             error = !bq_request_valid(&request) ? BQ_BAD_REQUEST : !bq_recipe_real(&request) ? BQ_UNSUPPORTED :
                     !string_equal(bq_field(&request, 0), S8(BQ_EXPORT_PRINCIPAL)) ? BQ_EXPORT_UNAUTHORIZED : BQ_OK;
         }
+    }
+    if (error == BQ_OK && operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH)
+    {
+        u8 const* arguments = input + BQ_CONTROL_HEADER;
+        bool valid = length >= 72 && bq_native_hex(arguments) && bq_u64(arguments + 64) >= 64 &&
+                     bq_u64(arguments + 64) <= BQ_NATIVE_PROGRAM_CAP &&
+                     (operation == BQ_OP_NATIVE_WRITE ? length > 80 : length == 72);
+        if (valid && operation == BQ_OP_NATIVE_WRITE)
+            valid = bq_u64(arguments + 72) <= bq_u64(arguments + 64) &&
+                    length - 80 <= bq_u64(arguments + 64) - bq_u64(arguments + 72);
+        if (!valid) error = BQ_BAD_REQUEST;
     }
     if (error == BQ_OK && operation == BQ_OP_EXPORT)
     {
@@ -503,7 +515,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_dispatch(BqQueue* queue, u8 const* requ
     else if (error == BQ_OK)
     {
         error = bq_dispatch(queue, request, size, response);
-        if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_LOGS)
+        if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_LOGS &&
+            !(operation >= BQ_OP_NATIVE_BEGIN && operation <= BQ_OP_NATIVE_FINISH))
         {
             /* Public receipts do not reveal global queue occupancy/sequence. */
             memset(response->bytes + BQ_CONTROL_HEADER + 20, 0, 8);

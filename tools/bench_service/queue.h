@@ -14,7 +14,9 @@
 
 #define BQ_SCHEMA_LEGACY 1u
 #define BQ_SCHEMA_MATERIALIZATION 2u
-#define BQ_SCHEMA 3u
+#define BQ_SCHEMA_WORKER 3u
+#define BQ_SCHEMA_NATIVE 4u
+#define BQ_SCHEMA BQ_SCHEMA_NATIVE
 #define BQ_CONTROL_SCHEMA 2u
 #define BQ_PENDING_CAP 8u
 /* Lifetime caps (#2114). Nothing durable encodes them: journal frames carry
@@ -76,7 +78,8 @@ typedef enum BqRecipe
     BQ_RECIPE_FAKE_FAILURE,
     BQ_RECIPE_VALIDATE_BUSTER,
     BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED,
-    BQ_RECIPE_ZEN5_CALIBRATION
+    BQ_RECIPE_ZEN5_CALIBRATION,
+    BQ_RECIPE_NATIVE_EXECUTE
 } BqRecipe;
 
 typedef struct BqRecipeFiles
