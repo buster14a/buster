@@ -10,6 +10,45 @@
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_expect_preprocessed(UnitTestArguments* arguments, Arena* arena,
+                                                                           CPreprocessResult actual, String8 expected_text)
+{
+    UnitTestResult result = {0};
+    CLexResult expected = c_lex(arena, expected_text);
+    u64 actual_index = 0;
+    u64 expected_index = 0;
+    while (actual_index < actual.token_count && expected_index < expected.token_count)
+    {
+        while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
+        {
+            actual_index += 1;
+        }
+        while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+        {
+            expected_index += 1;
+        }
+        if (actual_index < actual.token_count && expected_index < expected.token_count)
+        {
+            BUSTER_TEST(arguments, actual.tokens[actual_index].kind == expected.tokens[expected_index].kind);
+            BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
+                               c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
+            actual_index += 1;
+            expected_index += 1;
+        }
+    }
+    while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
+    {
+        actual_index += 1;
+    }
+    while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+    {
+        expected_index += 1;
+    }
+    BUSTER_TEST(arguments, actual_index == actual.token_count);
+    BUSTER_TEST(arguments, expected_index == expected.token_count);
+    return result;
+}
+
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(UnitTestArguments* arguments, CLexResult actual, CLexResult expected, String8 diagnostic)
 {
@@ -476,7 +515,6 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult actual = c_preprocess(temporary.arena, trailing_conditionals[case_index].source,
                                                 (CPreprocessOptions){.source_path = S8("trailing-conditional.c")});
-        CLexResult expected = c_lex(temporary.arena, trailing_conditionals[case_index].expected);
         BUSTER_TEST(arguments, actual.error_count == 0);
         BUSTER_TEST(arguments, actual.warning_count == 1);
         BUSTER_TEST(arguments, actual.diagnostic_count == 1);
@@ -488,37 +526,10 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, diagnostic.location.line == trailing_conditionals[case_index].warning_line);
             BUSTER_TEST(arguments, diagnostic.location.column == 2);
         }
-        u64 actual_index = 0;
-        u64 expected_index = 0;
-        while (actual_index < actual.token_count && expected_index < expected.token_count)
-        {
-            while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
-            {
-                actual_index += 1;
-            }
-            while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
-            {
-                expected_index += 1;
-            }
-            if (actual_index < actual.token_count && expected_index < expected.token_count)
-            {
-                BUSTER_TEST(arguments, actual.tokens[actual_index].kind == expected.tokens[expected_index].kind);
-                BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
-                                   c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
-                actual_index += 1;
-                expected_index += 1;
-            }
-        }
-        while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
-        {
-            actual_index += 1;
-        }
-        while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
-        {
-            expected_index += 1;
-        }
-        BUSTER_TEST(arguments, actual_index == actual.token_count);
-        BUSTER_TEST(arguments, expected_index == expected.token_count);
+        UnitTestResult compared = c_macro_conditional_expect_preprocessed(arguments, temporary.arena, actual,
+                                                                           trailing_conditionals[case_index].expected);
+        result.test_count += compared.test_count;
+        result.succeeded_test_count += compared.succeeded_test_count;
         scratch_end(temporary);
     }
     String8 no_warning_conditionals[] = {
@@ -552,7 +563,6 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                                                     (CPreprocessOptions){.source_path = S8("trailing-include.c"),
                                                                          .include_paths = &include_root,
                                                                          .include_path_count = 1});
-            CLexResult expected = c_lex(temporary.arena, S8("int header_token;"));
             BUSTER_TEST(arguments, actual.error_count == 0);
             BUSTER_TEST(arguments, actual.warning_count == 1);
             BUSTER_TEST(arguments, actual.diagnostic_count == 1);
@@ -564,37 +574,10 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, diagnostic.location.line == 1);
                 BUSTER_TEST(arguments, diagnostic.location.column == 2);
             }
-            u64 actual_index = 0;
-            u64 expected_index = 0;
-            while (actual_index < actual.token_count && expected_index < expected.token_count)
-            {
-                while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
-                {
-                    actual_index += 1;
-                }
-                while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
-                {
-                    expected_index += 1;
-                }
-                if (actual_index < actual.token_count && expected_index < expected.token_count)
-                {
-                    BUSTER_TEST(arguments, actual.tokens[actual_index].kind == expected.tokens[expected_index].kind);
-                    BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
-                                       c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
-                    actual_index += 1;
-                    expected_index += 1;
-                }
-            }
-            while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
-            {
-                actual_index += 1;
-            }
-            while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
-            {
-                expected_index += 1;
-            }
-            BUSTER_TEST(arguments, actual_index == actual.token_count);
-            BUSTER_TEST(arguments, expected_index == expected.token_count);
+            UnitTestResult compared = c_macro_conditional_expect_preprocessed(arguments, temporary.arena, actual,
+                                                                               S8("int header_token;"));
+            result.test_count += compared.test_count;
+            result.succeeded_test_count += compared.succeeded_test_count;
             scratch_end(temporary);
         }
     }
@@ -628,38 +611,10 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         }
         if (case_index == 0)
         {
-            CLexResult expected = c_lex(temporary.arena, S8("int not_defined;"));
-            u64 actual_index = 0;
-            u64 expected_index = 0;
-            while (actual_index < actual.token_count && expected_index < expected.token_count)
-            {
-                while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
-                {
-                    actual_index += 1;
-                }
-                while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
-                {
-                    expected_index += 1;
-                }
-                if (actual_index < actual.token_count && expected_index < expected.token_count)
-                {
-                    BUSTER_TEST(arguments, actual.tokens[actual_index].kind == expected.tokens[expected_index].kind);
-                    BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
-                                       c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
-                    actual_index += 1;
-                    expected_index += 1;
-                }
-            }
-            while (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
-            {
-                actual_index += 1;
-            }
-            while (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
-            {
-                expected_index += 1;
-            }
-            BUSTER_TEST(arguments, actual_index == actual.token_count);
-            BUSTER_TEST(arguments, expected_index == expected.token_count);
+            UnitTestResult compared = c_macro_conditional_expect_preprocessed(arguments, temporary.arena, actual,
+                                                                               S8("int not_defined;"));
+            result.test_count += compared.test_count;
+            result.succeeded_test_count += compared.succeeded_test_count;
         }
         scratch_end(temporary);
     }
