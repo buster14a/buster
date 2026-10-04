@@ -972,6 +972,11 @@ void os_test_process_child_run(UnitTestArguments* arguments)
     {
         UnitTestResult probe = os_test_capture_sink_admission_child(arguments);
         bool passed = unit_test_succeeded(probe);
+        if (!passed)
+        {
+            arguments->show(arguments, S8("CAPTURE_SINK_CHILD_V1 passed={u64} failed={u64} assertions={u64}\n"),
+                            probe.succeeded_test_count, probe.test_count - probe.succeeded_test_count, probe.test_count);
+        }
         if (passed) os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(S8("CAPTURE_SINK_ADMISSION_V1\n")));
         os_exit(passed ? 0 : 94);
     }
@@ -1438,10 +1443,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child), environment.keys, environment.values, outer);
     if (BUSTER_REQUIRE(arguments, spawn.handle != 0 && spawn.process_group))
     {
+        u64 wait_start = os_now_microseconds();
         ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30000000);
+        u64 wait_elapsed = os_now_microseconds() - wait_start;
         BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && !wait.capture_failed);
         BUSTER_TEST(arguments, !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
         String8 receipt = S8("CAPTURE_SINK_ADMISSION_V1\n");
+        if (wait.result != PROCESS_RESULT_SUCCESS || wait.timed_out || wait.capture_failed ||
+            wait.streams[STANDARD_STREAM_OUTPUT].length != receipt.length)
+        {
+            String8 output = {(char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, wait.streams[STANDARD_STREAM_OUTPUT].length};
+            String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length};
+            arguments->show(arguments,
+                S8("CAPTURE_SINK_ADMISSION_FAILURE_V1 result={u32} platform_status={u32} elapsed_us={u64} deadline_us=30000000 "
+                   "timed_out={u32} capture_failed={u32} truncated={u32} observed={u64} captured={u64} dropped={u64} "
+                   "cleanup_failed={u32} reservation_retained={u32} ownership_lost={u32} stdout={S8} stderr={S8}\n"),
+                (u32)wait.result, wait.platform_status, wait_elapsed, (u32)wait.timed_out, (u32)wait.capture_failed,
+                (u32)wait.output_truncated, wait.observed_total, wait.captured_total, wait.dropped_total,
+                (u32)wait.process_tree_cleanup_failed, (u32)wait.process_group_reservation_retained,
+                (u32)wait.process_group_ownership_lost, output, error);
+        }
         if (BUSTER_REQUIRE(arguments, wait.streams[STANDARD_STREAM_OUTPUT].length == receipt.length))
         {
             BUSTER_TEST(arguments, memory_compare(wait.streams[STANDARD_STREAM_OUTPUT].pointer, receipt.pointer, receipt.length));
