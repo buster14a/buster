@@ -229,6 +229,26 @@ having been made — none of which needs privileges or real memory exhaustion.
 The `commit_prefault` child-process failure mode asserts the fatal commit
 diagnostic with prefaulting requested.
 
+## Arena discard and zeroed reuse
+
+`arena_set_position_and_decommit` discards only complete native pages beyond
+the retained position. Legal sub-page granularities and non-page-sized
+reservations can leave a partial tail page above the discarded range. If any
+previous allocation reached that tail, its dirty watermark remains conservative
+through rewind, recommit and pooled reuse, so `arena_allocate_zeroed_bytes`
+clears the retained bytes. When no dirty bytes survive above the discarded end,
+non-Apple platforms can lower the mark to the retained prefix. Darwin preserves
+the mark for discarded pages as well because its discard may preserve contents.
+A failed discard leaves the logical cursor, committed extent and dirty mark
+unchanged; a rewind with no complete page to discard still succeeds.
+
+Registered `arena_tests` exercise actual create/allocate/decommit/recommit calls
+for dirty partial tails, complete-page and untouched-tail controls, sub-page
+reservations, no-discard rewinds, repeated cycles and retirement/pool reuse.
+The private `arena_internal.h` one-shot seam skips one discard attempt on the
+calling thread to check failure-state and payload preservation. It does not
+represent an observed native OS failure.
+
 ## Exclusive directory ownership
 
 `os_make_directory_exclusive` is the namespace-ownership primitive for private
