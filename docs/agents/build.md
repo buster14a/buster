@@ -8,6 +8,14 @@ directory before regenerating it; otherwise the running compiler and its
 outputs can disappear and be reported as compiler failures. Reuse the
 configured tree with `build` for ordinary rebuilds.
 
+Concurrent sessions that build, test or profile use separate source worktrees
+and session-owned build and output paths. A separate build directory inside a
+shared checkout still reads source that another session can edit. Follow the
+[parallel-session setup](workflow.md#parallel-sessions-on-one-machine); keep
+`build/` inside that isolated worktree for the micro-architecture lab, whose
+workload includes `build/generated`. No live-use lock protects `generate`:
+coordination and isolation are required before removing or regenerating a tree.
+
 ## Self-hosting — reproduce first
 
 All contributors—humans and coding agents—should reproduce the current
@@ -394,6 +402,19 @@ code generation but cost 0.065% of instructions on a unity self-compile
 (29.5037 G -> 29.5227 G) with no wall-clock difference above run-to-run noise
 and no change to the parser benchmark. CI opts out of both because it profiles
 nothing and pays the compile time.
+
+For a trusted performance compiler, configure that session's idle tree with
+`./build.sh generate --cc clang --no-include-tests`, then build `ide` in
+Release. The ordinary local default includes tests; that enables
+`BUSTER_IR_TRANSFORM_CHECKS` even in Release. Preserve the default tests-on
+configuration for correctness work, and keep sanitized, instrumented and
+explicit transform-verification builds separate from performance comparisons.
+When freezing a performance binary, retain its source revision, binary hash,
+`CMakeCache.txt` and `compile_commands.json`; check
+`BUSTER_INCLUDE_TESTS:BOOL=OFF` in that binary's saved cache. The
+[benchmark recipe](benchmarking.md#benchmarking-a-compiler-change-ab) records
+both variants and uses one isolated build path serially.
+
 Clang static analysis runs only against unsanitized Release. The native driver
 now freezes deterministic module shards and requires complete fail-closed
 aggregation; CI also exercises the authoritative split-source Clang database.
