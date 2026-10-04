@@ -18215,6 +18215,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pragma_pack_alignment(Un
 }
 #endif
 
+#if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_identifier_list_definitions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source_path = buster_test_temporary_path(arena, S8("buster-identifier-list-definition"), S8(".c"));
+    String8 source = S8(
+        "static int promoted(c, f, n) register char c; float f; int n;\n"
+        "{ return sizeof(c) == 1 && sizeof(f) == 4 && c == 65 && f == 3.5f && n == 9; }\n"
+        "static int omitted(a, b) int a; { return a + b; }\n"
+        "static int prior();\n"
+        "static int prior(v) short v; { return v; }\n"
+        "typedef int After;\n"
+        "After next(After value) { return value; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    if (!promoted((char)65, (float)3.5, 9)) return 1;\n"
+        "    if (omitted(4, 5) != 9) return 2;\n"
+        "    if (prior((short)7) != 7) return 3;\n"
+        "    if (next(11) != 11) return 4;\n"
+        "    return 0;\n"
+        "}\n");
+    bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                            S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
+    for (u32 dialect = 0; written && dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                TemporalArena row = scratch_begin(&arena, 1);
+                String8 image = buster_test_temporary_path(
+                    row.arena, S8("buster-identifier-list-definition"),
+                    string_format(row.arena, S8("-{u32}-{u32}-{u32}.exe"), dialect, frontend, allocator));
+                String8 command[] = {dialects[dialect], frontends[frontend], allocators[allocator], S8("-fverify-codegen"),
+                                     allocator ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                                     S8("-o"), image, source_path};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    row.arena, compiler_driver_parse_arguments(row.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(
+                    row.arena, S8("identifier-list dialect={u32} frontend={u32} allocator={u32}: {S8}"),
+                    dialect, frontend, allocator, compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                                           compiled.codegen_statistics.fallback_function_count == 0,
+                                description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(row.arena, image), description);
+                }
+                scratch_end(row);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18271,6 +18334,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINK_LIBC && !BUSTER_SANITIZE && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pragma_pack_alignment);
+#endif
+#if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_identifier_list_definitions);
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_row_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vla_runtime_types);

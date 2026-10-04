@@ -167,6 +167,20 @@ allocator modes and both frontend forms.
   is never set in that dialect and the call is refused as an arity error --
   which every dialect now reports by naming the callee and its parameter
   count rather than as "could not prepare C calls" (issue #666).
+- **A pre-C23 identifier-list definition keeps declared objects and promoted
+  callable values separate.** In `int f(c, x) char c; float x; { ... }`, the
+  body observes `char` and `float` parameter objects, while callers and the
+  callee ABI exchange the default-promoted `int` and `double` values. The
+  syntax pass records the identifier list and its following declaration list
+  as distinct token ranges; semantic binding reuses ordinary local-declarator
+  parsing, supplies `int` for an omitted declaration and preserves the
+  unprototyped call rule. C23 and GNU23 diagnose the removed definition form
+  while retaining declaration/body resynchronization. The registered
+  identifier-list frontend fixture checks declared object types, promoted
+  canonical IR signatures, call-site signatures, omitted declarations,
+  earlier `()` declarations and the declaration immediately following the
+  body. Its native runtime companion covers C17/GNU17, both frontend forms
+  and all four allocator modes with zero machine fallback (GitHub #1263).
 - **A callable parameter type is separate from its local object's type.**
   `c_ir_parameter_value_type` strips only top-level `volatile` from fixed
   parameter values in declaration and expression-built function types. It

@@ -915,6 +915,13 @@ scheduler exception is needed. The stack-alias tests explicitly recognize
 incoming reads independently of that metadata; otherwise a missing descriptor
 bit could disappear from both the scheduler and its test oracle.
 
+Windows AArch64 pre-C23 unprototyped calls use the same integer-register
+argument image as variadic calls. Both the machine caller plan and the callee's
+entry capture classify those promoted values with `IR_ABI_USE_VARIADIC_ARGUMENT`,
+but only a real variadic function emits `MACHINE_A64_VA_HOME_WINDOWS` or owns a
+`va_list` save area. Keep those properties separate when changing parameter
+placement.
+
 ## AArch64 large aggregate copies
 
 The three frame/pointer copy rows emit a bounded eight-byte loop at 256 bytes

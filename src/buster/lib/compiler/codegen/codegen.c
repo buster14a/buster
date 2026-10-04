@@ -12518,6 +12518,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                               (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS);
         bool aarch64_darwin_variadic = canonical_variadic && aarch64_darwin;
         bool aarch64_windows_variadic = canonical_variadic && windows_aarch64;
+        // Windows ARM64 routes every argument of a variadic call through the
+        // integer argument image.  A pre-C23 unprototyped call uses that same
+        // image, so an old-style definition must read its promoted parameters
+        // there even though it is not itself variadic and has no va_list save
+        // area.  Keep this incoming-argument property separate from
+        // aarch64_windows_variadic: only a real `...` function may initialize
+        // va_start or reserve/save the variadic register image.
+        bool aarch64_windows_integer_arguments =
+            windows_aarch64 && canonical_function_type && canonical_function_type->kind == IR_TYPE_FUNCTION &&
+            (canonical_function_type->is_variadic || canonical_function_type->is_unprototyped);
         if (target.cpu_arch == CPU_ARCH_AARCH64 && canonical_variadic && !aarch64_darwin_variadic)
         {
             // Align the Windows INTEGER-pair image and the ELF Q-register
@@ -21076,7 +21086,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 prior_hfa &= codegen_canonical_abi_part_is_float(prior_abi.parts[part].abi_class);
                             }
-                            if (prior_hfa && !aarch64_windows_variadic)
+                            if (prior_hfa && !aarch64_windows_integer_arguments)
                             {
                                 if (float_register_index + prior_abi.part_count <= 8)
                                 {
@@ -21100,7 +21110,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 continue;
                             }
-                            if (prior_type && prior_type->kind == IR_TYPE_FLOAT && !aarch64_windows_variadic)
+                            if (prior_type && prior_type->kind == IR_TYPE_FLOAT && !aarch64_windows_integer_arguments)
                             {
                                 if (float_register_index < 8)
                                 {
@@ -21182,7 +21192,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                             return result;
                         }
-                        if (argument_type->kind == IR_TYPE_FLOAT && !aarch64_windows_variadic)
+                        if (argument_type->kind == IR_TYPE_FLOAT && !aarch64_windows_integer_arguments)
                         {
                             if (!codegen_canonical_type_is_ieee_binary16(argument_type) && argument_type->bit_width != 32 &&
                                 argument_type->bit_width != 64 && argument_type->bit_width != 128)
@@ -21218,7 +21228,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
-                        if (argument_hfa && !aarch64_windows_variadic)
+                        if (argument_hfa && !aarch64_windows_integer_arguments)
                         {
                             if (float_register_index + argument_abi.part_count <= 8)
                             {

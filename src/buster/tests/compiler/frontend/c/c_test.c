@@ -16917,6 +16917,109 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_call_arguments(UnitTestAr
     return result;
 }
 
+// An identifier-list definition carries two types for a narrow parameter:
+// the declared object visible to sizeof and assignments in the body, and the
+// default-promoted value at the callable ABI.  The declaration list also sits
+// before the body rather than after the declarator, so the following typedef
+// is an independent resynchronization witness.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_identifier_list_function_definitions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("static int knr(a, b, c, d) register char a; float b; int c, d;\n"
+                        "{ return (int)sizeof(a) + (int)sizeof(b) + c + d; }\n"
+                        "static int omitted(x, y) int x; { return x + y; }\n"
+                        "static int prior();\n"
+                        "static int prior(x) short x; { return x; }\n"
+                        "typedef int After;\n"
+                        "After next(After x) { return x; }\n"
+                        "int caller(void) { return knr((char)2, (float)3.5, 4, 5) + omitted(6, 7) + prior((short)8) + next(9); }\n");
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU89, C_PREPROCESS_DIALECT_C99,
+                                     C_PREPROCESS_DIALECT_GNU99, C_PREPROCESS_DIALECT_C11,
+                                     C_PREPROCESS_DIALECT_GNU11, C_PREPROCESS_DIALECT_C17,
+                                     C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C23,
+                                     C_PREPROCESS_DIALECT_GNU23};
+    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+    {
+        bool c23 = dialects[dialect_index] == C_PREPROCESS_DIALECT_C23 ||
+                   dialects[dialect_index] == C_PREPROCESS_DIALECT_GNU23;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 label = string_format(temporary.arena, S8("identifier-list dialect={u32} frontend={u32}"), dialect_index, form);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = dialects[dialect_index]});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, label);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count != 0) == c23, label);
+            bool removed_message = !c23;
+            for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count; diagnostic += 1)
+            {
+                removed_message |= string_first_sequence(semantic.diagnostics[diagnostic].message,
+                                                         S8("identifier-list function definitions were removed in C23")) != BUSTER_STRING_NO_MATCH;
+            }
+            BUSTER_TEST_RAW(arguments, removed_message, label);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("identifier-list-definition.c"), tokens, syntax,
+                target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, (lowered.diagnostic_count != 0) == c23, label);
+            if (!c23 && BUSTER_REQUIRE(arguments, lowered.program != 0))
+            {
+                CDeclaration* knr = 0;
+                for (u32 declaration_index = 0; declaration_index < semantic.declaration_count; declaration_index += 1)
+                {
+                    CDeclaration* candidate = semantic.declarations + declaration_index;
+                    if (candidate->is_identifier_list_definition && string_equal(candidate->name, S8("knr")))
+                    {
+                        knr = candidate;
+                        break;
+                    }
+                }
+                if (BUSTER_REQUIRE(arguments, knr && knr->parameter_count == 4))
+                {
+                    CTypeKind object_kinds[] = {C_TYPE_CHAR, C_TYPE_FLOAT, C_TYPE_INT, C_TYPE_INT};
+                    for (u32 parameter_index = 0; parameter_index < knr->parameter_count; parameter_index += 1)
+                    {
+                        CParameter parameter = semantic.parameters[knr->parameter_start + parameter_index];
+                        BUSTER_TEST_RAW(arguments, parameter.type.value < semantic.type_count &&
+                                                           semantic.types[parameter.type.value].kind == object_kinds[parameter_index], label);
+                    }
+                }
+                IrModule* module = &lowered.program->modules[0];
+                IrFunction* knr_row = 0;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    if (string_equal(module->functions[function_index].name, S8("knr")))
+                    {
+                        knr_row = module->functions + function_index;
+                        break;
+                    }
+                }
+                if (BUSTER_REQUIRE(arguments, knr_row != 0))
+                {
+                    IrType* type = ir_type_from_id(&lowered.program->types, knr_row->canonical_type);
+                    IrTypeKind kinds[] = {IR_TYPE_INTEGER, IR_TYPE_FLOAT, IR_TYPE_INTEGER, IR_TYPE_INTEGER};
+                    u32 widths[] = {32, 64, 32, 32};
+                    BUSTER_TEST_RAW(arguments, c_test_call_parameters_are(lowered.program, type, kinds, widths, BUSTER_ARRAY_LENGTH(kinds)), label);
+                    BUSTER_TEST_RAW(arguments, type && type->is_unprototyped, label);
+                }
+                IrType* call_type = c_test_first_call_callee_type(lowered.program, module, S8("caller"));
+                IrTypeKind call_kinds[] = {IR_TYPE_INTEGER, IR_TYPE_FLOAT, IR_TYPE_INTEGER, IR_TYPE_INTEGER};
+                u32 call_widths[] = {32, 64, 32, 32};
+                BUSTER_TEST_RAW(arguments,
+                                c_test_call_parameters_are(lowered.program, call_type, call_kinds, call_widths, BUSTER_ARRAY_LENGTH(call_kinds)), label);
+                BUSTER_TEST_RAW(arguments, call_type && call_type->is_variadic && !call_type->is_unprototyped, label);
+                BUSTER_TEST_RAW(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE, label);
+            }
+            else if (c23)
+            {
+                BUSTER_TEST_RAW(arguments, lowered.program == 0, label);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -34324,6 +34427,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_alignof_object);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
+    BUSTER_TEST_FIXTURE(arguments, c_test_identifier_list_function_definitions);
     BUSTER_TEST_FIXTURE(arguments, c_test_parenthesized_typedef_parameters);
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
