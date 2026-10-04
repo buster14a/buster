@@ -2158,11 +2158,12 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         for (u32 extend = A64_SCALAR_INT_EXTEND_UXTB; extend <= A64_SCALAR_INT_EXTEND_SXTX; extend += 1)
         {
             boundary_extend.value = (u8)extend;
-            boundary_ext_operands[2].width = (extend == A64_SCALAR_INT_EXTEND_UXTX || extend == A64_SCALAR_INT_EXTEND_SXTX) ? 64 : 32;
-            bool x_extension = extend == A64_SCALAR_INT_EXTEND_UXTX || extend == A64_SCALAR_INT_EXTEND_SXTX;
+            bool x_extension = width == 64 &&
+                               (extend == A64_SCALAR_INT_EXTEND_UXTX || extend == A64_SCALAR_INT_EXTEND_SXTX);
+            boundary_ext_operands[2].width = x_extension ? 64 : 32;
             bool extension_ok = a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), boundary_ext_operands, 3,
                                                                             &boundary_extend, 1, &boundary_word);
-            BUSTER_TEST(arguments, extension_ok == (width == 64 || !x_extension));
+            BUSTER_TEST(arguments, extension_ok);
         }
         boundary_extend.value = A64_SCALAR_INT_EXTEND_UXTW;
         boundary_extend.amount = 5;
@@ -2173,6 +2174,212 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
                                boundary_word == UINT32_C(0x5a5aa5a5));
         boundary_extend.amount = 0;
     }
+    // Literal words for add w0, w1, w2, uxtx/sxtx from the independent #2625
+    // assembly audit. Decode them without first asking an encoder to succeed.
+    {
+        u32 const literal_words[2] = {UINT32_C(0x0b226020), UINT32_C(0x0b22e020)};
+        u8 const literal_options[2] = {A64_SCALAR_INT_EXTEND_UXTX, A64_SCALAR_INT_EXTEND_SXTX};
+        for (u32 literal = 0; literal < BUSTER_ARRAY_LENGTH(literal_words); literal += 1)
+        {
+            A64ScalarIntOperand decoded[4] = {0};
+            A64ScalarIntModifier decoded_modifier = {0};
+            u32 decoded_form = UINT32_MAX;
+            u32 operand_count = UINT32_MAX;
+            u32 modifier_count = UINT32_MAX;
+            bool decoded_ok = a64_arm_m1_scalar_integer_decode(gpr_target, literal_words[literal], &decoded_form,
+                decoded, BUSTER_ARRAY_LENGTH(decoded), &operand_count, &decoded_modifier, 1, &modifier_count);
+            if (BUSTER_REQUIRE(arguments, decoded_ok))
+            {
+                BUSTER_TEST(arguments, operand_count == 3 && modifier_count == 1);
+                for (u32 index = 0; index < 3; index += 1)
+                {
+                    BUSTER_TEST(arguments, decoded[index].kind == A64_SCALAR_INT_OPERAND_REGISTER &&
+                        decoded[index].width == 32 && decoded[index].index == index && !decoded[index].stack_pointer);
+                }
+                BUSTER_TEST(arguments, decoded_modifier.kind == A64_SCALAR_INT_MODIFIER_EXTEND &&
+                    decoded_modifier.value == literal_options[literal] && decoded_modifier.amount == 0 &&
+                    decoded_modifier.present);
+                u32 word = UINT32_C(0x5a5aa5a5);
+                BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode(gpr_target, decoded_form, decoded, 3,
+                    &decoded_modifier, 1, &word) && word == literal_words[literal]);
+            }
+            for (u32 amount = 5; amount < 8; amount += 1)
+            {
+                A64ScalarIntOperand unchanged_operands[4] = {0};
+                A64ScalarIntModifier unchanged_modifier = {0};
+                memset(decoded, 0xa5, sizeof(decoded));
+                memset(&decoded_modifier, 0xa5, sizeof(decoded_modifier));
+                memcpy(unchanged_operands, decoded, sizeof(decoded));
+                memcpy(&unchanged_modifier, &decoded_modifier, sizeof(decoded_modifier));
+                decoded_form = UINT32_MAX;
+                operand_count = UINT32_MAX;
+                modifier_count = UINT32_MAX;
+                u32 reserved_word = literal_words[literal] | (amount << 10);
+                BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_decode(gpr_target, reserved_word, &decoded_form,
+                    decoded, BUSTER_ARRAY_LENGTH(decoded), &operand_count, &decoded_modifier, 1, &modifier_count));
+                BUSTER_TEST(arguments, decoded_form == UINT32_MAX && operand_count == UINT32_MAX &&
+                    modifier_count == UINT32_MAX && memcmp(decoded, unchanged_operands, sizeof(decoded)) == 0 &&
+                    memcmp(&decoded_modifier, &unchanged_modifier, sizeof(decoded_modifier)) == 0);
+            }
+        }
+    }
+
+    // ADD/SUB (extended register): fixed field arithmetic independently supplies
+    // decoder input, including reserved shifts and SP/ZR register roles.
+    {
+        String8 const audit_mnemonics[4] = {S8("add"), S8("adds"), S8("sub"), S8("subs")};
+        u8 const audit_registers[3][3] = {{0, 1, 2}, {30, 31, 31}, {31, 30, 0}};
+        for (u32 sf = 0; sf < 2; sf += 1)
+        {
+            for (u32 op = 0; op < 4; op += 1)
+            {
+                u8 width = sf ? 64 : 32;
+                A64ScalarIntOperand baseline[3] = {
+                    {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 0},
+                    {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 1},
+                    {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 2},
+                };
+                A64ScalarIntModifier modifier = {
+                    .kind = A64_SCALAR_INT_MODIFIER_EXTEND,
+                    .value = A64_SCALAR_INT_EXTEND_UXTB,
+                    .present = true,
+                };
+                u32 form_index = UINT32_MAX;
+                bool found = a64_arm_m1_scalar_integer_find_form(audit_mnemonics[op], baseline, 3,
+                                                                &modifier, 1, &form_index);
+                if (!BUSTER_REQUIRE(arguments, found))
+                {
+                    continue;
+                }
+                for (u32 option = 0; option < 8; option += 1)
+                {
+                    // The source register's width is a function of BOTH sf and option.
+                    // In particular, every option uses Wm when sf is zero.
+                    u8 source_width = sf && (option == 3 || option == 7) ? 64 : 32;
+                    modifier.value = (u8)option;
+                    for (u32 amount = 0; amount < 8; amount += 1)
+                    {
+                        modifier.amount = amount;
+                        for (u32 r = 0; r < 3; r += 1)
+                        {
+                            u32 rd = audit_registers[r][0];
+                            u32 rn = audit_registers[r][1];
+                            u32 rm = audit_registers[r][2];
+                            A64ScalarIntOperand operands[3] = {
+                                {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width,
+                                 .index = (u8)rd, .stack_pointer = rd == 31 && !(op & 1)},
+                                {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width,
+                                 .index = (u8)rn, .stack_pointer = rn == 31},
+                                {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = source_width,
+                                 .index = (u8)rm},
+                            };
+                            u32 expected = UINT32_C(0x0b200000) | (sf << 31) | ((op >> 1) << 30) |
+                                ((op & 1) << 29) | (rm << 16) | (option << 13) |
+                                (amount << 10) | (rn << 5) | rd;
+                            bool legal = amount <= 4;
+                            u32 word = UINT32_C(0x5a5aa5a5);
+                            bool encoded = a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                                                                            operands, 3, &modifier, 1, &word);
+                            BUSTER_TEST(arguments, encoded == legal);
+                            BUSTER_TEST(arguments, word == (legal ? expected : UINT32_C(0x5a5aa5a5)));
+                            word = UINT32_C(0x5a5aa5a5);
+                            encoded = a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, audit_mnemonics[op],
+                                                                               operands, 3, &modifier, 1, &word);
+                            BUSTER_TEST(arguments, encoded == legal);
+                            BUSTER_TEST(arguments, word == (legal ? expected : UINT32_C(0x5a5aa5a5)));
+                            word = UINT32_C(0x5a5aa5a5);
+                            encoded = buster_aarch64_scalar_integer_encode_for_target(gpr_target, form_index,
+                                                                                      operands, 3, &modifier, 1, &word);
+                            BUSTER_TEST(arguments, encoded == legal);
+                            BUSTER_TEST(arguments, word == (legal ? expected : UINT32_C(0x5a5aa5a5)));
+
+                            // Feed an independently supplied word, NOT the encoder's output.
+                            A64ScalarIntOperand decoded[4] = {0};
+                            A64ScalarIntModifier decoded_modifier[1] = {0};
+                            A64ScalarIntOperand unchanged_operands[4] = {0};
+                            A64ScalarIntModifier unchanged_modifier[1] = {0};
+                            memset(decoded, 0xa5, sizeof(decoded));
+                            memset(decoded_modifier, 0xa5, sizeof(decoded_modifier));
+                            memcpy(unchanged_operands, decoded, sizeof(decoded));
+                            memcpy(unchanged_modifier, decoded_modifier, sizeof(decoded_modifier));
+                            u32 operand_count = UINT32_MAX;
+                            u32 modifier_count = UINT32_MAX;
+                            bool decoded_ok = a64_arm_m1_scalar_integer_decode_form(gpr_target, form_index, expected,
+                                decoded, 4, &operand_count, decoded_modifier, 1, &modifier_count);
+                            BUSTER_TEST(arguments, decoded_ok == legal);
+                            if (decoded_ok)
+                            {
+                                BUSTER_TEST(arguments, operand_count == 3);
+                                for (u32 i = 0; i < 3; i += 1)
+                                {
+                                    BUSTER_TEST(arguments, decoded[i].kind == operands[i].kind &&
+                                        decoded[i].width == operands[i].width && decoded[i].index == operands[i].index &&
+                                        decoded[i].stack_pointer == operands[i].stack_pointer);
+                                }
+                                bool omitted_default = amount == 0 && option == (sf ? 3u : 2u) &&
+                                                       (operands[0].stack_pointer || operands[1].stack_pointer);
+                                BUSTER_TEST(arguments, modifier_count == (omitted_default ? 0u : 1u));
+                                if (modifier_count == 1)
+                                {
+                                    BUSTER_TEST(arguments, decoded_modifier[0].kind == A64_SCALAR_INT_MODIFIER_EXTEND &&
+                                        decoded_modifier[0].value == option && decoded_modifier[0].amount == amount &&
+                                        decoded_modifier[0].present);
+                                }
+                            }
+                            else
+                            {
+                                BUSTER_TEST(arguments, operand_count == UINT32_MAX && modifier_count == UINT32_MAX);
+                                BUSTER_TEST(arguments, memcmp(decoded, unchanged_operands, sizeof(decoded)) == 0 &&
+                                    memcmp(decoded_modifier, unchanged_modifier, sizeof(decoded_modifier)) == 0);
+                            }
+                            if (legal)
+                            {
+                                // Each width is independently legitimate somewhere, but not with this sf/option pair.
+                                operands[2].width = source_width == 64 ? 32 : 64;
+                                word = UINT32_C(0x5a5aa5a5);
+                                BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                                    operands, 3, &modifier, 1, &word) && word == UINT32_C(0x5a5aa5a5));
+                            }
+                        }
+                    }
+                }
+                modifier.value = A64_SCALAR_INT_EXTEND_UXTB;
+                modifier.amount = UINT64_MAX;
+                u32 unchanged = UINT32_C(0x5a5aa5a5);
+                BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                    baseline, 3, &modifier, 1, &unchanged) && unchanged == UINT32_C(0x5a5aa5a5));
+                modifier.amount = 0;
+                for (u32 index = 0; index < 3; index += 1)
+                {
+                    u8 saved = baseline[index].index;
+                    u8 const invalid_indices[2] = {32, 255};
+                    for (u32 invalid = 0; invalid < 2; invalid += 1)
+                    {
+                        baseline[index].index = invalid_indices[invalid];
+                        unchanged = UINT32_C(0x5a5aa5a5);
+                        BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                            baseline, 3, &modifier, 1, &unchanged) && unchanged == UINT32_C(0x5a5aa5a5));
+                    }
+                    baseline[index].index = saved;
+
+                    // Register number 31 has a field- and flag-dependent role.
+                    bool expected_sp = index == 1 || (index == 0 && !(op & 1));
+                    baseline[index].index = 31;
+                    baseline[index].stack_pointer = !expected_sp;
+                    unchanged = UINT32_C(0x5a5aa5a5);
+                    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                        baseline, 3, &modifier, 1, &unchanged) && unchanged == UINT32_C(0x5a5aa5a5));
+                    baseline[index].index = saved;
+                    baseline[index].stack_pointer = true;
+                    unchanged = UINT32_C(0x5a5aa5a5);
+                    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index,
+                        baseline, 3, &modifier, 1, &unchanged) && unchanged == UINT32_C(0x5a5aa5a5));
+                    baseline[index].stack_pointer = false;
+                }
+            }
+        }
+    }
+
     A64ScalarIntOperand boundary_imm_operands[3] = {
         {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 0},
         {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 1},
