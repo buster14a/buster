@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+# One proof per pushed head; a later push queues behind a running proof
+# instead of cancelling it, so a measurement already under way is retained.
+concurrency:
+  group: validator-fusion-proof-${{ github.sha }}
+  cancel-in-progress: false
+
 jobs:
   proof:
     runs-on: ubuntu-26.04
@@ -20,7 +26,6 @@ jobs:
       # The immutable source-only candidate commit; this workflow commit sits
       # above it on the proof branch and is never measured.
       BUSTER_IR_CANDIDATE_SHA: 91a5199608e80a7ef23b176b4b248b47f7efbc00
-      BUSTER_IR_GENERATE_FLAGS: --config Release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
     steps:
       - name: Prepare retained evidence and hosted perf
         id: setup
@@ -77,7 +82,7 @@ jobs:
           git ls-files -z | sort -z | xargs -0 sha256sum > "$BUSTER_IR_EVIDENCE/baseline/source.sha256"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-baseline-build"
           sha256sum "$RUNNER_TEMP/buster-baseline-build" > "$BUSTER_IR_EVIDENCE/baseline/driver.sha256"
-          "$RUNNER_TEMP/buster-baseline-build" generate $BUSTER_IR_GENERATE_FLAGS -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=OFF
+          "$RUNNER_TEMP/buster-baseline-build" generate --config Release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=OFF
           "$RUNNER_TEMP/buster-baseline-build" build --config Release -t ide -- -j2
           grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=ON' build/CMakeCache.txt
           grep -Fx 'BUSTER_BENCH_ALLOCATIONS:BOOL=OFF' build/CMakeCache.txt
@@ -124,7 +129,7 @@ jobs:
           git ls-files -z | sort -z | xargs -0 sha256sum > "$BUSTER_IR_EVIDENCE/candidate/source.sha256"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-candidate-build"
           sha256sum "$RUNNER_TEMP/buster-candidate-build" > "$BUSTER_IR_EVIDENCE/candidate/driver.sha256"
-          "$RUNNER_TEMP/buster-candidate-build" generate $BUSTER_IR_GENERATE_FLAGS -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=OFF
+          "$RUNNER_TEMP/buster-candidate-build" generate --config Release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=OFF
           "$RUNNER_TEMP/buster-candidate-build" build --config Release -t ide -- -j2
           grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=ON' build/CMakeCache.txt
           grep -Fx 'BUSTER_BENCH_ALLOCATIONS:BOOL=OFF' build/CMakeCache.txt
@@ -211,7 +216,7 @@ jobs:
           exec > >(tee "$BUSTER_IR_EVIDENCE/notests/candidate-build.log") 2>&1
           set -x
           test "$(git rev-parse HEAD)" = "$BUSTER_IR_CANDIDATE_SHA"
-          "$RUNNER_TEMP/buster-candidate-build" generate $BUSTER_IR_GENERATE_FLAGS -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF
+          "$RUNNER_TEMP/buster-candidate-build" generate --config Release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF
           "$RUNNER_TEMP/buster-candidate-build" build --config Release -t ide -- -j2
           grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
           cp build/CMakeCache.txt "$BUSTER_IR_EVIDENCE/notests/candidate-CMakeCache.txt"
@@ -239,7 +244,7 @@ jobs:
           set -x
           test "$(git rev-parse HEAD)" = "$BUSTER_IR_BASELINE_SHA"
           sha256sum -c "$BUSTER_IR_EVIDENCE/baseline/source.sha256"
-          "$RUNNER_TEMP/buster-baseline-build" generate $BUSTER_IR_GENERATE_FLAGS -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF
+          "$RUNNER_TEMP/buster-baseline-build" generate --config Release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF
           "$RUNNER_TEMP/buster-baseline-build" build --config Release -t ide -- -j2
           grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
           cp build/CMakeCache.txt "$BUSTER_IR_EVIDENCE/notests/baseline-CMakeCache.txt"
@@ -280,7 +285,7 @@ jobs:
           exec > >(tee "$BUSTER_IR_EVIDENCE/census/baseline-build.log") 2>&1
           set -x
           test "$(git rev-parse HEAD)" = "$BUSTER_IR_BASELINE_SHA"
-          "$RUNNER_TEMP/buster-baseline-build" generate $BUSTER_IR_GENERATE_FLAGS -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/buster-baseline-build" generate --config Release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=ON
           "$RUNNER_TEMP/buster-baseline-build" build --config Release -t ide -- -j2
           grep -Fx 'BUSTER_BENCH_ALLOCATIONS:BOOL=ON' build/CMakeCache.txt
           cp build/Release/ide "$BUSTER_IR_EVIDENCE/binaries/baseline-census-ide"
@@ -308,7 +313,7 @@ jobs:
           set -x
           test "$(git rev-parse HEAD)" = "$BUSTER_IR_CANDIDATE_SHA"
           sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/source.sha256"
-          "$RUNNER_TEMP/buster-candidate-build" generate $BUSTER_IR_GENERATE_FLAGS -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/buster-candidate-build" generate --config Release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
           "$RUNNER_TEMP/buster-candidate-build" build --config Release -t ide -- -j2
           grep -Fx 'BUSTER_BENCH_ALLOCATIONS:BOOL=ON' build/CMakeCache.txt
           cp build/Release/ide "$BUSTER_IR_EVIDENCE/binaries/candidate-census-ide"
@@ -357,21 +362,23 @@ jobs:
           CANDIDATE_CENSUS: ${{ steps.candidate_census.outcome }}
         run: |
           set -euo pipefail
-          printf '## Canonical validator fusion proof (#2626)\n\nBaseline `%s`; source candidate `%s`.\n\nBaseline build: **%s**; baseline fixed point: **%s**; candidate build: **%s**; candidate fixed point: **%s**; candidate full tests: **%s**; A/A: **%s**; A/B tests-on: **%s**; A/B tests-off: **%s**; baseline census: **%s**; candidate census and IR tests: **%s**.\n\n' "$BUSTER_IR_BASELINE_SHA" "$BUSTER_IR_CANDIDATE_SHA" "$BASELINE_BUILD" "$BASELINE_FIXED_POINT" "$CANDIDATE_BUILD" "$CANDIDATE_FIXED_POINT" "$CANDIDATE_TESTS" "$AA" "$AB" "$AB_NOTESTS" "$BASELINE_CENSUS" "$CANDIDATE_CENSUS" >> "$GITHUB_STEP_SUMMARY"
-          printf 'Paired comparisons use frozen trusted Clang binaries built serially in one path, one frozen input tree per comparison and fresh executable copies per measured child. A/A measures runtime noise only. Hosted unpinned timing is diagnostic, not dedicated Ryzen 9700X acceptance; ordinary PR checks remain responsible for the platform/allocator matrix.\n\n' >> "$GITHUB_STEP_SUMMARY"
-          for comparison in aa ab ab-notests; do
-            report="$GITHUB_WORKSPACE/validator-fusion-evidence/$comparison/report.md"
-            if test -f "$report"; then
-              printf '### %s\n\n' "$comparison" >> "$GITHUB_STEP_SUMMARY"
-              cat "$report" >> "$GITHUB_STEP_SUMMARY"
-              printf '\n' >> "$GITHUB_STEP_SUMMARY"
+          {
+            printf '## Canonical validator fusion proof (#2626)\n\nBaseline %s; source candidate %s.\n\nBaseline build: **%s**; baseline fixed point: **%s**; candidate build: **%s**; candidate fixed point: **%s**; candidate full tests: **%s**; A/A: **%s**; A/B tests-on: **%s**; A/B tests-off: **%s**; baseline census: **%s**; candidate census and IR tests: **%s**.\n\n' "$BUSTER_IR_BASELINE_SHA" "$BUSTER_IR_CANDIDATE_SHA" "$BASELINE_BUILD" "$BASELINE_FIXED_POINT" "$CANDIDATE_BUILD" "$CANDIDATE_FIXED_POINT" "$CANDIDATE_TESTS" "$AA" "$AB" "$AB_NOTESTS" "$BASELINE_CENSUS" "$CANDIDATE_CENSUS"
+            printf 'Paired comparisons use frozen trusted Clang binaries built serially in one path, one frozen input tree per comparison and fresh executable copies per measured child. A/A measures runtime noise only. Hosted unpinned timing is diagnostic, not dedicated Ryzen 9700X acceptance; ordinary PR checks remain responsible for the platform/allocator matrix.\n\n'
+            for comparison in aa ab ab-notests; do
+              report="$GITHUB_WORKSPACE/validator-fusion-evidence/$comparison/report.md"
+              if test -f "$report"; then
+                printf '### %s\n\n' "$comparison"
+                cat "$report"
+                printf '\n'
+              fi
+            done
+            census="$GITHUB_WORKSPACE/validator-fusion-evidence/census/validation-census.md"
+            if test -f "$census"; then
+              printf '### Validation work census (stage-1, instrumented)\n\n'
+              cat "$census"
             fi
-          done
-          census="$GITHUB_WORKSPACE/validator-fusion-evidence/census/validation-census.md"
-          if test -f "$census"; then
-            printf '### Validation work census (stage-1, instrumented)\n\n' >> "$GITHUB_STEP_SUMMARY"
-            cat "$census" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          } >> "$GITHUB_STEP_SUMMARY"
           test "$BASELINE_BUILD" = success
           test "$BASELINE_FIXED_POINT" = success
           test "$CANDIDATE_BUILD" = success
