@@ -4413,16 +4413,26 @@ BUSTER_GLOBAL_LOCAL bool os_linux_same_file_identity(struct stat left, struct st
 
 BUSTER_GLOBAL_LOCAL bool os_linux_process_status_namespace_index(OsLinuxProcessStatus status, pid_t process_id, u32* namespace_index)
 {
-    u32 matches = 0;
-    for (u32 index = 0; index < status.namespace_depth; index += 1)
+    // self/status lists the procfs namespace first and this process's active
+    // namespace last. Namespace-local numeric IDs may repeat across levels.
+    bool result = status.valid && status.namespace_depth && status.namespace_depth <= OS_LINUX_PID_NAMESPACE_DEPTH_LIMIT;
+    if (result)
     {
-        if (status.namespace_process_ids[index] == process_id)
-        {
-            *namespace_index = index;
-            matches += 1;
-        }
+        u32 index = status.namespace_depth - 1;
+        result = process_id > 0 && status.namespace_process_ids[index] == process_id;
+        if (result) { *namespace_index = index; }
     }
-    return matches == 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_linux_proc_context_select_self(OsLinuxProcContext* context, char* bytes, u64 length, pid_t process_id)
+{
+    OsLinuxProcessStatus self = {0};
+    context->current_namespace_depth = 0;
+    context->current_namespace_index = 0;
+    context->valid = context->valid && os_linux_process_status_parse(bytes, length, 0, &self) &&
+        os_linux_process_status_namespace_index(self, process_id, &context->current_namespace_index);
+    if (context->valid) { context->current_namespace_depth = self.namespace_depth; }
 }
 
 BUSTER_GLOBAL_LOCAL OsLinuxProcContext os_linux_proc_context_open(void)
@@ -4434,15 +4444,11 @@ BUSTER_GLOBAL_LOCAL OsLinuxProcContext os_linux_proc_context_open(void)
     char bytes[16384];
     u64 length = 0;
     bool vanished = false;
-    OsLinuxProcessStatus self = {0};
     if (result.valid)
     {
-        result.valid = os_linux_proc_read_at(result.descriptor, "self/status", bytes, sizeof(bytes), &length, &vanished) &&
-            os_linux_process_status_parse(bytes, length, 0, &self);
+        result.valid = os_linux_proc_read_at(result.descriptor, "self/status", bytes, sizeof(bytes), &length, &vanished);
     }
-    pid_t self_process_id = getpid();
-    result.current_namespace_depth = self.namespace_depth;
-    result.valid = result.valid && os_linux_process_status_namespace_index(self, self_process_id, &result.current_namespace_index);
+    os_linux_proc_context_select_self(&result, bytes, length, getpid());
     return result;
 }
 
@@ -4712,6 +4718,26 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_group_is_quiescent(Arena* arena, const
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool os_linux_proc_context_select_self_test(String8 status, s32 process_id, bool identity_valid,
+                                             u32* namespace_index, u32* namespace_depth)
+{
+    OsLinuxProcContext context = {.descriptor = -1, .valid = identity_valid};
+    os_linux_proc_context_select_self(&context, (char*)status.pointer, status.length, (pid_t)process_id);
+    *namespace_index = context.current_namespace_index;
+    *namespace_depth = context.current_namespace_depth;
+    return context.valid;
+}
+
+bool os_linux_proc_context_live_self_test(void)
+{
+    OsLinuxProcContext context = os_linux_proc_context_open();
+    bool result = context.valid && context.current_namespace_depth &&
+        context.current_namespace_index == context.current_namespace_depth - 1;
+    bool closed = os_linux_proc_context_close(&context);
+    result = result && closed && context.descriptor == -1 && !context.valid;
+    return result;
+}
+
 bool os_linux_process_group_churn_self_test(Arena* arena)
 {
     pid_t leader = fork();
@@ -4797,10 +4823,11 @@ bool os_linux_process_stat_parse_self_test(void)
         .valid = true,
     };
     u32 namespace_index = 0;
-    result = os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && namespace_index == 1 && result;
+    result = os_linux_process_status_namespace_index(mapping, 7, &namespace_index) && namespace_index == 2 && result;
+    result = !os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && result;
     result = !os_linux_process_status_namespace_index(mapping, 8, &namespace_index) && result;
     mapping.namespace_process_ids[2] = 12;
-    result = !os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && result;
+    result = os_linux_process_status_namespace_index(mapping, 12, &namespace_index) && namespace_index == 2 && result;
     OsLinuxProcessGroupMember members[] = {
         {.proc_process_id = 999, .local_process_id = 12, .namespace_process_ids = {999, 12}, .namespace_depth = 2},
     };
