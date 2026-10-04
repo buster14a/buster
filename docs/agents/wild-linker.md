@@ -15,7 +15,7 @@ For a debug-information-preserving application build:
 
 Use the existing C driver entry point for the host environment. The evaluation invokes its compiled executable directly. Debug remains non-unity under current repository policy. Release unity/non-unity are separate graphs. Wild stays optional: omitting the selector preserves the existing mold/default selection policy; removing Wild does not affect an ordinary build.
 
-Wild 0.10.0 enables section GC by default, unlike mold 2.42.1. The explicit no-GC flag is necessary for the strict full-DWARF qualification demonstrated here. Targets with their own required GC, such as `hot_reload`, are separately qualified: both linkers pass its runtime lifecycle checks, but both fail full-output `llvm-dwarfdump --verify` under GC. Do not claim that configuration preserves the strict full-DWARF contract. Sanitized Debug qualification covers the seven affected modules named in the [evidence report](../performance-audits/2026-10-04-issue-2645-wild-linker.md), not every sanitizer/test mode.
+Wild 0.10.0 enables section GC by default, unlike mold 2.42.1. The explicit no-GC flag is necessary for the strict full-DWARF qualification demonstrated here. Targets with their own required GC, such as `hot_reload`, are separately qualified: both linkers pass its runtime lifecycle checks, but both fail full-output `llvm-dwarfdump --verify` under GC. Do not claim that configuration preserves the strict full-DWARF contract. Sanitized Debug qualification covers the seven affected modules named in the [evidence report](../performance-audits/2026-10-04T185601Z.md), not every sanitizer/test mode.
 
 ## Diagnostics and scope
 
