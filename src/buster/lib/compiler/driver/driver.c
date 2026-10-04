@@ -4772,6 +4772,11 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
                                                           .save_temporaries = invocation.save_gpu_temporaries,
                                                           .capture_text_output = capture_text_output,
                                                       });
+    if (pipeline.published)
+    {
+        result.gpu = pipeline.artifact;
+        result.has_gpu = true;
+    }
     if (pipeline.error != GPU_PIPELINE_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_GPU;
