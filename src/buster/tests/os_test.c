@@ -1005,7 +1005,13 @@ void os_test_process_child_run(UnitTestArguments* arguments)
         if (parked || string_equal(process_test_mode, S8("capture-sink-payload")))
         {
             written = written && os_test_create_empty_file(os_get_environment_variable(S8("BUSTER_OS_PROCESS_READY")));
-            while (parked && written) os_test_sleep_milliseconds(10);
+            if (parked && written)
+            {
+                for (;;)
+                {
+                    os_test_sleep_milliseconds(10);
+                }
+            }
         }
         os_exit(written ? 0 : 95);
     }
