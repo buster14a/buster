@@ -1,0 +1,34 @@
+name: Wild integration source-size acknowledgment
+on:
+  push:
+    branches: ['codex/2645-wild-arm-evidence']
+    paths: ['.github/workflows/wild-linker-baseline-ack.yml']
+permissions:
+  contents: read
+jobs:
+  record:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Require hosted execution admission
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: b17fa1e1a2948e70e07fe74a3256336c2bc42009
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Generate acknowledgment using existing C driver
+        run: |
+          git rev-parse HEAD
+          test "$(git rev-parse HEAD)" = b17fa1e1a2948e70e07fe74a3256336c2bc42009
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/wild-ack-driver"
+          "$RUNNER_TEMP/wild-ack-driver" source_size --write-baseline
+          cat docs/source-size-baseline.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: wild-source-size-ack-${{ github.run_id }}
+          path: docs/source-size-baseline.txt
+          retention-days: 30
+          if-no-files-found: error
