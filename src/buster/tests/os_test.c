@@ -817,7 +817,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission_child(UnitTest
                 else if (count >= 0 || errno != EINTR) configured = false;
             }
             bool restored = write_flags >= 0 && fcntl(pipe_fds[1], F_SETFL, write_flags) == 0;
-            if (BUSTER_REQUIRE(arguments, configured && full && filled && restored && !(write_flags & O_NONBLOCK)))
+            // Filling the pipe can set kernel bookkeeping flags. Snapshot the
+            // restored blocking handle immediately before admission begins.
+            int admission_write_flags = fcntl(pipe_fds[1], F_GETFL);
+            int admission_write_descriptor_flags = fcntl(pipe_fds[1], F_GETFD);
+            int restored_flags_mask = O_ACCMODE | O_APPEND | O_ASYNC | O_SYNC | O_DSYNC | O_NONBLOCK;
+            if (BUSTER_REQUIRE(arguments, configured && full && filled && restored && admission_write_flags >= 0 &&
+                                          !(admission_write_flags & O_NONBLOCK) && admission_write_descriptor_flags == write_descriptor_flags &&
+                                          (admission_write_flags & restored_flags_mask) == (write_flags & restored_flags_mask)))
             {
                 OsFileDescriptor* sink = (OsFileDescriptor*)(u64)(pipe_fds[1] + 1);
                 UnitTestResult probe = os_test_capture_sink_refusals(arguments, sink, regular, marker, invalid_argument);
@@ -825,7 +832,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission_child(UnitTest
                 result.succeeded_test_count += probe.succeeded_test_count;
                 struct stat after = {0};
                 BUSTER_TEST(arguments, fstat(pipe_fds[1], &after) == 0 && before.st_dev == after.st_dev && before.st_ino == after.st_ino);
-                BUSTER_TEST(arguments, fcntl(pipe_fds[1], F_GETFL) == write_flags && fcntl(pipe_fds[1], F_GETFD) == write_descriptor_flags);
+                BUSTER_TEST(arguments, fcntl(pipe_fds[1], F_GETFL) == admission_write_flags &&
+                                       fcntl(pipe_fds[1], F_GETFD) == admission_write_descriptor_flags);
                 if (BUSTER_REQUIRE(arguments, fcntl(pipe_fds[0], F_SETFL, read_flags | O_NONBLOCK) == 0))
                 {
                     u64 drained = 0;
