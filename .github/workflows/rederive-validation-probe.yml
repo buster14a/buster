@@ -69,7 +69,7 @@ jobs:
           git -C "$RUNNER_TEMP/probe-src" diff --stat
 
       - name: Stage the pinned SQLite amalgamation
-        if: ${{ inputs.sqlite == 'true' }}
+        if: ${{ (inputs.sqlite || 'true') == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -84,9 +84,9 @@ jobs:
         run: |
           set -euo pipefail
           SQLITE_ROOT=""
-          if [[ "${{ inputs.sqlite }}" == "true" ]]; then SQLITE_ROOT="$PWD/external/sqlite-amalgamation-3530400"; fi
+          if [[ "${{ inputs.sqlite || 'true' }}" == "true" ]]; then SQLITE_ROOT="$PWD/external/sqlite-amalgamation-3530400"; fi
           bash docs/performance-audits/evidence/rederive-validation-probe/run_probe.sh \
-            "$PWD" "$RUNNER_TEMP/probe-src" "$RUNNER_TEMP/out" "${{ inputs.pairs }}" "$SQLITE_ROOT" 2>&1 | tee "$RUNNER_TEMP/out/run.log"
+            "$PWD" "$RUNNER_TEMP/probe-src" "$RUNNER_TEMP/out" "${{ inputs.pairs || '8' }}" "$SQLITE_ROOT" 2>&1 | tee "$RUNNER_TEMP/out/run.log"
 
       - name: Summarize
         if: ${{ always() }}
