@@ -21044,6 +21044,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_auto_local_declarations(UnitTestAr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_declaration_order(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 accepted[] = {
+        S8("int later(int); int main(void) { return later(3); } int later(int value) { return value; }\n"),
+        S8("extern int g; int main(void) { return g; } int g = 5;\n"),
+        S8("struct S; struct S *p; int main(void) { return p != 0; } struct S { int value; };\n"),
+        S8("int t; int main(void) { return t; } int t = 3;\n"),
+        S8("int recurse(int n) { return n ? recurse(n - 1) : 0; }\n"),
+        S8("enum { A, B = A + 1 }; int main(void) { return B - 1; }\n"),
+        S8("int main(void) { extern int g; return g; } int g = 5;\n"),
+        S8("static int h(int); int main(void) { return h(3); } static int h(int value) { return value; }\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(accepted); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, accepted[index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && checked.analysis_complete && !checked.diagnostic_count,
+            checked.diagnostic_count ? checked.diagnostics[0].message : accepted[index]);
+        scratch_end(temporary);
+    }
+    struct { String8 source; String8 message; CDiagnosticKind kind; u32 line; u32 column; } rejected[] = {
+        {S8("int main(void) {\n    return later(3);\n}\nint later(int value) { return value; }\n"),
+         S8("use of undeclared identifier 'later'"), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, 2, 12},
+        {S8("int main(void) {\n    return later(3);\n}\nstatic int later(int value) { return value; }\n"),
+         S8("use of undeclared identifier 'later'"), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, 2, 12},
+        {S8("int main(void) {\n    return g;\n}\nint g = 5;\n"),
+         S8("use of undeclared identifier 'g'"), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, 2, 12},
+        {S8("int main(void) {\n    return sizeof(arr);\n}\nchar arr[7];\n"),
+         S8("use of undeclared identifier 'arr'"), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, 2, 19},
+        {S8("int main(void) {\n    T x = 5;\n    return x;\n}\ntypedef int T;\n"),
+         S8("unknown type name 'T'"), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME, 2, 5},
+        {S8("int main(void) {\n    return E1;\n}\nenum { E0, E1 };\n"),
+         S8("use of undeclared identifier 'E1'"), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, 2, 12},
+        {S8("int main(void) {\n    T x = 5;\n    return x + g + later(E1);\n}\ntypedef int T;\nint g = 5;\nenum { E0, E1 };\nint later(int value) { return value; }\n"),
+         S8("unknown type name 'T'"), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME, 2, 5},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+        bool diagnosed_use = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < checked.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = checked.diagnostics[diagnostic_index];
+            if (diagnostic.location.line == rejected[index].line && diagnostic.location.column == rejected[index].column)
+            {
+                diagnosed_use = diagnostic.kind == rejected[index].kind && string_equal(diagnostic.message, rejected[index].message);
+            }
+        }
+        BUSTER_TEST_RAW(arguments, diagnosed_use, checked.diagnostic_count ? checked.diagnostics[0].message : rejected[index].source);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 c_test_character_literal_query_source(Arena* arena, Target target, bool c23)
 {
     String8 literals[] = {S8("'a'"), S8("L'a'"), S8("u'a'"), S8("U'a'"), S8("u8'a'")};
@@ -34464,6 +34527,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_type_constant_query_isolation);
     BUSTER_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_auto_local_declarations);
+    BUSTER_TEST_FIXTURE(arguments, c_test_file_scope_declaration_order);
     BUSTER_TEST_FIXTURE(arguments, c_test_character_literal_query_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
