@@ -2085,6 +2085,7 @@ typedef enum CIrQueryFrameKind
     C_IR_QUERY_FRAME_CONDITIONAL_TYPE,
     C_IR_QUERY_FRAME_NULL_POINTER_CONSTANT,
     C_IR_QUERY_FRAME_OFFSETOF,
+    C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE,
 } CIrQueryFrameKind;
 
 typedef struct CIrQueryFrame CIrQueryFrame;
@@ -3162,6 +3163,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* bu
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out);
 BUSTER_C_INTERNAL bool c_ir_constant_evaluate_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
+BUSTER_C_INTERNAL bool c_ir_strict_operand_type_walk(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields);
 BUSTER_C_INTERNAL IrTypeId c_ir_vla_c_type_attempt(CIntegerIrBuilder* builder, CTypeId type);
 BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* size_out, u32* alignment_out);
 BUSTER_C_INTERNAL bool c_ir_compound_literal_element_count_attempt(CIntegerIrBuilder* builder, u32 open, u32 close, u64* count_out);
@@ -3198,6 +3200,8 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
                    left.end == right.end && left.third == right.third && left.fourth == right.fourth;
         case C_IR_QUERY_FRAME_NULL_POINTER_CONSTANT:
             return left.first_type.value == right.first_type.value && left.start == right.start && left.end == right.end;
+        case C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE:
+            return left.start == right.start && left.end == right.end && left.flag == right.flag && left.third == right.third;
         }
     }
 
@@ -3283,6 +3287,14 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
             frame->success = true;
             break;
         case C_IR_QUERY_FRAME_OFFSETOF: frame->success = c_ir_constant_offsetof_attempt(builder, frame->start, frame->end, &frame->integer); break;
+        case C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE:
+        {
+            u32 tail_depth = builder->sizeof_statement_expression_tail_depth;
+            builder->sizeof_statement_expression_tail_depth = frame->third;
+            frame->success = c_ir_strict_operand_type_walk(builder, frame->start, frame->end, &frame->result_type, frame->flag);
+            builder->sizeof_statement_expression_tail_depth = tail_depth;
+            break;
+        }
         }
         if (machine->has_request)
         {
@@ -3415,6 +3427,30 @@ BUSTER_C_INTERNAL bool c_ir_query_prediction(CIntegerIrBuilder* builder, u32 sta
 {
     CIrQueryFrame result = {0};
     if (!c_ir_query_request(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_PREDICTION}, &result))
+    {
+        return false;
+    }
+    *type_out = result.result_type;
+    return result.success;
+}
+
+// One step of the strict operand-type walk: the sub-range resolves in its own
+// frame, and the statement-expression-tail context travels in the key so the
+// same token range queried inside and outside a `({ ...; tail; })` tail stays
+// distinct. A miss leaves the request pending and returns false; the machine
+// reruns this frame after the child completes.
+BUSTER_C_INTERNAL bool c_ir_query_strict_operand_type(CIntegerIrBuilder* builder, u32 start, u32 end, bool promote_bit_fields, bool statement_tail,
+                                                      IrTypeId* type_out)
+{
+    CIrQueryFrame result = {0};
+    CIrQueryFrame key = {
+        .start = start,
+        .end = end,
+        .third = statement_tail || builder->sizeof_statement_expression_tail_depth != 0,
+        .kind = C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE,
+        .flag = promote_bit_fields,
+    };
+    if (!c_ir_query_request(builder, key, &result))
     {
         return false;
     }
@@ -27109,7 +27145,7 @@ BUSTER_C_INTERNAL bool c_ir_static_postfix_type(CIntegerIrBuilder* builder, IrTy
 BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
 BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
-BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth, bool promote_bit_fields);
+BUSTER_C_INTERNAL bool c_ir_strict_operand_type_walk(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields);
 BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder, u32 open, u32 close, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
@@ -27436,19 +27472,11 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
    false defers to the older per-shape paths and ultimately the caller's fallback; a
    guessed type must never come out of this function, because the guessed size folds
    silently into the program (the 2026-08-08 array-bound incident, and the same
-   defect shape in function bodies). */
-BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth, bool promote_bit_fields)
+   defect shape in function bodies). The walk is not recursive: every sub-operand
+   resolves through a STRICT_OPERAND_TYPE query frame (c_ir_query_strict_operand_type),
+   so expression depth is bounded by the query frame capacity, not the C stack. */
+BUSTER_C_INTERNAL bool c_ir_strict_operand_type_walk(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields)
 {
-    // This resolver is a speculative type query: false lets the caller use
-    // the ordinary expression paths.  Bound its recursive precedence walk so
-    // adversarially deep, otherwise-valid expressions cannot exhaust the host
-    // stack in sanitizer/fuzz configurations, whose instrumented frames are
-    // substantially larger than Release frames.
-    if (!remaining_depth)
-    {
-        return false;
-    }
-    remaining_depth -= 1;
     // GNU __extension__ is a diagnostic-only marker on the expression that
     // follows it; it contributes no value and no type of its own, so strip it
     // the same way a redundant parenthesis is stripped, and keep stripping
@@ -27647,7 +27675,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     if (last_comma != UINT32_MAX)
     {
         IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, last_comma + 1, end, &right, remaining_depth, promote_bit_fields))
+        if (!c_ir_query_strict_operand_type(builder, last_comma + 1, end, promote_bit_fields, false, &right))
         {
             return false;
         }
@@ -27658,7 +27686,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     {
         // Assignment to an atomic place yields its unpromoted non-atomic value
         // type, not the access type carried by the destination place.
-        bool resolved = c_ir_sizeof_operand_type_attempt_depth(builder, start, first_assign, type_out, remaining_depth, promote_bit_fields);
+        bool resolved = c_ir_query_strict_operand_type(builder, start, first_assign, promote_bit_fields, false, type_out);
         IrType* assigned = resolved ? ir_type_from_id(&builder->program->types, *type_out) : 0;
         if (assigned && assigned->is_atomic)
         {
@@ -27682,8 +27710,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         }
         IrTypeId true_type = IR_TYPE_ID_INVALID;
         IrTypeId false_type = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, true_start, true_end, &true_type, remaining_depth, true) ||
-            !c_ir_sizeof_operand_type_attempt_depth(builder, first_colon + 1, end, &false_type, remaining_depth, true))
+        if (!c_ir_query_strict_operand_type(builder, true_start, true_end, true, false, &true_type) ||
+            !c_ir_query_strict_operand_type(builder, first_colon + 1, end, true, false, &false_type))
         {
             return false;
         }
@@ -27713,8 +27741,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     {
         IrTypeId left = IR_TYPE_ID_INVALID;
         IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, bitwise_index, &left, remaining_depth, true) ||
-            !c_ir_sizeof_operand_type_attempt_depth(builder, bitwise_index + 1, end, &right, remaining_depth, true))
+        if (!c_ir_query_strict_operand_type(builder, start, bitwise_index, true, false, &left) ||
+            !c_ir_query_strict_operand_type(builder, bitwise_index + 1, end, true, false, &right))
         {
             return false;
         }
@@ -27735,7 +27763,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     {
         // A shift yields the promoted left operand; the right operand never widens it.
         IrTypeId left = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, shift_index, &left, remaining_depth, true))
+        if (!c_ir_query_strict_operand_type(builder, start, shift_index, true, false, &left))
         {
             return false;
         }
@@ -27752,8 +27780,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     {
         IrTypeId left = IR_TYPE_ID_INVALID;
         IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, additive_index, &left, remaining_depth, true) ||
-            !c_ir_sizeof_operand_type_attempt_depth(builder, additive_index + 1, end, &right, remaining_depth, true))
+        if (!c_ir_query_strict_operand_type(builder, start, additive_index, true, false, &left) ||
+            !c_ir_query_strict_operand_type(builder, additive_index + 1, end, true, false, &right))
         {
             return false;
         }
@@ -27795,8 +27823,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     {
         IrTypeId left = IR_TYPE_ID_INVALID;
         IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, multiplicative_index, &left, remaining_depth, true) ||
-            !c_ir_sizeof_operand_type_attempt_depth(builder, multiplicative_index + 1, end, &right, remaining_depth, true))
+        if (!c_ir_query_strict_operand_type(builder, start, multiplicative_index, true, false, &left) ||
+            !c_ir_query_strict_operand_type(builder, multiplicative_index + 1, end, true, false, &right))
         {
             return false;
         }
@@ -27832,7 +27860,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_STAR))
     {
         IrTypeId operand = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth, false))
+        if (!c_ir_query_strict_operand_type(builder, start + 1, end, false, false, &operand))
         {
             return false;
         }
@@ -27847,7 +27875,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_AMPERSAND))
     {
         IrTypeId operand = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth, false))
+        if (!c_ir_query_strict_operand_type(builder, start + 1, end, false, false, &operand))
         {
             return false;
         }
@@ -27858,7 +27886,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE))
     {
         IrTypeId operand = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth, true))
+        if (!c_ir_query_strict_operand_type(builder, start + 1, end, true, false, &operand))
         {
             return false;
         }
@@ -27873,7 +27901,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
     {
-        bool resolved = c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, type_out, remaining_depth, promote_bit_fields);
+        bool resolved = c_ir_query_strict_operand_type(builder, start + 1, end, promote_bit_fields, false, type_out);
         IrType* operand = resolved ? ir_type_from_id(&builder->program->types, *type_out) : 0;
         if (operand && operand->is_atomic)
         {
@@ -27898,9 +27926,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
             IrTypeId tail_type = builder->void_type;
             if (c_ir_statement_expression_tail(builder, start + 1, close - 1, &tail_start, &tail_end))
             {
-                builder->sizeof_statement_expression_tail_depth += 1;
-                bool tail_resolved = c_ir_sizeof_operand_type_attempt_depth(builder, tail_start, tail_end, &tail_type, remaining_depth, true);
-                builder->sizeof_statement_expression_tail_depth -= 1;
+                // The tail context rides in the query key instead of a depth
+                // bracket so a completed answer keyed without it never matches.
+                bool tail_resolved = c_ir_query_strict_operand_type(builder, tail_start, tail_end, true, true, &tail_type);
                 if (!tail_resolved)
                 {
                     return false;
@@ -27943,7 +27971,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
             return true;
         }
         IrTypeId inner = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, close, &inner, remaining_depth, promote_bit_fields))
+        if (!c_ir_query_strict_operand_type(builder, start + 1, close, promote_bit_fields, false, &inner))
         {
             return false;
         }
@@ -28055,10 +28083,36 @@ BUSTER_C_INTERNAL void c_ir_sizeof_statement_expression_operand(CIntegerIrBuilde
     }
 }
 
+// The non-frame entry for the strict operand walk: callers outside the query
+// machine run one root frame and take its answer. A pending request is never
+// clobbered -- the caller's own frame will rerun and reach the completed table.
+BUSTER_C_INTERNAL bool c_ir_strict_operand_type(CIntegerIrBuilder* builder, u32 start, u32 end, bool promote_bit_fields, IrTypeId* type_out)
+{
+    bool typed = false;
+    CIrQueryMachine* machine = builder->queries;
+    if (machine && !machine->has_request)
+    {
+        CIrQueryFrame result = {0};
+        CIrQueryFrame root = {
+            .start = start,
+            .end = end,
+            .third = builder->sizeof_statement_expression_tail_depth != 0,
+            .kind = C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE,
+            .flag = promote_bit_fields,
+        };
+        typed = c_ir_query_execute(builder, root, &result) && result.success;
+        if (typed)
+        {
+            *type_out = result.result_type;
+        }
+    }
+    return typed;
+}
+
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
 {
     c_ir_sizeof_statement_expression_operand(builder, &start, &end);
-    return c_ir_sizeof_operand_type_attempt_depth(builder, start, end, type_out, 64, false);
+    return c_ir_strict_operand_type(builder, start, end, false, type_out);
 }
 
 // Walks the call, subscript, member and postfix-increment suffixes that may
@@ -33578,7 +33632,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type_attempt(CIntegerIrBuilde
     if (promote_true)
     {
         IrTypeId promoted = IR_TYPE_ID_INVALID;
-        if (c_ir_sizeof_operand_type_attempt_depth(builder, true_start, true_end, &promoted, 64, true))
+        if (c_ir_strict_operand_type(builder, true_start, true_end, true, &promoted))
         {
             true_type = promoted;
         }
@@ -33586,7 +33640,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type_attempt(CIntegerIrBuilde
     if (promote_false && !builder->queries->has_request)
     {
         IrTypeId promoted = IR_TYPE_ID_INVALID;
-        if (c_ir_sizeof_operand_type_attempt_depth(builder, false_start, false_end, &promoted, 64, true))
+        if (c_ir_strict_operand_type(builder, false_start, false_end, true, &promoted))
         {
             false_type = promoted;
         }

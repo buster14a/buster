@@ -268,7 +268,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   results retain it after masking to the stored width, without rereading a
   volatile field. The strict operand type walk receives the promotion context
   explicitly so `_Generic(+field)` and conditional arms agree with emitted
-  arithmetic while a direct type query still sees the declaration's type.
+  arithmetic while a direct type query still sees the declaration's type. The
+  walk itself runs as explicit `CIrQueryMachine` frames
+  (`C_IR_QUERY_FRAME_STRICT_OPERAND_TYPE`) with no depth cap, so tall operands
+  are typed by the walk rather than the identifier-scan fallback (GitHub
+  #2531).
   `tests/basic_c_bit_field_promotion.c` covers widths 1, 3, 31, and 32,
   anonymous members, casts, assignments, and argument promotion under every
   allocator (GitHub #218).

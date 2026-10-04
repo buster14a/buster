@@ -19925,6 +19925,156 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_conditional_conversions(UnitTes
     return result;
 }
 
+// GitHub #2531: the strict operand-type walk runs as query-machine frames, so
+// operands taller than the old depth-64 cap are still typed by the walk rather
+// than falling back to the identifier-scan guess.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 heights[] = {1, 2, 63, 64, 65, 256, 1000, 10000};
+    String8* functions = arena_allocate(arguments->arena, String8, BUSTER_ARRAY_LENGTH(heights));
+    String8* calls = arena_allocate(arguments->arena, String8, BUSTER_ARRAY_LENGTH(heights));
+    for (u32 height_index = 0; height_index < BUSTER_ARRAY_LENGTH(heights); height_index += 1)
+    {
+        u32 height = heights[height_index];
+        String8* expression_parts = arena_allocate(arguments->arena, String8, 2 * height);
+        for (u32 operand = 0; operand < height; operand += 1)
+        {
+            expression_parts[2 * operand] = S8("i");
+            expression_parts[2 * operand + 1] = operand + 1 == height ? S8(" + (int)u") : S8(" + ");
+        }
+        String8 expression = string_join_arena(arguments->arena, (SliceString8){expression_parts, 2 * height}, false);
+        functions[height_index] = string_format(arguments->arena,
+            S8("static int tall_{u32}(int i, unsigned long u, int c) {{\n"
+               "    _Static_assert(sizeof(({S8})) == sizeof(int), \"tall {u32}\");\n"
+               "    __typeof__(({S8})) t = 0;\n"
+               "    int failed = sizeof(({S8})) != sizeof(int) || sizeof t != sizeof(int);\n"
+               "    failed |= _Generic(c ? ({S8}) : 0, int: 0, default: 1);\n"
+               "    failed |= !((c ? ({S8}) : 0) < 0);\n"
+               "    return failed;\n"
+               "}}\n"),
+            height, expression, height, expression, expression, expression, expression);
+        calls[height_index] = string_format(arguments->arena, S8("    failed |= tall_{u32}(vi, vu, vc);\n"), height);
+    }
+    String8 functions_text = string_join_arena(arguments->arena, (SliceString8){functions, BUSTER_ARRAY_LENGTH(heights)}, false);
+    String8 calls_text = string_join_arena(arguments->arena, (SliceString8){calls, BUSTER_ARRAY_LENGTH(heights)}, false);
+    String8 source_text = string_format(arguments->arena,
+        S8("{S8}"
+           "int main(void) {{\n"
+           "    volatile int vi = -1, vc = 1;\n"
+           "    volatile unsigned long vu = 0;\n"
+           "    int failed = 0;\n"
+           "{S8}"
+           "    return failed;\n"
+           "}}\n"),
+        functions_text, calls_text);
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            Arena* conflicts[] = {arguments->arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("tall-expression-types.c"), tokens, parsed, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("tall-expression-types"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u32 optimization = 0; optimization < 2; optimization += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+                {
+                    Arena* conflicts[] = {arguments->arena};
+                    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("tall-expression-types-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], optimization == 0 ? S8("-O0") : S8("-O2"), S8("-fverify-codegen"), S8("-o"), output, source_path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("tall expression {S8} {S8}: status={u32} timed_out={u32}"),
+                                    modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    // The same walk serves a block-scope _Static_assert, which must fold the
+    // tall operand identically under -fsyntax-only and -c (issue #2531).
+    {
+        u32 height = 64;
+        String8* expression_parts = arena_allocate(arguments->arena, String8, 2 * height);
+        for (u32 operand = 0; operand < height; operand += 1)
+        {
+            expression_parts[2 * operand] = S8("i");
+            expression_parts[2 * operand + 1] = operand + 1 == height ? S8(" + (int)u") : S8(" + ");
+        }
+        String8 expression = string_join_arena(arguments->arena, (SliceString8){expression_parts, 2 * height}, false);
+        String8 sizes[] = {S8("int"), S8("long")};
+        for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(sizes); size += 1)
+        {
+            Arena* conflicts[] = {arguments->arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            String8 assert_source = string_format(temporary.arena,
+                S8("int f(int i, unsigned long u) {{ _Static_assert(sizeof({S8}) == sizeof({S8}), \"tall {u32}\"); return 0; }}\n"),
+                expression, sizes[size], height);
+            String8 assert_path = buster_test_temporary_path(temporary.arena, S8("tall-expression-assert"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(assert_path, BUSTER_SLICE_TO_BYTE_SLICE(assert_source))))
+            {
+                for (u32 action = 0; action < 2; action += 1)
+                {
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("tall-expression-assert"), S8(".o"));
+                    String8 syntax_command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fsyntax-only"), assert_path};
+                    String8 object_command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-c"), S8("-o"), output, assert_path};
+                    String8* command = action == 0 ? syntax_command : object_command;
+                    u32 command_count = action == 0 ? BUSTER_ARRAY_LENGTH(syntax_command) : BUSTER_ARRAY_LENGTH(object_command);
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8){command, command_count});
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    bool accepted = compiled.error == COMPILER_DRIVER_ERROR_NONE;
+                    BUSTER_TEST_RAW(arguments, accepted == (size == 0),
+                        string_format(temporary.arena, S8("tall static assert sizeof({S8}) action={u32}: error={u32} {S8}"),
+                            sizes[size], (u32)action, (u32)compiled.error, compiled.diagnostic));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
+
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestArguments* arguments)
 {
@@ -34455,6 +34605,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
     BUSTER_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
     BUSTER_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
+    BUSTER_TEST_FIXTURE(arguments, c_test_tall_expression_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
     BUSTER_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_conversion_rank);
