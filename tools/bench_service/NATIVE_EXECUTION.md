@@ -37,7 +37,11 @@ canonical program-manifest SHA256; submission binds that identity in both
 existing source-identity fields. Reusing a submission key with the same request
 is idempotent, while different request bytes conflict. An off-host coordinator
 must transfer and validate these immutable bytes before native materialization;
-this local slice does not claim remote native submission or MCP upload tools.
+the off-host control implementation owns that transfer. The MCP adapter also
+offers bounded `bench_program_begin`, `bench_program_write` and
+`bench_program_finish` tools; [MCP client instructions](deploy/MCP_CLIENT.md)
+describe their fields and direct submission. Neither interface establishes
+that the installed backend has been upgraded or qualified.
 
 The authenticated schema-2 protocol adds operations 14 (begin), 15 (write) and
 16 (finish). Begin/finish bodies contain 64 lowercase ASCII program-SHA256 bytes

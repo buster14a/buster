@@ -106,11 +106,13 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_protocol(void)
             BQ_CHECK(bq_mcp_text(&json, bq_mcp_member(&json, i, S8("name")), &name));
             u32 operation = bq_mcp_tool(name), annotations = bq_mcp_member(&json, i, S8("annotations"));
             u32 readonly = bq_mcp_member(&json, annotations, S8("readOnlyHint"));
-            BQ_CHECK(operation == count && readonly < json.count && string_equal(json.tokens[readonly].text,
-                operation == BQ_OP_SUBMIT || operation == BQ_OP_CANCEL ? S8("false") : S8("true")));
+            u32 expected = count <= 6 ? count : BQ_OP_NATIVE_BEGIN + count - 7;
+            bool write = operation == BQ_OP_SUBMIT || operation == BQ_OP_CANCEL || operation >= BQ_OP_NATIVE_BEGIN;
+            BQ_CHECK(operation == expected && readonly < json.count && string_equal(json.tokens[readonly].text,
+                write ? S8("false") : S8("true")));
         }
     }
-    BQ_CHECK(count == 6);
+    BQ_CHECK(count == 9);
     char const* invalid_envelopes[] = {
         "[]", "null", "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"ping\"}",
         "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}",
@@ -211,6 +213,72 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_protocol(void)
     if (reply) fclose(reply);
 }
 
+BUSTER_GLOBAL_LOCAL void bq_test_mcp_program_codec(void)
+{
+    char const* hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    BqMcpJson json;
+    BqPacket request, response;
+    char text[2048];
+    snprintf(text, sizeof(text), "{\"program_sha256\":\"%s\",\"program_size\":\"256\",\"offset\":\"0\",\"bytes_hex\":\"00aaff\"}", hash);
+    BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) &&
+             bq_mcp_arguments(&json, 0, BQ_OP_NATIVE_WRITE, &request) && request.size == BQ_CONTROL_HEADER + 83 &&
+             bq_u32(request.bytes + 8) == BQ_OP_NATIVE_WRITE && bq_u64(request.bytes + BQ_CONTROL_HEADER + 64) == 256 &&
+             !memcmp(request.bytes + BQ_CONTROL_HEADER + 80, "\0\xaa\xff", 3));
+    u8 body[76] = {0};
+    char manifest[BQ_NATIVE_MANIFEST_CAP], identity[65];
+    BQ_CHECK(bq_native_manifest(manifest, (u8 const*)hash, 256, identity) > 0);
+    memcpy(body + 12, identity, 64);
+    bq_put64(body + 4, 3);
+    bq_packet(&response, BQ_OP_NATIVE_WRITE | 0x80000000u, 1, body, sizeof(body));
+    BqMcpBuffer result = {0};
+    BQ_CHECK(bq_mcp_service_result(&request, &response, &result) &&
+             bq_test_mcp_contains(&result, "\"cursor\":\"3\"") && bq_test_mcp_contains(&result, "\"committed\":false"));
+    bq_put64(response.bytes + BQ_CONTROL_HEADER + 4, 2);
+    result = (BqMcpBuffer){0};
+    BQ_CHECK(!bq_mcp_service_result(&request, &response, &result) && !result.count);
+    char const* bad_write[] = {"{}", "[]", "null", "{\"offset\":\"0\"}",
+        "{\"program_sha256\":\"a\",\"program_size\":\"256\",\"offset\":\"0\",\"bytes_hex\":\"00\"}"};
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(bad_write); i += 1)
+        BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(bad_write[i])) &&
+                 !bq_mcp_arguments(&json, 0, BQ_OP_NATIVE_WRITE, &request) && !request.size);
+    char const* bad_hex[] = {"", "0", "0A", "zz", "00 ", "\\u0000"};
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(bad_hex); i += 1)
+    {
+        snprintf(text, sizeof(text), "{\"program_sha256\":\"%s\",\"program_size\":\"256\",\"offset\":\"0\",\"bytes_hex\":\"%s\"}", hash, bad_hex[i]);
+        BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) &&
+                 !bq_mcp_arguments(&json, 0, BQ_OP_NATIVE_WRITE, &request) && !request.size);
+    }
+    char const* bad_offset[] = {"\"256\"", "\"257\"", "\"18446744073709551615\"", "\"01\"", "\"-1\"", "0", "null"};
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(bad_offset); i += 1)
+    {
+        snprintf(text, sizeof(text), "{\"program_sha256\":\"%s\",\"program_size\":\"256\",\"offset\":%s,\"bytes_hex\":\"00\"}", hash, bad_offset[i]);
+        BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) &&
+                 !bq_mcp_arguments(&json, 0, BQ_OP_NATIVE_WRITE, &request) && !request.size);
+    }
+    char const* sizes[] = {"\"63\"", "\"4194305\"", "\"01\"", "\"18446744073709551615\"", "256", "null"};
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
+    {
+        snprintf(text, sizeof(text), "{\"program_sha256\":\"%s\",\"program_size\":%s}", hash, sizes[i]);
+        BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) &&
+                 !bq_mcp_arguments(&json, 0, BQ_OP_NATIVE_BEGIN, &request) && !request.size);
+    }
+    char hex[867];
+    memset(hex, '0', sizeof(hex) - 1);
+    hex[sizeof(hex) - 1] = 0;
+    snprintf(text, sizeof(text), "{\"program_sha256\":\"%s\",\"program_size\":\"4194304\",\"offset\":\"0\",\"bytes_hex\":\"%s\"}", hash, hex);
+    BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) && !bq_mcp_arguments(&json, 0, BQ_OP_NATIVE_WRITE, &request));
+    hex[864] = 0;
+    snprintf(text, sizeof(text), "{\"program_sha256\":\"%s\",\"program_size\":\"4194304\",\"offset\":\"4193872\",\"bytes_hex\":\"%s\"}", hash, hex);
+    BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) && bq_mcp_arguments(&json, 0, BQ_OP_NATIVE_WRITE, &request) &&
+             request.size == BQ_CONTROL_CAP);
+    snprintf(text, sizeof(text), "{\"program_sha256\":\"%s\",\"program_size\":\"256\",\"command\":\"program\"}", hash);
+    BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(text)) && !bq_mcp_arguments(&json, 0, BQ_OP_NATIVE_FINISH, &request));
+    BQ_CHECK(bq_mcp_recipe_available(S8("service-recipes=validate-buster-v1,native-execute-v1\n"), S8(BQ_NATIVE_RECIPE)));
+    BQ_CHECK(!bq_mcp_recipe_available(S8("blocked-recipes=native-execute-v1\n"), S8(BQ_NATIVE_RECIPE)));
+    BQ_CHECK(!bq_mcp_recipe_available(S8("service-recipes=native-execute-v1-extra\n"), S8(BQ_NATIVE_RECIPE)));
+    BQ_CHECK(!bq_mcp_recipe_available(S8("xservice-recipes=native-execute-v1\n"), S8(BQ_NATIVE_RECIPE)));
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_mcp_receipts(void)
 {
     u8 arguments[8] = {0}, body[BQ_CONTROL_BODY] = {0};
@@ -264,6 +332,70 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_call(BqMcpSession* session, char const* soc
     bq_mcp_message(session, socket_path, string_from_pointer(message), output);
 }
 
+BUSTER_GLOBAL_LOCAL void bq_test_mcp_program_socket(char const* socket_path)
+{
+    u8 bytes[256];
+    bq_test_native_program(bytes);
+    char hash[65], identity[65], manifest[BQ_NATIVE_MANIFEST_CAP], hex[513];
+    bq_native_hash(bytes, sizeof(bytes), hash);
+    BQ_CHECK(bq_native_manifest(manifest, (u8 const*)hash, sizeof(bytes), identity) > 0);
+    char const digits[] = "0123456789abcdef";
+    for (u32 i = 0; i < sizeof(bytes); i += 1)
+    {
+        hex[i * 2] = digits[bytes[i] >> 4];
+        hex[i * 2 + 1] = digits[bytes[i] & 15];
+    }
+    hex[512] = 0;
+    BqMcpSession session = {0};
+    BqMcpBuffer output;
+    BqMcpJson json;
+    u32 result = BQ_MCP_NONE;
+    char message[2048];
+    bq_test_mcp_ready(&session, socket_path);
+    snprintf(message, sizeof(message), "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_program_begin\",\"arguments\":{\"program_sha256\":\"%s\",\"program_size\":\"256\"}}}", hash);
+    bq_mcp_message(&session, socket_path, string_from_pointer(message), &output);
+    BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_test_mcp_contains(&output, "\"cursor\":\"0\"") &&
+             bq_test_mcp_contains(&output, "\"committed\":false"));
+    snprintf(message, sizeof(message), "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_program_write\",\"arguments\":{\"program_sha256\":\"%s\",\"program_size\":\"256\",\"offset\":\"0\",\"bytes_hex\":\"%.256s\"}}}", hash, hex);
+    for (u32 retry = 0; retry < 2; retry += 1)
+    {
+        bq_mcp_message(&session, socket_path, string_from_pointer(message), &output);
+        BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_test_mcp_contains(&output, "\"cursor\":\"128\"") &&
+                 bq_test_mcp_contains(&output, "\"committed\":false"));
+    }
+    char* first = strstr(message, "\"bytes_hex\":\"");
+    BQ_CHECK(first != NULL);
+    if (first) first[13] = first[13] == '0' ? '1' : '0';
+    bq_mcp_message(&session, socket_path, string_from_pointer(message), &output);
+    BQ_CHECK(bq_test_mcp_contains(&output, "\"isError\":true") && bq_test_mcp_contains(&output, "conflicting-key"));
+    session = (BqMcpSession){0};
+    bq_test_mcp_ready(&session, socket_path);
+    snprintf(message, sizeof(message), "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_program_begin\",\"arguments\":{\"program_sha256\":\"%s\",\"program_size\":\"256\"}}}", hash);
+    bq_mcp_message(&session, socket_path, string_from_pointer(message), &output);
+    BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_test_mcp_contains(&output, "\"cursor\":\"128\""));
+    snprintf(message, sizeof(message), "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_program_write\",\"arguments\":{\"program_sha256\":\"%s\",\"program_size\":\"256\",\"offset\":\"128\",\"bytes_hex\":\"%s\"}}}", hash, hex + 256);
+    bq_mcp_message(&session, socket_path, string_from_pointer(message), &output);
+    BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_test_mcp_contains(&output, "\"cursor\":\"256\"") &&
+             bq_test_mcp_contains(&output, "\"committed\":false"));
+    snprintf(message, sizeof(message), "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_program_finish\",\"arguments\":{\"program_sha256\":\"%s\",\"program_size\":\"256\"}}}", hash);
+    for (u32 retry = 0; retry < 2; retry += 1)
+    {
+        bq_mcp_message(&session, socket_path, string_from_pointer(message), &output);
+        String8 actual = {0};
+        BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_test_mcp_contains(&output, "\"committed\":true") &&
+                 bq_mcp_text(&json, bq_mcp_member(&json, result, S8("program_manifest_sha256")), &actual) &&
+                 string_equal(actual, string_from_pointer(identity)));
+    }
+    snprintf(message, sizeof(message), "{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_submit\",\"arguments\":{\"idempotency_key\":\"mcp-native-program\",\"recipe\":\"native-execute-v1\",\"baseline_sha\":\"%s\",\"candidate_sha\":\"%s\"}}}", identity, identity);
+    u64 id = 0, repeated = 0;
+    bq_mcp_message(&session, socket_path, string_from_pointer(message), &output);
+    BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_mcp_decimal(&json, bq_mcp_member(&json, result, S8("job_id")), true, &id));
+    bq_mcp_message(&session, socket_path, string_from_pointer(message), &output);
+    BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_mcp_decimal(&json, bq_mcp_member(&json, result, S8("job_id")), true, &repeated) && repeated == id);
+    bq_test_mcp_call(&session, socket_path, "bench_cancel", id, &output);
+    BQ_CHECK(bq_test_mcp_contains(&output, "\"execution_outcome\":\"cancelled\""));
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_mcp_socket(void)
 {
     BqFixture fixture;
@@ -301,7 +433,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_socket(void)
                 bq_test_mcp_ready(&session, socket_path);
                 bq_mcp_message(&session, socket_path, S8("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_capabilities\",\"arguments\":{}}}"), &output);
                 BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_test_mcp_contains(&output, "\"isError\":false") &&
-                         bq_test_mcp_contains(&output, "\"off_host_cache\":false") && bq_test_mcp_contains(&output, "\"custom_workloads\":false"));
+                         bq_test_mcp_contains(&output, "\"off_host_cache\":false") && bq_test_mcp_contains(&output, "\"custom_workloads\":false") &&
+                         bq_test_mcp_contains(&output, "\"native_program_upload\":true"));
                 char const* submit = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_submit\",\"arguments\":{\"idempotency_key\":\"mcp-lost-reply\",\"recipe\":\"validate-buster-v1\",\"baseline_sha\":\"1111111111111111111111111111111111111111\",\"candidate_sha\":\"2222222222222222222222222222222222222222\"}}}";
                 bq_mcp_message(&session, socket_path, string_from_pointer(submit), &output);
                 BQ_CHECK(bq_test_mcp_result(&output, &json, &result) && bq_test_mcp_contains(&output, "\"isError\":false") &&
@@ -352,13 +485,17 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_socket(void)
                          bq_test_mcp_contains(&output, "\"execution_outcome\":\"cancelled\""));
                 bq_test_mcp_call(&session, socket_path, "bench_cancel", id, &output);
                 BQ_CHECK(bq_test_mcp_contains(&output, "\"isError\":false"));
+                bq_test_mcp_program_socket(socket_path);
             }
             BQ_CHECK(kill(child, SIGTERM) == 0);
             int status = 0;
             BQ_CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
-            BQ_CHECK(bq_open(&fixture.queue, fixture.path) == BQ_OK && fixture.queue.state.job_count == 2);
-            BqJob* own = fixture.queue.state.job_count == 2 ? fixture.queue.state.jobs + 1 : NULL;
+            BQ_CHECK(bq_open(&fixture.queue, fixture.path) == BQ_OK && fixture.queue.state.job_count == 3);
+            BqJob* own = fixture.queue.state.job_count == 3 ? fixture.queue.state.jobs + 1 : NULL;
             BQ_CHECK(own && own->phase == BQ_FINISHED && own->cancel_requested && string_equal(bq_field(&own->request, 0), S8(BQ_EXPORT_PRINCIPAL)));
+            BqJob* program = fixture.queue.state.job_count == 3 ? fixture.queue.state.jobs + 2 : NULL;
+            BQ_CHECK(program && bq_request_recipe(&program->request) == BQ_RECIPE_NATIVE_EXECUTE &&
+                     program->phase == BQ_FINISHED && program->outcome == BQ_CANCELLED);
             BqMcpSession disconnected = {.phase = 2};
             BqMcpBuffer output;
             bq_test_mcp_call(&disconnected, socket_path, "bench_status", own ? own->id : 1, &output);

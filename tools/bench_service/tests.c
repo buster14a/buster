@@ -5728,6 +5728,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_codec();
     bq_test_typed_client();
     bq_test_mcp_protocol();
+    bq_test_mcp_program_codec();
     bq_test_mcp_receipts();
 #ifndef _WIN32
     bq_test_physical_temp_paths();

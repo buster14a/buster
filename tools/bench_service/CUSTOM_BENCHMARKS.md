@@ -13,11 +13,15 @@ dispatch, PR, repository branch or per-experiment GitHub approval. CI is an
 optional client of the same queue. The service authenticates its owner;
 repository contribution permissions do not authorize execution.
 
-The current service does not implement that execution path. Its requests
-bind compiler revisions and an installed recipe, with no separate workload
-identity. The MCP adapter reports this limitation and rejects custom source,
-command and runtime argument fields. Successful smoke execution is not a
-custom benchmark result.
+The first [native execution slice](NATIVE_EXECUTION.md) accepts privately
+uploaded static Linux x86-64 executables, including assembled microkernels.
+CLI and bounded MCP upload tools return an immutable manifest identity for
+direct submission to `native-execute-v1`. There is one program, fixed argv
+and environment, and no dynamic runtime closure or optional compilation yet.
+Runtime samples and custom compiler measurements remain unavailable in this
+slice. The MCP adapter rejects caller commands and runtime argument fields;
+successful execution is not a custom benchmark result. Source implementation
+does not establish that a particular worker has the coordinated installation.
 
 ## Existing machinery
 

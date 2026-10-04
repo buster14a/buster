@@ -25,6 +25,23 @@ path. The existing protected CI gateway can remain another client of the same
 queue. The broader native experiment capability likewise requires no PR or
 branch for each private program bundle.
 
+The native upload tools use `program_sha256` and a decimal `program_size`.
+`bench_program_begin` starts or resumes the upload; its `cursor` is the durable
+byte count. `bench_program_write` takes an exact decimal `offset` and 1--432
+bytes encoded as lowercase `bytes_hex`. An identical retry is safe; changed
+prefixes and gaps are refused. `bench_program_finish` verifies all bytes and
+the static ELF contract before returning `committed=true`. A manifest digest
+returned before that finish acknowledgement is only the declared identity,
+not proof of a committed bundle.
+
+Submit the finished `program_manifest_sha256` using `bench_submit`, recipe
+`native-execute-v1`, and the same digest in both `baseline_sha` and
+`candidate_sha`. Those fields identify one program bundle for this recipe;
+no compiler revisions are needed. `bench_capabilities` reports native upload
+and execution only when the backend lists that admitted recipe. A successful
+one-shot execution has no compiler or runtime performance series. See the
+[execution contract](../NATIVE_EXECUTION.md) for supported binaries and limits.
+
 The installed daemon is synchronous: during an admitted job it stops serving
 ordinary control requests until cleanup. An MCP call can therefore return a
 transport error without cancelling or resubmitting the job. Retrying submission
