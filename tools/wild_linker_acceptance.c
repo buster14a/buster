@@ -115,7 +115,7 @@ static void check_debugger(const char* cell, const char* binary, const char* bre
 
 static void direct_cell(const char* cell, const char* compiler_command, const char* directory, const char* binary, const char* runtime)
 {
-    char* wild = direct_link(compiler_command, directory);
+    char* wild = format("%s --no-gc-sections --icf=none --build-id=0x2645264526452645264526452645264526452645", direct_link(compiler_command, directory));
     char* mold = change_linker(wild, directory, "mold");
     const char* paths = format("%s/%s-read-paths.txt", evidence, cell);
     FILE* manifest_paths = fopen(paths, "wx");
@@ -264,7 +264,7 @@ int main(int argc, char** argv)
         self_test();
         write_text(format("%s/method.txt", evidence),
             "Independent direct-linker replay from #2646 frozen artifacts, unchanged source baseline 3b79a042. Same objects, scripts and system inputs hashed before/after; complete successful read-open traces retained.\n"
-            "Direct timing excludes compiler-driver startup, includes /bin/sh and fork/wait (<1ms self-control); output close without fsync, warm page-cache. Original release package binaries, default threads and matched --threads=1. No LTO.\n"
+            "Direct timing excludes compiler-driver startup, includes /bin/sh and fork/wait (<1ms self-control); output close without fsync, warm page-cache. Original release package binaries, default threads and matched --threads=1. No LTO. Explicit --no-gc-sections --icf=none and identical fixed 20-byte benchmark-only build ID override differing upstream defaults.\n"
             "wait4 user/system and individual-child high-water RSS, not aggregate process-tree RSS. Bootstrap intervals are descriptive for the observed hosted VM; no dedicated-host claim.\n"
             "Build link share uses the actual Ninja output step duration; end-to-end includes driver/Ninja/compilation. Clean samples n=3; edits n=5 per variant.\n");
         smoke();
@@ -297,16 +297,28 @@ int main(int argc, char** argv)
             const char* name = i ? "wild" : "mold";
             check_debugger("buster-object-source-and-unwind", format("%s/buster-produced-%s", evidence, name), "probe", "", "probe", "main");
         }
-        must("configure-review-build", format("%s generate --build-directory build-wild-review --cc clang --linker WILD --no-include-tests --no-fuzz --no-sanitize --no-lto -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_HOT_RELOAD_DEMO=ON", quote(driver)));
+        must("configure-review-build", format("%s generate --build-directory build-wild-review --cc clang --linker WILD --no-include-tests --no-fuzz --no-sanitize --no-lto -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_HOT_RELOAD_DEMO=ON -DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-gc-sections,--icf=none,--build-id=0x2645264526452645264526452645264526452645", quote(driver)));
         must("build-review-application", format("%s build --build-directory build-wild-review --config Debug -t ide -t hot_reload", quote(driver)));
         direct_cell("hot-reload-debug", target_command("build-wild-review", "hot_reload"), "build-wild-review", "build-wild-review/Debug/hot_reload",
             "build-wild-review/Debug/hot_reload --self-test build-wild-review/Debug/ide");
         build_shares("build-wild-review");
+
+        must("configure-regression-build", format("%s generate --build-directory build-wild-regression --cc clang --linker WILD --include-tests --no-fuzz --sanitize --no-lto -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-gc-sections,--icf=none,--build-id=0x2645264526452645264526452645264526452645", quote(driver)));
+        for (unsigned i = 0; i < 2; ++i)
+        {
+            const char* linker = i ? "WILD" : "MOLD";
+            must("regression-select-linker", format("cmake -B build-wild-regression -DCMAKE_LINKER_TYPE=%s", linker));
+            must("build-regression-ide", format("%s build --build-directory build-wild-regression --config Debug -t ide", quote(driver)));
+            BenchResult regression = run_command("sanitized-affected-regressions", linker, -1,
+                "build-wild-regression/Debug/ide test --verbose=1 --module=debug_model_tests,dwarf_tests,object_tests,jit_tests,link_tests,compiler_driver_tests,compiler_driver_object_path_tests");
+            if (regression.status) ++failures;
+        }
+
         BenchResult cold = run_command("guest-cold-cache-admission", "drop-caches", -1, "sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'");
         write_text(format("%s/cold-cache-status.txt", evidence), cold.status ? "NOT RUN: guest refused drop-caches, diagnostic retained.\n" : "Guest Linux page cache, dentries and inode cache evicted with sync; drop_caches=3 before every observation. Reset excluded from timer. Hypervisor/storage caches uncontrolled; this is guest-cold, not physical-cold. No cold warmups. Nine randomized pairs per cell.\n");
         if (!cold.status)
         {
-            char* wild = direct_link(frozen_command(input, "separate-debug-default"), "build-wild-separate");
+            char* wild = format("%s --no-gc-sections --icf=none --build-id=0x2645264526452645264526452645264526452645", direct_link(frozen_command(input, "separate-debug-default"), "build-wild-separate"));
             char* mold = change_linker(wild, "build-wild-separate", "mold");
             cold_comparison("ide-debug-direct-guest-cold-default", mold, wild);
             cold_comparison("ide-debug-direct-guest-cold-threads1", format("%s --threads=1", mold), format("%s --threads=1", wild));
