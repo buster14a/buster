@@ -29459,6 +29459,117 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_literal_initializer_runtime(Unit
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_initializer_elision_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena source_arena = scratch_begin(&arguments->arena, 1);
+    String8 fixture = S8(
+        "static double _Complex g[3] = {1, 2, 3};\n"
+        "struct lead { double _Complex z; int n; };\n"
+        "struct mid { int n; double _Complex z; double d; };\n"
+        "struct trail { int n; float d; long double _Complex z; };\n"
+        "struct L { double _Complex z; int n; };\n"
+        "struct N { struct L l; float _Complex w[2]; int k; };\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failed = 0;\n"
+        "    double _Complex unit;\n"
+        "    __real__ unit = 0;\n"
+        "    __imag__ unit = 1;\n"
+        "    float _Complex fa[3] = {1, 2, 3};\n"
+        "    double _Complex da[3] = {1, 2, 3};\n"
+        "    long double _Complex la[3] = {1, 2, 3};\n"
+        "    int one = 1, two = 2, three = 3;\n"
+        "    double _Complex va[3] = {one, two, three};\n"
+        "    double _Complex m[2][2] = {1, 2, 3, 4};\n"
+        "    double _Complex ia[3] = {1.0, 2.0 * unit, 3.0};\n"
+        "    double _Complex ib[3] = {2 * unit, 1, 3};\n"
+        "    struct lead sl = {1, 2};\n"
+        "    struct mid sm = {1, 2, 3};\n"
+        "    struct trail st = {1, 2, three};\n"
+        "    struct N s[2] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};\n"
+        "    static double _Complex sa[3] = {1, 2, 3};\n"
+        "    double _Complex zpair = {5, 6};\n"
+        "    double _Complex zp1 = {5};\n"
+        "    double _Complex ap[2] = {{1, 2}, {3, 4}};\n"
+        "    double _Complex ai[] = {1, 2, 3};\n"
+        "    unsigned i;\n"
+        "    for (i = 0; i < 3; i += 1)\n"
+        "    {\n"
+        "        failed |= __real__ fa[i] != (float)(i + 1) || __imag__ fa[i] != 0;\n"
+        "        failed |= __real__ da[i] != (double)(i + 1) || __imag__ da[i] != 0;\n"
+        "        failed |= __real__ la[i] != (long double)(i + 1) || __imag__ la[i] != 0;\n"
+        "        failed |= __real__ va[i] != (double)(i + 1) || __imag__ va[i] != 0;\n"
+        "        failed |= __real__ g[i] != (double)(i + 1) || __imag__ g[i] != 0;\n"
+        "        failed |= __real__ sa[i] != (double)(i + 1) || __imag__ sa[i] != 0;\n"
+        "        failed |= __real__ ai[i] != (double)(i + 1) || __imag__ ai[i] != 0;\n"
+        "    }\n"
+        "    failed |= sizeof(ai) / sizeof(ai[0]) != 3;\n"
+        "    failed |= __real__ m[0][0] != 1 || __imag__ m[0][0] != 0;\n"
+        "    failed |= __real__ m[0][1] != 2 || __imag__ m[0][1] != 0;\n"
+        "    failed |= __real__ m[1][0] != 3 || __imag__ m[1][0] != 0;\n"
+        "    failed |= __real__ m[1][1] != 4 || __imag__ m[1][1] != 0;\n"
+        "    failed |= __real__ ia[0] != 1 || __imag__ ia[0] != 0;\n"
+        "    failed |= __real__ ia[1] != 0 || __imag__ ia[1] != 2;\n"
+        "    failed |= __real__ ia[2] != 3 || __imag__ ia[2] != 0;\n"
+        "    failed |= __real__ ib[0] != 0 || __imag__ ib[0] != 2;\n"
+        "    failed |= __real__ ib[1] != 1 || __imag__ ib[1] != 0;\n"
+        "    failed |= __real__ ib[2] != 3 || __imag__ ib[2] != 0;\n"
+        "    failed |= __real__ sl.z != 1 || __imag__ sl.z != 0 || sl.n != 2;\n"
+        "    failed |= sm.n != 1 || __real__ sm.z != 2 || __imag__ sm.z != 0 || sm.d != 3;\n"
+        "    failed |= st.n != 1 || st.d != 2 || __real__ st.z != 3 || __imag__ st.z != 0;\n"
+        "    failed |= __real__ s[0].l.z != 1 || __imag__ s[0].l.z != 0 || s[0].l.n != 2;\n"
+        "    failed |= __real__ s[0].w[0] != 3 || __imag__ s[0].w[0] != 0;\n"
+        "    failed |= __real__ s[0].w[1] != 4 || __imag__ s[0].w[1] != 0 || s[0].k != 5;\n"
+        "    failed |= __real__ s[1].l.z != 6 || __imag__ s[1].l.z != 0 || s[1].l.n != 7;\n"
+        "    failed |= __real__ s[1].w[0] != 8 || __imag__ s[1].w[0] != 0;\n"
+        "    failed |= __real__ s[1].w[1] != 9 || __imag__ s[1].w[1] != 0 || s[1].k != 10;\n"
+        "    failed |= __real__ zpair != 5 || __imag__ zpair != 6;\n"
+        "    failed |= __real__ zp1 != 5 || __imag__ zp1 != 0;\n"
+        "    failed |= __real__ ap[0] != 1 || __imag__ ap[0] != 2;\n"
+        "    failed |= __real__ ap[1] != 3 || __imag__ ap[1] != 4;\n"
+        "    return failed;\n"
+        "}\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("complex-initializer-elision"), S8(".c"));
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(fixture))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < 2; frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("complex-initializer-elision-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+                    frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    scratch_end(source_arena);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -34744,6 +34855,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_literal_initializer_rounding);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_literal_initializer_runtime);
+    BUSTER_TEST_FIXTURE(arguments, c_test_complex_initializer_elision_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
     BUSTER_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
