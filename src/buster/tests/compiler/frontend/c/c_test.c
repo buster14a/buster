@@ -8677,6 +8677,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_hexadecimal_escapes(UnitTestArgum
 // c_token_spelling, never the raw field, so the same fixtures hold before
 // and after the field narrows. Covered: the boundary spelling lengths just
 // below, at, and above the escape through lex, preprocess, parse and IR
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_stringify_backslashes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("#define str(x) #x\n"
+                        "#define xstr(x) str(x)\n"
+                        "str(\\n)\n"
+                        "str(a\\b)\n"
+                        "str(\"\\n\")\n"
+                        "str('\\n')\n"
+                        "xstr(str(\\n))\n"
+                        "str(\\)\n");
+    String8 expected[] = {
+        S8("\"\\n\""),
+        S8("\"a\\b\""),
+        S8("\"\\\"\\\\n\\\"\""),
+        S8("\"'\\\\n'\""),
+        S8("\"\\\"\\\\n\\\"\""),
+        S8("\"\\\\\""),
+    };
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess =
+        c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("stringify-backslashes.c")});
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, preprocess.token_count == BUSTER_ARRAY_LENGTH(expected) + 1);
+    if (BUSTER_REQUIRE(arguments, preprocess.token_count == BUSTER_ARRAY_LENGTH(expected) + 1 && preprocess.tokens))
+    {
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+        {
+            BUSTER_TEST(arguments, preprocess.tokens[index].kind == C_TOKEN_STRING_LITERAL);
+            BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), expected[index]);
+        }
+        BUSTER_TEST(arguments, preprocess.tokens[BUSTER_ARRAY_LENGTH(expected)].kind == C_TOKEN_END_OF_FILE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // decode; the SIMD/scalar lexer differential over each; a >64 KB character
 // literal; an unterminated >64 KB literal (both lexer paths must agree on
 // it); and the two synthesized-spelling producers of oversized string
@@ -34384,6 +34421,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
     BUSTER_TEST_FIXTURE(arguments, c_test_validation_candidates);
     BUSTER_TEST_FIXTURE(arguments, c_test_body_scope_map);
+    BUSTER_TEST_FIXTURE(arguments, c_test_macro_stringify_backslashes);
     BUSTER_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
 #if BUSTER_BENCH_ALLOCATIONS
