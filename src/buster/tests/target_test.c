@@ -919,7 +919,10 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, cpu_model_from_string(S8("not-a-processor")) == CPU_MODEL_ERROR);
     BUSTER_STRING_TEST(arguments, cpu_model_to_string_os(CPU_MODEL_ERROR), S8("error"));
     BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_ERROR) == CPU_MODEL_NATIVE);
-    BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_AMD_ZEN_5) == CPU_MODEL_AMD_ZEN_5);
+    BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_AMD_ATHLON_XP) == CPU_MODEL_NATIVE);
+    CpuModel detected_arch_model = target_native.cpu_arch == CPU_ARCH_X86_64 ? CPU_MODEL_AMD_ZEN_5 : CPU_MODEL_A64_GENERIC;
+    BUSTER_TEST(arguments, cpu_model_resolve_detected(detected_arch_model) == detected_arch_model);
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(target_native));
     for (u32 model_index = 0; model_index < BUSTER_ARRAY_LENGTH(target_test_x86_arch_cases); model_index += 1)
     {
         TargetTestX86ArchCase const* model_case = &target_test_x86_arch_cases[model_index];

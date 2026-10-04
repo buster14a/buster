@@ -550,7 +550,12 @@ TargetParseResult target_parse_triple(String8 triple)
 
 CpuModel cpu_model_resolve_detected(CpuModel model)
 {
-    return model == CPU_MODEL_ERROR ? CPU_MODEL_NATIVE : model;
+    CpuModel result = model;
+    if (!cpu_model_supports_arch(model, target_native.cpu_arch))
+    {
+        result = CPU_MODEL_NATIVE;
+    }
+    return result;
 }
 
 CpuModel cpu_detect_model(void)
