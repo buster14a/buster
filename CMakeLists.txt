@@ -1374,17 +1374,26 @@ set(GNU_FAMILY_UNITY_DISABLE_WARNINGS
     "$<${BUSTER_UNITY_BUILD_CONDITION}:-Wno-unused-function>"
 )
 
-set(GNU_FAMILY_NATIVE_TARGET -march=native)
+# Diagnostic trees may pick another -march= value, for example x86-64-v3 so
+# Valgrind (which cannot decode EVEX) runs the compiler. Trusted trees keep
+# native; see docs/agents/benchmarking.md.
+set(BUSTER_NATIVE_TARGET native CACHE STRING "GNU-family -march= value for host builds")
+if (NOT BUSTER_NATIVE_TARGET MATCHES "^[A-Za-z0-9_.+-]+$")
+    message(FATAL_ERROR "BUSTER_NATIVE_TARGET must be a single -march= value, got '${BUSTER_NATIVE_TARGET}'")
+endif()
+set(GNU_FAMILY_NATIVE_TARGET -march=${BUSTER_NATIVE_TARGET})
 if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # Win64 guarantees only 16-byte stack alignment. MinGW GCC 15 can emit
     # 32-byte-aligned AVX spills without realigning the incoming stack.
     list(APPEND GNU_FAMILY_NATIVE_TARGET -mno-avx)
 endif()
-buster_native_target_compatibility_flags(
-    GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY
-    "${CMAKE_C_COMPILER_ID}" "${C_COMPILER_ZIG}" "${CMAKE_C_COMPILER_VERSION}" "${CMAKE_SYSTEM_PROCESSOR}" "${BUSTER_CROSS_COMPILE}"
-)
-list(APPEND GNU_FAMILY_NATIVE_TARGET ${GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY})
+if (BUSTER_NATIVE_TARGET STREQUAL "native")
+    buster_native_target_compatibility_flags(
+        GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY
+        "${CMAKE_C_COMPILER_ID}" "${C_COMPILER_ZIG}" "${CMAKE_C_COMPILER_VERSION}" "${CMAKE_SYSTEM_PROCESSOR}" "${BUSTER_CROSS_COMPILE}"
+    )
+    list(APPEND GNU_FAMILY_NATIVE_TARGET ${GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY})
+endif()
 
 # Match the unsigned plain-char contract of GNU_FAMILY_OPTIONS. /J changes
 # the compiler's type semantics; defining _CHAR_UNSIGNED alone is not enough.
