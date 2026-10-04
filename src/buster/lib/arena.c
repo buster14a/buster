@@ -232,8 +232,11 @@ u64 arena_dirty_position(Arena* arena)
 
 u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment)
 {
-    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment));
-    u8* result = arena_get_byte_pointer_at_position(arena, align_forward(position, alignment));
+    BUSTER_VALIDATE(arena && position <= arena->reserved_size);
+    u64 aligned_position;
+    BUSTER_VALIDATE(arena_align_position_checked(arena, position, alignment, &aligned_position));
+    BUSTER_VALIDATE(aligned_position <= arena->reserved_size);
+    u8* result = arena_get_byte_pointer_at_position(arena, aligned_position);
     return result;
 }
 
