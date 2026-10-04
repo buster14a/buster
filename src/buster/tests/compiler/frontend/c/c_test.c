@@ -20003,6 +20003,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
     }
     // The tallest operands only lower: each tall_H's _Static_assert already
     // fails lowering when the walk mistypes the operand, so no driver sweep.
+    // Skipped on mobile, where the test payload runs inside an emulator with
+    // a per-run deadline the quadratic walk cost would exhaust (CI Debug
+    // measured ~80 s for this fixture against a 180 s budget).
+#if !BUSTER_ANDROID && !BUSTER_IOS
     u32 lowered_heights[] = {4096, 10000};
     String8 lowered_source_text = c_test_tall_expression_source(arguments->arena, lowered_heights, BUSTER_ARRAY_LENGTH(lowered_heights));
     for (u32 form = 0; form < 2; form += 1)
@@ -20023,6 +20027,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
         }
         scratch_end(temporary);
     }
+#endif
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("tall-expression-types"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
