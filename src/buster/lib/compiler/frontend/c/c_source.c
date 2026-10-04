@@ -4806,10 +4806,10 @@ BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 previou
     bool result = false;
     switch ((CPunctuator)previous.punctuator)
     {
-    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
+    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>' || first == '='; break;
     case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
     case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
-    case C_PUNCTUATOR_EQUAL:
+    case C_PUNCTUATOR_ASSIGN:
     case C_PUNCTUATOR_EXCLAMATION:
     case C_PUNCTUATOR_STAR:
     case C_PUNCTUATOR_CARET: result = first == '='; break;
