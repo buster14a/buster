@@ -54,6 +54,26 @@ physical device/inode hashes vary between simulator app containers, so probe
 counts from two independently created file sets are not a stable ratio. The
 direct table workload retains its cross-size ratio check on fixed path keys.
 
+## Builtin stddef inclusion requests
+
+The embedded `<stddef.h>` supports independent `__need_ptrdiff_t`,
+`__need_size_t`, `__need_rsize_t`, `__need_wchar_t`, `__need_NULL`,
+`__need_max_align_t`, `__need_offsetof` and `__need_nullptr_t` requests.
+A partial include defines only requested entities and consumes every request
+macro. Separate declaration guards allow repeated requests and a later full
+include; a partial include after a full one retains established declarations.
+C23 `nullptr_t` has its own guard and is absent from earlier dialects.
+`rsize_t` is available on an explicit request, or a full include with
+`__STDC_WANT_LIB_EXT1__ >= 1`; this does not advertise Annex K library functions.
+The existing target typedefs, NULL spelling and max_align_t layout are unchanged.
+
+Registered `c_test_stddef_need_protocol` independently checks each name's
+presence or absence, combined requests, helper consumption and both include
+orders in C17/C23 on six target layouts and both frontend SSA forms. Linux
+hosted execution also compiles and runs namespace controls through real
+`string.h`, `stdio.h`, `stdlib.h` and `time.h` with Buster in both frontend forms
+and every allocator, plus independent GCC and Clang controls.
+
 ## Builtin capability queries
 
 Direct angle-bracket header operands preserve their translated-source
@@ -177,6 +197,24 @@ all 64 scanner phases, splice ordering, original positions and phase boundaries.
 Registered `c_trigraph_preprocess_tests` checks directives, literals, comments,
 stringizing and included source, and compares fixed semantic token expectations
 with both GCC and Clang on hosted Linux x86-64 in C99/C11/C17/GNU17 modes.
+
+## Digraph token identity
+
+All C dialects recognize `<:`, `:>`, `<%`, `%>`, `%:` and `%:%:` as the
+ordinary bracket, brace, hash and double-hash punctuators. The scalar emitter
+and prewarmed SIMD spelling tables publish canonical ids in both token rows
+and shape sidecars; no later normalization pass or parser-specific alternative
+checks are needed. The spelling table retains its longest-match scan order,
+including the four-byte `%:%:` form.
+
+Token offsets and lengths preserve the original digraph bytes. Macro `#` and
+`##`, stringification, diagnostic positions and preprocessing output therefore
+retain physical spelling. The printer's separator check distinguishes `%:`
+from `#` by those bytes, since adjacent `%:` tokens must not merge into `%:%:`.
+Registered `c_test_digraphs` pins all six ids at every 64-byte scanner phase,
+overlapping maximal munch, literal/comment controls, directives, stringification,
+paste, separators, nine dialects, canonical IR through both frontend forms and
+a self-checking native driver program.
 
 ## Universal character names in identifiers
 

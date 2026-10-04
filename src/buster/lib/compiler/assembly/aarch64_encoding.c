@@ -3443,9 +3443,10 @@ BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_decode_immediate(BusterAarch64ArmM1Sca
     return a64_scalar_operand_valid(form->operands[index], decoded[index]);
 }
 
-BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_logical_immediate_decode(u8 width, u32 n, u32 immr, u32 imms, u64* value)
+BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_logical_immediate_decode(u8 width, u32 n, u32 immr, u32 imms, u64* value,
+                                                                   u32* ignored_rotation_bits)
 {
-    if (!value || (width != 32 && width != 64) || n > 1 || immr > 63 || imms > 63)
+    if (!value || !ignored_rotation_bits || (width != 32 && width != 64) || n > 1 || immr > 63 || imms > 63)
     {
         return false;
     }
@@ -3484,6 +3485,7 @@ BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_logical_immediate_decode(u8 width, u32
         result |= element << offset;
     }
     *value = result & (width == 32 ? UINT64_C(0xffffffff) : UINT64_MAX);
+    *ignored_rotation_bits = (63u & ~levels) << 16;
     return true;
 }
 
@@ -3498,6 +3500,7 @@ BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_recipe_decode(BusterAarch64ArmM1Scalar
     A64ScalarIntOperand decoded[4] = {0};
     A64ScalarIntModifier decoded_modifier = {0};
     u32 decoded_modifier_count = 0;
+    u32 ignored_rotation_bits = 0;
     u8 width = form->width;
     switch ((BusterAarch64ArmM1ScalarIntegerRecipe)form->recipe)
     {
@@ -3572,7 +3575,8 @@ BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_recipe_decode(BusterAarch64ArmM1Scalar
     case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_IMM:
     {
         u64 immediate = 0;
-        if (!a64_typed_scalar_logical_immediate_decode(width, (word >> 22) & 1u, (word >> 16) & 63u, (word >> 10) & 63u, &immediate) ||
+        if (!a64_typed_scalar_logical_immediate_decode(width, (word >> 22) & 1u, (word >> 16) & 63u, (word >> 10) & 63u,
+                                                         &immediate, &ignored_rotation_bits) ||
             !a64_typed_scalar_decode_register(form, 0, (u8)(word & 31u), width, decoded) ||
             !a64_typed_scalar_decode_register(form, 1, (u8)((word >> 5) & 31u), width, decoded) ||
             !a64_typed_scalar_decode_immediate(form, 2, immediate, decoded))
@@ -3660,10 +3664,13 @@ BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_recipe_decode(BusterAarch64ArmM1Scalar
     {
         return false;
     }
+    // DecodeBitMasks masks immr by the selected element's levels. Its upper
+    // rotation bits remain legal encodings of the same semantic immediate;
+    // the encoder chooses zero for those bits. Keep every other bit exact.
     u32 reencoded = 0;
     if (!a64_scalar_recipe_encode(form, decoded, form->operand_count, decoded_modifier_count ? &decoded_modifier : 0,
                                   decoded_modifier_count, &reencoded) ||
-        reencoded != word)
+        ((reencoded ^ word) & ~ignored_rotation_bits))
     {
         return false;
     }

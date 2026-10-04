@@ -17,6 +17,8 @@
 // block_entries/block_exits preserve canonical control-flow destinations.
 // MachineX64ValueUse is the hot value-use projection; MachineX64LocalUse
 // holds sparse local-promotion store and alias state during selection.
+// machine_x64_plan_call reuses selector-owned variadic shape/placement rows;
+// machine_x64_select_call consumes their active prefix before the next call.
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
@@ -246,6 +248,11 @@ struct MachineX64Selector
     u32 call_argument_capacity;
     u32* call_argument_registers;
     u32* call_argument_slots;
+    // Variadic rows grow only for an actual tail-bearing call. Fixed calls
+    // continue to borrow the immutable signature rows, regardless of arity.
+    u32 variadic_argument_capacity;
+    MachineX64ValueShape* variadic_argument_shapes;
+    MachineX64ArgumentPlacement* variadic_argument_placements;
     // Frame slot holding the incoming hidden result pointer, or UINT32_MAX.
     u32 hidden_return_slot;
     // SysV variadic save area.  The row is emitted before incoming argument
@@ -305,13 +312,17 @@ struct MachineX64Selector
 // The reference form a symbol takes in this module. An undefined ELF
 // function uses the PLT even in the default model, so an external linker can
 // place the -c object in a PIE. Under -fPIC, any interposable function uses
-// the PLT and any interposable address uses the GOT.
+// the PLT and any interposable address uses the GOT. Linux undefined
+// default-visible weak function addresses also use the GOT in the default
+// model so an absent provider stays zero; direct calls retain their PLT form.
 BUSTER_GLOBAL_LOCAL u8 machine_x64_symbol_reference(MachineX64Selector* selector, IrSymbolId symbol, bool call_site)
 {
     IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
     bool elf_external_call = call_site && record && !record->is_definition &&
                              object_format_for_target(selector->target) == OBJECT_FORMAT_ELF64;
-    bool indirect = elf_external_call ||
+    bool weak_function_address = !call_site && selector->target.os == OPERATING_SYSTEM_LINUX && record &&
+                                 record->kind == IR_SYMBOL_FUNCTION && !record->is_definition && record->is_weak && !record->is_hidden;
+    bool indirect = elf_external_call || weak_function_address ||
                     (selector->position_independent && ir_symbol_is_interposable(record));
     return (u8)(!indirect ? MACHINE_SYMBOL_REFERENCE_DIRECT : call_site ? MACHINE_SYMBOL_REFERENCE_PLT : MACHINE_SYMBOL_REFERENCE_GOT);
 }
@@ -5215,7 +5226,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_inline_assembly_source(MachineX64Selector* 
     {
         encoded = assembly_encode(selector->arena, (String8){.pointer = instructions, .length = instruction_length},
                                   (AssemblyEncodeOptions){.target = selector->target, .syntax = ASSEMBLY_SYNTAX_ATT,
-                                                          .private_inline_labels = true});
+                                                          .private_inline_labels = true, .inline_assembly = true});
         selected = encoded.diagnostic_count == 0;
     }
     if (selected)
@@ -6266,8 +6277,9 @@ BUSTER_GLOBAL_LOCAL MachineX64SignaturePlan const* machine_x64_signature_plan(Ma
 // Everything CALL selection resolves before it emits a row: who is called,
 // where each argument travels, and how the result comes back. The shapes
 // and placements are the signature plan's rows; a variadic call's tail is
-// classified per call into arena rows that start with a copy of the fixed
-// part, so the staging below indexes one array either way.
+// classified per call into selector-owned rows that start with a copy of
+// the fixed part, so the staging below indexes one array either way. These
+// rows are consumed synchronously and no pointer is retained in MIR.
 typedef struct MachineX64CallPlan MachineX64CallPlan;
 struct MachineX64CallPlan
 {
@@ -6394,8 +6406,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
         plan->argument_placements = signature->argument_placements;
         if (plan->argument_count > signature->parameter_count)
         {
-            MachineX64ValueShape* tail_shapes = arena_allocate(selector->arena, MachineX64ValueShape, plan->argument_count);
-            MachineX64ArgumentPlacement* tail_placements = arena_allocate(selector->arena, MachineX64ArgumentPlacement, plan->argument_count);
+            if (plan->argument_count > selector->variadic_argument_capacity)
+            {
+                // Exact growth keeps each request equal to one old per-call
+                // request; retained logical bytes cannot exceed their sum.
+                selector->variadic_argument_shapes = arena_allocate(selector->arena, MachineX64ValueShape, plan->argument_count);
+                selector->variadic_argument_placements = arena_allocate(selector->arena, MachineX64ArgumentPlacement, plan->argument_count);
+                selector->variadic_argument_capacity = plan->argument_count;
+            }
+            MachineX64ValueShape* tail_shapes = selector->variadic_argument_shapes;
+            MachineX64ArgumentPlacement* tail_placements = selector->variadic_argument_placements;
             for (u32 parameter_index = 0; parameter_index < signature->parameter_count; parameter_index += 1)
             {
                 tail_shapes[parameter_index] = signature->argument_shapes[parameter_index];

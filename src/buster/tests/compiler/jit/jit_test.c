@@ -955,6 +955,39 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     }
     jit_program_release(&native_program);
     BUSTER_TEST(arguments, !native_program.allocation_base && !native_program.auxiliary_allocation_base && !native_program.object);
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX
+    // Serialized ELF retains explicit PLT32 references. The JIT must bind
+    // an imported call through its existing thunk and a defined call locally.
+    native_relocations[0].kind = OBJECT_RELOCATION_X86_64_PLT32;
+    native_relocations[1].kind = OBJECT_RELOCATION_X86_64_PLT32;
+    ObjectArtifact plt32_elf = object_write(arguments->arena, &native_object, OBJECT_FORMAT_ELF64);
+    ObjectFile plt32_object = object_read(arguments->arena, plt32_elf.bytes, native_object.target);
+    bool plt32_ready = plt32_elf.error == OBJECT_ERROR_NONE && plt32_object.error == OBJECT_ERROR_NONE &&
+                       plt32_object.relocation_count == 4 &&
+                       plt32_object.relocations[0].kind == OBJECT_RELOCATION_X86_64_PLT32 &&
+                       plt32_object.relocations[1].kind == OBJECT_RELOCATION_X86_64_PLT32;
+    BUSTER_TEST(arguments, plt32_ready);
+    if (plt32_ready)
+    {
+        JitProgram plt32_program = jit_link_object(&plt32_object, (JitOptions){.bindings = &native_binding, .binding_count = 1});
+        BUSTER_TEST(arguments, plt32_program.error == JIT_ERROR_NONE);
+        if (plt32_program.error == JIT_ERROR_NONE)
+        {
+            void* import_address = jit_program_symbol(&plt32_program, native_symbols[1].name);
+            void* internal_address = jit_program_symbol(&plt32_program, native_symbols[3].name);
+            JitTestFunction* call_import = 0;
+            JitTestFunction* call_internal = 0;
+            memcpy(&call_import, &import_address, sizeof(call_import));
+            memcpy(&call_internal, &internal_address, sizeof(call_internal));
+            BUSTER_TEST(arguments, call_import && call_import() == 73);
+            BUSTER_TEST(arguments, call_internal && call_internal() == 42);
+        }
+        jit_program_release(&plt32_program);
+        BUSTER_TEST(arguments, !plt32_program.allocation_base && !plt32_program.auxiliary_allocation_base && !plt32_program.object);
+    }
+    native_relocations[0].kind = OBJECT_RELOCATION_X86_64_PC32;
+    native_relocations[1].kind = OBJECT_RELOCATION_X86_64_PC32;
+#endif
 #endif
 
     return result;
