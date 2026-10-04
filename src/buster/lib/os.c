@@ -640,11 +640,7 @@ BUSTER_GLOBAL_LOCAL void os_windows_commit_failure_context(OsCommitFailureContex
 bool os_commit_diagnose(void* address, u64 size, ProtectionFlags protection, bool prefault, OsCommitFailureContext* failure_context)
 {
     bool result = 1;
-    OsCommitFailureContext context;
-    if (failure_context)
-    {
-        memset(&context, 0, sizeof(context));
-    }
+    OsCommitFailureContext context = {0};
 
 #if defined(__linux__) || defined(__APPLE__)
     int protection_flags = os_posix_protection_flags(protection);
