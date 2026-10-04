@@ -770,6 +770,11 @@ meaning or a removal bumps the schema id):
 
 ## Native-retirement gate (#512)
 
+This is the frozen historical four-mode acceptance protocol. Execution requires
+archived compilers supporting `none`, `mir-stack`, `fast` and `quality`;
+the current compiler accepts only FAST and QUALITY. Use `uarch_lab.py compare`
+for current compiler measurements, and `report` for retained retirement results.
+
 The [maintainer decision](https://github.com/buster14a/buster/issues/36#issuecomment-5969534074)
 defines five required cells: a stage-1 self-host compile in each of `none`,
 `mir-stack`, `fast` and `quality`, then the generated-runtime cell. The latter

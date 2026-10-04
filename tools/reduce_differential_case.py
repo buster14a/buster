@@ -30,7 +30,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from differential_c_harness import generate_program, DEFAULT_IDE, REPOSITORY_ROOT
+from differential_c_harness import generate_program, DEFAULT_IDE, REPOSITORY_ROOT, IDE_ALLOCATORS
 
 # A healthy candidate runs in milliseconds; a deletion that breaks the
 # prelude's emit loop spins forever, so the run timeout stays tight.
@@ -75,7 +75,7 @@ class Checker:
             return ("timeout", b"")
         return (process.returncode, process.stdout)
 
-    def observe(self, text, ide_modes=("ide", "ide-canon")):
+    def observe(self, text, ide_modes=("ide-fast", "ide-quality")):
         """Returns (category, detail) for the candidate program text.
 
         The expensive checks run lazily: clang -O0 and the ide modes decide
@@ -92,9 +92,9 @@ class Checker:
         commands = {
             "clang-O0": ["clang", "-O0", "-w"],
             "clang-O2": ["clang", "-O2", "-w"],
-            "ide": [self.ide_path, "cc"],
-            "ide-canon": [self.ide_path, "cc", "-fno-register-allocator"],
         }
+        commands.update({label: [self.ide_path, "cc", "-fregister-allocator=" + allocator]
+                         for label, allocator in IDE_ALLOCATORS})
 
         def evaluate(label):
             binary_path = os.path.join(self.work_directory, "candidate." + label)
@@ -184,10 +184,10 @@ def main():
     print("reducing %s: %s (%s)" % (tag, category, detail))
     # Pin reduction to the one mode that diverged: rejects come from the
     # shared frontend, behavior stays with the mode that showed it.
-    if "ide-canon" in detail:
-        ide_modes = ("ide-canon",)
+    if "ide-quality" in detail:
+        ide_modes = ("ide-quality",)
     else:
-        ide_modes = ("ide",)
+        ide_modes = ("ide-fast",)
 
     def interesting(candidate_lines):
         candidate_category, candidate_detail = checker.observe("\n".join(candidate_lines) + "\n",

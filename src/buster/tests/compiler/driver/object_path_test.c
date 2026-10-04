@@ -162,7 +162,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
         "    return initializer_calls != 0 || target != 7 || read_external() != 9;\n"
         "}\n");
     BUSTER_TEST(arguments, file_write(unreachable_source, BUSTER_SLICE_TO_BYTE_SLICE(unreachable_program)));
-    String8 allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    String8 allocators[] = {S8("fast"), S8("quality")};
     String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
     for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
     {
@@ -176,11 +176,8 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
             String8 allocator_option = string_format_z(arena, S8("-fregister-allocator={S8}"), allocators[allocator]);
             String8 command[8] = {allocator_option, frontends[frontend]};
             u32 command_count = 2;
-            if (allocator != 0)
-            {
-                command[command_count++] = S8("-fno-machine-fallback");
-                command[command_count++] = S8("-fverify-codegen");
-            }
+            command[command_count++] = S8("-fno-machine-fallback");
+            command[command_count++] = S8("-fverify-codegen");
             command[command_count++] = S8("-o");
             command[command_count++] = executable;
             command[command_count++] = unreachable_source;

@@ -111,8 +111,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult vector_contract_test_emit(UnitTestArguments* 
     {
         bool supported = !exact || (target.cpu_arch == CPU_ARCH_X86_64 &&
             (target.cpu_model == CPU_MODEL_AMD_ZEN_5 || (target.cpu_model == CPU_MODEL_INTEL_SKYLAKE_AVX512 && !vector_contract_cases[operation].extension)));
-        CodegenRegisterAllocatorMode modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
-            CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+        CodegenRegisterAllocatorMode modes[] = {CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
             CodegenModule artifact = codegen_generate_canonical_module(arguments->arena, program, module, target,

@@ -97,7 +97,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_uefi_boundary(UnitTestArgum
         {S8("aarch64-unknown-uefi"), CPU_ARCH_AARCH64, OPERATING_SYSTEM_UEFI},
         {S8("x86_64-unknown-uefi"), CPU_ARCH_X86_64, OPERATING_SYSTEM_UEFI},
     };
-    String8 modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 modes[] = {S8("fast"), S8("quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
     {
@@ -1007,8 +1007,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_switches(UnitTestArguments*
     String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 optimizations[] = {S8("-O0"), S8("-O1"), S8("-O2"), S8("-O3")};
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     u32 configuration_count = BUSTER_ARRAY_LENGTH(frontends) * BUSTER_ARRAY_LENGTH(optimizations) * BUSTER_ARRAY_LENGTH(allocators);
     for (u32 configuration = 0; configuration < configuration_count; configuration += 1)
     {

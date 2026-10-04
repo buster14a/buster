@@ -378,7 +378,7 @@ BUSTER_GLOBAL_LOCAL ProbeError probe_compile(ProbeHost* host, char const* compil
     {
         TemporalArena scratch = scratch_begin(0, 0);
         String8 arguments[] = {string_from_pointer_length((char8 const*)compiler, strlen(compiler)), S8("cc"), S8("-g0"), S8("-fverify-codegen"),
-            S8("-fregister-allocator=mir-stack"), S8("-fno-machine-fallback"), S8("-target"),
+            S8("-fregister-allocator=fast"), S8("-fno-machine-fallback"), S8("-target"),
             S8("x86_64-unknown-linux"), S8("-c"), string_from_pointer_length((char8 const*)source, strlen(source)), S8("-o"),
             string_from_pointer_length((char8 const*)output, strlen(output))};
         ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = arguments, .length = BUSTER_ARRAY_LENGTH(arguments)},

@@ -3,9 +3,8 @@
 // IrModule into a CodegenModule — code bytes, global data images,
 // relocations, unwind actions, debug locations, and statistics — for x86-64
 // and AArch64. Every public allocator spelling routes through machine
-// selection, placement, and metadata-backed emission. The legacy NONE
-// spelling is an alias for MIR_STACK; a machine failure is returned to the
-// caller and never rerouted to the direct canonical emitter.
+// selection, placement, and metadata-backed emission. A machine failure is
+// returned to the caller and never rerouted to the direct canonical emitter.
 //
 // codegen_layout_globals owns the per-attempt data images and global
 // descriptors; codegen_plan_module_capacity computes the reservation bound
@@ -1986,25 +1985,14 @@ String8 codegen_fallback_reason_string(CodegenFallbackReason reason)
 
 String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode)
 {
+    String8 result = S8("invalid");
     switch (mode)
     {
-        break;
-    case CODEGEN_REGISTER_ALLOCATOR_NONE:
-        return S8("none");
-        break;
-    case CODEGEN_REGISTER_ALLOCATOR_MIR_STACK:
-        return S8("mir-stack");
-        break;
-    case CODEGEN_REGISTER_ALLOCATOR_FAST:
-        return S8("fast");
-        break;
-    case CODEGEN_REGISTER_ALLOCATOR_QUALITY:
-        return S8("quality");
-        break;
-    case CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT:
-        break;
+        break; case CODEGEN_REGISTER_ALLOCATOR_FAST: result = S8("fast");
+        break; case CODEGEN_REGISTER_ALLOCATOR_QUALITY: result = S8("quality");
+        break; case CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT: break;
     }
-    return S8("invalid");
+    return result;
 }
 
 // The narrowest thread-local model that can be right for one reference, which
@@ -6599,7 +6587,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             TemporalArena machine_scratch = scratch_begin(&arena, 1);
             MachineSelectResult selected = {0};
             selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target, position_independent,
-                                                                   options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
                                                                    options.debug_info, machine_module);
             if (bootstrap_trace)
             {
@@ -6661,11 +6648,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 result.failed_phase = CODEGEN_PHASE_MACHINE_PLACEMENT;
                 MachineStackPlacement placement;
 
-                switch (options.register_allocator)
+                if (options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY)
                 {
-                    break; case CODEGEN_REGISTER_ALLOCATOR_FAST: placement = machine_fast_placement_build(machine_scratch.arena, &selected.function);
-                    break; case CODEGEN_REGISTER_ALLOCATOR_QUALITY: placement = machine_quality_placement_build(machine_scratch.arena, &selected.function);
-                    break; default: placement = machine_stack_placement_build(machine_scratch.arena, &selected.function);
+                    placement = machine_quality_placement_build(machine_scratch.arena, &selected.function);
+                }
+                else
+                {
+                    placement = machine_fast_placement_build(machine_scratch.arena, &selected.function);
                 }
 
                 // Stage-9 scheduling, QUALITY only: reorder rows within
@@ -7367,13 +7356,6 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
     {
         result.error = CODEGEN_ERROR_INVALID_IR;
         return result;
-    }
-    // NONE is retained as a command-line/API compatibility spelling. It no
-    // longer exposes the direct emitter: its deliberately low-complexity
-    // meaning is the machine selector plus MIR_STACK placement.
-    if (options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_NONE)
-    {
-        options.register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK;
     }
     WORK_LEDGER_PHASE(TARGET_PREWARM);
     codegen_prewarm_for_target(target);

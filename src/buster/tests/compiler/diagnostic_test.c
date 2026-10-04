@@ -24,8 +24,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
     String8 output = buster_test_temporary_path(arguments->arena, S8("diagnostic-write-output"), S8(".bin"));
     BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
     String8 actions[] = {S8("-E"), S8("-S"), S8("-c"), S8("-O0")};
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     OsFileTestStep failures[] = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345},
                                  {OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345},
                                  {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456},

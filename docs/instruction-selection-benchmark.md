@@ -14,8 +14,8 @@ and the relevant correctness matrix; this benchmark is not a replacement.
 
 ```sh
 python3 tools/selection_benchmark.py --self-test
-python3 tools/selection_benchmark.py --compiler build/Release/ide --samples 8 --allocators none fast mir-stack quality --check --output build/selection-benchmark/smoke.json
-python3 tools/selection_benchmark.py --compiler /absolute/base/ide --candidate /absolute/candidate/ide --samples 12 --allocators none fast mir-stack quality --check --cpu 0 --build-description 'Record commit IDs, host compiler/version, complete flags, configuration and host here' --output build/selection-benchmark/ab.json
+python3 tools/selection_benchmark.py --compiler build/Release/ide --samples 8 --allocators fast quality --check --output build/selection-benchmark/smoke.json
+python3 tools/selection_benchmark.py --compiler /absolute/base/ide --candidate /absolute/candidate/ide --samples 12 --allocators fast quality --check --cpu 0 --build-description 'Record commit IDs, host compiler/version, complete flags, configuration and host here' --output build/selection-benchmark/ab.json
 ```
 
 Choose an allowed logical CPU for `--cpu`; it is optional and requires host
@@ -93,7 +93,7 @@ questions; do not label these fields as total compiler memory usage.
 
 The runner separately starts a fresh `ide cc -g0 -O2` process for each object
 compilation and allocator. Its wall time includes startup, preprocessing,
-analysis, canonical preparation, selection or fallback, placement, encoding,
+analysis, canonical preparation, selection, placement, encoding,
 object writing, and shutdown, but not linking. It does not drop the OS page
 cache. Run `test_self_host` as well for complete compiler executable generation.
 
@@ -112,8 +112,8 @@ Object identity is intentionally strict for throughput-only transformations.
 An intentional change to selected code needs an independently reviewed
 semantic/ABI proof and quality comparison, not a disabled hash check disguised
 as a throughput win. This benchmark does not exercise placement/encoder
-fallback coverage directly; inspect ordinary verbose `CODEGEN_FALLBACK` and
-`CODEGEN_FALLBACK_STAGES` reports as well.
+failure handling directly; ordinary native compilation must report those
+failures without publishing an artifact.
 
 Archive JSON and fail CI on command/test/coverage failures. Do not fail a shared
 runner on a percentage threshold derived from one wall-clock run. Before an
@@ -122,6 +122,9 @@ build policy, controlled repeated A/B order, all allocator regressions,
 self-hosting, applicable sanitizers, unchanged output/coverage, and both local
 selector and end-to-end results. Record cycles, retired instructions,
 branches/misses and cache counters separately when PMU access is available.
-Keep the NONE allocator as a control: it bypasses machine selection, so a
-similar apparent gain there is evidence against attributing the whole change
-to this selector experiment.
+Compare FAST and QUALITY end-to-end results with the selector-only replay.
+Both retained modes use machine selection, so neither provides a control that
+bypasses it. Archived NONE results can describe historical direct-emitter
+measurements only when their compiler predates the MIR cutover; later NONE
+selected MIR-stack. Record the archived binary's revision and mode semantics
+before using those measurements for attribution.

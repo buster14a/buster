@@ -1825,12 +1825,6 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
-        if (string_equal(argument, S8("-fno-register-allocator")))
-        {
-            invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE;
-            invocation.register_allocator_explicit = true;
-            continue;
-        }
         value = compiler_driver_option_value(argument, S8("-fregister-allocator="));
         if (value.length)
         {
@@ -5339,6 +5333,11 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         result.diagnostic = S8("compiler driver requires an arena");
         return result;
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.register_allocator >= CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT)
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("unsupported register allocator; expected fast or quality");
     }
     if ((measure || invocation.keep_going) && invocation.input_count && invocation.error == COMPILER_DRIVER_ERROR_NONE)
     {

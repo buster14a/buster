@@ -11,7 +11,7 @@
 // after construction, integer-ID based. This header owns only the record
 // shapes, static opcode metadata interface, chunked builder, verifier, and
 // test-only replay; instruction selection and allocation build on top of it
-// in later stages. The canonical direct emitter (`NONE`) never touches it.
+// in later stages. Every native function passes through this representation.
 
 // A packed operand reference: kind in the top three bits, payload in the low
 // twenty-nine. Payload meaning depends on the kind (virtual/physical register
@@ -1147,8 +1147,8 @@ struct MachineTargetDescription
     u64 allocatable_mask;
     u64 callee_saved_mask;
     u32 register_count;
-    // The fixed scratch register per inline operand slot, used by MIR_STACK
-    // for every operand and by the allocators for constrained opcodes.
+    // The fixed scratch register per inline operand slot, used by the
+    // allocators for constrained opcodes.
     u8 slot_scratch[4];
     // Full-width register copy: coalescible, and the encoder emits nothing
     // when both operands land on the same register.
@@ -1197,8 +1197,8 @@ struct MachineTargetDescription
     // the frame pointer either way; only the saves move above it.
     u8 saves_precede_frame_pointer;
     u8 predicate_allocatable_mask;
-    // The fixed vector scratch per operand slot, the MIR_STACK counterpart
-    // of `slot_scratch` for vector-class operand slots.
+    // The fixed vector scratch per operand slot, the counterpart of
+    // `slot_scratch` for vector-class operand slots.
     u8 vector_slot_scratch[4];
 };
 
@@ -1624,9 +1624,8 @@ struct MachineScheduleResult
 // lives only in a k register, so it has no frame location.
 #define MACHINE_VIRTUAL_REGISTER_NO_HOME UINT32_MAX
 
-// MIR_STACK placement: every virtual register owns one 8-byte frame slot and
-// every operand round-trips through a fixed scratch register. This is the
-// selector/encoder verification mode, not an allocator.
+// Shared FAST/QUALITY placement: frame homes, operand registers, and the
+// point-sorted edit stream consumed by native encoding and debug locations.
 typedef struct MachineStackPlacement MachineStackPlacement;
 struct MachineStackPlacement
 {
@@ -1913,8 +1912,8 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
 // derived from backward block references (block-ref operands and
 // switch-case targets naming a block at or before their own). The class is
 // a static execution-frequency estimate consumed only by QUALITY's pin
-// economics, which runs the stamp itself before pricing traffic — FAST and
-// MIR_STACK never read a class and never pay for the walk. Idempotent, so
+// economics, which runs the stamp itself before pricing traffic — FAST
+// never reads a class and never pays for the walk. Idempotent, so
 // re-stamping a scheduled function that shares its blocks array with the
 // original is safe.
 BUSTER_F_DECL void machine_function_stamp_frequency_classes(MachineFunction* function);
@@ -1943,19 +1942,16 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // prepare a context for this function alone, which is the unvalidated entry
 // point's cost and never module code generation's.
 BUSTER_F_DECL MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target);
-// `predicate_residency` enables source K-chain selection for allocators that
-// retain registers across rows. Stack-only source selection keeps its existing
-// integer bridges; explicit MASK MIR remains valid in every machine allocator.
+// Native selection retains source K chains for FAST/QUALITY placement.
 BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                               bool position_independent, bool predicate_residency,
+                                                                               bool position_independent,
                                                                                bool preserve_debug_values, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                            bool position_independent, bool assume_validated, bool predicate_residency,
+                                                                            bool position_independent, bool assume_validated,
                                                                             bool preserve_debug_values, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                             bool assume_validated, bool preserve_debug_values);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);
-BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
 
 // A split pin's handoff plan, built and validated by QUALITY. The entry

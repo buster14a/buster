@@ -1397,13 +1397,28 @@ class CheckedInDependencyTests(unittest.TestCase):
         codegen = (root / "src/buster/lib/compiler/codegen/codegen.c").read_text(encoding="utf-8")
         private = (root / "src/buster/lib/compiler/codegen/codegen_internal.h").read_text(encoding="utf-8")
         public = (root / "src/buster/lib/compiler/codegen/codegen.h").read_text(encoding="utf-8")
+        machine = (root / "src/buster/lib/compiler/codegen/machine.c").read_text(encoding="utf-8")
+        machine_header = (root / "src/buster/lib/compiler/codegen/machine.h").read_text(encoding="utf-8")
+        predicate = (root / "src/buster/lib/compiler/codegen/register_allocator_predicate.c").read_text(encoding="utf-8")
         cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")
         unity = (root / "src/buster/apps/ide/ide.c").read_text(encoding="utf-8")
 
         self.assertIn("machine_select_validated_canonical_function(", codegen)
-        self.assertIn("options.register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK;", codegen)
-        self.assertIn("machine_stack_placement_build(", codegen)
-        self.assertIn("CODEGEN_REGISTER_ALLOCATOR_NONE", public)
+        self.assertIn("CODEGEN_REGISTER_ALLOCATOR_FAST", public)
+        self.assertIn("CODEGEN_REGISTER_ALLOCATOR_QUALITY", public)
+        self.assertIn("CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT", public)
+        self.assertIn("machine_fast_placement_build(", codegen)
+        self.assertIn("machine_quality_placement_build(", codegen)
+        registry = (root / "src/buster/lib/compiler/driver/codegen_configurations.h").read_text(encoding="utf-8")
+        self.assertRegex(registry, r'X\("fast",\s*CODEGEN_REGISTER_ALLOCATOR_FAST\)')
+        self.assertRegex(registry, r'X\("quality",\s*CODEGEN_REGISTER_ALLOCATOR_QUALITY\)')
+        self.assertEqual(re.findall(r'X\("([^"]+)",\s*CODEGEN_REGISTER_ALLOCATOR_', registry), ["fast", "quality"])
+        native_sources = codegen + private + public + registry + machine + machine_header + predicate
+        for retired_mode in ("CODEGEN_REGISTER_ALLOCATOR_NONE", "CODEGEN_REGISTER_ALLOCATOR_MIR_STACK",
+                             "machine_stack_placement_build_core(", "machine_stack_placement_build(",
+                             "machine_stack_placement_build_in_arena(", "predicate_residency"):
+            with self.subTest(retired_mode=retired_mode):
+                self.assertNotIn(retired_mode, native_sources)
         for retired in ("CCanonicalEmitter", "CCanonicalBranchPatch", "X64Builder",
                         "CodegenRegisterAllocation", "X64Evex", "CODEGEN_X64_X87_SCRATCH_SIZE",
                         "x64_emit_vector_native_memory", "x64_emit_vector_native_binary_operation",
@@ -1461,6 +1476,9 @@ class CheckedInDependencyTests(unittest.TestCase):
         self.assertEqual(subjects, contract.FULL_SUBJECT_COUNT)
         self.assertEqual(counts["row"], contract.FULL_ROW_COUNT)
         producer = (root / "tools/native_retirement_census.c").read_text(encoding="utf-8")
+        registry = re.search(r'nrc_allocators\[\] = \{([^}]+)\};', producer)
+        self.assertIsNotNone(registry)
+        self.assertEqual(re.findall(r'S8_INITIALIZER\("([^"]+)"\)', registry.group(1)), list(contract.ALLOCATORS))
         for name, count in counts.items():
             with self.subTest(dimension=name):
                 match = re.search(r'nrc_full_' + name + r'_count = ([0-9]+);', producer)

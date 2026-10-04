@@ -469,7 +469,7 @@ without facts for identical bitcode and diagnostics.
   removed by the bare-address shortcut. Constant subscripts retain their
   signedness before checked scaling into the relocation's signed addend.
   `compiler_driver_test_static_pointer_addresses` checks the address family
-  under both frontend forms and all four allocators, reads serialized ELF
+  under both frontend forms with FAST and QUALITY, reads serialized ELF
   addends, and rejects unrepresentable indices (GitHub #1230). Arithmetic on
   non-null integer-to-pointer static casts remains unsupported; it is refused
   rather than folded as if the trailing operator belonged inside the cast.
@@ -694,8 +694,8 @@ without facts for identical bitcode and diagnostics.
   one-per-type slot a rejected alignment specifier uses. The predicate
   descends array elements alone: a qualified copy keeps the base's kind, so
   `const void` answers the same, and a `void *` is a pointer and answers no.
-  `tests/basic_c_void_size.c` pins every runtime answer under all four
-  register allocators -- both orders of the addition, the two subtractions,
+  `tests/basic_c_void_size.c` pins every runtime answer under FAST and QUALITY --
+  both orders of the addition, the two subtractions,
   `++`/`--`/`+=`/`-=`, and the qualified pointees -- reading each stepped
   pointer back through a live object so an address that folds correctly and
   lowers wrongly still fails; `c_test_void_object_refusals` pins both layout
@@ -789,8 +789,8 @@ without facts for identical bitcode and diagnostics.
   over: musl's strftime writes into `*s` through `snprintf` and returns it from
   a `char (*s)[100]` parameter, so the copy took every formatted specifier with
   it and libc-test's `functional/strftime` failed all 64 of its checks.
-  `tests/basic_c_pointer_to_array_place.c` pins that shape under all four
-  register allocators.
+  `tests/basic_c_pointer_to_array_place.c` pins that shape under FAST and
+  QUALITY.
 - Variably modified arrays use flattened scalar pointers in canonical IR.
   `CIrVlaValue` in `c_gen.c` keeps the frontend's saved element type, bound
   arrays, remaining dimension and array-lvalue/pointer-rvalue distinction in
@@ -809,7 +809,7 @@ without facts for identical bitcode and diagnostics.
   they occur; later objects and type queries reuse those declaration-time
   values even after a bound variable changes.
   `compiler_driver_test_vla_runtime_types` checks these sizes, allocation and
-  row casts at O0/O2 in both frontend forms and all four allocators. It also
+  row casts at O0/O2 in both frontend forms with FAST and QUALITY. It also
   checks nested call arguments and the effects of VLA-valued `typeof` operands.
   Object and typedef declarations evaluate VLA-valued `typeof` operands before
   capturing their layout. Nested pointer-to-VLA casts receive a diagnostic
@@ -852,7 +852,7 @@ without facts for identical bitcode and diagnostics.
   is a `.`, which is the same rule as the array arm beside it; a chain that
   ends at the aggregate still loads it, so a by-value read is unchanged.
   `tests/basic_c_member_chain_place.c` pins the offsets against a live object
-  under all four register allocators, spelling the pointer form directly so it
+  under FAST and QUALITY, spelling the pointer form directly so it
   does not depend on which offsetof a header picks, and faults the way musl did
   if the copy comes back. The peek only sees the token after the member
   identifier, so a group hides the `.` that follows from it — `(*o).a.b` and
@@ -898,9 +898,9 @@ without facts for identical bitcode and diagnostics.
   `ir_validate_canonical_module` admits exactly that difference between a plain
   `IR_OPCODE_LOAD` or `IR_OPCODE_STORE` and its place -- the pairing the atomic
   opcodes were always validated with. `tests/basic_c_volatile_aggregate.c` pins
-  both directions of the qualifier under all four register allocators.
+  both directions of the qualifier under FAST and QUALITY.
 - Canonical block IDs are graph identities, not an execution order. A valid
-  `IrFunction.entry` may name any block. Native canonical and eBPF emission
+  `IrFunction.entry` may name any block. Native machine and eBPF emission
   place that entry first, then retain ID order for the remaining blocks; branch
   fixups continue to use original block IDs. Incoming argument capture belongs
   to the declared entry, and debug-location endpoints follow emitted layout,
@@ -1045,9 +1045,9 @@ Complex comparisons/truth conversion and floating classification combine
 Boolean comparisons with `IR_BINARY_BOOLEAN_AND`/`IR_BINARY_BOOLEAN_OR`.
 Their canonical verifier case requires matching Boolean value operands and a
 Boolean value result. Integer bitwise opcodes still require integer operands.
-Native machine selectors implement these Boolean operations. The public `none`
-allocator selects MIR-stack; unsupported native shapes are refused rather than
-falling back to a direct canonical emitter.
+Native machine selectors implement these Boolean operations for FAST and QUALITY.
+Unsupported native shapes are refused; neither allocator has a direct canonical
+emitter fallback.
 
 A `_Bool` destination is one rule for every scalar source (C 6.3.1.2): the
 result is 0 exactly when the whole value compares equal to 0.
@@ -1296,6 +1296,5 @@ widening, static initializers and volatile runtime values. The existing external
 differential harness runs it with Clang/GCC at O0/O2; expected values are literal
 constants, not inferred from Buster. The fixed-range fixture additionally checks
 the aligned-base case against Clang. `c_test_enum_runtime` runs these two sources
-and the bit-field source in all four native allocator modes with strict codegen
-verification. Native NONE uses MIR-stack, so no mode has a direct-emitter
-fallback.
+and the bit-field source in FAST and QUALITY with strict codegen verification.
+Neither native allocator has a direct-emitter fallback.

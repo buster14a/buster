@@ -669,8 +669,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_protocol_frontend_tests(UnitTestArguments*
         for (u32 mode = 0; target.error == TARGET_PARSE_ERROR_NONE && mode < 4; mode += 1)
         {
             bool tails = mode < 2;
-            CodegenRegisterAllocatorMode allocators[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
-                                                         CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+            CodegenRegisterAllocatorMode allocators[] = {CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
             for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);

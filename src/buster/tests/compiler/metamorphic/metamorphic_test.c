@@ -1134,14 +1134,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult meta_campaign_contract_tests(UnitTestArgument
     MetaSummary reference = meta_run(&context, 17, 1, BUSTER_META_ALL_TRANSFORMS);
     BUSTER_TEST(arguments, reference.budget_exhausted && !reference.failures && !reference.unique_failures);
     BUSTER_TEST(arguments, reference.reference_pairs == 0 && reference.planned_reference_pairs == 48);
-    BUSTER_TEST(arguments, reference.pairs == 0 && reference.planned_pairs == 48);
+    BUSTER_TEST(arguments, reference.pairs == 0 && reference.planned_pairs == 24);
     BUSTER_TEST(arguments, atomic_u64_add(&context.work_serial, 0) == 0);
     BUSTER_TEST(arguments, meta_campaign_result(reference, false) == PROCESS_RESULT_FAILED);
     BUSTER_STRING_TEST(arguments, meta_summary_status(reference, false), S8("incomplete"));
     String8 report = meta_summary_report(arguments->arena, reference, 17, 1, 1, false, S8("budget-control"));
     BUSTER_STRING_TEST(arguments, report,
         S8("METAMORPHIC_SUMMARY seed=17 cases=1 pairs=0 executed=0 unexecuted=0 failures=0 unique=0 reducer_replays=0 "
-           "reference_pairs=0 reference_planned=48 reference_incomplete=48 planned_pairs=48 incomplete_pairs=48 "
+           "reference_pairs=0 reference_planned=48 reference_incomplete=48 planned_pairs=24 incomplete_pairs=24 "
            "budget_exhausted=1 budget_ns=0 status=incomplete frontend_ssa=1 output=budget-control\n"));
 
     context.clang = (String8){0};
@@ -1149,19 +1149,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult meta_campaign_contract_tests(UnitTestArgument
     MetaSummary target = meta_run(&context, 17, 1, BUSTER_META_ALL_TRANSFORMS);
     BUSTER_TEST(arguments, target.budget_exhausted && !target.failures && !target.unique_failures);
     BUSTER_TEST(arguments, target.reference_pairs == 0 && target.planned_reference_pairs == 0);
-    BUSTER_TEST(arguments, target.pairs == 0 && target.planned_pairs == 48);
+    BUSTER_TEST(arguments, target.pairs == 0 && target.planned_pairs == 24);
     BUSTER_TEST(arguments, atomic_u64_add(&context.work_serial, 0) == 0);
     BUSTER_TEST(arguments, meta_campaign_result(target, false) == PROCESS_RESULT_FAILED);
     BUSTER_STRING_TEST(arguments, meta_summary_status(target, false), S8("incomplete"));
 
     MetaSummary planned = meta_plan(&context, BUSTER_META_MAX_CASES, BUSTER_META_ALL_TRANSFORMS);
-    BUSTER_TEST(arguments, planned.planned_pairs == 12288 && planned.planned_reference_pairs == 0);
+    BUSTER_TEST(arguments, planned.planned_pairs == 6144 && planned.planned_reference_pairs == 0);
     context.target_filter = S8("ebpf");
     planned = meta_plan(&context, 1, BUSTER_META_ALL_TRANSFORMS);
-    BUSTER_TEST(arguments, planned.planned_pairs == 44);
+    BUSTER_TEST(arguments, planned.planned_pairs == 22);
     context.ebpf_kernel = true;
     planned = meta_plan(&context, 1, BUSTER_META_ALL_TRANSFORMS);
-    BUSTER_TEST(arguments, planned.planned_pairs == 48);
+    BUSTER_TEST(arguments, planned.planned_pairs == 24);
 
     MetaSummary complete = {.pairs = 4, .passed = 4, .executed = 4, .planned_pairs = 4,
                             .reference_pairs = 2, .planned_reference_pairs = 2};
