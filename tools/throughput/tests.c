@@ -513,6 +513,93 @@ static unsigned test_open_descriptor_count(void)
     return count;
 }
 
+typedef struct TpProcessGroupTestReport
+{
+    int setup_ok, raw_error, selected_error, redundant_error, wrong_group_error, other_error;
+    pid_t process_id, process_group;
+} TpProcessGroupTestReport;
+
+/* Direct children have no descendants. A retained child and a two-second
+ * parent deadline bound both the actual session-leader EPERM and wrong-group
+ * controls; no released PID/PGID is probed or signalled. */
+static void test_process_group_postcondition(void)
+{
+    unsigned descriptors = test_open_descriptor_count();
+    for (unsigned mode = 0; mode < 2; ++mode)
+    {
+        int channel[2] = {-1, -1};
+        int pipe_ok = pipe(channel) == 0;
+        CHECK(pipe_ok);
+        pid_t child = pipe_ok ? fork() : -1;
+        if (child == 0)
+        {
+            close(channel[0]);
+            TpProcessGroupTestReport report = {0};
+            report.process_id = getpid();
+            report.wrong_group_error = tp_process_group_self_error(-1, EPERM);
+            report.setup_ok = getpgrp() != report.process_id;
+            if (mode == 1 && setsid() < 0) report.setup_ok = 0;
+            int status = setpgid(0, 0);
+            report.raw_error = status == 0 ? 0 : errno;
+            report.selected_error = tp_process_group_self_error(status, report.raw_error);
+            report.redundant_error = tp_process_group_self_error(-1, EPERM);
+            report.other_error = tp_process_group_self_error(-1, EACCES);
+            report.process_group = getpgrp();
+            ssize_t written;
+            do
+            {
+                written = write(channel[1], &report, sizeof(report));
+            } while (written < 0 && errno == EINTR);
+            int closed = close(channel[1]);
+            _exit(written == (ssize_t)sizeof(report) && closed == 0 ? 0 : 3);
+        }
+        CHECK(child > 0);
+        if (channel[1] >= 0) CHECK(close(channel[1]) == 0);
+        if (child > 0)
+        {
+            u64 deadline = os_now_microseconds() + 2000000;
+            int status = 0;
+            pid_t waited = 0;
+            while (waited == 0 && os_now_microseconds() < deadline)
+            {
+                waited = waitpid(child, &status, WNOHANG);
+                if (waited < 0 && errno == EINTR) waited = 0;
+                if (waited == 0) test_delay(1);
+            }
+            int timed_out = waited == 0;
+            if (timed_out)
+            {
+                CHECK(kill(child, SIGKILL) == 0 || errno == ESRCH);
+                do
+                {
+                    waited = waitpid(child, &status, 0);
+                } while (waited < 0 && errno == EINTR);
+            }
+            CHECK(!timed_out && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+            if (waited == child)
+            {
+                TpProcessGroupTestReport report = {0};
+                ssize_t received;
+                do
+                {
+                    received = read(channel[0], &report, sizeof(report));
+                } while (received < 0 && errno == EINTR);
+                CHECK(received == (ssize_t)sizeof(report));
+                CHECK(report.setup_ok && report.process_id == child && report.process_group == child);
+                CHECK(report.raw_error == (mode == 1 ? EPERM : 0));
+                CHECK(report.selected_error == 0 && report.redundant_error == 0);
+                CHECK(report.wrong_group_error == EPERM && report.other_error == EACCES);
+                printf("THROUGHPUT_GROUP_POSTCONDITION mode=%u raw_error=%d selected_error=%d redundant_error=%d "
+                       "wrong_group_error=%d other_error=%d pid=%ld group=%ld timed_out=%d\n", mode,
+                       report.raw_error, report.selected_error, report.redundant_error,
+                       report.wrong_group_error, report.other_error, (long)report.process_id, (long)report.process_group, timed_out);
+            }
+        }
+        if (channel[0] >= 0) CHECK(close(channel[0]) == 0);
+    }
+    CHECK(test_open_descriptor_count() == descriptors);
+}
+
 /* The error channel must report preexec failure, survive repeated cleanup,
  * and remain empty when a successfully launched program itself exits 125. */
 static void test_launch_errors(char const* executable, char const* root)
@@ -1859,6 +1946,7 @@ int main(int argc, char** argv)
         test_maximum_jobs(root);
         test_processes(executable, root);
 #ifndef _WIN32
+        test_process_group_postcondition();
         test_launch_errors(executable, root);
 #endif
         test_retirement_statistics();
