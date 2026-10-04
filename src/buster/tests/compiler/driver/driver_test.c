@@ -19913,7 +19913,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
         String8 contexts[] = {
-            S8("#if 0\nint \xFF;\n#endif\n"),
             S8("#define unused \xFF\n"),
             S8("#define unused 1.\xFF\n"),
             S8("#define Q(x) #x\nchar* value = Q(\xFF);\n"),
@@ -19932,6 +19931,19 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("invalid UTF-8 sequence")) != BUSTER_STRING_NO_MATCH);
             scratch_end(utf8_temporary);
         }
+        TemporalArena skipped_utf8_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* skipped_utf8_arena = skipped_utf8_temporary.arena;
+        String8 skipped_utf8_input = buster_test_temporary_path(skipped_utf8_arena, S8("buster-skipped-invalid-utf8"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(skipped_utf8_input, BUSTER_SLICE_TO_BYTE_SLICE(S8("#if 0\nint \xFF;\n#endif\nint x;\n"))));
+        // Skipped groups ignore their spelling (C11 6.10.1p6).
+        String8 skipped_utf8_command_line[] = {S8("-fsyntax-only"), skipped_utf8_input};
+        CompilerDriverResult skipped_utf8 = compiler_driver_execute_invocation(
+            skipped_utf8_arena,
+            compiler_driver_parse_arguments(skipped_utf8_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(skipped_utf8_command_line)));
+        BUSTER_TEST(arguments, skipped_utf8.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, skipped_utf8.tokenizer_error_count == 0);
+        scratch_end(skipped_utf8_temporary);
+
         TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
         Arena* utf8_arena = utf8_temporary.arena;
         String8 header = buster_test_temporary_path(utf8_arena, S8("buster-invalid-utf8-header"), S8(".h"));

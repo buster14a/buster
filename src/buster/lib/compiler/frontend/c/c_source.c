@@ -84,6 +84,10 @@
 //                                              copied out of the phase arena
 //                                              before its release
 //                                              (docs/compiler-lifetime.md)
+//   CPreprocessSourceFrame,
+//   c_preprocess_lex_diagnostics_release       per-line lexer diagnostic
+//                                              release as the frame walk
+//                                              enters live and skipped lines
 //   c_preprocess                               the stage driver
 //   c_prewarm                                  serial table prewarm
 
@@ -7518,6 +7522,7 @@ struct CPreprocessSourceFrame
     // and the interned symbol of its `#ifndef` name (see CIncludeGuardState).
     CConditionalFrame* guard;
     CLexResult lex;
+    u64 lex_diagnostic_index;
     // The class projection of `lex` (see CPpClassMasks); built once when the
     // frame is pushed, read by every per-line scan of the driver.
     CPpClassMasks class_masks;
@@ -7543,6 +7548,30 @@ struct CPreprocessSourceFrame
     FileMapRead source_map;
     CIncludeSearchOrigin include_origin;
 };
+
+// A frame's lexer diagnostics belong to the spelling that raised them, so the
+// walk releases them a line at a time: kept on a live line, ignored in a
+// skipped group, where only comments and conditional nesting matter
+// (C11 6.10.1p6). An unterminated block comment is structural and is always
+// kept. A byte that starts no token is itself a preprocessing token (6.4p1);
+// its diagnostic waits until the token survives into the output stream
+// (see the C_TOKEN_INVALID scan at the end of c_preprocess_run).
+BUSTER_C_INTERNAL void c_preprocess_lex_diagnostics_release(Arena* arena, CPreprocessResult* result, char8 const* base,
+                                                            CPreprocessSourceFrame* frame, u64 end_offset, bool live)
+{
+    while (frame->lex_diagnostic_index < frame->lex.diagnostic_count &&
+           frame->lex.diagnostics[frame->lex_diagnostic_index].location.map_offset < end_offset)
+    {
+        CDiagnostic diagnostic = frame->lex.diagnostics[frame->lex_diagnostic_index];
+        bool invalid_byte = diagnostic.kind == C_DIAGNOSTIC_INVALID_CHARACTER && base[diagnostic.location.map_offset] != '\\';
+        if (diagnostic.kind == C_DIAGNOSTIC_UNTERMINATED_BLOCK_COMMENT || diagnostic.kind == C_DIAGNOSTIC_SOURCE_TOO_LARGE ||
+            (live && !invalid_byte))
+        {
+            c_preprocess_diagnostic_copy(arena, result, diagnostic);
+        }
+        frame->lex_diagnostic_index += 1;
+    }
+}
 
 // Test instrumentation observes the real probe loops without adding state or
 // work to tests-disabled compiler builds.
@@ -9985,10 +10014,6 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + 1, UINT64_C(64));
     C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
-    for (u64 diagnostic_index = 0; diagnostic_index < root_lex.diagnostic_count; diagnostic_index += 1)
-    {
-        c_preprocess_diagnostic_copy(arena, &result, root_lex.diagnostics[diagnostic_index]);
-    }
     CMacro* first_macro = 0;
     CMacro* last_macro = 0;
     CToken* standard_replacement = arena_allocate(arena, CToken, 2);
@@ -10549,6 +10574,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     CConditionalFrame* conditional = 0;
     CPreprocessSourceFrame root_frame = {
         .lex = root_lex,
+        .lex_diagnostic_index = 0,
         .class_masks = root_class_masks,
         .path = options.source_path.length ? options.source_path : S8("."),
         .identity = c_include_file_identity(options.source_path.length ? options.source_path : S8("."), options.source_identity),
@@ -10600,12 +10626,14 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         pragma_context.current_path = source_frame->path;
         pragma_context.current_identity = source_frame->identity;
         CLexResult lex = source_frame->lex;
+        char8 const* base = space->base;
         CPpClassMasks const* class_masks = &source_frame->class_masks;
         u64 token_index = source_frame->token_index;
         bool line_start = source_frame->line_start;
         CToken token = lex.tokens[token_index];
         if (token.kind == C_TOKEN_END_OF_FILE)
         {
+            c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, UINT64_MAX, true);
             while (conditional != source_frame->conditional_base)
             {
                 c_preprocess_diagnostic_push(arena, &result, conditional->location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL, S8("unterminated preprocessing conditional"));
@@ -10644,6 +10672,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         first_macro->builtin_path = source_frame->logical_path;
         if (line_start && c_token_is_punctuator(&token, C_PUNCTUATOR_HASH))
         {
+            bool directive_live = c_preprocess_is_active(conditional);
+            bool directive_diagnostics_released = false;
             CPreprocessSourceFrame* include_frame = 0;
             token_index += 1;
             bool is_line_marker = token_index < lex.token_count && lex.tokens[token_index].kind == C_TOKEN_PREPROCESSING_NUMBER;
@@ -10654,7 +10684,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 // an invalid directive rather than an assembly comment.
                 bool null_directive = token_index < lex.token_count &&
                                       (lex.tokens[token_index].kind == C_TOKEN_NEWLINE || lex.tokens[token_index].kind == C_TOKEN_END_OF_FILE);
-                if (!null_directive && !options.assembly_comment_lines && !options.already_preprocessed)
+                if (c_preprocess_is_active(conditional) && !null_directive && !options.assembly_comment_lines && !options.already_preprocessed)
                 {
                     c_preprocess_diagnostic_push(arena, &result, c_lex_token_location(&source_frame->lex, token), C_DIAGNOSTIC_EXPECTED_DIRECTIVE,
                                                  S8("expected preprocessing directive after '#'"));
@@ -10672,7 +10702,6 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 CSourceLocation directive_location = c_preprocess_logical_location(source_frame, c_lex_token_location(&source_frame->lex, directive));
                 u64 line_end = class_masks->word_count ? c_pp_line_end_masked(class_masks, lex.token_count, token_index) : c_preprocess_line_end(lex, token_index);
                 bool active = c_preprocess_is_active(conditional);
-                char8 const* base = space->base;
                 bool is_if = c_token_spelling_equal(base, directive, S8("if"));
                 bool is_ifdef = c_token_spelling_equal(base, directive, S8("ifdef"));
                 bool is_ifndef = c_token_spelling_equal(base, directive, S8("ifndef"));
@@ -10687,6 +10716,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 bool is_error = c_token_spelling_equal(base, directive, S8("error"));
                 bool is_warning = c_token_spelling_equal(base, directive, S8("warning"));
                 CPreprocessConditionalDirective conditional_directive = c_preprocess_conditional_directive_kind(base, directive);
+                directive_live =
+                    directive_live || (is_elif && conditional != source_frame->conditional_base && !conditional->else_seen &&
+                                       conditional->parent_active && !conditional->branch_taken);
+                c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[line_end].offset, directive_live);
+                directive_diagnostics_released = true;
                 // Any directive at the frame's top level other than the
                 // conditionals themselves sits outside a candidate include
                 // guard, so the file cannot be guard-shaped.
@@ -10919,11 +10953,6 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                 c_symbols_intern_tokens(symbol_table, include_lex.spelling_base, include_lex.tokens, include_lex.token_shapes, include_lex.token_count);
                                 CPpClassMasks include_class_masks;
                                 c_pp_class_masks_build(arena, &include_class_masks, include_lex.token_shapes, include_lex.token_count);
-                                for (u64 index = 0; index < include_lex.diagnostic_count; index += 1)
-                                {
-                                    CDiagnostic diagnostic = include_lex.diagnostics[index];
-                                    c_preprocess_diagnostic_copy(arena, &result, diagnostic);
-                                }
                                 if (!include_once)
                                 {
                                     include_frame = arena_allocate(arena, CPreprocessSourceFrame, 1);
@@ -10931,6 +10960,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                         .previous = source_frame,
                                         .conditional_base = conditional,
                                         .lex = include_lex,
+                                        .lex_diagnostic_index = 0,
                                         .class_masks = include_class_masks,
                                         .path = include_path,
                                         .identity = include_identity,
@@ -10995,6 +11025,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             {
                 token_index += 1;
             }
+            if (!directive_diagnostics_released)
+            {
+                c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[token_index].offset, directive_live);
+            }
             source_frame->token_index = token_index;
             source_frame->line_start = true;
             if (include_frame)
@@ -11012,6 +11046,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         }
         bool classified = class_masks->word_count != 0;
         u64 line_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, token_index) : c_preprocess_line_end(lex, token_index);
+        c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[line_end].offset, c_preprocess_is_active(conditional));
         if (!c_preprocess_is_active(conditional))
         {
             source_frame->token_index = line_end;
@@ -11063,6 +11098,13 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 u64 directive_index = next_line_start + 1;
                 if (directive_index >= lex.token_count || lex.tokens[directive_index].kind != C_TOKEN_IDENTIFIER)
                 {
+                    if (!c_preprocess_is_active(conditional))
+                    {
+                        logical_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, next_line_start)
+                                                 : c_preprocess_line_end(lex, next_line_start);
+                        c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[logical_end].offset, false);
+                        continue;
+                    }
                     break;
                 }
                 CToken directive = lex.tokens[directive_index];
@@ -11074,6 +11116,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                         directive_index += 1;
                         logical_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, directive_index)
                                                  : c_preprocess_line_end(lex, directive_index);
+                        c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[logical_end].offset, false);
                         continue;
                     }
                     break;
@@ -11086,6 +11129,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 directive_index += 1;
                 u64 directive_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, directive_index)
                                                : c_preprocess_line_end(lex, directive_index);
+                bool directive_live =
+                    c_preprocess_is_active(conditional) ||
+                    (directive_kind == C_PREPROCESS_CONDITIONAL_ELIF && conditional != source_frame->conditional_base &&
+                     !conditional->else_seen && conditional->parent_active && !conditional->branch_taken);
+                c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[directive_end].offset, directive_live);
                 first_macro->builtin_token_offset = directive.offset;
                 c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, directive_kind, directive,
                                                    directive_index, directive_end, expansion_limit, &result, options, &conditional);
@@ -11095,6 +11143,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             }
             u64 next_line_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, next_line_start)
                                            : c_preprocess_line_end(lex, next_line_start);
+            c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[next_line_end].offset,
+                                                 c_preprocess_is_active(conditional));
             if (c_preprocess_is_active(conditional))
             {
                 if (conditional == source_frame->conditional_base)
@@ -11365,6 +11415,17 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     }
     recovery->map.pages = pages;
     recovery->map.page_count = page_count;
+    // Phase 7 diagnoses invalid preprocessing tokens that survive expansion.
+    for (u64 index = 0; index < output_count; index += 1)
+    {
+        if (c_token_shape_kind(recovery->token_shapes[index]) == C_TOKEN_INVALID)
+        {
+            c_preprocess_diagnostic_push(arena, &result, (CSourceLocation){.map_offset = result.tokens[index].offset},
+                                         C_DIAGNOSTIC_INVALID_CHARACTER,
+                                         string_format(arena, S8("invalid character byte {u32} in C source"),
+                                                       (u32)(u8)space->base[result.tokens[index].offset]));
+        }
+    }
     for (u64 index = 0; index < result.diagnostic_count; index += 1)
     {
         CDiagnostic* diagnostic = result.diagnostics + index;
