@@ -30,6 +30,11 @@ jobs:
         run: clang -std=c11 -O2 -g -Wall -Wextra -Werror tools/research/debug-comparison-capture.c -o capture
       - name: Run fixed-count cloud diagnostic
         run: ./capture
+      - name: Separate cproc QBE g0 study
+        if: ${{ always() }}
+        run: |
+          clang -std=c11 -O2 -g -Wall -Wextra -Werror tools/research/cproc-study.c -o cproc-study
+          ./cproc-study
       - name: Qualification and host receipts
         if: ${{ always() }}
         run: |
@@ -59,7 +64,9 @@ jobs:
           path: |
             evidence
             prior-evidence
+            secondary-evidence
             tools/research/debug-comparison-capture.c
+            tools/research/cproc-study.c
             .github/workflows/comparison-capture.yml
           retention-days: 30
           if-no-files-found: error
