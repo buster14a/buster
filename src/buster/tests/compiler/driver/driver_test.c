@@ -16235,6 +16235,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_import_facts(UnitTe
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_binary128_long_double(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("_Static_assert(sizeof(long double) == 16, \"long double size\");\n"
+                        "_Static_assert(_Alignof(long double) == 16, \"long double alignment\");\n"
+                        "struct Record { unsigned char first; long double value; unsigned char last; };\n"
+                        "_Static_assert(sizeof(struct Record) == 48, \"record size\");\n"
+                        "_Static_assert(__builtin_offsetof(struct Record, value) == 16, \"value offset\");\n"
+                        "_Static_assert(__builtin_offsetof(struct Record, last) == 32, \"last offset\");\n"
+                        "_Static_assert(sizeof(long double[3]) == 48, \"long double array size\");\n"
+                        "_Static_assert(__SIZEOF_LONG_DOUBLE__ == 16, \"long double predefined size\");\n"
+                        "_Static_assert(__LDBL_MANT_DIG__ == 113, \"long double precision\");\n"
+                        "_Static_assert(__LONG_DOUBLE_WIDTH__ == 128, \"long double width\");\n"
+                        "_Static_assert(__LDBL_MAX_EXP__ == 16384, \"long double exponent\");\n"
+                        "double narrow(long double* p) { return (double)*p; }\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_WASM32, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WASI},
+        {.cpu_arch = CPU_ARCH_WASM64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_FREESTANDING},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        Target target = targets[target_index];
+        CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+        CParserResult syntax = c_parse_ast(arena, preprocess);
+        CIRLowerResult lowered = c_analyze(arena, S8("wasm-binary128-long-double.c"), preprocess, syntax, target);
+        if (BUSTER_REQUIRE(arguments, !preprocess.error_count && lowered.program && !lowered.diagnostic_count) &&
+            BUSTER_REQUIRE(arguments, ir_prepare_canonical_module(lowered.program, lowered.program->modules, false).error == IR_VALIDATION_NONE))
+        {
+            WasmOptions options = WASM64_OPTIONS_DEFAULT;
+            options.pointer_size = target.cpu_arch == CPU_ARCH_WASM32 ? 4 : 8;
+            WasmArtifact artifact = wasm_emit(arena, lowered.program, lowered.program->modules, 1, options);
+            BUSTER_TEST(arguments, !artifact.success);
+            BUSTER_TEST_RAW(arguments,
+                            string_equal(artifact.error.message, S8("floating-point WebAssembly SSA value wider than binary64 is unsupported")),
+                            artifact.error.message);
+            if (target.cpu_arch == CPU_ARCH_WASM64)
+            {
+                LlvmBitcodeArtifact bitcode = llvm_bitcode_emit(arena, lowered.program, lowered.program->modules, 1);
+                BUSTER_TEST_RAW(arguments, llvm_bitcode_artifact_is_valid(bitcode), bitcode.error.message);
+            }
+        }
+        scratch_end(temporary);
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        Target target = targets[target_index];
+        CPreprocessResult preprocess = c_preprocess(arena, S8("long double one = 1.0L;\n"),
+                                                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+        CParserResult syntax = c_parse_ast(arena, preprocess);
+        CIRLowerResult lowered = c_analyze(arena, S8("wasm-binary128-static-initializer.c"), preprocess, syntax, target);
+        BUSTER_TEST(arguments, lowered.diagnostic_count > 0);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // `-c` writes the object through object_write_borrowing: the ELF image borrows
 // every large section payload from the ObjectFile instead of copying it, and
 // the file is its slices written in order. The published file must equal the
@@ -18318,6 +18378,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_direct_emitter_preparation);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_import_facts);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_binary128_long_double);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unneeded_prototyped_definitions);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_aggregate_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unreferenced_declarations);

@@ -891,7 +891,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, wasi_layout.pointer.size == 4 && wasi_layout.pointer.alignment == 4 && wasi_layout.pointer.bit_width == 32);
     BUSTER_TEST(arguments, wasi_layout.long_integer.size == 4 && wasi_layout.long_integer.bit_width == 32);
     BUSTER_TEST(arguments, wasi_layout.long_long_integer.size == 8 && wasi_layout.long_double_type.size == 16 &&
-                               wasi_layout.long_double_type.bit_width == 128);
+                               wasi_layout.long_double_type.alignment == 16 && wasi_layout.long_double_type.bit_width == 128);
     BUSTER_TEST(arguments, wasi_layout.va_list.size == 4 && wasi_layout.va_list.alignment == 4);
     BUSTER_TEST(arguments, !wasi_layout.has_128_bit_integer);
     BUSTER_TEST(arguments, target_vector_register_size(wasi_target) == 0);
@@ -906,7 +906,10 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     TargetDataLayout wasm64_layout = target_data_layout(wasm64_target);
     BUSTER_TEST(arguments, target_data_layout_is_valid(wasm64_layout));
     BUSTER_TEST(arguments, wasm64_layout.pointer.size == 8 && wasm64_layout.pointer.bit_width == 64);
-    BUSTER_TEST(arguments, wasm64_layout.long_integer.size == 8 && wasm64_layout.long_double_type.size == 8);
+    BUSTER_TEST(arguments, wasm64_layout.long_integer.size == 8);
+    // WebAssembly C ABI binary128, shared by Clang's wasm32 and wasm64 targets.
+    BUSTER_TEST(arguments, wasm64_layout.long_double_type.size == 16 && wasm64_layout.long_double_type.alignment == 16 &&
+                               wasm64_layout.long_double_type.bit_width == 128);
     BUSTER_TEST(arguments, !wasm64_layout.has_128_bit_integer);
     BUSTER_TEST(arguments, target_vector_register_size(wasm64_target) == 0);
     BUSTER_STRING_TEST(arguments, cpu_arch_to_string_os(CPU_ARCH_WASM64), S8("wasm64"));

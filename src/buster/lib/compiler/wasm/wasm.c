@@ -2461,8 +2461,17 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
         }
         else if (!wasm64_valtype_for_type(context, type, value->category == IR_VALUE_PLACE, &valtype))
         {
-            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate WebAssembly SSA value is unsupported"), function, 0, 0,
-                        IR_SYMBOL_ID_INVALID);
+            if (type && type->kind == IR_TYPE_FLOAT && type->bit_width > 64)
+            {
+                wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE,
+                            wasm64_s8("floating-point WebAssembly SSA value wider than binary64 is unsupported"), function, 0, 0,
+                            IR_SYMBOL_ID_INVALID);
+            }
+            else
+            {
+                wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI,
+                            wasm64_s8("aggregate WebAssembly SSA value is unsupported"), function, 0, 0, IR_SYMBOL_ID_INVALID);
+            }
             return false;
         }
         emitter->value_types[value_index] = (u8)valtype;

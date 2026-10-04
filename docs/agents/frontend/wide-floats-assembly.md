@@ -347,3 +347,8 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
 - The Wasm64 backend consumes canonical IR directly. Unsupported ABI or
   instruction shapes must be diagnosed; never silently fall back to a native
   backend.
+- Wasm32 and Wasm64 `long double` use IEEE binary128 (16 bytes, aligned 16)
+  per the WebAssembly C ABI, matching Clang's shared WebAssembly target. The
+  direct Wasm emitter has no binary128 lowering and refuses such values with a
+  precise diagnostic; static `long double` initializers are not folded, while
+  LLVM bitcode carries `fp128`.

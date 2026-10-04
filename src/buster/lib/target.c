@@ -230,7 +230,7 @@ TargetDataLayout target_data_layout(Target target)
     u32 long_size = llp64 || wasm32 || spirv_compute ? 4 : 8;
     bool plain_char_is_signed = target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED ||
                                 (target.plain_char_policy != TARGET_PLAIN_CHAR_POLICY_UNSIGNED && !arm_plain_char_unsigned);
-    bool double_long_double = llp64 || wasm64 || bpfel || spirv_compute || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
+    bool double_long_double = llp64 || bpfel || spirv_compute || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
     u32 long_double_size = double_long_double ? 8 : 16;
     bool x87_long_double = target.cpu_arch == CPU_ARCH_X86_64 && target.os != OPERATING_SYSTEM_ANDROID;
     u32 long_double_bits = double_long_double ? 64 : x87_long_double ? 80 : 128;
