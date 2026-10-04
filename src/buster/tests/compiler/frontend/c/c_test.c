@@ -35071,6 +35071,154 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_void_function_pointer_policy(UnitTestA
     return result;
 }
 
+// #1257: integer promotion precedes switch validation; wide rejection stays explicit.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int input; static volatile int hits;\n"
+        "static _Bool next_bool(void) { hits += 1; return input; }\n"
+        "int switch_bool_pair(_Bool value) { switch (value) { case 0: return 10; case 1: return 11; default: return 12; } }\n"
+        "int switch_bool_default(_Bool value) { switch (value) { case 1: return 21; default: return 20; } }\n"
+        "int switch_bool_range(_Bool value) { switch (value) { case -1: return 30; case 0 ... 1: return 31; default: return 32; } }\n"
+        "int switch_compare(int value) { switch (value != 0) { case 0: return 40; case 1: return 41; default: return 42; } }\n"
+        "int switch_once(void) { switch (next_bool()) { case 0: return 50; case 1: return 51; default: return 52; } }\n"
+        "int switch_signed_narrow(signed char value) { switch (value) { case -1: return 60; default: return 61; } }\n"
+        "int switch_unsigned_narrow(unsigned char value) { switch (value) { case -1: return 70; case 255: return 71; default: return 72; } }\n"
+        "int switch_wide(long long value) { switch (value) { case -1: return 80; case 4294967295LL: return 81; default: return 82; } }\n"
+        "int main(void) {\n"
+        "    int failed = 0;\n"
+        "    failed |= switch_bool_pair(0) != 10 || switch_bool_pair(1) != 11 || switch_bool_pair(7) != 11;\n"
+        "    failed |= switch_bool_default(0) != 20 || switch_bool_default(1) != 21;\n"
+        "    failed |= switch_bool_range(0) != 31 || switch_bool_range(1) != 31;\n"
+        "    failed |= switch_compare(0) != 40 || switch_compare(-7) != 41;\n"
+        "    hits = 0; input = 0; failed |= switch_once() != 50 || hits != 1;\n"
+        "    input = 7; failed |= switch_once() != 51 || hits != 2;\n"
+        "    failed |= switch_signed_narrow(-1) != 60 || switch_signed_narrow(127) != 61;\n"
+        "    failed |= switch_unsigned_narrow(255) != 71 || switch_unsigned_narrow(0) != 72;\n"
+        "    failed |= switch_wide(-1) != 80 || switch_wide(4294967295LL) != 81 || switch_wide(0) != 82;\n"
+        "    return failed;\n"
+        "}\n");
+    String8 promoted_names[] = {S8("switch_bool_pair"), S8("switch_bool_default"), S8("switch_compare"),
+                               S8("switch_once"), S8("switch_signed_narrow"), S8("switch_unsigned_narrow")};
+    typedef struct CTestWideSwitchRejection CTestWideSwitchRejection;
+    struct CTestWideSwitchRejection
+    {
+        String8 source;
+        String8 type;
+        u32 column;
+    };
+    CTestWideSwitchRejection rejections[] = {
+        {S8("int reject(__int128 value) { switch (value) { case 1: return 1; default: return 3; } }\n"), S8("__int128"), 38},
+        {S8("int reject(unsigned __int128 value) { switch (value) { case 1: return 1; default: return 3; } }\n"), S8("unsigned __int128"), 47},
+    };
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessOptions options = {.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17};
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("switch-integer-controls.c"), tokens, parsed, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count &&
+                               lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(promoted_names); index += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, promoted_names[index]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 switches = 0;
+                        for (u32 row = 0; row < function->instruction_count; row += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + row;
+                            if (instruction->opcode == IR_OPCODE_SWITCH && BUSTER_REQUIRE(arguments, instruction->operand_count == 1))
+                            {
+                                IrValueId operand = instruction->operands[0];
+                                IrType* type = operand.value < function->value_count
+                                    ? ir_type_from_id(&lowered.program->types, function->values[operand.value].canonical_type) : 0;
+                                BUSTER_TEST(arguments, type && type->kind == IR_TYPE_INTEGER && type->bit_width == 32 && type->is_signed);
+                                switches += 1;
+                            }
+                        }
+                        BUSTER_TEST(arguments, switches == 1);
+                    }
+                }
+                IrFunction* once = c_test_find_ir_function(module, S8("switch_once"));
+                if (BUSTER_REQUIRE(arguments, once != 0))
+                {
+                    BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, once, S8("next_bool")) == 1);
+                }
+            }
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejections); index += 1)
+            {
+                CPreprocessResult wide_tokens = c_preprocess(temporary.arena, rejections[index].source, options);
+                CParseResult wide_parse = c_parse(temporary.arena, wide_tokens);
+                CIRLowerResult wide = c_lower_to_ir_with_options(temporary.arena, S8("switch-wide-rejection.c"), wide_tokens, wide_parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST(arguments, !wide_tokens.diagnostic_count && !wide_parse.diagnostic_count);
+                BUSTER_TEST(arguments, !wide.canonical_ir_certified);
+                if (BUSTER_REQUIRE(arguments, wide.diagnostic_count == 1 && wide.diagnostics != 0))
+                {
+                    CDiagnostic diagnostic = wide.diagnostics[0];
+                    BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                    BUSTER_TEST(arguments, diagnostic.location.line == 1 && diagnostic.location.column == rejections[index].column &&
+                                           diagnostic.location.offset == rejections[index].column - 1);
+                    BUSTER_STRING_TEST(arguments, diagnostic.message, string_format(temporary.arena,
+                        S8("in function 'reject': switch controlling type '{S8}' is unsupported; integer switch dispatch supports at most 64 bits"),
+                        rejections[index].type));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    c_test_case_range_lower_diagnostic(arguments, &result,
+        S8("int overlap(_Bool value) { switch (value) { case 0 ... 1: return 0; case 1: return 1; } return 2; }\n"),
+        S8("in function 'overlap': case label overlaps another case label"));
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = buster_test_temporary_path(arguments->arena, S8("switch-integer-controls"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("switch-integer-controls-run"), S8(".exe"));
+                String8 command[] = {S8("-std=gnu17"), modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
+                                     S8("-fverify-codegen"), S8("-o"), output, path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -35289,6 +35437,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
+    BUSTER_TEST_FIXTURE(arguments, c_test_switch_integer_controls);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_identity_authority);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
