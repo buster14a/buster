@@ -1,0 +1,78 @@
+# Native MCP client deployment boundary
+
+The native stdio adapter translates MCP tools into the authenticated local
+control protocol. The queue daemon remains the single journal writer and
+owns submission, cancellation and recipe admission. Build the adapter through
+the existing driver, then configure clients to start the resulting executable
+directly so stdout contains only MCP messages:
+
+```sh
+./build.sh bench_service capabilities
+build/bench-service-tools/service mcp /run/buster-bench/control.sock
+```
+
+The socket path is an operator startup argument. Tool calls cannot select a
+socket, host, principal, executable, shell command or filesystem path. The
+adapter process needs the daemon's already approved peer UID/GID; starting it
+does not grant that identity or change socket permissions. The currently
+deployed public protocol uses one fixed `github-actions` principal. A personal
+client must be explicitly admitted into that trust boundary; this adapter does
+not introduce per-user authentication or change the runner's pinned sudo policy.
+
+The installed daemon is synchronous: during an admitted job it stops serving
+ordinary control requests until cleanup. An MCP call can therefore return a
+transport error without cancelling or resubmitting the job. Retrying submission
+uses the original idempotency key and exact immutable request. An MCP connection
+closing or a request-cancellation notification does not release queue admission.
+Only the explicit `bench_cancel` tool requests job cancellation; its receipt
+distinguishes that request from a confirmed terminal outcome.
+
+## Off-host control plane
+
+The production #437 topology requires the queue, adapters, cached logs/results
+and any tunnel client on a separate control machine. The worker initiates the
+fixed SSH transport; client polling must create no worker activity during
+measurement. The current local control socket cannot supply that topology by
+itself. Running the adapter or an SSH-per-call proxy on the 9700X is a functional
+client smoke test, not qualified off-host service acceptance.
+
+Before enabling external clients, install the durable off-host control/worker
+protocol and document its principal mapping, reconnect/reconciliation policy,
+cache freshness and exceptional cancellation path. Run the 100-submit /
+1,000-read quiet-phase fixture and retain the worker traffic trace. Do not move
+the queue files between hosts or run a second writer against shared storage.
+Keep the existing host singleton, inherited lease, containment, installed
+recipe identities and result sealing contract intact.
+
+## Private ChatGPT connection
+
+OpenAI's [Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+supports an operator-installed tunnel client forwarding to a stdio command.
+It is an external deployment prerequisite, not a Buster library dependency.
+Configure it on the control machine with the reviewed installed service binary
+and fixed socket path. Follow the current guide and the installed client's
+help for its exact command-line syntax.
+
+A tunnel ID, runtime API credential and appropriate Platform tunnel roles are
+required. The target ChatGPT workspace must also permit developer mode and be
+associated with the tunnel. Those account facts must be verified in the actual
+workspace; a documentation example or successful local tool enumeration does
+not establish them. See the official [connection and testing guide](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+
+Keep credentials in operator-managed deployment storage. Do not put them in
+requests, source control, compiler workspaces, job artifacts or diagnostic logs.
+
+## Acceptance receipts
+
+Record the installed service revision and binary hashes, control/worker host
+identities, transport configuration, tool schemas and account/workspace access.
+From ChatGPT, invoke `bench_submit`, retain its durable job ID, disconnect and
+retrieve that same job's status/result later. Repeat from Codex. Validate the
+bound evidence through the existing authenticated exporter and independent
+unpacker. Enumeration, queue fixtures and a local adapter smoke test remain
+separate from those actual client-to-host receipts.
+
+Complete the real compare recipe and host qualification gates separately.
+`measurement_validity=not_evaluated` and a successful execution do not establish
+a compiler speedup or an equivalence decision. The historical retirement recipe
+being superseded does not make the independent #437 service goals complete.
