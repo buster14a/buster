@@ -236,12 +236,20 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool arena_align_position_c
     // Mappings guarantee native page alignment, which can be smaller than an
     // allocation's requested alignment. Round the address, then recover the
     // offset; neither arithmetic failure may publish a partial result.
-    u64 address;
-    u64 aligned_address;
-    bool valid = result && u64_add_checked((u64)arena, position, &address) && align_forward_checked(address, alignment, &aligned_address);
+    bool valid = result != 0;
     if (valid)
     {
-        *result = aligned_address - (u64)arena;
+        u64 address;
+        valid = u64_add_checked((u64)arena, position, &address);
+        if (valid)
+        {
+            u64 aligned_address;
+            valid = align_forward_checked(address, alignment, &aligned_address);
+            if (valid)
+            {
+                *result = aligned_address - (u64)arena;
+            }
+        }
     }
     return valid;
 }
