@@ -73,7 +73,8 @@
 //   c_preprocess_pragma_*,                     pragmas: once, pack, push/pop
 //   c_preprocess_expansion_pragma              macro effects at the rescan cursor
 //   c_include_read .. c_include_name           include resolution and the
-//                                              builtin resource headers
+//                                              builtin resource headers,
+//                                              including stddef request guards
 //   CIncludeGuardState, CIncludeFileTable      shared #import, #pragma once,
 //                                              and #ifndef guard identity
 //   c_preprocess_command_operations,           ordered command-line macro
@@ -8742,18 +8743,40 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
     }
     else if (string_equal(name, S8("stddef.h")))
     {
-        source = S8("#ifndef __BUSTER_PTRDIFF_T\n"
+        // Partial resource-header requests must not claim unrelated names.
+        // Each definition has its own guard so later full includes complete it.
+        source = S8("#if !defined(__need_ptrdiff_t) && !defined(__need_size_t) && "
+                    "!defined(__need_rsize_t) && !defined(__need_wchar_t) && "
+                    "!defined(__need_NULL) && !defined(__need_max_align_t) && "
+                    "!defined(__need_offsetof) && !defined(__need_nullptr_t)\n"
+                    "#define __BUSTER_STDDEF_ALL\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_ptrdiff_t)\n"
+                    "#ifndef __BUSTER_PTRDIFF_T\n"
                     "#define __BUSTER_PTRDIFF_T\n"
                     "typedef __PTRDIFF_TYPE__ ptrdiff_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_size_t)\n"
                     "#ifndef __BUSTER_SIZE_T\n"
                     "#define __BUSTER_SIZE_T\n"
                     "typedef __SIZE_TYPE__ size_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__need_rsize_t) || (defined(__BUSTER_STDDEF_ALL) && "
+                    "defined(__STDC_WANT_LIB_EXT1__) && __STDC_WANT_LIB_EXT1__ >= 1)\n"
+                    "#ifndef __BUSTER_RSIZE_T\n"
+                    "#define __BUSTER_RSIZE_T\n"
+                    "typedef __SIZE_TYPE__ rsize_t;\n"
+                    "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_wchar_t)\n"
                     "#ifndef __BUSTER_WCHAR_T\n"
                     "#define __BUSTER_WCHAR_T\n"
                     "typedef __WCHAR_TYPE__ wchar_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_max_align_t)\n"
                     "#ifndef __BUSTER_MAX_ALIGN_T\n"
                     "#define __BUSTER_MAX_ALIGN_T\n"
                     "typedef union {\n"
@@ -8761,21 +8784,32 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
                     "    long double real;\n"
                     "} max_align_t;\n"
                     "#endif\n"
-                    "#if __STDC_VERSION__ >= 202311L\n"
+                    "#endif\n"
+                    "#if __STDC_VERSION__ >= 202311L && "
+                    "(defined(__BUSTER_STDDEF_ALL) || defined(__need_nullptr_t))\n"
+                    "#ifndef __BUSTER_NULLPTR_T\n"
+                    "#define __BUSTER_NULLPTR_T\n"
                     "typedef typeof(nullptr) nullptr_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_NULL)\n"
                     "#ifndef NULL\n"
                     "#define NULL ((void *)0)\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_offsetof)\n"
                     "#define offsetof(type, member) "
                     "__builtin_offsetof(type, member)\n"
+                    "#endif\n"
+                    "#undef __BUSTER_STDDEF_ALL\n"
                     "#undef __need_ptrdiff_t\n"
                     "#undef __need_size_t\n"
                     "#undef __need_rsize_t\n"
                     "#undef __need_wchar_t\n"
                     "#undef __need_NULL\n"
                     "#undef __need_max_align_t\n"
-                    "#undef __need_offsetof\n");
+                    "#undef __need_offsetof\n"
+                    "#undef __need_nullptr_t\n");
     }
     else if (string_equal(name, S8("limits.h")))
     {

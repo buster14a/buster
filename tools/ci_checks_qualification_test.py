@@ -97,6 +97,15 @@ class QualificationTests(unittest.TestCase):
                          toolchains={key: "synthetic1" for key in tools}, caches={key: "not-used" for key in caches})
             if "BUSTER_CI_ZIG_CACHE_HIT" in caches:
                 entry["caches"]["BUSTER_CI_ZIG_CACHE_HIT"] = "false"
+            if name == "iOS AArch64":
+                comparable = dict(runtime="com.apple.CoreSimulator.SimRuntime.iOS-26-5",
+                                  device_type="com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro")
+                receipt = dict(schema="buster-ci-ios-simulator-selection-v1", status="observed", invalid_bindings=[], reason="none",
+                               repository="buster14a/buster", source_revision=run["head_sha"], run_id=str(run["id"]),
+                               run_attempt=str(run["run_attempt"]), job="mobile",
+                               selection=dict(kind="name-reuse", udid="12345678-1234-1234-1234-123456789ABC", **comparable))
+                entry["simulator_selection"] = reference(self.root, "selected-simulator-" + str(job["id"]) + ".json", receipt)
+                entry["toolchains"]["ios_simulator"] = comparable
             if name == "Android x86-64":
                 entry["toolchains"].update(android_system_image="system-images;android-35;google_apis;x86_64", android_system_image_revision="9")
                 entry["caches"]["android_sdk_package_state_before"] = {
@@ -264,6 +273,52 @@ class QualificationTests(unittest.TestCase):
                     qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
         with self.assertRaisesRegex(ValueError, "unknown conditions role"):
             qualification.condition_keys("not a workflow job")
+
+    def test_selected_simulator_uuid_is_provenance_not_a_comparable(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        entry = value["jobs"]["iOS AArch64"]
+        _, original = qualification.conditions(self.root, reference(self.root, "first-conditions.json", value), run)
+        path = self.root / entry["simulator_selection"]["path"]
+        receipt = json.loads(path.read_text())
+        receipt["selection"]["udid"] = "87654321-4321-4321-4321-CBA987654321"
+        entry["simulator_selection"] = reference(self.root, path.name, receipt)
+        _, changed = qualification.conditions(self.root, reference(self.root, "second-conditions.json", value), run)
+        self.assertEqual(original, changed)
+        self.assertNotIn("udid", changed["iOS AArch64"]["toolchains"]["ios_simulator"])
+
+    def test_missing_or_guessed_simulator_observations_never_pass(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        changes = (lambda e: e.pop("simulator_selection"),
+                   lambda e: e["toolchains"].update(ios_simulator="synthetic1"),
+                   lambda e: e["toolchains"]["ios_simulator"].update(udid="12345678-1234-1234-1234-123456789ABC"),
+                   lambda e: e["toolchains"]["ios_simulator"].update(runtime="latest"))
+        for change in changes:
+            invalid = copy.deepcopy(value)
+            change(invalid["jobs"]["iOS AArch64"])
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid-conditions.json", invalid), run)
+
+    def test_simulator_receipt_identity_actual_fields_and_status_are_required(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        entry = value["jobs"]["iOS AArch64"]
+        path = self.root / entry["simulator_selection"]["path"]
+        original = json.loads(path.read_text())
+        changes = ({"source_revision": "d" * 40}, {"repository": "elsewhere/repo"}, {"run_id": "124"},
+                   {"run_attempt": "2"}, {"job": "lint"}, {"status": "unknown"}, {"invalid_bindings": ["run_id"]},
+                   {"selection": dict(original["selection"], kind="explicit")},
+                   {"selection": dict(original["selection"], udid="FAKE-UDID")},
+                   {"selection": dict(original["selection"], runtime="latest")},
+                   {"selection": dict(original["selection"], device_type=None)},
+                   {"selection": {k: v for k, v in original["selection"].items() if k != "device_type"}})
+        for change in changes:
+            invalid = copy.deepcopy(original)
+            invalid.update(change)
+            entry["simulator_selection"] = reference(self.root, path.name, invalid)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid-conditions.json", value), run)
 
     def test_selected_tool_receipt_identity_and_authority_are_required(self):
         run = self.run_fixture()

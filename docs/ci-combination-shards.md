@@ -398,10 +398,40 @@ controls do not assert a measured speedup or close either research issue.
 retained evidence and emits an independent timing/census verdict. Its module
 docstring defines the campaign format. Missing or incomparable observations
 remain `pending`; complete campaigns can meet or reject each timing threshold.
-Native phase CPU time and peak RSS remain unknown, so positive timing leaves
-overall qualification `pending` and `performance_accepted=false`. Actual
-resource observations and a resource/deadline/cleanup/reliability comparison
-are still required before either issue can be accepted.
+Historical native phase CPU time and peak RSS remain unknown, so positive
+timing alone leaves overall qualification `pending` and
+`performance_accepted=false`. Actual resource observations and a
+resource/deadline/cleanup/reliability comparison are still required before
+either issue can be accepted.
+
+The three new `codex/2120-evidence-v2-*` dispatch refs additionally enable the
+[external resource observer](ci-checks-resources.md). Separate bounded start
+and stop steps surround the unchanged combination workflow steps on every
+desktop role. Their window includes the complete step and runner scheduling
+gaps, including Windows' existing bootstrap/differential setup. The observer
+does not launch, contain, signal or change the payload. Its readiness and final
+completion are separate required evidence outcomes; a successful payload
+cannot replace missing, failed or skipped observer steps. Stop precedes
+configure postprocessing, log sanitization and the existing artifact upload.
+
+The retained source/run/attempt/matrix-role-bound journal contains OS-instance
+busy CPU counters and 200 ms sequential readable-process resident-set scans.
+Busy CPU includes OS, background and observer work. The maximum observed scan
+sum is not an exact simultaneous peak or a guaranteed lower bound: reads are
+non-atomic, shared pages are counted repeatedly, short-lived processes may be
+missed, and denied/vanished/error reads remain explicit. Each scan retains its
+actual duration and gap. Numeric Actions job IDs and assigned-runner/image
+facts must be joined independently with the exact job inventory; a label or
+CPU model alone does not establish host isolation or feature comparability.
+
+These observations supplement the scoped native child witnesses. Neither
+their presence nor controlled completion automatically establishes no resource
+regression. The owning issues still require a comparative resource and
+lifecycle verdict, including incomplete visibility, gaps, deadlines, capture,
+cleanup and every failed/cancelled attempt. Missing or inconclusive evidence
+remains pending; existing timing/runner thresholds are unchanged. The timing
+qualifier continues to report resource review pending until that separate
+review is recorded; do not turn its Boolean into acceptance without evidence.
 The tool records invocation binary/driver hashes within each sample while
 comparing source/policy, toolchains, conditions and exact census across runs;
 it does not require independently linked executables to have identical bytes.
@@ -496,3 +526,37 @@ This extends the owned prospective #2427 source before the separate observer
 #2430 workflow delta. Final actual main/source/workflow pins, retained receipt
 readbacks and all required role joins must be independently checked before A1.
 Historical cohorts and failed/retried receipts retain their original meanings.
+
+### Offline assembly of one retained sample
+
+`tools/ci_checks_sample.py` derives the runtime manifests needed by the strict
+qualification reader without launching a compiler, test or workflow. It depends
+on the prospective cohort reader introduced by #2427. Prepare one input JSON
+object with `schema=buster-ci-checks-sample-input-v1`, the declared `cohort`,
+`variant`, digest-bound `run` and `conditions` references, and `desktops` entries
+containing exactly `job`, `coverage`, `result`, `phases` and `phase_directory`.
+The run reference contains one run object, not the collector's outer runs array.
+Retain the actual API/artifact bytes and verify downloaded archive digests before
+assembly. SHA-256 integrity alone cannot authenticate invented observations.
+
+```sh
+python3 -B tools/ci_checks_sample.py retained/input-123.json --output sample-123.json
+python3 -B tools/ci_checks_sample_test.py -v
+```
+
+Every input reference and nested selected-tool receipt remains relative to the
+input directory. The output must be a fresh JSON filename in that same directory;
+its sibling `sample-123-tests/` contains the derived runtime manifests. Insert
+the emitted sample object in the campaign's `samples` array and preserve its
+declared cohort in a campaign located in that same directory. Moving only the
+sample or conditions file changes reference roots and is unsupported.
+
+The assembler replays phase journals, derives every selected runtime row from
+actual coverage/capability/inventory/observation records, retains raw log hashes
+and the measured host profile, and preserves audit policy and low-core serial
+fallback. It rejects duplicate capability rows and caller-supplied runtime
+manifests. Existing `qualification.sample()` validates the entire assembled
+sample before publication; missing or unknown conditions fail. Fresh generated
+outputs are removed on rejection while retained inputs remain unchanged.
+Successful assembly is evidence preparation only: the full nine-run comparison,
+resource/deadline/cleanup/reliability review and default-promotion gate remain.

@@ -5065,6 +5065,14 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
         }
+        else if (spelling.length && spelling.pointer[0] == 'u')
+        {
+            kind = spelling.length > 1 && spelling.pointer[1] == '8' ? C_TYPE_UNSIGNED_CHAR : C_TYPE_UNSIGNED_SHORT;
+        }
+        else if (spelling.length && spelling.pointer[0] == 'U')
+        {
+            kind = C_TYPE_UNSIGNED_INT;
+        }
         return c_parse_expression_scalar_type(result, kind);
     }
     if (first.kind == C_TOKEN_STRING_LITERAL)
@@ -5515,6 +5523,23 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 // A single token cannot contain a cast or an operator. Keep
                 // its existing leaf policy without another machine frame.
                 last = c_parse_expression_leaf_without_cast(arena, preprocess, result, scope, task->start, task->end);
+                if (machine->validate_expression_constraints && !machine->expression_constraint.length &&
+                    last.value >= result->type_count && first.kind == C_TOKEN_IDENTIFIER)
+                {
+                    // A typedef may be bound in a cast or a type operand, but
+                    // this task is an expression leaf and must name a value.
+                    u32 use = c_parse_identifier_use_index(result, task->start);
+                    CScopeId lookup_scope = scope.value == C_ID_UNDERLYING_INVALID && result->scope_count
+                        ? (CScopeId){.value = 0} : scope;
+                    CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[task->start]);
+                    if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF)
+                    {
+                        machine->expression_constraint = string_format(result->arena, S8("typedef name '{S8}' is not an expression"),
+                            c_token_spelling(preprocess.spelling_base, first));
+                        machine->expression_constraint_token = task->start;
+                    }
+                }
                 task_count -= 1;
                 continue;
             }
@@ -13483,6 +13508,42 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
     c_type_parse_frame_complete(machine, completion_type, completion_index, true);
 }
 
+// In a parameter declaration, a type-name-led group is an abstract function
+// declarator, not a redundantly parenthesized parameter name (C11 6.7.6.3p11).
+// A pointer-led group still declares its own name, even when that name hides
+// a typedef. Match scalar specifier lookup's fallback only for an unbound name.
+BUSTER_C_INTERNAL bool c_parse_parameter_function_list(CParseResult* result, CPreprocessResult preprocess, u32 open, u32 end)
+{
+    bool function_list = false;
+    while (open + 1 < end && c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        open += 1;
+    if (open + 1 < end && c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        preprocess.tokens[open + 1].kind == C_TOKEN_IDENTIFIER)
+    {
+        CToken token = preprocess.tokens[open + 1];
+        function_list = c_parse_type_word_for_dialect_token(preprocess, token);
+        if (!function_list)
+        {
+            CScopeId scope = result->binding_scope.value < result->scope_count ? result->binding_scope : (CScopeId){.value = 0};
+            CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+            if (entity.value == C_ID_UNDERLYING_INVALID)
+                entity = c_parse_lookup_typedef_name_token(result, preprocess.spelling_base, token, true);
+            function_list = entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+        }
+    }
+    return function_list;
+}
+
+BUSTER_C_INTERNAL CTypeParseFrameKind c_parse_parameter_group_kind(CPreprocessResult preprocess, u32 open, bool abstract_group)
+{
+    CTypeParseFrameKind kind = C_TYPE_PARSE_FRAME_PARENTHESIZED;
+    if (abstract_group)
+        kind = c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
+                   ? C_TYPE_PARSE_FRAME_PARAMETER_GROUP : C_TYPE_PARSE_FRAME_FUNCTION_SUFFIX;
+    return kind;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -13548,8 +13609,13 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
         if (frame->declarator_start < frame->end && c_token_is_punctuator(&preprocess.tokens[frame->declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 nested_name_index = 0;
-            bool nested_has_name = c_parse_parenthesized_declarator_name(preprocess, frame->declarator_start, frame->end, &nested_name_index);
-            if (!nested_has_name)
+            bool function_list = c_parse_parameter_function_list(result, preprocess, frame->declarator_start, frame->end);
+            bool nested_has_name = !function_list && c_parse_parenthesized_declarator_name(preprocess, frame->declarator_start, frame->end, &nested_name_index);
+            if (function_list)
+            {
+                nested_name_index = frame->declarator_start;
+            }
+            else if (!nested_has_name)
             {
                 u32 close_index = frame->declarator_start + 1;
                 CType ignored = {0};
@@ -13583,7 +13649,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
                                                       .end = frame->end,
                                                       .declarator_start = frame->declarator_start,
                                                       .name_index = nested_name_index,
-                                                      .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+                                                      .kind = c_parse_parameter_group_kind(preprocess, frame->declarator_start, function_list),
                                                       .has_name = nested_has_name,
                                                   }))
             {
@@ -13822,7 +13888,8 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                 nested_index += 1;
             }
         }
-        frame->nested = nested_index < frame->end && nested_index > frame->declarator_start + 1 &&
+        frame->nested = nested_index < frame->end &&
+                        (nested_index > frame->declarator_start + 1 || frame->kind == C_TYPE_PARSE_FRAME_PARAMETER_GROUP) &&
                         c_token_is_punctuator(&preprocess.tokens[nested_index], C_PUNCTUATOR_LEFT_PARENTHESIS);
         if (frame->nested)
         {
@@ -14073,7 +14140,12 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                 return;
             }
             u32 nested_name_index = 0;
-            bool nested_has_name = c_parse_parenthesized_declarator_name(preprocess, frame->nested_start, frame->close_index, &nested_name_index);
+            // Classification belongs to the outer parameter query. A redundant
+            // group cannot change it; retain the fact instead of rescanning
+            // every remaining group at each depth.
+            bool function_list = frame->kind == C_TYPE_PARSE_FRAME_PARAMETER_GROUP;
+            bool nested_has_name = !function_list &&
+                                   c_parse_parenthesized_declarator_name(preprocess, frame->nested_start, frame->close_index, &nested_name_index);
             frame->stage = C_TYPE_PARSE_STAGE_CHILD;
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = result,
@@ -14083,7 +14155,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                                                       .end = frame->close_index,
                                                       .declarator_start = frame->nested_start,
                                                       .name_index = nested_has_name ? nested_name_index : frame->nested_start,
-                                                      .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+                                                      .kind = c_parse_parameter_group_kind(preprocess, frame->nested_start, function_list),
                                                       .has_name = nested_has_name,
                                                   }))
             {
@@ -14122,6 +14194,41 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
     }
 }
 
+// An abstract function suffix uses the same reserved parameter ranges and
+// child frames as a grouped declarator, without a name or grouping pointer.
+BUSTER_C_INTERNAL void c_type_parse_function_suffix_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
+{
+    CParseResult* result = frame->result;
+    CPreprocessResult preprocess = *frame->preprocess;
+    bool valid = true;
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
+    {
+        valid = frame->declarator_start < frame->end &&
+                c_token_is_punctuator(&preprocess.tokens[frame->declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (valid)
+        {
+            frame->close_index = c_parse_matching_delimiter_indexed(result, preprocess, frame->declarator_start);
+            valid = frame->close_index < frame->end;
+        }
+        if (valid)
+        {
+            frame->pointer_start = frame->declarator_start + 1;
+            frame->name_index = frame->pointer_start;
+            frame->parameter_start = result->parameter_count;
+            frame->written_parameter_count = 0;
+            result->parameter_count += c_parse_parameter_list_reserved_count(preprocess, frame->declarator_start, frame->end);
+            frame->segment_start = frame->declarator_start + 1;
+            frame->scan_index = frame->segment_start;
+            frame->depth = 1;
+            frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
+        }
+    }
+    if (valid)
+        c_type_parse_parenthesized_step(machine, frame);
+    else
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+}
+
 BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 frame_start)
 {
     WORK_LEDGER_RECORD(REDERIVE_TYPE_MACHINE_RUNS, 1);
@@ -14152,7 +14259,11 @@ BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 
             c_type_parse_aggregate_range_step(machine, frame);
             break;
         case C_TYPE_PARSE_FRAME_PARENTHESIZED:
+        case C_TYPE_PARSE_FRAME_PARAMETER_GROUP:
             c_type_parse_parenthesized_step(machine, frame);
+            break;
+        case C_TYPE_PARSE_FRAME_FUNCTION_SUFFIX:
+            c_type_parse_function_suffix_step(machine, frame);
             break;
         case C_TYPE_PARSE_FRAME_PARAMETER:
             c_type_parse_parameter_step(machine, frame);
@@ -15691,8 +15802,13 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     if (declarator_start < end && c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         u32 name_index = 0;
-        bool has_name = c_parse_parenthesized_declarator_name(preprocess, declarator_start, end, &name_index);
-        if (!has_name)
+        bool function_list = c_parse_parameter_function_list(result, preprocess, declarator_start, end);
+        bool has_name = !function_list && c_parse_parenthesized_declarator_name(preprocess, declarator_start, end, &name_index);
+        if (function_list)
+        {
+            name_index = declarator_start;
+        }
+        else if (!has_name)
         {
             u32 close_index = declarator_start + 1;
             CType ignored = {0};
@@ -15781,7 +15897,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachi
                                               .end = suffix_end,
                                               .declarator_start = declarator_start,
                                               .name_index = name_index,
-                                              .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+                                              .kind = c_parse_parameter_group_kind(preprocess, declarator_start, !has_name && name_index == declarator_start),
                                               .has_name = has_name,
                                           });
     if (pushed)
@@ -18316,6 +18432,7 @@ struct CAutoDeclarationInfo
     u32 initializer_start;
     u32 initializer_end;
     bool has_auto_type;
+    bool is_c23_auto;
     bool has_initializer;
     bool has_multiple_declarators;
     bool invalid_declarator;
@@ -18371,7 +18488,8 @@ BUSTER_C_INTERNAL bool c_parse_auto_storage_word(String8 spelling, CAutoDeclarat
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preprocess, u32 start, u32 end, CAutoDeclarationInfo* info)
+BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CParseResult* parse, CPreprocessResult preprocess, CScopeId scope,
+                                                       u32 start, u32 end, CAutoDeclarationInfo* info)
 {
     *info = (CAutoDeclarationInfo){
         .auto_index = UINT32_MAX,
@@ -18401,6 +18519,7 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preproces
             break;
         }
     }
+    u32 c23_auto_index = UINT32_MAX;
     u32 scan = start;
     while (scan < specifier_end)
     {
@@ -18422,7 +18541,58 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preproces
                 info->auto_index = scan;
             }
         }
+        else if (c_preprocess_dialect_is_c23(preprocess.dialect) &&
+                 preprocess.tokens[scan].kind == C_TOKEN_IDENTIFIER &&
+                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[scan]), S8("auto")))
+        {
+            c23_auto_index = scan;
+        }
         scan += 1;
+    }
+    if (!info->has_auto_type && c23_auto_index != UINT32_MAX)
+    {
+        // `auto` remains a storage word when an explicit type follows it,
+        // including a visible typedef. Only a declaration's specifier prefix
+        // participates; initializer words and declarator groups cannot supply
+        // a type or introduce inference.
+        bool explicit_type = false;
+        scan = start;
+        while (scan < specifier_end)
+        {
+            u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, specifier_end);
+            if (skipped != scan)
+            {
+                scan = skipped;
+                continue;
+            }
+            CToken token = preprocess.tokens[scan];
+            if (token.kind != C_TOKEN_IDENTIFIER)
+            {
+                break;
+            }
+            if (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("auto")))
+            {
+                info->conflicting_specifier |= info->auto_index != UINT32_MAX;
+                info->auto_index = scan;
+            }
+            else if ((c_parse_word_bits_token(preprocess, token) & C_WORD_QUALIFIER_ATOMIC) && scan + 1 < specifier_end &&
+                     c_token_is_punctuator(&preprocess.tokens[scan + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                explicit_type = true;
+                break;
+            }
+            else if (!c_parse_type_qualifier_word_token(preprocess, token, &info->qualifiers) &&
+                     !c_parse_auto_storage_word(c_token_spelling(preprocess.spelling_base, token), info))
+            {
+                CEntityId entity = c_parse_lookup_entity_token(parse, preprocess.spelling_base, scope, &token);
+                explicit_type = c_parse_type_word_for_dialect_token(preprocess, token) ||
+                    (entity.value < parse->entity_count && parse->entities[entity.value].kind == C_ENTITY_TYPEDEF);
+                break;
+            }
+            scan += 1;
+        }
+        info->has_auto_type = info->auto_index != UINT32_MAX && !explicit_type;
+        info->is_c23_auto = info->has_auto_type;
     }
     bool result;
     if (!info->has_auto_type)
@@ -18857,7 +19027,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                                                     CScopeId scope, u32 declaration_index, u32 start, u32 end)
 {
     CAutoDeclarationInfo auto_info = {0};
-    bool is_auto_type = c_parse_auto_declaration_info(preprocess, start, end, &auto_info);
+    bool is_auto_type = c_parse_auto_declaration_info(result, preprocess, scope, start, end, &auto_info);
     if (is_auto_type && !c_parse_storage_classes_valid(result, preprocess, scope, start, end))
     {
         return false;
@@ -18909,7 +19079,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         is_static_storage |= auto_info.is_static_storage;
         is_extern |= auto_info.is_extern;
         is_thread_local |= auto_info.is_thread_local;
-        if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
+        if (!auto_info.is_c23_auto && !c_preprocess_dialect_is_gnu(preprocess.dialect))
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                S8("GNU __auto_type is only available in GNU dialects"));
@@ -18918,31 +19088,36 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         if (auto_info.has_multiple_declarators)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("GNU __auto_type may only be used with a single declarator"));
+                               auto_info.is_c23_auto ? S8("C23 auto may only be used with a single declarator") :
+                                                       S8("GNU __auto_type may only be used with a single declarator"));
             return false;
         }
         if (is_typedef || is_static_storage || is_extern || is_thread_local)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("GNU __auto_type requires an automatic object declaration"));
+                               auto_info.is_c23_auto ? S8("C23 auto inference currently requires an automatic object declaration") :
+                                                       S8("GNU __auto_type requires an automatic object declaration"));
             return false;
         }
         if (auto_info.conflicting_specifier)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("GNU __auto_type cannot be combined with another type specifier"));
+                               auto_info.is_c23_auto ? S8("C23 auto cannot be combined with another inferred type specifier") :
+                                                       S8("GNU __auto_type cannot be combined with another type specifier"));
             return false;
         }
         if (auto_info.invalid_declarator || auto_info.name_index >= end)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("GNU __auto_type requires a plain identifier as declarator"));
+                               auto_info.is_c23_auto ? S8("C23 auto requires a plain identifier as declarator") :
+                                                       S8("GNU __auto_type requires a plain identifier as declarator"));
             return false;
         }
         if (!auto_info.has_initializer || auto_info.initializer_start >= auto_info.initializer_end)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("GNU __auto_type requires an initialized data declaration"));
+                               auto_info.is_c23_auto ? S8("C23 auto requires an initialized data declaration") :
+                                                       S8("GNU __auto_type requires an initialized data declaration"));
             return false;
         }
         u32 diagnostic_checkpoint = result->diagnostic_count;
@@ -18953,7 +19128,8 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             if (result->diagnostic_count == diagnostic_checkpoint)
             {
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                                   S8("could not infer the type of the GNU __auto_type initializer"));
+                                   auto_info.is_c23_auto ? S8("could not infer the type of the C23 auto initializer") :
+                                                           S8("could not infer the type of the GNU __auto_type initializer"));
             }
             return false;
         }
@@ -18962,7 +19138,8 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                                                         .element_type = result->types[inferred.value].element_type, .is_restrict = true}))
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("restrict-qualified GNU __auto_type must infer an object pointer type"));
+                               auto_info.is_c23_auto ? S8("restrict-qualified C23 auto must infer an object pointer type") :
+                                                       S8("restrict-qualified GNU __auto_type must infer an object pointer type"));
             return false;
         }
         if (auto_info.qualifiers.is_const || auto_info.qualifiers.is_volatile || auto_info.qualifiers.is_restrict || auto_info.qualifiers.is_atomic)
@@ -20546,7 +20723,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 end += 1;
             }
             CAutoDeclarationInfo auto_declaration_info = {0};
-            bool auto_declaration = c_parse_auto_declaration_info(preprocess, index, end, &auto_declaration_info);
+            bool auto_declaration = c_parse_auto_declaration_info(result, preprocess, scope_stack[scope_count - 1], index, end, &auto_declaration_info);
             if (end < body_end &&
                 c_parse_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index, index, end))
             {
@@ -27499,7 +27676,9 @@ BUSTER_C_INTERNAL void c_parse_validate_statement_expression_range(CTypeParseMac
                 while (limit < close && c_token_is_punctuator(&preprocess.tokens[limit], C_PUNCTUATOR_COMMA))
                     limit = c_parse_constraint_expression_end(result, preprocess, limit + 1, close);
                 CTypeId type = C_TYPE_ID_INVALID;
-                bool declaration_part = for_loop && part_index == 0 && part < limit && c_parse_declaration_keyword_at(result, preprocess, part);
+                bool declaration_part = for_loop && part_index == 0 && part < limit &&
+                    (c_parse_declaration_keyword_at(result, preprocess, part) ||
+                     c_parse_type_start_token(result, preprocess, scope, preprocess.tokens[part]));
                 bool typed = !declaration_part && part < limit && c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess,
                     result, scope, part, limit, &type, diagnostic);
                 bool condition = !for_loop || part_index == 1;
