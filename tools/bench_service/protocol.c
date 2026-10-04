@@ -1,6 +1,7 @@
 /* Versioned local control codec, not a network server or authentication layer.
  * Requests and ordinary replies are capped at 536 bytes, independent of queue
- * size. Authenticated export replies alone allow one fixed 64 KiB chunk.
+ * size. Off-host observation trailers add 32 reply bytes; authenticated export
+ * replies allow one fixed 64 KiB chunk. Local replies keep their original wire.
  * Both human CLI commands and raw protocol requests enter bq_dispatch.
  * bq_public_response_valid checks successful typed replies before rendering.
  */
@@ -80,7 +81,7 @@ BUSTER_GLOBAL_LOCAL u32 bq_response_body_size(BqPacket const* packet)
 BUSTER_GLOBAL_LOCAL void bq_packet_schema(BqPacket* packet, u32 schema, u32 operation, u64 correlation, u8 const* body, u32 size)
 {
     *packet = (BqPacket){0};
-    if (size <= BQ_CONTROL_BODY + BQ_OBSERVATION_SIZE || (operation == (BQ_OP_EXPORT | 0x80000000u) && size <= BQ_EXPORT_BODY_CAP))
+    if (size <= BQ_CONTROL_BODY || (operation == (BQ_OP_EXPORT | 0x80000000u) && size <= BQ_EXPORT_BODY_CAP))
     {
         packet->size = BQ_CONTROL_HEADER + size;
         memcpy(packet->bytes, "BQP1", 4);
@@ -119,8 +120,10 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
         u32 operation = bq_u32(request->bytes + 8);
         u32 length = bq_response_body_size(response);
         u8 const* observation = bq_observation(response);
-        if (observation && ((bq_u32(observation + 16) & ~31u) || bq_u32(observation + 20) > 3 ||
-                            bq_u32(observation + 24) || bq_u32(observation + 28))) valid = false;
+        bool observation_valid = !observation ||
+            (((operation >= BQ_OP_SUBMIT && operation <= BQ_OP_LOGS) || operation == BQ_OP_SUBMIT_EXCLUSIVE) &&
+             !(bq_u32(observation + 16) & ~31u) && bq_u32(observation + 20) <= 3 &&
+             !bq_u32(observation + 24) && !bq_u32(observation + 28));
         u8 const* data = response->bytes + BQ_CONTROL_HEADER;
         u8 const* arguments = request->bytes + BQ_CONTROL_HEADER;
         if (operation == BQ_OP_EXPORT)
@@ -228,6 +231,7 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
         {
             valid = false;
         }
+        valid = valid && observation_valid;
     }
     return valid;
 }

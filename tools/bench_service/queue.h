@@ -18,8 +18,8 @@
 #define BQ_SCHEMA_NATIVE 4u
 #define BQ_SCHEMA_RUNTIME 6u
 #define BQ_SCHEMA BQ_SCHEMA_RUNTIME
-/* Worker custody ledgers alone use the assigned generation; ordinary
- * local/control journals stay at BQ_SCHEMA. */
+/* Worker custody ledgers alone use v7; local/control journals retain the
+ * compiled normal generation. Import never changes the request identity. */
 #define BQ_SCHEMA_ASSIGNED 7u
 #define BQ_CONTROL_SCHEMA 2u
 #define BQ_PENDING_CAP 8u

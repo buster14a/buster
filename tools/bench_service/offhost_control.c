@@ -15,10 +15,18 @@ typedef struct BqOffhostControl
 } BqOffhostControl;
 
 #ifdef __linux__
+BUSTER_GLOBAL_LOCAL bool bq_offhost_recipe_supported(BqRecipe recipe)
+{
+    bool supported = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
+                     bq_recipe_native(recipe);
+    return supported;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_control_assignment(BqOffhostControl* control, BqSessionPacket* packet)
 {
     BqJob* job = bq_job(&control->queue.state, control->identity.id);
-    BqError error = !job || job->token != control->identity.token ? BQ_CONFLICT : BQ_OK;
+    BqError error = !job || job->token != control->identity.token ? BQ_CONFLICT :
+                    !bq_offhost_recipe_supported(bq_request_recipe(&job->request)) ? BQ_UNSUPPORTED : BQ_OK;
     if (error == BQ_OK)
     {
         bq_session_packet(packet, BQ_SESSION_HELLO | BQ_SESSION_REPLY, BQ_OK, &control->identity,
@@ -79,6 +87,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_open(BqOffhostControl* control, char cons
         BqError quiet = error == BQ_OK ? bq_offhost_marked(&control->queue, "quiet", &control->identity) : error;
         if (quiet != BQ_OK && quiet != BQ_NOT_FOUND) error = quiet;
         control->quiet = quiet == BQ_OK;
+        control->channel_lost = control->quiet;
     }
     if (error != BQ_OK) bq_close(&control->queue);
     return error;
@@ -296,6 +305,43 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_publish_cache(BqOffhostControl* control)
     return error;
 }
 
+BUSTER_GLOBAL_LOCAL BqError bq_control_native_read(BqOffhostControl* control, u64 cursor, u8 output[BQ_CONTROL_BODY], u32* output_size)
+{
+    *output_size = 0;
+    BqJob* job = bq_job(&control->queue.state, control->identity.id);
+    BqError error = !job || !bq_recipe_native(bq_request_recipe(&job->request)) ? BQ_UNSUPPORTED : BQ_OK;
+    char identity[65] = {0}, program[65] = {0}, manifest[BQ_NATIVE_MANIFEST_CAP];
+    u32 length = 0;
+    u64 size = 0;
+    if (error == BQ_OK) memcpy(identity, bq_field(&job->request, 3).pointer, 64);
+    int store = error == BQ_OK ? bq_native_store(&control->queue) : -1;
+    int directory = store >= 0 ? openat(store, identity, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    struct stat info = {0};
+    if (error == BQ_OK && (directory < 0 || fstat(directory, &info) != 0 || !S_ISDIR(info.st_mode) ||
+        info.st_uid != geteuid() || (info.st_mode & 07777) != 0500 ||
+        !bq_native_description(directory, identity, manifest, &length, program, &size))) error = BQ_SOURCE_MISMATCH;
+    int file = error == BQ_OK ? openat(directory, "program", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
+    if (error == BQ_OK && !bq_native_file(file, (off_t)size, 0400)) error = BQ_SOURCE_MISMATCH;
+    if (error == BQ_OK)
+    {
+        memcpy(output, program, 64);
+        bq_put64(output + 64, size);
+        if (cursor == UINT64_MAX) *output_size = 72;
+        else if (cursor >= size) error = BQ_BAD_REQUEST;
+        else
+        {
+            u32 count = size - cursor < BQ_CONTROL_BODY - 80 ? (u32)(size - cursor) : BQ_CONTROL_BODY - 80;
+            bq_put64(output + 72, cursor);
+            if (!bq_read(file, output + 80, count, cursor)) error = BQ_IO;
+            else *output_size = 80 + count;
+        }
+    }
+    if (file >= 0) close(file);
+    if (directory >= 0) close(directory);
+    if (store >= 0) close(store);
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_control_session(BqOffhostControl* control, BqSessionPacket const* request,
                                               BqSessionPacket* response)
 {
@@ -351,6 +397,17 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_session(BqOffhostControl* control, BqSess
         if (error == BQ_OK) error = bq_control_receipt(control, body);
         if (error == BQ_OK) error = bq_offhost_observe(&control->queue, "receipt", &incoming);
     }
+    else if (error == BQ_OK && operation == BQ_SESSION_NATIVE_READ && size == 8)
+    {
+        BqError quiet = bq_offhost_marked(&control->queue, "quiet", &incoming);
+        if (quiet == BQ_OK) error = BQ_BUSY;
+        else if (quiet != BQ_NOT_FOUND) error = quiet;
+        u8 output[BQ_CONTROL_BODY];
+        u32 output_size = 0;
+        if (error == BQ_OK) error = bq_offhost_marked(&control->queue, "custody", &incoming);
+        if (error == BQ_OK) error = bq_control_native_read(control, bq_u64(body), output, &output_size);
+        if (error == BQ_OK) bq_session_packet(response, operation | BQ_SESSION_REPLY, BQ_OK, &incoming, output, output_size);
+    }
     else if (error == BQ_OK && operation == BQ_SESSION_CHUNK)
         error = bq_control_transfer(control, body, size);
     else if (error == BQ_OK && operation == BQ_SESSION_COMPLETE && !size)
@@ -369,7 +426,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_session(BqOffhostControl* control, BqSess
         }
     }
     else if (error == BQ_OK) error = BQ_BAD_REQUEST;
-    if (operation != BQ_SESSION_HELLO || error != BQ_OK)
+    if ((operation != BQ_SESSION_HELLO && operation != BQ_SESSION_NATIVE_READ) || error != BQ_OK)
         bq_session_packet(response, operation | BQ_SESSION_REPLY, error,
                           operation == BQ_SESSION_HELLO ? &control->identity : &incoming, NULL, 0);
     control->worker_messages += 1;
@@ -395,6 +452,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_observation(BqOffhostControl* control, Bq
         BqError quiet = bq_offhost_marked(&control->queue, "quiet", &identity);
         if (quiet == BQ_OK) flags |= BQ_OBSERVATION_STALE | BQ_OBSERVATION_PAUSED | BQ_OBSERVATION_LIFECYCLE_UNAVAILABLE;
         else if (quiet != BQ_NOT_FOUND) error = quiet;
+    }
+    if (job->token && job->id == control->identity.id)
+    {
         if (control->queue.needs_reconciliation) flags |= BQ_OBSERVATION_RECONCILIATION;
         if (control->channel_lost) flags |= BQ_OBSERVATION_RECONCILIATION | BQ_OBSERVATION_QUARANTINE;
     }
@@ -419,18 +479,66 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_observation(BqOffhostControl* control, Bq
     return error;
 }
 
+BUSTER_GLOBAL_LOCAL BqError bq_control_logs(BqQueue* queue, u8 const* arguments, BqPacket* response, u64 correlation)
+{
+    BqJob* job = bq_job(&queue->state, bq_u64(arguments));
+    u64 after = bq_u64(arguments + 8), next = after;
+    BqError error = !job || !string_equal(bq_field(&job->request, 0), S8(BQ_EXPORT_PRINCIPAL)) ? BQ_NOT_FOUND :
+                    after > queue->state.sequence ? BQ_BAD_REQUEST : BQ_OK;
+    u8 output[20 + BQ_LOG_PAGE * 32] = {0};
+    u32 count = 0;
+    bool more = false;
+    for (u32 i = 0; error == BQ_OK && i < queue->state.event_count; i += 1)
+    {
+        BqEvent const* event = queue->state.events + i;
+        /* Intermediate execution phases are synthesized only to reconcile the
+         * existing queue validator. They are not worker observations. */
+        bool observed = event->kind != BQ_RESULT_BIND && (event->kind != BQ_ADVANCE || event->phase == BQ_FINISHED);
+        if (observed && event->job_id == job->id && event->sequence > after)
+        {
+            if (count == BQ_LOG_PAGE) more = true;
+            else
+            {
+                u8* record = output + 20 + count * 32;
+                bq_put64(record, event->sequence);
+                bq_put64(record + 8, event->job_id);
+                bq_put32(record + 16, (u32)event->kind);
+                bq_put32(record + 20, (u32)event->phase);
+                bq_put32(record + 24, (u32)event->outcome);
+                next = event->sequence;
+                count += 1;
+            }
+        }
+    }
+    if (error == BQ_OK)
+    {
+        bq_put32(output + 4, count);
+        bq_put64(output + 8, next);
+        bq_put32(output + 16, more);
+        bq_packet(response, BQ_OP_LOGS | 0x80000000u, correlation, output, 20 + count * 32);
+    }
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_control_public(BqOffhostControl* control, u8 const* request, u32 size, BqPacket* response)
 {
     BqQueue* queue = &control->queue;
     BqError error = bq_transport_public_request(request, size);
     u32 operation = size >= BQ_CONTROL_HEADER ? bq_u32(request + 8) : 0;
+    if (error == BQ_OK && (operation == BQ_OP_SUBMIT || operation == BQ_OP_SUBMIT_EXCLUSIVE))
+    {
+        BqRequest work = {.size = size - BQ_CONTROL_HEADER};
+        memcpy(work.bytes, request + BQ_CONTROL_HEADER, work.size);
+        if (!bq_offhost_recipe_supported(bq_request_recipe(&work))) error = BQ_UNSUPPORTED;
+    }
     if (error == BQ_OK && operation == BQ_OP_CAPABILITIES)
     {
         char const capabilities[] = "schema=2 executor=off-host-control-unqualified pending=8 lifetime-jobs=512\n"
-            "recipes=validate-buster-v1,zen5-calibration-v1 cache=control-local-original-sealed\n"
+            "service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1,native-runtime-v1 cache=control-local-original-sealed\n"
             "worker=initiated-fixed-ssh quiet=whole-job no-heartbeat lease=no-expiry\n"
-            "lifecycle=last-observed posthoc-phases cancellation=durable-intent-until-worker-outcome\n"
-            "qualification=local-fixtures-only native-remote=unsupported observation=BQOBS001-utc-ms\n";
+            "lifecycle=last-observed cancellation=durable-intent-until-worker-outcome\n"
+            "qualification=local-fixtures-only native-remote=execute-and-runtime-unqualified observation=BQOBS001-utc-ms\n";
+        _Static_assert(sizeof(capabilities) - 1 <= BQ_CONTROL_BODY - 4, "offhost capabilities fit");
         u8 output[BQ_CONTROL_BODY] = {0};
         memcpy(output + 4, capabilities, sizeof(capabilities) - 1);
         bq_packet(response, operation | 0x80000000u, bq_u64(request + 16), output, 4 + sizeof(capabilities) - 1);
@@ -474,6 +582,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_public(BqOffhostControl* control, u8 cons
             bq_packet(response, operation | 0x80000000u, bq_u64(request + 16), output, output_size);
         }
     }
+    else if (error == BQ_OK && operation == BQ_OP_LOGS)
+        error = size == BQ_CONTROL_HEADER + 16 ? bq_control_logs(queue, request + BQ_CONTROL_HEADER,
+                    response, bq_u64(request + 16)) : BQ_BAD_REQUEST;
     else if (error == BQ_OK && operation == BQ_OP_EXPORT)
     {
         u8 const* body = request + BQ_CONTROL_HEADER;
@@ -487,7 +598,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_public(BqOffhostControl* control, u8 cons
     }
     else if (error == BQ_OK && (operation == BQ_OP_STATUS || operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL)) error = BQ_BAD_REQUEST;
     else if (error == BQ_OK) error = bq_transport_dispatch(queue, request, size, response);
-    if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_EXPORT)
+    if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_EXPORT && operation < BQ_OP_NATIVE_BEGIN)
     {
         u64 id = operation == BQ_OP_LOGS ? bq_u64(request + BQ_CONTROL_HEADER) : bq_u64(response->bytes + BQ_CONTROL_HEADER + 4);
         BqJob* job = bq_job(&queue->state, id);

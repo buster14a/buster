@@ -5810,8 +5810,10 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_transport_worker_signal_handoff();
     bq_test_offhost_codec();
     bq_test_offhost_assigned_worker();
-    bq_test_offhost_cache(false);
-    bq_test_offhost_cache(true);
+    bq_test_offhost_custodian();
+    bq_test_offhost_cache(false, false);
+    bq_test_offhost_cache(true, false);
+    bq_test_offhost_cache(false, true);
     bq_test_offhost_quiet_load();
     bq_test_export_inventory();
     bq_test_export(true);

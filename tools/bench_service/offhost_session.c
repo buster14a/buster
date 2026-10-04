@@ -18,7 +18,7 @@ typedef enum BqSessionOperation
 {
     BQ_SESSION_HELLO = 1, BQ_SESSION_CUSTODY, BQ_SESSION_QUIET,
     BQ_SESSION_RESULT, BQ_SESSION_CHUNK, BQ_SESSION_COMPLETE,
-    BQ_SESSION_TERMINAL_ACK, BQ_SESSION_CANCEL
+    BQ_SESSION_TERMINAL_ACK, BQ_SESSION_CANCEL, BQ_SESSION_NATIVE_READ
 } BqSessionOperation;
 
 typedef struct BqSessionPacket
@@ -66,7 +66,7 @@ BUSTER_GLOBAL_LOCAL bool bq_session_valid(BqSessionPacket const* packet, bool re
                  bq_u32(packet->bytes + 16) == packet->size - BQ_SESSION_HEADER &&
                  (operation & BQ_SESSION_REPLY) == (reply ? BQ_SESSION_REPLY : 0) &&
                  (operation & ~BQ_SESSION_REPLY) >= BQ_SESSION_HELLO &&
-                 (operation & ~BQ_SESSION_REPLY) <= BQ_SESSION_CANCEL &&
+                 (operation & ~BQ_SESSION_REPLY) <= BQ_SESSION_NATIVE_READ &&
                  bq_u32(packet->bytes + 20) <= BQ_EXPORT_TIMEOUT && (reply || !bq_u32(packet->bytes + 20)) &&
                  bq_result_digest_valid(packet->bytes + 104);
     bool control_empty = true;
@@ -98,6 +98,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_record(BqQueue* queue, char const* name, 
         error = fd < 0 || fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_uid != geteuid() ||
                 info.st_nlink != 1 || (info.st_mode & 0777) != 0400 || info.st_size != size ? BQ_CORRUPT : BQ_OK;
         if (error == BQ_OK && (!bq_read(fd, previous, size, 0) || memcmp(previous, bytes, size))) error = BQ_CONFLICT;
+        if (error == BQ_OK && (fsync(fd) != 0 || fsync(queue->directory_fd) != 0)) error = BQ_IO;
     }
     else if (error == BQ_OK)
     {

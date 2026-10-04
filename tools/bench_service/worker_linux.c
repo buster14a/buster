@@ -3918,7 +3918,13 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     bool instance_bound = false;
     BqJob* job = *id ? bq_job(&queue->state, *id) : NULL;
     bool recovering = queue->needs_reconciliation;
-    if (error == BQ_OK && !recovering && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
+    if (error == BQ_OK && !recovering && !config->assigned_attempt && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
+    if (error == BQ_OK && config->assigned_attempt && config->retained_lease_descriptor >= 3 && config->quarantine->descriptor < 0)
+    {
+        int duplicate = fcntl(config->retained_lease_descriptor, F_DUPFD_CLOEXEC, 3);
+        if (duplicate < 0 || bq_worker_lease_adopt(lease_path, duplicate, &lease) != 0)
+            error = BQ_CONFIGURATION_MISMATCH;
+    }
     if (error == BQ_OK && config->quarantine->descriptor >= 0)
     {
         int descriptor = config->quarantine->descriptor;
@@ -3938,14 +3944,9 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && recovering)
         error = bq_worker_recover(queue, config, backend, lease_path, current_boot, job, &lease,
                                   &finalization);
-    if (error == BQ_OK && !recovering && config->assigned_attempt)
-    {
-        int duplicate = fcntl(config->retained_lease_descriptor, F_DUPFD_CLOEXEC, 3);
-        if (duplicate < 0 || bq_worker_lease_adopt(lease_path, duplicate, &lease) != 0)
-            error = BQ_CONFIGURATION_MISMATCH;
-    }
+    if (error == BQ_OK && !recovering && config->assigned_attempt && lease.descriptor < 0) error = BQ_CONFIGURATION_MISMATCH;
     if (error == BQ_OK && !recovering && !config->assigned_attempt && bq_worker_lease_acquire(lease_path, &lease) != 0) error = BQ_BUSY;
-    if (error == BQ_OK && !recovering && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
+    if (error == BQ_OK && !recovering && !config->assigned_attempt && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
     u64 token = 0;
     if (error == BQ_OK && !recovering && config->assigned_attempt)
     {
@@ -4185,6 +4186,13 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         lease.descriptor = -1;
     }
     if (!bq_worker_lease_handoff_close(&handoff) && error == BQ_OK) error = BQ_IO;
+    if (config && config->assigned_attempt && config->retained_lease_descriptor < 0 &&
+        config->quarantine && lease.descriptor >= 0 && config->quarantine->descriptor < 0)
+    {
+        config->quarantine->descriptor = lease.descriptor;
+        snprintf(config->quarantine->lease_path, sizeof(config->quarantine->lease_path), "%s", lease_path);
+        lease.descriptor = -1;
+    }
     bq_worker_lease_release(&lease);
     if (finalization.result_directory >= 0) close(finalization.result_directory);
     if (handoff_blocked && sigprocmask(SIG_SETMASK, &prior_signals, NULL) != 0) error = BQ_IO;

@@ -377,7 +377,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
 {
     BqError error = BQ_OK;
     BqJob* job = NULL;
-    if ((schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA_ASSIGNED) || (state->journal_schema && schema < state->journal_schema) ||
+    if ((schema < BQ_SCHEMA_LEGACY || (schema > BQ_SCHEMA && schema != BQ_SCHEMA_ASSIGNED)) || (state->journal_schema && schema < state->journal_schema) ||
         sequence != state->sequence + 1 || state->event_count == BQ_EVENT_CAP || kind < BQ_SUBMIT || kind > BQ_ASSIGN_IMPORT)
     {
         error = BQ_INVALID_TRANSITION;
@@ -727,7 +727,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_replay(BqQueue* queue)
             u32 kind = bq_u32(frame + 12);
             u64 sequence = bq_u64(frame + 24);
             u32 schema = bq_u32(frame + 8);
-            if (memcmp(frame, "BQJNL001", 8) || schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA_ASSIGNED ||
+            if (memcmp(frame, "BQJNL001", 8) || schema < BQ_SCHEMA_LEGACY || (schema > BQ_SCHEMA && schema != BQ_SCHEMA_ASSIGNED) ||
                 (queue->state.journal_schema && schema < queue->state.journal_schema) || bq_u32(frame + 20) ||
                 length > BQ_JOURNAL_BODY_CAP || kind < BQ_SUBMIT || kind > BQ_ASSIGN_IMPORT ||
                 (kind != BQ_RESULT_BIND && kind != BQ_ASSIGN_IMPORT && length > BQ_REQUEST_CAP) ||

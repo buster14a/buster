@@ -180,7 +180,13 @@ BUSTER_GLOBAL_LOCAL bool bq_response_write(u32 operation, BqPacket const* respon
     }
     else
     {
-        written = fprintf(output, "job=%" PRIu64 " token=%" PRIu64 " sequence=%" PRIu64
+        if (bq_observation(response))
+            written = fprintf(output, "job=%" PRIu64 " token=%" PRIu64 " phase=%s outcome=%s validity=not-evaluated"
+                              " cancel-requested=%u request-sha256=%.64s failure=%s\n",
+                              (uint64_t)bq_u64(data + 4), (uint64_t)bq_u64(data + 12),
+                              bq_phase_name(bq_u32(data + 28)), bq_outcome_name(bq_u32(data + 32)), bq_u32(data + 40),
+                              (char const*)data + 56, bq_error_name((BqError)bq_u32(data + 120))) >= 0;
+        else written = fprintf(output, "job=%" PRIu64 " token=%" PRIu64 " sequence=%" PRIu64
                           " phase=%s outcome=%s validity=not-evaluated cancel-requested=%u reconciliation=%u"
                           " pending=%u retained=%u request-sha256=%.64s failure=%s\n",
                           (uint64_t)bq_u64(data + 4), (uint64_t)bq_u64(data + 12), (uint64_t)bq_u64(data + 20),
@@ -189,15 +195,29 @@ BUSTER_GLOBAL_LOCAL bool bq_response_write(u32 operation, BqPacket const* respon
                           bq_error_name((BqError)bq_u32(data + 120))) >= 0;
         if (written)
         {
-            bool bound = response->size == BQ_CONTROL_CAP;
+            bool bound = bq_response_body_size(response) == BQ_CONTROL_BODY;
             written = fprintf(output, "result-bound=%u statistical-decision=not-evaluated\n", bound ? 1u : 0u) >= 0;
             if (written && bound)
             {
-                written = fprintf(output, "result-root=%.*s\nmanifest-sha256=%.64s\nbundle-sha256=%.64s\n"
-                                  "full-result-sha256=%.64s\n", (int)bq_u32(data + 124), (char const*)data + 128,
+                if (!bq_observation(response))
+                    written = fprintf(output, "result-root=%.*s\n", (int)bq_u32(data + 124), (char const*)data + 128) >= 0;
+                if (written) written = fprintf(output, "manifest-sha256=%.64s\nbundle-sha256=%.64s\n"
+                                  "full-result-sha256=%.64s\n",
                                   (char const*)data + 320, (char const*)data + 384, (char const*)data + 448) >= 0;
             }
         }
+    }
+    u8 const* observation = bq_observation(response);
+    if (written && observation)
+    {
+        u32 flags = bq_u32(observation + 16);
+        char const* cancellation[] = {"none", "intent", "applied", "too-late"};
+        written = fprintf(output, "last-observed-utc-ms=%" PRIu64 " stale=%u live-export-paused=%u reconciliation=%u"
+                          " quarantined=%u lifecycle-unavailable=%u cancellation=%s\n",
+                          (uint64_t)bq_u64(observation + 8), !!(flags & BQ_OBSERVATION_STALE),
+                          !!(flags & BQ_OBSERVATION_PAUSED), !!(flags & BQ_OBSERVATION_RECONCILIATION),
+                          !!(flags & BQ_OBSERVATION_QUARANTINE), !!(flags & BQ_OBSERVATION_LIFECYCLE_UNAVAILABLE),
+                          cancellation[bq_u32(observation + 20)]) >= 0;
     }
     return written;
 }
@@ -256,7 +276,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
             .lease_file = S8("/var/lib/buster-bench/lease/host.lock"),
             .boot_id_file = S8("/proc/sys/kernel/random/boot_id"),
             .cgroup_root = S8("/sys/fs/cgroup"),
-            .limits = {0, 8ull * 1024 * 1024 * 1024, 0, 256, 60ull * 60 * 1000000},
+            .limits = {2, 8ull * 1024 * 1024 * 1024, 0, 256, 60ull * 60 * 1000000},
             .quarantine = &bq_worker_quarantine,
             .queue_root = S8("/var/lib/buster-bench/queue"),
             .production_path = true,
@@ -553,6 +573,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "fake-reconcile DIR JOB TOKEN | materialize DIR INSTALLED_ROOT WORKSPACE_ROOT | "
                     "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | "
                     "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR | rpc SOCKET | "
+                    "control-serve ROOT PUBLIC_SOCKET WORKER_SOCKET | worker-agent | worker-stdio | "
                     "mcp SOCKET | client SOCKET capabilities/submit/status/result/cancel/logs ... | "
                     "gateway capabilities | gateway upload-program FILE | gateway submit-program KEY MANIFEST_SHA | "
                     "gateway submit KEY BASE_SHA CANDIDATE_SHA | "

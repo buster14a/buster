@@ -24,7 +24,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_connect(char const* socket_path, int* out
 
 BUSTER_GLOBAL_LOCAL BqError bq_control_serve(char const* root, char const* public_path, char const* worker_path, char const machine[SHA256_HEX_CAPACITY])
 {
-    BqOffhostControl control;
+    BqOffhostControl control = {.queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1}};
     BqTransportEndpoint public = {.listener = -1, .parent = -1};
     BqTransportEndpoint worker = {.listener = -1, .parent = -1};
     BqError error = !strcmp(public_path, worker_path) ? BQ_BAD_REQUEST : bq_control_open(&control, root, machine);
@@ -115,7 +115,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_control_serve(char const* root, char const* publi
 BUSTER_GLOBAL_LOCAL BqError bq_worker_stdio(int input, int output, char const* socket_path)
 {
     int session = -1;
-    BqError error = bq_offhost_connect(socket_path, &session);
+    struct sigaction ignored = {.sa_handler = SIG_IGN}, previous = {0};
+    sigemptyset(&ignored.sa_mask);
+    BqError error = sigaction(SIGPIPE, &ignored, &previous) == 0 ? bq_offhost_connect(socket_path, &session) : BQ_IO;
     while (error == BQ_OK)
     {
         /* No inactivity timer, keepalive, heartbeat or reconnect while quiet.
@@ -145,6 +147,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stdio(int input, int output, char const* s
         }
     }
     if (session >= 0) close(session);
+    sigaction(SIGPIPE, &previous, NULL);
     return error;
 }
 
@@ -153,6 +156,7 @@ typedef struct BqOffhostSsh
     pid_t process;
     int input;
     int output;
+    bool cancel_pending;
 } BqOffhostSsh;
 
 BUSTER_GLOBAL_LOCAL void bq_offhost_ssh_close(BqOffhostSsh* ssh)
@@ -171,11 +175,15 @@ BUSTER_GLOBAL_LOCAL void bq_offhost_ssh_close(BqOffhostSsh* ssh)
 BUSTER_GLOBAL_LOCAL BqError bq_offhost_ssh_open(BqOffhostSsh* ssh)
 {
     *ssh = (BqOffhostSsh){.input = -1, .output = -1};
-    int config = open(BQ_OFFHOST_SSH_CONFIG, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-    struct stat info = {0};
-    BqError error = config < 0 || fstat(config, &info) != 0 || !S_ISREG(info.st_mode) ||
+    char leaf[BQ_PATH_CAP + 1];
+    int parent = bq_worker_open_lease_parent(BQ_OFFHOST_SSH_CONFIG, leaf);
+    int config = parent >= 0 ? openat(parent, leaf, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
+    struct stat info = {0}, directory = {0};
+    BqError error = parent < 0 || fstat(parent, &directory) != 0 || directory.st_uid != 0 ||
+        (directory.st_mode & 022) || config < 0 || fstat(config, &info) != 0 || !S_ISREG(info.st_mode) ||
         info.st_nlink != 1 || info.st_uid != 0 || (info.st_mode & 022) ? BQ_CONFIGURATION_MISMATCH : BQ_OK;
     if (config >= 0) close(config);
+    if (parent >= 0) close(parent);
     int incoming[2] = {-1, -1}, outgoing[2] = {-1, -1};
     if (error == BQ_OK && (pipe2(incoming, O_CLOEXEC) != 0 || pipe2(outgoing, O_CLOEXEC) != 0)) error = BQ_IO;
     pid_t child = error == BQ_OK ? fork() : -1;
@@ -185,8 +193,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_ssh_open(BqOffhostSsh* ssh)
         if (dup2(incoming[0], STDIN_FILENO) < 0 || dup2(outgoing[1], STDOUT_FILENO) < 0) _exit(126);
         close(incoming[0]); close(incoming[1]); close(outgoing[0]); close(outgoing[1]);
         char* const arguments[] = {"ssh", "-F", BQ_OFFHOST_SSH_CONFIG, "-T", "-oBatchMode=yes",
-            "-oServerAliveInterval=0", "-oServerAliveCountMax=0", "-oConnectTimeout=10",
-            "buster-control", "/opt/buster-bench/service", "worker-stdio", NULL};
+            "-oServerAliveInterval=0", "-oServerAliveCountMax=0", "-oTCPKeepAlive=no", "-oRekeyLimit=1G 0",
+            "-oConnectTimeout=10",
+            "buster-control", "/usr/local/libexec/buster-bench-service", "worker-stdio", NULL};
         execv("/usr/bin/ssh", arguments);
         _exit(127);
     }
@@ -228,6 +237,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_roundtrip(BqOffhostSsh* ssh, BqSessionPac
         if (error == BQ_OK && bq_offhost_cancel_identity(response, &identity))
         {
             if (execution > 0 && kill(execution, SIGTERM) != 0 && errno != ESRCH) error = BQ_IO;
+            else if (!execution) ssh->cancel_pending = true;
         }
         else if (error == BQ_OK)
         {
@@ -238,6 +248,84 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_roundtrip(BqOffhostSsh* ssh, BqSessionPac
                  memcmp(response->bytes + 24, request->bytes + 24, 144))) error = BQ_BAD_REQUEST;
             else error = (BqError)bq_u32(response->bytes + 20);
         }
+    }
+    return error;
+}
+
+/* A verified committed local CAS needs no remote read. In particular, retrying
+ * a lost quiet ACK cannot begin ordinary transport after quiet admission. */
+BUSTER_GLOBAL_LOCAL BqError bq_offhost_native_cached(BqQueue* queue, String8 identity, bool* cached)
+{
+    *cached = false;
+    char name[65] = {0}, program[65], manifest[BQ_NATIVE_MANIFEST_CAP], digest[65];
+    u32 length = 0;
+    u64 size = 0;
+    BqError error = identity.length == 64 && bq_native_hex((u8 const*)identity.pointer) ? BQ_OK : BQ_BAD_REQUEST;
+    if (error == BQ_OK) memcpy(name, identity.pointer, 64);
+    int store = error == BQ_OK ? bq_native_store(queue) : -1;
+    if (error == BQ_OK && store < 0) error = BQ_IO;
+    int directory = error == BQ_OK ? openat(store, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (error == BQ_OK && directory < 0 && errno != ENOENT) error = BQ_SOURCE_MISMATCH;
+    struct stat info = {0};
+    if (directory >= 0)
+    {
+        bool valid = fstat(directory, &info) == 0 && info.st_uid == geteuid() &&
+                     (info.st_mode & 07777) == 0500 &&
+                     bq_native_description(directory, name, manifest, &length, program, &size);
+        int input = valid ? openat(directory, "program", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC) : -1;
+        valid = valid && bq_native_file(input, (off_t)size, 0400) && bq_native_elf(input, size, 0) &&
+                bq_native_digest_fd(input, 0, size, digest, -1) && !memcmp(digest, program, 64);
+        if (input >= 0) close(input);
+        if (valid) *cached = true;
+        else error = BQ_SOURCE_MISMATCH;
+    }
+    if (directory >= 0) close(directory);
+    if (store >= 0) close(store);
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_native(BqQueue* queue, BqOffhostSsh* ssh, BqOffhostIdentity const* identity)
+{
+    BqJob* job = bq_job(&queue->state, identity->id);
+    BqError error = !job || job->token != identity->token ? BQ_CONFLICT : BQ_OK;
+    bool native = error == BQ_OK && bq_recipe_native(bq_request_recipe(&job->request));
+    bool cached = false;
+    if (native) error = bq_offhost_native_cached(queue, bq_field(&job->request, 3), &cached);
+    if (error == BQ_OK && native && !cached)
+    {
+        BqSessionPacket request, response;
+        u8 cursor_body[8];
+        bq_put64(cursor_body, UINT64_MAX);
+        bq_session_packet(&request, BQ_SESSION_NATIVE_READ, BQ_OK, identity, cursor_body, sizeof(cursor_body));
+        error = bq_offhost_roundtrip(ssh, &request, &response, 0);
+        u8 metadata[72];
+        u64 size = 0, cursor = 0;
+        char installed[65];
+        if (error == BQ_OK && response.size != BQ_SESSION_HEADER + sizeof(metadata)) error = BQ_BAD_REQUEST;
+        if (error == BQ_OK)
+        {
+            memcpy(metadata, response.bytes + BQ_SESSION_HEADER, sizeof(metadata));
+            size = bq_u64(metadata + 64);
+            char manifest[BQ_NATIVE_MANIFEST_CAP], digest[65];
+            if (bq_native_manifest(manifest, metadata, size, digest) <= 0 ||
+                memcmp(digest, bq_field(&job->request, 3).pointer, 64)) error = BQ_SOURCE_MISMATCH;
+            if (error == BQ_OK) error = bq_native_upload(queue, 1, metadata, sizeof(metadata), installed, &cursor);
+        }
+        while (error == BQ_OK && cursor < size)
+        {
+            bq_put64(cursor_body, cursor);
+            bq_session_packet(&request, BQ_SESSION_NATIVE_READ, BQ_OK, identity, cursor_body, sizeof(cursor_body));
+            error = bq_offhost_roundtrip(ssh, &request, &response, 0);
+            u32 amount = response.size >= BQ_SESSION_HEADER ? response.size - BQ_SESSION_HEADER : 0;
+            u8 const* body = response.bytes + BQ_SESSION_HEADER;
+            if (error == BQ_OK && (amount <= 80 || amount > BQ_CONTROL_BODY || memcmp(body, metadata, 72) ||
+                bq_u64(body + 72) != cursor || amount - 80 > size - cursor)) error = BQ_SOURCE_MISMATCH;
+            u64 previous = cursor;
+            if (error == BQ_OK) error = bq_native_upload(queue, 2, body, amount, installed, &cursor);
+            if (error == BQ_OK && cursor != previous + amount - 80) error = BQ_INVALID_TRANSITION;
+        }
+        if (error == BQ_OK) error = bq_native_upload(queue, 3, metadata, sizeof(metadata), installed, &cursor);
+        if (error == BQ_OK && (cursor != size || memcmp(installed, bq_field(&job->request, 3).pointer, 64))) error = BQ_SOURCE_MISMATCH;
     }
     return error;
 }
@@ -294,6 +382,86 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_upload(BqQueue* queue, BqOffhostSs
     return error;
 }
 
+BUSTER_GLOBAL_LOCAL BqError bq_offhost_deliver(BqQueue* queue, BqOffhostSsh* ssh, BqOffhostIdentity const* identity)
+{
+    BqJob* job = bq_job(&queue->state, identity->id);
+    BqError error = !job || job->token != identity->token || job->phase != BQ_FINISHED ||
+                    !job->result_bound || queue->needs_reconciliation ? BQ_RECONCILIATION_REQUIRED :
+                    bq_worker_result_binding_validate(job);
+    BqSessionPacket request, response;
+            while (error == BQ_OK)
+            {
+                if (ssh->input < 0)
+                {
+                    error = bq_offhost_ssh_open(ssh);
+                    if (error == BQ_OK)
+                    {
+                        bq_session_packet(&request, BQ_SESSION_HELLO, BQ_OK, identity, NULL, 0);
+                        error = bq_offhost_roundtrip(ssh, &request, &response, 0);
+                        if (error == BQ_OK && response.size == BQ_SESSION_HEADER)
+                        {
+                            error = bq_offhost_mark(queue, "terminal-ack", identity);
+                            break;
+                        }
+                    }
+                }
+                if (error == BQ_OK) error = bq_offhost_worker_upload(queue, ssh, identity);
+                if (error == BQ_IO || error == BQ_EXPORT_TIMEOUT)
+                {
+                    bq_offhost_ssh_close(ssh);
+                    error = BQ_OK;
+                    poll(NULL, 0, 1000);
+                }
+                else break;
+            }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_offhost_custodian(int channel, char const* root, BqOffhostIdentity const* identity, BqError run)
+{
+    u8 completed[24] = {0};
+    bq_put64(completed, identity->id);
+    bq_put64(completed + 8, identity->token);
+    bq_put32(completed + 16, (u32)run);
+    bool sent = send(channel, completed, sizeof(completed), MSG_NOSIGNAL) == sizeof(completed);
+    bool acknowledged = false, orphaned = !sent;
+    BqError error = BQ_OK;
+    while (error == BQ_OK && !acknowledged && !orphaned)
+    {
+        struct pollfd waiting = {channel, POLLIN, 0};
+        int ready = poll(&waiting, 1, -1);
+        if (ready < 0 && errno == EINTR) continue;
+        u8 receipt[24] = {0};
+        ssize_t size = ready > 0 ? recv(channel, receipt, sizeof(receipt), MSG_TRUNC) : -1;
+        orphaned = size <= 0;
+        acknowledged = size == sizeof(receipt) && !memcmp(receipt, completed, 16) && !bq_u64(receipt + 16);
+        if (size > 0 && !acknowledged) error = BQ_CONFLICT;
+    }
+    close(channel);
+    if (orphaned && error == BQ_OK)
+    {
+        /* The execution child retains the original OFD until the control ACK.
+         * Parent loss transfers delivery ownership to it, never to a new job. */
+        BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
+        do
+        {
+            error = bq_open(&queue, root);
+            if (error == BQ_BUSY) poll(NULL, 0, 1000);
+        } while (error == BQ_BUSY);
+        BqOffhostSsh ssh = {.input = -1, .output = -1};
+        if (error == BQ_OK) error = bq_offhost_deliver(&queue, &ssh, identity);
+        bq_offhost_ssh_close(&ssh);
+        bq_close(&queue);
+    }
+    if (error != BQ_OK)
+    {
+        fprintf(stderr, "offhost lease custodian quarantined: %s\n", bq_error_name(error));
+        fflush(stderr);
+        for (;;) poll(NULL, 0, 1000);
+    }
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_offhost_binary_digest(int fd, u64 size, char digest[SHA256_HEX_CAPACITY])
 {
     bool ok = size > 0 && size <= BQ_WORKER_BUNDLE_FILE_CAP;
@@ -311,13 +479,59 @@ BUSTER_GLOBAL_LOCAL bool bq_offhost_binary_digest(int fd, u64 size, char digest[
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL BqError bq_offhost_recover_custody(BqQueue* queue, BqWorkerConfig const* installed,
+                                                     BqOffhostIdentity const* identity, BqWorkerLease* lease)
+{
+    BqJob* pending = bq_job(&queue->state, identity->id);
+    BqError entered = bq_offhost_marked(queue, "execution-entered", identity);
+    BqError custody = bq_offhost_marked(queue, "lease-custody", identity);
+    BqError error = !pending || pending->token != identity->token ? BQ_CONFLICT :
+                    entered != BQ_OK && entered != BQ_NOT_FOUND ? entered :
+                    custody != BQ_OK && custody != BQ_NOT_FOUND ? custody : BQ_OK;
+    bool uncertain = entered == BQ_OK || custody == BQ_OK;
+    if (error == BQ_OK && uncertain && pending->phase != BQ_FINISHED)
+    {
+        /* A new process has no proof of continuity of the previous OFD. First
+         * recover the actual installed unit/cgroup/cleanup locally, never SSH. */
+        BqWorkerConfig recovery = *installed;
+        recovery.assigned_attempt = true;
+        recovery.retained_lease_descriptor = -1;
+        queue->needs_reconciliation = true;
+        u64 id = identity->id;
+        error = bq_worker_run(queue, &recovery, &id);
+        if (installed->quarantine->descriptor >= 0)
+        {
+            lease->descriptor = installed->quarantine->descriptor;
+            installed->quarantine->descriptor = -1;
+        }
+    }
+    if (error == BQ_OK && uncertain && lease->descriptor < 0)
+    {
+        char path[BQ_PATH_CAP + 1];
+        if (!bq_worker_text(installed->lease_file, path, sizeof(path)) || bq_worker_lease_acquire(path, lease) != 0)
+            error = BQ_BUSY;
+    }
+    if (error == BQ_OK && uncertain)
+    {
+        /* Whole-unit stop/reboot can kill every custodian. Reacquisition is
+         * not continuity: retain the new lease and a durable gap quarantine.
+         * Clearing it requires an operator-reviewed recovery, no timed retry. */
+        queue->needs_reconciliation = true;
+        error = bq_offhost_mark(queue, "lease-gap", identity);
+        if (error == BQ_OK) error = BQ_RECONCILIATION_REQUIRED;
+    }
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_agent(char const* root, BqWorkerConfig const* installed)
 {
     BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
     BqWorkerLease lease = {.descriptor = -1};
     BqOffhostSsh ssh = {.input = -1, .output = -1};
     BqOffhostIdentity identity = {0};
-    BqError error = bq_offhost_operator_identity(identity.machine);
+    struct sigaction ignored = {.sa_handler = SIG_IGN}, previous_pipe = {0};
+    sigemptyset(&ignored.sa_mask);
+    BqError error = sigaction(SIGPIPE, &ignored, &previous_pipe) == 0 ? bq_offhost_operator_identity(identity.machine) : BQ_IO;
     if (error == BQ_OK) error = bq_open(&queue, root);
     if (error == BQ_OK && queue.state.journal_schema && queue.state.journal_schema != BQ_SCHEMA_ASSIGNED) error = BQ_CONFIGURATION_MISMATCH;
     for (u32 i = 0; error == BQ_OK && i < queue.state.job_count; i += 1)
@@ -339,6 +553,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_agent(char const* root, BqWorkerCo
             else if (ack != BQ_OK) error = ack;
         }
     }
+    if (error == BQ_OK && identity.id) error = bq_offhost_recover_custody(&queue, installed, &identity, &lease);
+    int completion = -1;
+    pid_t custodian = -1;
     while (error == BQ_OK)
     {
         BqSessionPacket request, response;
@@ -396,7 +613,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_agent(char const* root, BqWorkerCo
             error = bq_offhost_read(&queue, custody_name, custody, 128u);
             if (error == BQ_NOT_FOUND)
             {
-                int binary = open("/opt/buster-bench/service", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+                int binary = open("/usr/local/libexec/buster-bench-service", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
                 struct stat info = {0};
                 char boot_path[BQ_PATH_CAP + 1], boot[BQ_WORKER_BOOT_CAP];
                 error = binary < 0 || fstat(binary, &info) != 0 || !S_ISREG(info.st_mode) || info.st_uid != 0 ||
@@ -417,12 +634,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_agent(char const* root, BqWorkerCo
         BqJob* job = bq_job(&queue.state, identity.id);
         if (error == BQ_OK && job && job->phase != BQ_FINISHED)
         {
+            error = bq_offhost_worker_native(&queue, &ssh, &identity);
+            if (error == BQ_OK) error = bq_offhost_mark(&queue, "lease-custody", &identity);
             bq_session_packet(&request, BQ_SESSION_QUIET, BQ_OK, &identity, NULL, 0);
-            error = bq_offhost_roundtrip(&ssh, &request, &response, 0);
+            if (error == BQ_OK) error = bq_offhost_roundtrip(&ssh, &request, &response, 0);
             BqError started = bq_offhost_marked(&queue, "execution-entered", &identity);
             if (error == BQ_OK && started != BQ_OK && started != BQ_NOT_FOUND) error = started;
             bool recovery = started == BQ_OK;
             if (error == BQ_OK) error = bq_offhost_mark(&queue, "execution-entered", &identity);
+            if (error == BQ_OK && ssh.cancel_pending) error = bq_cancel(&queue, identity.id);
             if (error == BQ_OK)
             {
                 queue.needs_reconciliation = recovery;
@@ -431,21 +651,35 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_agent(char const* root, BqWorkerCo
                 sigaddset(&blocked, SIGTERM);
                 sigaddset(&blocked, SIGINT);
                 bool masked = sigprocmask(SIG_BLOCK, &blocked, &previous) == 0;
-                pid_t execution = masked ? fork() : -1;
-                if (execution < 0) error = BQ_IO;
+                int channels[2] = {-1, -1};
+                bool channel = masked && socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channels) == 0;
+                pid_t execution = channel ? fork() : -1;
+                if (execution < 0)
+                {
+                    error = BQ_IO;
+                    if (masked) sigprocmask(SIG_SETMASK, &previous, NULL);
+                    if (channels[0] >= 0) close(channels[0]);
+                    if (channels[1] >= 0) close(channels[1]);
+                }
                 else if (execution == 0)
                 {
+                    close(channels[0]);
                     close(ssh.input); close(ssh.output);
                     BqWorkerConfig config = *installed;
                     config.assigned_attempt = true;
                     config.retained_lease_descriptor = lease.descriptor;
+                    if (ssh.cancel_pending) bq_worker_transport_stop_signal = 1;
                     u64 id = identity.id;
                     BqError run = bq_worker_run(&queue, &config, &id);
                     bq_close(&queue);
-                    _exit(run == BQ_OK ? 0 : 1);
+                    BqError delivered = bq_offhost_custodian(channels[1], root, &identity, run);
+                    _exit(delivered == BQ_OK ? 0 : 1);
                 }
                 else
                 {
+                    close(channels[1]);
+                    completion = channels[0];
+                    custodian = execution;
                     sigprocmask(SIG_SETMASK, &previous, NULL);
                     bq_close(&queue);
                     bool finished = false;
@@ -453,18 +687,29 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_agent(char const* root, BqWorkerCo
                     {
                         int status = 0;
                         pid_t waited = waitpid(execution, &status, WNOHANG);
-                        if (waited == execution) finished = true;
+                        if (waited == execution) { error = BQ_WORKER_INTERRUPTED; finished = true; custodian = -1; }
                         else if (waited < 0 && errno != EINTR) { error = BQ_IO; finished = true; }
                         else
                         {
-                            struct pollfd waiting = {ssh.output, POLLIN, 0};
-                            int ready = poll(&waiting, 1, 1000);
-                            if (ready > 0 && (waiting.revents & (POLLIN | POLLHUP | POLLERR)))
+                            struct pollfd waiting[2] = {{ssh.output, POLLIN, 0}, {completion, POLLIN, 0}};
+                            int ready = poll(waiting, 2, 1000);
+                            if (ready > 0 && (waiting[1].revents & (POLLIN | POLLHUP | POLLERR)))
+                            {
+                                u8 done[24];
+                                ssize_t amount = recv(completion, done, sizeof(done), MSG_TRUNC);
+                                if (amount != sizeof(done) || bq_u64(done) != identity.id || bq_u64(done + 8) != identity.token)
+                                    error = BQ_WORKER_MISMATCH;
+                                finished = true;
+                            }
+                            if (ready > 0 && (waiting[0].revents & (POLLIN | POLLHUP | POLLERR)))
                             {
                                 BqSessionPacket exceptional = {0};
                                 BqError read = bq_session_stream(ssh.output, &exceptional, false,
                                     bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_EXPORT_READ_MILLISECONDS));
-                                if (read == BQ_OK && bq_offhost_cancel_identity(&exceptional, &identity)) kill(execution, SIGTERM);
+                                if (read == BQ_OK && bq_offhost_cancel_identity(&exceptional, &identity))
+                                {
+                                    if (!finished) kill(execution, SIGTERM);
+                                }
                                 else
                                 {
                                     /* Channel loss never terminates or duplicates admitted work. */
@@ -478,44 +723,29 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_agent(char const* root, BqWorkerCo
                 }
             }
         }
+        if (error == BQ_OK) error = bq_offhost_deliver(&queue, &ssh, &identity);
         if (error == BQ_OK)
         {
-            /* Reconnect is permitted only after execution has joined. Lease
-             * stays held throughout every upload retry and terminal ACK loss. */
-            while (error == BQ_OK)
+            if (completion >= 0)
             {
-                if (ssh.input < 0)
-                {
-                    error = bq_offhost_ssh_open(&ssh);
-                    if (error == BQ_OK)
-                    {
-                        bq_session_packet(&request, BQ_SESSION_HELLO, BQ_OK, &identity, NULL, 0);
-                        error = bq_offhost_roundtrip(&ssh, &request, &response, 0);
-                        if (error == BQ_OK && response.size == BQ_SESSION_HEADER)
-                        {
-                            error = bq_offhost_mark(&queue, "terminal-ack", &identity);
-                            break;
-                        }
-                    }
-                }
-                if (error == BQ_OK) error = bq_offhost_worker_upload(&queue, &ssh, &identity);
-                if (error == BQ_IO || error == BQ_EXPORT_TIMEOUT)
-                {
-                    bq_offhost_ssh_close(&ssh);
-                    error = BQ_OK;
-                    poll(NULL, 0, 1000);
-                }
-                else break;
+                u8 receipt[24] = {0};
+                bq_put64(receipt, identity.id);
+                bq_put64(receipt + 8, identity.token);
+                if (send(completion, receipt, sizeof(receipt), MSG_NOSIGNAL) != sizeof(receipt)) error = BQ_IO;
+                close(completion);
+                completion = -1;
+                int status = 0;
+                if (custodian > 0 && bq_worker_waitpid_until(custodian, &status,
+                    bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000)) != BQ_OK) error = BQ_IO;
+                custodian = -1;
             }
-        }
-        if (error == BQ_OK)
-        {
-            bq_worker_lease_release(&lease);
+            if (error == BQ_OK) bq_worker_lease_release(&lease);
             identity.id = identity.token = 0;
             bq_offhost_ssh_close(&ssh);
         }
     }
     bq_offhost_ssh_close(&ssh);
+    if (completion >= 0) close(completion);
     if (lease.descriptor >= 0)
     {
         /* Preserve quarantine in the live coordinator. Installed restart must
@@ -526,6 +756,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_offhost_worker_agent(char const* root, BqWorkerCo
         lease.descriptor = -1;
     }
     bq_close(&queue);
+    if (bq_worker_quarantine.descriptor >= 0)
+    {
+        fprintf(stderr, "offhost worker quarantined: %s; retained lease requires operator reconciliation\n", bq_error_name(error));
+        fflush(stderr);
+        /* Installed process stays alive holding the same OFD after uncertainty.
+         * No new network activity or assignment is attempted in quarantine. */
+        for (;;) poll(NULL, 0, 1000);
+    }
+    sigaction(SIGPIPE, &previous_pipe, NULL);
     return error;
 }
 #else

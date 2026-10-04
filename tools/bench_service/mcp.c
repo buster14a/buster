@@ -495,6 +495,33 @@ BUSTER_GLOBAL_LOCAL bool bq_mcp_recipe_available(String8 capabilities, String8 r
     return available;
 }
 
+BUSTER_GLOBAL_LOCAL void bq_mcp_observation(BqMcpBuffer* result, BqPacket const* response)
+{
+    u8 const* observation = bq_observation(response);
+    if (observation)
+    {
+        bq_mcp_append(result, S8(",\"last_observed_utc_ms\":"));
+        bq_mcp_u64(result, bq_u64(observation + 8));
+        u32 flags = bq_u32(observation + 16);
+        bq_mcp_append(result, flags & BQ_OBSERVATION_STALE ? S8(",\"stale\":true") : S8(",\"stale\":false"));
+        bq_mcp_append(result, flags & BQ_OBSERVATION_PAUSED ? S8(",\"live_export_paused\":true") : S8(",\"live_export_paused\":false"));
+        bq_mcp_append(result, flags & BQ_OBSERVATION_RECONCILIATION ? S8(",\"needs_reconciliation\":true") : S8(",\"needs_reconciliation\":false"));
+        bq_mcp_append(result, flags & BQ_OBSERVATION_QUARANTINE ? S8(",\"quarantined\":true") : S8(",\"quarantined\":false"));
+        bq_mcp_append(result, flags & BQ_OBSERVATION_LIFECYCLE_UNAVAILABLE ? S8(",\"lifecycle_unavailable\":true") : S8(",\"lifecycle_unavailable\":false"));
+        char const* decisions[] = {"none", "intent", "applied", "too_late"};
+        bq_mcp_append(result, S8(",\"cancellation_status\":"));
+        bq_mcp_string(result, string_from_pointer(decisions[bq_u32(observation + 20)]));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_mcp_capability_contains(String8 capabilities, String8 value)
+{
+    bool found = false;
+    for (u64 i = 0; value.length <= capabilities.length && i <= capabilities.length - value.length; i += 1)
+        found = found || !memcmp(capabilities.pointer + i, value.pointer, (size_t)value.length);
+    return found;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_mcp_service_result(BqPacket const* request, BqPacket const* response, BqMcpBuffer* result)
 {
     bool ok = bq_public_response_valid(request, response);
@@ -509,7 +536,10 @@ BUSTER_GLOBAL_LOCAL bool bq_mcp_service_result(BqPacket const* request, BqPacket
             bool runtime = bq_mcp_recipe_available(capabilities, S8(BQ_RUNTIME_RECIPE));
             bq_mcp_append(result, S8("{\"service_capabilities\":"));
             bq_mcp_string(result, capabilities);
-            bq_mcp_append(result, S8(",\"adapter\":{\"transport\":\"stdio\",\"backend\":\"unix-seqpacket\",\"principal\":\"github-actions\",\"off_host_cache\":false,\"synchronous_backend\":true,\"fixed_recipe_only\":true,\"custom_workloads\":false,\"native_program_upload\":"));
+            bool offhost = bq_mcp_capability_contains(capabilities, S8("executor=off-host-control-unqualified"));
+            bq_mcp_append(result, S8(",\"adapter\":{\"transport\":\"stdio\",\"backend\":\"unix-seqpacket\",\"principal\":\"github-actions\",\"off_host_cache\":"));
+            bq_mcp_append(result, offhost ? S8("true,\"synchronous_backend\":false") : S8("false,\"synchronous_backend\":true"));
+            bq_mcp_append(result, S8(",\"fixed_recipe_only\":true,\"custom_workloads\":false,\"native_program_upload\":"));
             /* One upload store serves both native recipes; each flag follows
              * the installed backend's own served-recipe token. */
             bq_mcp_append(result, native || runtime ? S8("true") : S8("false"));
@@ -561,6 +591,7 @@ BUSTER_GLOBAL_LOCAL bool bq_mcp_service_result(BqPacket const* request, BqPacket
             }
             bq_mcp_append(result, S8("],\"next_cursor\":"));
             bq_mcp_u64(result, bq_u64(data + 8));
+            bq_mcp_observation(result, response);
             bq_mcp_append(result, bq_u32(data + 16) ? S8(",\"more\":true}") : S8(",\"more\":false}"));
         }
         else
@@ -575,21 +606,7 @@ BUSTER_GLOBAL_LOCAL bool bq_mcp_service_result(BqPacket const* request, BqPacket
             bq_mcp_string(result, string_from_pointer(bq_outcome_name(bq_u32(data + 32))));
             bq_mcp_append(result, S8(",\"measurement_validity\":\"not_evaluated\",\"statistical_decision\":\"not_evaluated\",\"cancel_requested\":"));
             bq_mcp_append(result, bq_u32(data + 40) ? S8("true") : S8("false"));
-            u8 const* observation = bq_observation(response);
-            if (observation)
-            {
-                bq_mcp_append(result, S8(",\"last_observed_utc_ms\":"));
-                bq_mcp_u64(result, bq_u64(observation + 8));
-                u32 flags = bq_u32(observation + 16);
-                bq_mcp_append(result, flags & BQ_OBSERVATION_STALE ? S8(",\"stale\":true") : S8(",\"stale\":false"));
-                bq_mcp_append(result, flags & BQ_OBSERVATION_PAUSED ? S8(",\"live_export_paused\":true") : S8(",\"live_export_paused\":false"));
-                bq_mcp_append(result, flags & BQ_OBSERVATION_RECONCILIATION ? S8(",\"needs_reconciliation\":true") : S8(",\"needs_reconciliation\":false"));
-                bq_mcp_append(result, flags & BQ_OBSERVATION_QUARANTINE ? S8(",\"quarantined\":true") : S8(",\"quarantined\":false"));
-                bq_mcp_append(result, flags & BQ_OBSERVATION_LIFECYCLE_UNAVAILABLE ? S8(",\"lifecycle_unavailable\":true") : S8(",\"lifecycle_unavailable\":false"));
-                char const* decisions[] = {"none", "intent", "applied", "too_late"};
-                bq_mcp_append(result, S8(",\"cancellation_status\":"));
-                bq_mcp_string(result, string_from_pointer(decisions[bq_u32(observation + 20)]));
-            }
+            bq_mcp_observation(result, response);
             bq_mcp_append(result, S8(",\"request_sha256\":"));
             bq_mcp_string(result, (String8){(char8*)data + 56, 64});
             bq_mcp_append(result, S8(",\"failure\":"));
@@ -713,7 +730,7 @@ BUSTER_GLOBAL_LOCAL void bq_mcp_message(BqMcpSession* session, char const* socke
             bq_mcp_id(output, &json, id);
             bq_mcp_append(output, S8(",\"result\":{\"protocolVersion\":"));
             bq_mcp_string(output, string_equal(requested, S8("2025-06-18")) ? requested : S8(BQ_MCP_VERSION));
-            bq_mcp_append(output, S8(",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"buster-bench-service\",\"version\":\"1\"},\"instructions\":\"Use bench_capabilities to check installed recipes. Native programs use typed begin/write/finish uploads and a native-execute-v1 or native-runtime-v1 submission with the manifest digest in both SHA fields. native-runtime-v1 returns diagnostic process-latency samples, not a qualified verdict. Compilation is unavailable. This adapter requires the authenticated Unix socket; the synchronous backend may time out while a job runs. No artifact byte download tool is implemented. EOF and MCP request cancellation do not cancel jobs; use bench_cancel.\"}}\n"));
+            bq_mcp_append(output, S8(",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"buster-bench-service\",\"version\":\"1\"},\"instructions\":\"Use bench_capabilities to check installed recipes. Native programs use typed begin/write/finish uploads and a native-execute-v1 or native-runtime-v1 submission with the manifest digest in both SHA fields. native-runtime-v1 returns diagnostic process-latency samples, not a qualified verdict. Compilation is unavailable. This adapter requires the authenticated Unix socket. Service capabilities identify local synchronous or unqualified off-host cached mode; the synchronous backend may time out while a job runs. No artifact byte download tool is implemented. EOF and MCP request cancellation do not cancel jobs; use bench_cancel.\"}}\n"));
             session->phase = 1;
         }
     }
