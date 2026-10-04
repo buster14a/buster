@@ -169,7 +169,7 @@ int main(int argc, char **argv)
         valid[arm] = command(cmd, name) == 0;
         if (valid[arm])
         {
-            snprintf(cmd, sizeof(cmd), "gcc -no-pie evidence/caller.o evidence/%s-kernels.o -o evidence/%s-runtime", arms[arm].name, arms[arm].name);
+            snprintf(cmd, sizeof(cmd), "gcc -no-pie evidence/caller.o evidence/%s-kernels.o external/tcc/lib/tcc/libtcc1.a -o evidence/%s-runtime", arms[arm].name, arms[arm].name);
             snprintf(name, sizeof(name), "%s-link", arms[arm].name);
             valid[arm] = command(cmd, name) == 0;
         }
@@ -179,7 +179,7 @@ int main(int argc, char **argv)
             snprintf(name, sizeof(name), "%s-oracle-warmup", arms[arm].name);
             valid[arm] = command(cmd, name) == 0;
         }
-        snprintf(cmd, sizeof(cmd), "%s %s -funsigned-char -fno-strict-aliasing -fwrapv -fno-pie evidence/debug_probe.c -o evidence/%s-debug", arms[arm].compiler, arms[arm].flags, arms[arm].name);
+        snprintf(cmd, sizeof(cmd), "%s %s -funsigned-char -fno-strict-aliasing -fwrapv -fno-pie -no-pie evidence/debug_probe.c -o evidence/%s-debug", arms[arm].compiler, arms[arm].flags, arms[arm].name);
         snprintf(name, sizeof(name), "%s-debug-build", arms[arm].name);
         int debug_ok = command(cmd, name) == 0;
         if (debug_ok)
