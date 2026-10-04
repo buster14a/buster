@@ -3722,7 +3722,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena,
     }
     else
     {
-        String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION
+        String8 hint = invocation.image_kind != NATIVE_IMAGE_EXECUTABLE && link.error == LINK_ERROR_RELOCATION &&
+                               !link.position_independent_relocation
                            ? S8(" (a position-independent image needs objects compiled with -fPIC)") : S8("");
         diagnostic = string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
     }

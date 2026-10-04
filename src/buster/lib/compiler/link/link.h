@@ -181,6 +181,10 @@ struct NativeExecutableLinkResult
     // Distinguish policy refusals (links, directories, special files) from an
     // incomplete transfer when no native OS error was supplied.
     bool write_unsupported_destination;
+    // The refused relocation is one position-independent code emits itself
+    // (GOT, PLT or a dynamic/initial-exec TLS model), so recompiling with
+    // -fPIC would not help.
+    bool position_independent_relocation;
     LinkError error;
 };
 
