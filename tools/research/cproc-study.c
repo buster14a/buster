@@ -86,7 +86,7 @@ static int command(const char *cmd, const char *name)
     snprintf(path, sizeof(path), "secondary-evidence/%s.log", name);
     int result = measure(cmd, path, 0, "", "", 0);
     fprintf(stderr, "%s: %d\n", name, result);
-    if (result) failures++;
+    if (result) { failures++; FILE *f=fopen(path,"r"); if(f){char line[1024];while(fgets(line,sizeof(line),f))fputs(line,stderr);fclose(f);} }
     return result;
 }
 static void generate(void)
@@ -140,11 +140,11 @@ static void generate(void)
 static void setup(void)
 {
     command("curl -fsSL https://c9x.me/compile/release/qbe-1.3.tar.xz -o external/qbe-1.3.tar.xz && echo 'd587905d620dc5e1d2bfa7c2cc642b9b837aa89a3188c6e37b53d756cf66e320  external/qbe-1.3.tar.xz' | sha256sum -c - && tar -xf external/qbe-1.3.tar.xz -C external", "qbe-source");
-    command("cp external/qbe-1.3/COPYING secondary-evidence/qbe-COPYING; cp external/qbe-1.3/README secondary-evidence/qbe-README; cat external/qbe-1.3/COPYING", "qbe-license");
+    command("cp external/qbe-1.3/LICENSE secondary-evidence/qbe-LICENSE; cp external/qbe-1.3/README secondary-evidence/qbe-README; cat external/qbe-1.3/LICENSE", "qbe-license");
     command("cd external/qbe-1.3 && make -j2 CC=clang CFLAGS='-O2 -g'", "qbe-build");
     command("git clone -q https://github.com/michaelforney/cproc external/cproc && git -C external/cproc checkout -q d1c53ddf56571573a7025324c8dd5c6d547a4d1f", "cproc-source");
     command("cp external/cproc/LICENSE secondary-evidence/cproc-LICENSE; cat external/cproc/LICENSE", "cproc-license");
-    command("cd external/cproc && ./configure CC=clang CFLAGS='-O2 -g' --target=x86_64-linux-gnu --with-qbe=\"$(pwd)/../qbe-1.3/qbe\" --with-cpp=cpp --with-as=as --with-ld=ld && make -j2", "cproc-build");
+    command("cd external/cproc && ./configure CC=clang CFLAGS='-O2 -g' --target=x86_64-pc-linux-gnu --with-qbe=\"$(pwd)/../qbe-1.3/qbe\" --with-cpp=cpp --with-as=as --with-ld=ld && make -j2", "cproc-build");
     command("cp external/cproc/config.h external/cproc/config.mk secondary-evidence/; cp source/build/CMakeCache.txt source/build/compile_commands.json secondary-evidence/; git -C external/cproc rev-parse HEAD HEAD^{tree} > secondary-evidence/cproc-pin.txt; sha256sum source/build/Release/ide external/cproc/cproc external/cproc/cproc-qbe external/qbe-1.3/qbe > secondary-evidence/compiler-sha256.txt", "receipts");
 }
 int main(int argc, char **argv)
@@ -152,6 +152,7 @@ int main(int argc, char **argv)
     (void)argc; (void)argv;
     mkdir("secondary-evidence", 0755); mkdir("external", 0755);
     setup();
+    if (failures) return 1;
     generate();
     command("exec gcc -O2 -g -march=x86-64 -fno-pie -c secondary-evidence/caller.c -o secondary-evidence/caller.o", "caller-build");
     FILE *csv = fopen("secondary-evidence/samples.csv", "w");
@@ -219,7 +220,7 @@ int main(int argc, char **argv)
     command("sha256sum secondary-evidence/*.c secondary-evidence/*.o secondary-evidence/*-runtime > secondary-evidence/artifacts-sha256.txt", "artifact-hashes");
     /* A bounded text receipt also survives browser artifact-download restrictions.
      * Excludes executable objects: the normal uploaded artifact retains those. */
-    if (system("tar -czf secondary-replay-receipt.tar.gz secondary-evidence/*.c secondary-evidence/*.csv secondary-evidence/*.txt secondary-evidence/*.log secondary-evidence/CMakeCache.txt secondary-evidence/compile_commands.json secondary-evidence/qbe-COPYING secondary-evidence/qbe-README secondary-evidence/cproc-LICENSE secondary-evidence/config.h secondary-evidence/config.mk && sha256sum secondary-replay-receipt.tar.gz && base64 -w 4000 secondary-replay-receipt.tar.gz")) failures++;
+    if (system("tar -czf secondary-replay-receipt.tar.gz secondary-evidence/*.c secondary-evidence/*.csv secondary-evidence/*.txt secondary-evidence/*.log secondary-evidence/CMakeCache.txt secondary-evidence/compile_commands.json secondary-evidence/qbe-LICENSE secondary-evidence/qbe-README secondary-evidence/cproc-LICENSE secondary-evidence/config.h secondary-evidence/config.mk && sha256sum secondary-replay-receipt.tar.gz && base64 -w 4000 secondary-replay-receipt.tar.gz")) failures++;
     fprintf(stderr, "capture failures=%d; debugger/unsupported failures are retained\n", failures);
     return failures != 0;
 }
