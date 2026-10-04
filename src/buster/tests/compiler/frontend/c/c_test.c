@@ -11784,6 +11784,81 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_target_abi_macros(UnitTestArguments* a
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_max_align_t_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 triple;
+        u32 size;
+        u32 alignment;
+        u32 containing_size;
+        u32 tail_offset;
+    } cases[] = {
+        // Clang 18 layouts: max_align_t size/alignment, then H size/tail offset.
+        {S8("x86_64-unknown-linux-gnu"), 32, 16, 64, 48},
+        {S8("aarch64-unknown-linux-gnu"), 32, 16, 64, 48},
+        {S8("wasm32-unknown-wasip1"), 32, 16, 64, 48},
+        {S8("x86_64-pc-windows-msvc"), 8, 8, 24, 16},
+        {S8("aarch64-apple-macos"), 8, 8, 24, 16},
+        {S8("x86_64-apple-macos"), 16, 16, 48, 32},
+    };
+    CPreprocessDialect dialects[] = {
+        C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU99, C_PREPROCESS_DIALECT_GNU11,
+        C_PREPROCESS_DIALECT_GNU23, C_PREPROCESS_DIALECT_C99, C_PREPROCESS_DIALECT_C11,
+        C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU89,
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TargetParseResult parsed = target_parse_triple(cases[index].triple);
+        if (BUSTER_REQUIRE(arguments, parsed.error == TARGET_PARSE_ERROR_NONE))
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena,
+                S8("#include <stddef.h>\n"
+                   "typedef char max_align_size[(sizeof(max_align_t) == {u32}) ? 1 : -1];\n"
+                   "typedef char max_align_alignment[_Alignof(max_align_t) == {u32} ? 1 : -1];\n"
+                   "struct H {{ char tag; max_align_t pad; int tail; }};\n"
+                   "typedef char H_size[(sizeof(struct H) == {u32}) ? 1 : -1];\n"
+                   "typedef char H_tail[offsetof(struct H, tail) == {u32} ? 1 : -1];\n"),
+                cases[index].size, cases[index].alignment, cases[index].containing_size, cases[index].tail_offset);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){
+                    .target = parsed.target,
+                    .data_layout = target_data_layout(parsed.target),
+                    .dialect = C_PREPROCESS_DIALECT_C11,
+                    .source_path = S8("max-align-t-layout.c"),
+                    .disable_external_includes = true,
+                });
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0,
+                string_format(temporary.arena, S8("max_align_t layout target={S8}"), cases[index].triple));
+            scratch_end(temporary);
+        }
+    }
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        TargetParseResult parsed = target_parse_triple(cases[0].triple);
+        if (BUSTER_REQUIRE(arguments, parsed.error == TARGET_PARSE_ERROR_NONE))
+        {
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, S8("#include <stddef.h>\nmax_align_t probe;\n"),
+                (CPreprocessOptions){
+                    .target = parsed.target,
+                    .data_layout = target_data_layout(parsed.target),
+                    .dialect = dialects[dialect],
+                    .source_path = S8("max-align-t-dialect.c"),
+                    .disable_external_includes = true,
+                });
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0,
+                string_format(temporary.arena, S8("max_align_t dialect={u32}"), dialect));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_stddef_need_protocol(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -34497,6 +34572,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_reserve_failure);
     BUSTER_TEST_FIXTURE(arguments, c_test_scope_interval_index);
     BUSTER_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
+    BUSTER_TEST_FIXTURE(arguments, c_test_max_align_t_layout);
     BUSTER_TEST_FIXTURE(arguments, c_test_stddef_need_protocol);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
     BUSTER_TEST_FIXTURE(arguments, c_test_target_abi_macros);
