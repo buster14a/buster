@@ -140,6 +140,37 @@ ordering follows the Linux man-pages project's
 and namespace-local numbering follows
 [`pid_namespaces(7)`](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
 
+## Captured-payload storage
+
+The Windows and POSIX capture collectors pack retained stdout and stderr into
+16 KiB payload blocks. Each stream fills its last block before another block is
+allocated, independently of native read boundaries. Empty reads and bytes past
+the capture limits allocate no retained-payload storage. Prefixes, shared-quota
+admission order, overflow policy and observed/captured/streamed/dropped counters
+keep their existing meanings. Overflow-file descriptors remain caller-owned.
+
+For retained stream lengths `R_s`, the collector allocates exactly
+`N = sum(ceil(R_s / 16384))` chunk headers and payload blocks. With `R` total
+retained bytes, `S` nonempty streams and header size/alignment `H`/`A`, requested
+scratch-arena storage, including alignment padding, is at most
+`R + S * 16383 + N * (H + A - 1)`. Only each stream's last block can contain
+unused payload capacity. Flattening separately allocates `R` bytes in the
+caller's arena before capture scratch storage is released. This bounds requested
+collector storage rather than arena committed pages, process RSS or all memory
+used by the invocation; explicitly unbounded capture limits still admit
+unbounded retained output.
+
+The private `BUSTER_INCLUDE_TESTS` collector in `os_internal.h` feeds the
+production append/flatten boundary and reports chunk counts and requested
+scratch bytes before flattening. Registered `os_tests` compare identical inputs
+fed whole, one byte at a time and in 97-byte fragments at lengths 0, 1, 16384,
+16385 and 1 MiB. They overwrite released scratch storage before checking caller
+output ownership. Literal quota controls cover zero/default and `UINT64_MAX`
+limits, the 32 MiB default total, interleaved stream admission, truncation and
+failure, and exact overflow-file payloads including a partial write failure and
+caller descriptor reuse. Existing live-process drain and transport controls
+remain required. These allocation controls make no speed or RSS claim.
+
 ## Deterministic captured-pipe replay
 
 Ordinary POSIX `os_process_wait_deadline` drains the blocking pipes created by
