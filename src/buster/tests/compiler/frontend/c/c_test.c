@@ -9431,7 +9431,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_preprocess(UnitTestArguments* argu
         {S8("#define F(\\u03b1) α + \\U000003B1\nF(3)\n"), S8("3 + 3")},
         {S8("#define CAT(a,b) a##b\n#define αtail 5\nCAT(\\u03b1,tail)\n"), S8("5")},
         {S8("#define RAW(x) #x\nRAW(\\u03b1) RAW(\\U000003B1) RAW(α)\n"),
-         S8("\"\\\\u03b1\" \"\\\\U000003B1\" \"α\"")},
+         S8("\"\\u03b1\" \"\\U000003B1\" \"α\"")},
         {S8("\\u03b1 α \\U000003B1\n"), S8("α α α")},
         {S8("/* \\u0041 */ \"\\u03b1\" '\\u03b1'\n"), S8("\"\\u03b1\" '\\u03b1'")},
     };
