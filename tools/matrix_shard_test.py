@@ -389,6 +389,7 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/matrix_unit_observation_test.py",
             "tools/github_ci_time_test.py", "tools/ci_vs_dev_shell_test.py",
             "tools/ci_workflow_tools_test.py",
+            "tools/ci_checks_resources_test.py", "tools/ci_checks_resources_workflow_test.py",
             "tools/bootstrap_wrapper_cases_test.py",
         }
         suites = re.findall(r'^            ([^ =]+\.py)=[^ =]+\.log$', block, re.M)
@@ -609,6 +610,42 @@ class CompletionGateTests(unittest.TestCase):
             with self.subTest(branch=branch), mock.patch.object(github_ci_time, "api_get", return_value=dict(run, head_branch=branch)):
                 with self.assertRaisesRegex(ValueError, "event and exact qualification ref"):
                     github_ci_time.require_jobs(args)
+
+    def test_split_api_gate_rejects_wrong_workflow_or_execution_identity(self):
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1, checks_layout="split")
+        for branch in ("codex/ci-checks-split-overlap", "codex/2120-evidence-v2-split-overlap"):
+            run = dict(id=123, run_attempt=1, path=".github/workflows/ci.yml", head_sha="a" * 40,
+                       event="workflow_dispatch", head_branch=branch)
+            for field, value in (("id", 124), ("run_attempt", 2), ("path", ""),
+                                 ("path", ".github/workflows/other.yml"), ("path", ".github/workflows/ci.yml-extra"),
+                                 ("head_sha", "unknown"), ("head_sha", True)):
+                with self.subTest(branch=branch, field=field, value=value), mock.patch.object(
+                        github_ci_time, "api_get", return_value=dict(run, **{field: value})) as fetch:
+                    with self.assertRaisesRegex(ValueError, "identity does not match|no exact source identity"):
+                        github_ci_time.require_jobs(args)
+                    self.assertEqual(fetch.call_count, 1)
+
+    def test_prospective_split_api_gate_does_not_admit_missing_duplicate_or_foreign_jobs(self):
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1, checks_layout="split")
+        run = dict(id=123, run_attempt=1, path=".github/workflows/ci.yml", head_sha="a" * 40,
+                   event="workflow_dispatch", head_branch="codex/2120-evidence-v2-split-overlap")
+        for mutation in ("missing", "duplicate", "foreign-source", "combined-inventory"):
+            jobs = self.sample("split")
+            if mutation == "missing":
+                jobs.pop(0)
+            elif mutation == "duplicate":
+                jobs.append(copy.deepcopy(jobs[0]))
+            elif mutation == "foreign-source":
+                jobs[0]["head_sha"] = "b" * 40
+            else:
+                jobs = self.sample("combined")
+            batch = {"total_count": len(jobs), "jobs": jobs}
+            with self.subTest(mutation=mutation), mock.patch.object(
+                    github_ci_time, "api_get", side_effect=[run] + [batch] * 4), \
+                    mock.patch.object(github_ci_time.time, "sleep"):
+                report = github_ci_time.require_jobs(args)
+            self.assertFalse(report["success"])
+            self.assertTrue(report["errors"])
 
     def test_missing_duplicate_failed_cancelled_and_skipped_jobs_fail(self):
         total = len(github_ci_time.combination_jobs())
@@ -1053,13 +1090,25 @@ class CompletionGateTests(unittest.TestCase):
         windows = desktop.split("      - name: Combination matrix (Windows)\n", 1)[1].split("      - name:", 1)[0]
         admission = re.search(r"^          BUSTER_MATRIX_TEST_ADMISSION: (.+)$", windows, re.M).group(1)
         self.assertEqual(workflow.count("BUSTER_MATRIX_TEST_ADMISSION:"), 1)
-        self.assertEqual(admission, "${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && matrix.shard == 'checks' && github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' && 'all-builds' || 'overlap' }}")
-        capture = "${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap') && '1' || '0' }}"
+        self.assertEqual(admission, "${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && "
+                         "matrix.shard == 'checks' && (github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || "
+                         "github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && 'all-builds' || 'overlap' }}")
+        capture = ("${{ github.event_name == 'workflow_dispatch' && "
+                   "(github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || "
+                   "github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || "
+                   "github.ref == 'refs/heads/codex/ci-checks-split-overlap' || "
+                   "github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || "
+                   "github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || "
+                   "github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}")
         self.assertEqual(workflow.count("BUSTER_CI_CHECKS_EVIDENCE:"), 2)
         for title in ("Combination matrix (Linux, macOS)", "Combination matrix (Windows)"):
             step = desktop.split(f"      - name: {title}\n", 1)[1].split("      - name:", 1)[0]
             observed = re.search(r"^          BUSTER_CI_CHECKS_EVIDENCE: (.+)$", step, re.M).group(1)
             self.assertEqual(observed, capture)
+        self.assertEqual(re.search(r"^  BUSTER_CI_CONDITIONS_EVIDENCE: (.+)$", workflow, re.M).group(1), capture)
+        self.assertEqual(workflow.count("BUSTER_CI_CONDITIONS_EVIDENCE:"), 11)
+        self.assertEqual(re.findall(r"^          BUSTER_CI_CONDITIONS_EVIDENCE: (.+)$", workflow, re.M),
+                         ["${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}"] * 10)
 
     def timing_sample(self, checks_layout="combined"):
         jobs = self.sample(checks_layout)

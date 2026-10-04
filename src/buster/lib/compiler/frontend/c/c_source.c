@@ -29,6 +29,8 @@
 //   c_source_metrics_file_row                  the per-file attribution rows
 //   c_ucn_decode, c_ucn_identifier_allowed      dialect-owned identifier escapes
 //   c_lex_validate_word_utf8                   bounded word encoding checks
+//   c_punctuator_canonical                     digraph meaning at emission,
+//                                              preserving physical spellings
 //   c_lex_scan_one, c_lex_scalar               the scalar lexer
 //   c_lex_compact_tables_build,                the SIMD lexer (Validark
 //   c_lex_compact                              method, AGENTS.md): one
@@ -71,7 +73,8 @@
 //   c_preprocess_pragma_*,                     pragmas: once, pack, push/pop
 //   c_preprocess_expansion_pragma              macro effects at the rescan cursor
 //   c_include_read .. c_include_name           include resolution and the
-//                                              builtin resource headers
+//                                              builtin resource headers,
+//                                              including stddef request guards
 //   CIncludeGuardState, CIncludeFileTable      shared #import, #pragma once,
 //                                              and #ifndef guard identity
 //   c_preprocess_command_operations,           ordered command-line macro
@@ -1981,6 +1984,24 @@ BUSTER_C_INTERNAL u16 c_token_push_long_length(CTranslatedSource translated, u64
     return exact ? C_TOKEN_LENGTH_OVERSIZED : C_TOKEN_LENGTH_OVERSIZED - 1;
 }
 
+// Spelling ids drive maximal munch; published token ids drive C semantics.
+// Offsets and lengths retain the original spelling for #, ## and -E.
+BUSTER_C_INTERNAL CPunctuator c_punctuator_canonical(CPunctuator punctuator)
+{
+    CPunctuator result;
+    switch (punctuator)
+    {
+    case C_PUNCTUATOR_LEFT_BRACKET_DIGRAPH: result = C_PUNCTUATOR_LEFT_BRACKET; break;
+    case C_PUNCTUATOR_RIGHT_BRACKET_DIGRAPH: result = C_PUNCTUATOR_RIGHT_BRACKET; break;
+    case C_PUNCTUATOR_LEFT_BRACE_DIGRAPH: result = C_PUNCTUATOR_LEFT_BRACE; break;
+    case C_PUNCTUATOR_RIGHT_BRACE_DIGRAPH: result = C_PUNCTUATOR_RIGHT_BRACE; break;
+    case C_PUNCTUATOR_HASH_DIGRAPH: result = C_PUNCTUATOR_HASH; break;
+    case C_PUNCTUATOR_HASH_HASH_DIGRAPH: result = C_PUNCTUATOR_HASH_HASH; break;
+    default: result = punctuator; break;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL void c_token_push(CLexResult* result, CTranslatedSource translated, u64 start, u64 end, CTokenKind kind, CPunctuator punctuator)
 {
     u64 length = end - start;
@@ -2129,7 +2150,7 @@ BUSTER_C_INTERNAL u64 c_punctuator_length(String8 source, u64 offset, CPunctuato
             }
             if (match)
             {
-                *punctuator_out = (CPunctuator)punctuator_index;
+                *punctuator_out = c_punctuator_canonical((CPunctuator)punctuator_index);
                 return punctuator.length;
             }
         }
@@ -2866,7 +2887,7 @@ BUSTER_C_INTERNAL void c_lex_compact_tables_build(void)
                 c_lex_pair_column[second] = (u8)column_count++;
             }
             BUSTER_CHECK(row_count <= C_LEX_PAIR_TABLE_SIZE && column_count <= C_LEX_PAIR_TABLE_SIZE);
-            c_lex_pair_punctuators[c_lex_pair_row[first]][c_lex_pair_column[second]] = (u8)index;
+            c_lex_pair_punctuators[c_lex_pair_row[first]][c_lex_pair_column[second]] = (u8)c_punctuator_canonical((CPunctuator)index);
         }
         else if (spelling.length == 3)
         {
@@ -3325,7 +3346,7 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
             __m512i triple_ids = _mm512_maskz_permutex2var_epi8((__mmask64)punctuator3, triple_low, chunk0, triple_high);
             punctuator_vector = _mm512_mask_mov_epi8(punctuator_vector, (__mmask64)punctuator2, pair_ids);
             punctuator_vector = _mm512_mask_mov_epi8(punctuator_vector, (__mmask64)punctuator3, triple_ids);
-            punctuator_vector = _mm512_mask_set1_epi8(punctuator_vector, (__mmask64)punctuator4, (char)C_PUNCTUATOR_HASH_HASH_DIGRAPH);
+            punctuator_vector = _mm512_mask_set1_epi8(punctuator_vector, (__mmask64)punctuator4, (char)C_PUNCTUATOR_HASH_HASH);
         }
 
         // Nothing left over may reach the emitter: a byte that is neither a
@@ -3627,7 +3648,7 @@ u64 c_test_lex_punctuator_nfa_mismatches(void)
                     bool is_three = (triple & C_LEX_NFA_ELLIPSIS) != 0 || ((triple & C_LEX_NFA_SHIFT_ASSIGN) != 0 && repeated);
                     bool is_two = (pair & C_LEX_NFA_PAIR_CHANNELS) != 0 || ((pair & C_LEX_NFA_DOUBLE) != 0 && repeated);
                     u64 emitted_length = is_four ? 4 : is_three ? 3 : is_two ? 2 : 1;
-                    u8 emitted_punctuator = (u8)C_PUNCTUATOR_HASH_HASH_DIGRAPH;
+                    u8 emitted_punctuator = (u8)C_PUNCTUATOR_HASH_HASH;
                     if (emitted_length == 3)
                     {
                         emitted_punctuator = c_lex_triple_punctuators[first];
@@ -4775,17 +4796,16 @@ BUSTER_C_INTERNAL bool c_token_identifier_is_literal_prefix(String8 spelling)
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 current)
+BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 previous_spelling, String8 current)
 {
     char8 first = current.length ? current.pointer[0] : 0;
     bool result = false;
     switch ((CPunctuator)previous.punctuator)
     {
-    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>'; break;
-    case C_PUNCTUATOR_HASH_DIGRAPH: result = first == '%'; break;
+    case C_PUNCTUATOR_PERCENT: result = first == ':' || first == '>' || first == '='; break;
     case C_PUNCTUATOR_LESS: result = first == '<' || first == '=' || first == ':' || first == '%'; break;
     case C_PUNCTUATOR_GREATER: result = first == '>' || first == '='; break;
-    case C_PUNCTUATOR_EQUAL:
+    case C_PUNCTUATOR_ASSIGN:
     case C_PUNCTUATOR_EXCLAMATION:
     case C_PUNCTUATOR_STAR:
     case C_PUNCTUATOR_CARET: result = first == '='; break;
@@ -4794,7 +4814,7 @@ BUSTER_C_INTERNAL bool c_token_punctuators_join(CToken previous, String8 current
     case C_PUNCTUATOR_SLASH: result = first == '/' || first == '*' || first == '='; break;
     case C_PUNCTUATOR_PLUS: result = first == '+' || first == '='; break;
     case C_PUNCTUATOR_MINUS: result = first == '-' || first == '>' || first == '='; break;
-    case C_PUNCTUATOR_HASH: result = first == '#'; break;
+    case C_PUNCTUATOR_HASH: result = previous_spelling.length == 2 ? first == '%' : first == '#'; break;
     case C_PUNCTUATOR_COLON: result = first == '>'; break;
     case C_PUNCTUATOR_DOT: result = first == '.'; break;
     case C_PUNCTUATOR_SHIFT_LEFT:
@@ -4834,7 +4854,7 @@ bool c_token_requires_separator(CToken previous, String8 previous_spelling, CTok
     {
         result = (previous.punctuator == C_PUNCTUATOR_DOT && current.kind == C_TOKEN_PREPROCESSING_NUMBER && current_spelling.length &&
                   current_spelling.pointer[0] != '.') ||
-                 (current.kind == C_TOKEN_PUNCTUATOR && c_token_punctuators_join(previous, current_spelling));
+                 (current.kind == C_TOKEN_PUNCTUATOR && c_token_punctuators_join(previous, previous_spelling, current_spelling));
     }
     return result;
 }
@@ -8723,18 +8743,40 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
     }
     else if (string_equal(name, S8("stddef.h")))
     {
-        source = S8("#ifndef __BUSTER_PTRDIFF_T\n"
+        // Partial resource-header requests must not claim unrelated names.
+        // Each definition has its own guard so later full includes complete it.
+        source = S8("#if !defined(__need_ptrdiff_t) && !defined(__need_size_t) && "
+                    "!defined(__need_rsize_t) && !defined(__need_wchar_t) && "
+                    "!defined(__need_NULL) && !defined(__need_max_align_t) && "
+                    "!defined(__need_offsetof) && !defined(__need_nullptr_t)\n"
+                    "#define __BUSTER_STDDEF_ALL\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_ptrdiff_t)\n"
+                    "#ifndef __BUSTER_PTRDIFF_T\n"
                     "#define __BUSTER_PTRDIFF_T\n"
                     "typedef __PTRDIFF_TYPE__ ptrdiff_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_size_t)\n"
                     "#ifndef __BUSTER_SIZE_T\n"
                     "#define __BUSTER_SIZE_T\n"
                     "typedef __SIZE_TYPE__ size_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__need_rsize_t) || (defined(__BUSTER_STDDEF_ALL) && "
+                    "defined(__STDC_WANT_LIB_EXT1__) && __STDC_WANT_LIB_EXT1__ >= 1)\n"
+                    "#ifndef __BUSTER_RSIZE_T\n"
+                    "#define __BUSTER_RSIZE_T\n"
+                    "typedef __SIZE_TYPE__ rsize_t;\n"
+                    "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_wchar_t)\n"
                     "#ifndef __BUSTER_WCHAR_T\n"
                     "#define __BUSTER_WCHAR_T\n"
                     "typedef __WCHAR_TYPE__ wchar_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_max_align_t)\n"
                     "#ifndef __BUSTER_MAX_ALIGN_T\n"
                     "#define __BUSTER_MAX_ALIGN_T\n"
                     "typedef union {\n"
@@ -8742,21 +8784,32 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
                     "    long double real;\n"
                     "} max_align_t;\n"
                     "#endif\n"
-                    "#if __STDC_VERSION__ >= 202311L\n"
+                    "#endif\n"
+                    "#if __STDC_VERSION__ >= 202311L && "
+                    "(defined(__BUSTER_STDDEF_ALL) || defined(__need_nullptr_t))\n"
+                    "#ifndef __BUSTER_NULLPTR_T\n"
+                    "#define __BUSTER_NULLPTR_T\n"
                     "typedef typeof(nullptr) nullptr_t;\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_NULL)\n"
                     "#ifndef NULL\n"
                     "#define NULL ((void *)0)\n"
                     "#endif\n"
+                    "#endif\n"
+                    "#if defined(__BUSTER_STDDEF_ALL) || defined(__need_offsetof)\n"
                     "#define offsetof(type, member) "
                     "__builtin_offsetof(type, member)\n"
+                    "#endif\n"
+                    "#undef __BUSTER_STDDEF_ALL\n"
                     "#undef __need_ptrdiff_t\n"
                     "#undef __need_size_t\n"
                     "#undef __need_rsize_t\n"
                     "#undef __need_wchar_t\n"
                     "#undef __need_NULL\n"
                     "#undef __need_max_align_t\n"
-                    "#undef __need_offsetof\n");
+                    "#undef __need_offsetof\n"
+                    "#undef __need_nullptr_t\n");
     }
     else if (string_equal(name, S8("limits.h")))
     {
@@ -10006,6 +10059,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         }
     }
     TargetDataLayout layout = options.data_layout;
+    bool apple_target = options.target.os == OPERATING_SYSTEM_MACOS || options.target.os == OPERATING_SYSTEM_IOS;
+    bool wasm_target = options.target.cpu_arch == CPU_ARCH_WASM32 || options.target.cpu_arch == CPU_ARCH_WASM64;
+    bool int64_uses_long = layout.long_integer.bit_width == 64 && !apple_target && !wasm_target;
+    bool intmax_uses_long = layout.long_integer.bit_width == 64 && !wasm_target;
     CToken* constant_parameter_replacement = arena_allocate(arena, CToken, 1);
     constant_parameter_replacement[0] = c_space_token(space, S8("value"), C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
     String8* constant_parameters = arena_allocate(arena, String8, 1);
@@ -10026,7 +10083,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         else if (macro_index >= 6)
         {
             bool is_unsigned = (macro_index & 1) != 0;
-            suffix = layout.long_integer.size == 8 ? (is_unsigned ? S8("UL") : S8("L")) : (is_unsigned ? S8("ULL") : S8("LL"));
+            bool uses_long = macro_index < 8 ? int64_uses_long : intmax_uses_long;
+            suffix = uses_long ? (is_unsigned ? S8("UL") : S8("L")) : (is_unsigned ? S8("ULL") : S8("LL"));
         }
         CToken* replacement = constant_parameter_replacement;
         u32 replacement_count = 1;
@@ -10045,15 +10103,22 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
     String8 signed_pointer_type = layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
     String8 unsigned_pointer_type = layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
-    String8 signed_64_type = layout.long_integer.bit_width == 64 ? S8("long") : S8("long long");
-    String8 unsigned_64_type = layout.unsigned_long_integer.bit_width == 64 ? S8("unsigned long") : S8("unsigned long long");
+    bool unsigned_wchar_target = target_uses_unsigned_wchar(options.target);
+    bool unsigned_wint_target = !short_wchar_target && !apple_target && !wasm_target;
+    // Equal widths do not select the platform's typedef identity. Darwin
+    // uses long long for int64_t but long for intmax_t; Wasm uses long long
+    // for both, including its LP64 target. Literal constructors must agree.
+    String8 signed_64_type = int64_uses_long ? S8("long") : S8("long long");
+    String8 unsigned_64_type = int64_uses_long ? S8("unsigned long") : S8("unsigned long long");
+    String8 signed_max_type = intmax_uses_long ? S8("long") : S8("long long");
+    String8 unsigned_max_type = intmax_uses_long ? S8("unsigned long") : S8("unsigned long long");
 #define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
     C_DEFINE_TYPE_MACRO("__PTRDIFF_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__INTPTR_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINTPTR_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_64_type);
-    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_64_type);
+    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_max_type);
+    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_max_type);
     C_DEFINE_TYPE_MACRO("__INT8_TYPE__", S8("signed char"));
     C_DEFINE_TYPE_MACRO("__UINT8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__INT16_TYPE__", S8("short"));
@@ -10062,9 +10127,12 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_64_type);
     C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_64_type);
-    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") :
-                      target_uses_unsigned_wchar(options.target) ? S8("unsigned int") : S8("int"));
-    C_DEFINE_TYPE_MACRO("__WINT_TYPE__", options.target.os == OPERATING_SYSTEM_UEFI ? S8("unsigned short") : S8("unsigned int"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__WINT_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wint_target ? S8("unsigned int") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_WCHAR_T__", short_wchar_target ? S8("2") : S8("4"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_WINT_T__", short_wchar_target ? S8("2") : S8("4"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_MAX__", short_wchar_target ? S8("65535") : unsigned_wchar_target ? S8("4294967295U") : S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__WINT_MAX__", short_wchar_target ? S8("65535") : unsigned_wint_target ? S8("4294967295U") : S8("2147483647"));
     C_DEFINE_TYPE_MACRO("__CHAR8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__CHAR32_TYPE__", S8("unsigned int"));
@@ -10146,6 +10214,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // CPython's Objects/floatobject.c stopped.  float and double are IEEE
     // binary32/64 on every hosted target here; the long double family
     // follows the target's layout below.
+    // Supported targets evaluate float/double at their declared precision.
+    C_DEFINE_TYPE_MACRO("__FLT_EVAL_METHOD__", S8("0"));
     C_DEFINE_TYPE_MACRO("__FLT_RADIX__", S8("2"));
     C_DEFINE_TYPE_MACRO("__FLT_MANT_DIG__", S8("24"));
     C_DEFINE_TYPE_MACRO("__FLT_DIG__", S8("6"));
@@ -10242,6 +10312,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
     C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
     C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
+    C_DEFINE_TYPE_MACRO("__WINT_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
     C_DEFINE_TYPE_MACRO("__ORDER_LITTLE_ENDIAN__", S8("1234"));
     C_DEFINE_TYPE_MACRO("__ORDER_BIG_ENDIAN__", S8("4321"));
     C_DEFINE_TYPE_MACRO("__BYTE_ORDER__", layout.endianness == TARGET_ENDIAN_LITTLE ? S8("__ORDER_LITTLE_ENDIAN__") : S8("__ORDER_BIG_ENDIAN__"));
@@ -10252,6 +10323,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // The string form beside the three numbers: CPython's Python/getcompiler.c
     // builds sys.version's compiler field from it.
     C_DEFINE_TYPE_MACRO("__clang_version__", S8("\"18.0.0 (buster)\""));
+    C_DEFINE_TYPE_MACRO("__VERSION__", S8("__clang_version__"));
+    // No inliner runs at any accepted -O level. Do not expose glibc's
+    // optimized extern-inline paths by advertising __OPTIMIZE__ or
+    // __OPTIMIZE_SIZE__; tell its guards explicitly that inlining is absent.
+    C_DEFINE_TYPE_MACRO("__NO_INLINE__", S8("1"));
     // C11 6.10.8.1 mandates both, in exactly these spellings ("Mmm dd yyyy"
     // and "hh:mm:ss").  A fixed epoch keeps builds reproducible; consumers
     // parse the SHAPE -- CPython's platform.py rejects sys.version when the

@@ -293,15 +293,6 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
         BUSTER_QUALITY_COUNT(invalid_target_functions, 1);
         return (MachineStackPlacement){0};
     }
-    // A switch's targets live in the case table rather than in block-ref
-    // operands, so the loop extension below cannot see whether any of them
-    // points backwards. Rather than reason about that, functions with a
-    // case table keep the local allocator alone.
-    if (function->switch_case_count)
-    {
-        BUSTER_QUALITY_COUNT(switch_fallback_functions, 1);
-        return machine_fast_placement_build_core(arena, function);
-    }
     // Frequency classes are consumed only by the economics below, so only
     // QUALITY pays the stamping walk — measured at +0.9% of fast-mode
     // compile cost when every machine mode stamped at selection.
@@ -634,15 +625,6 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
     u32* candidate_region_counts = 0;
     if (merged_span_count)
     {
-        u32* instruction_blocks = arena_allocate(scratch.arena, u32, function->instruction_count);
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-        {
-            MachineBlock* block = function->blocks + block_index;
-            for (u32 offset = 0; offset < block->instruction_count; offset += 1)
-            {
-                instruction_blocks[block->first_instruction + offset] = block_index;
-            }
-        }
         block_regions = arena_allocate(scratch.arena, u32, function->block_count ? function->block_count : 1);
         region_head_blocks = arena_allocate(scratch.arena, u32, merged_span_count);
         region_ok = arena_allocate(scratch.arena, u8, merged_span_count);
@@ -691,29 +673,20 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
                 region_entry_rows = arena_allocate(scratch.arena, u32, region_entry_offsets[merged_span_count] ? region_entry_offsets[merged_span_count] : 1);
                 region_exit_blocks = arena_allocate(scratch.arena, u32, region_exit_offsets[merged_span_count] ? region_exit_offsets[merged_span_count] : 1);
             }
-            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            // The shared prepass already owns adjacency for operand targets,
+            // switch tables and asm-goto successor ranges. Reuse all of it;
+            // rebuilding from block operands would miss table-only exits and
+            // outside predecessors of a split's landing-pad store.
+            for (u32 target_block = 0; target_block < function->block_count; target_block += 1)
             {
-                MachineInstruction* instruction = function->instructions + instruction_index;
-                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                u32 targets[BUSTER_ARRAY_LENGTH(instruction->operands)];
-                u32 target_count = 0;
-                for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                for (u32 predecessor = prepass.predecessor_offsets[target_block];
+                     predecessor < prepass.predecessor_offsets[target_block + 1]; predecessor += 1)
                 {
-                    if (machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_BLOCK)
-                    {
-                        targets[target_count] = machine_ref_payload(instruction->operands[slot]);
-                        target_count += 1;
-                    }
-                }
-                if (!target_count)
-                {
-                    continue;
-                }
-                u32 source_block = instruction_blocks[instruction_index];
-                u32 source_region = block_regions[source_block];
-                for (u32 target_index = 0; target_index < target_count; target_index += 1)
-                {
-                    u32 target_block = targets[target_index];
+                    u32 source_block = prepass.predecessor_list[predecessor];
+                    MachineBlock* source = function->blocks + source_block;
+                    u32 instruction_index = source->first_instruction + source->instruction_count - 1;
+                    MachineInstruction* instruction = function->instructions + instruction_index;
+                    u32 source_region = block_regions[source_block];
                     u32 target_region = block_regions[target_block];
                     if (pass == 0)
                     {
@@ -728,7 +701,11 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
                             if (pass == 0)
                             {
                                 region_entry_counts[target_region] += 1;
-                                if (target_count != 1 || target_block <= source_block)
+                                // Entry installs execute before the terminator;
+                                // only an unconditional forward edge guarantees
+                                // every execution reaches this region. Duplicate
+                                // switch destinations do not provide that proof.
+                                if (instruction->opcode != description->unconditional_branch_opcode || target_block <= source_block)
                                 {
                                     region_ok[target_region] = 0;
                                 }

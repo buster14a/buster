@@ -61,6 +61,7 @@ COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + (
 SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
 SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "Windows x86-64")
 SPLIT_QUALIFICATION_BRANCH = "codex/ci-checks-split-overlap"
+SPLIT_QUALIFICATION_BRANCHES = (SPLIT_QUALIFICATION_BRANCH, "codex/2120-evidence-v2-split-overlap")
 DEFAULT_CHECKS_LAYOUT = "split"
 COMBINED_QUALIFICATION_BRANCHES = (
     "codex/ci-checks-combined-overlap",

@@ -12,6 +12,7 @@
 // artifact is a structured error, not a crash.
 
 #include <buster/lib/compiler/gpu/gpu.h>
+#include <buster/lib/compiler/gpu/gpu_internal.h>
 
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -2201,12 +2202,31 @@ BUSTER_GLOBAL_LOCAL void gpu_result_append_log(Arena* arena, GpuPipelineResult* 
     result->log = result->log.length ? string_format(arena, S8("{S8}{S8}"), result->log, text) : text;
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool gpu_fail_next_cleanup;
+
+void gpu_test_fail_next_cleanup(bool enabled)
+{
+    gpu_fail_next_cleanup = enabled;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL bool gpu_pipeline_cleanup(GpuPipelinePlan plan, bool save_temporaries)
 {
     bool result = true;
     if (!save_temporaries && plan.temporary_directory.length)
     {
-        result = os_directory_delete(plan.temporary_directory);
+#if BUSTER_INCLUDE_TESTS
+        if (gpu_fail_next_cleanup)
+        {
+            gpu_fail_next_cleanup = false;
+            result = false;
+        }
+        else
+#endif
+        {
+            result = os_directory_delete(plan.temporary_directory);
+        }
     }
     return result;
 }
@@ -2242,6 +2262,7 @@ BUSTER_GLOBAL_LOCAL void gpu_plan_retarget_output(GpuPipelinePlan* plan, String8
 
 BUSTER_GLOBAL_LOCAL void gpu_result_record_cleanup_failure(Arena* arena, GpuPipelineResult* result, String8 diagnostic)
 {
+    result->cleanup_failed = true;
     if (result->error == GPU_PIPELINE_ERROR_NONE)
     {
         result->error = GPU_PIPELINE_ERROR_FILE_WRITE;
@@ -2544,6 +2565,7 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                 else
                 {
                     result.artifact.path = publication_path;
+                    result.published = true;
                 }
             }
 
@@ -2551,12 +2573,15 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
             {
                 gpu_result_record_cleanup_failure(
                     arena, &result,
-                    string_format(arena, S8("could not remove owned GPU temporary directory {S8}"), plan.temporary_directory));
+                    result.published
+                        ? string_format(arena, S8("GPU artifact published to {S8}; could not remove owned GPU temporary directory {S8}"),
+                                        result.artifact.path, plan.temporary_directory)
+                        : string_format(arena, S8("could not remove owned GPU temporary directory {S8}"), plan.temporary_directory));
             }
         }
     }
 
-    if (result.error != GPU_PIPELINE_ERROR_NONE)
+    if (result.error != GPU_PIPELINE_ERROR_NONE && !result.published)
     {
         result.artifact = (GpuArtifact){0};
     }
