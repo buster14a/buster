@@ -3856,6 +3856,13 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                            sigaddset(&handoff_signals, SIGTERM) == 0 &&
                            sigaddset(&handoff_signals, SIGINT) == 0 &&
                            sigprocmask(SIG_BLOCK, &handoff_signals, &prior_signals) == 0;
+    if (config && config->assigned_attempt && handoff_blocked)
+    {
+        /* Assigned coordinator forks with cancellation blocked. Install the
+         * existing durable-cancel handlers before admitting the pending signal. */
+        sigdelset(&prior_signals, SIGTERM);
+        sigdelset(&prior_signals, SIGINT);
+    }
     bool handoff_failed = !handoff_blocked;
     sig_atomic_t transport_stop = bq_worker_transport_stop_signal;
     bq_worker_transport_stop_signal = 0;
@@ -3931,10 +3938,21 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && recovering)
         error = bq_worker_recover(queue, config, backend, lease_path, current_boot, job, &lease,
                                   &finalization);
-    if (error == BQ_OK && !recovering && bq_worker_lease_acquire(lease_path, &lease) != 0) error = BQ_BUSY;
+    if (error == BQ_OK && !recovering && config->assigned_attempt)
+    {
+        int duplicate = fcntl(config->retained_lease_descriptor, F_DUPFD_CLOEXEC, 3);
+        if (duplicate < 0 || bq_worker_lease_adopt(lease_path, duplicate, &lease) != 0)
+            error = BQ_CONFIGURATION_MISMATCH;
+    }
+    if (error == BQ_OK && !recovering && !config->assigned_attempt && bq_worker_lease_acquire(lease_path, &lease) != 0) error = BQ_BUSY;
     if (error == BQ_OK && !recovering && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
     u64 token = 0;
-    if (error == BQ_OK && !recovering) error = bq_materialize(queue, config->installed_root, config->workspace_root, id, &token);
+    if (error == BQ_OK && !recovering && config->assigned_attempt)
+    {
+        token = job ? job->token : 0;
+        error = bq_materialize_reserved(queue, config->installed_root, config->workspace_root, id, &token);
+    }
+    else if (error == BQ_OK && !recovering) error = bq_materialize(queue, config->installed_root, config->workspace_root, id, &token);
     if (!recovering) job = error == BQ_OK ? bq_job(&queue->state, *id) : NULL;
     if (error == BQ_OK && !recovering && job) error = bq_worker_result_open(config, job, &finalization, true);
     char unit[BQ_WORKER_UNIT_CAP];

@@ -575,11 +575,26 @@ BUSTER_GLOBAL_LOCAL bool bq_mcp_service_result(BqPacket const* request, BqPacket
             bq_mcp_string(result, string_from_pointer(bq_outcome_name(bq_u32(data + 32))));
             bq_mcp_append(result, S8(",\"measurement_validity\":\"not_evaluated\",\"statistical_decision\":\"not_evaluated\",\"cancel_requested\":"));
             bq_mcp_append(result, bq_u32(data + 40) ? S8("true") : S8("false"));
+            u8 const* observation = bq_observation(response);
+            if (observation)
+            {
+                bq_mcp_append(result, S8(",\"last_observed_utc_ms\":"));
+                bq_mcp_u64(result, bq_u64(observation + 8));
+                u32 flags = bq_u32(observation + 16);
+                bq_mcp_append(result, flags & BQ_OBSERVATION_STALE ? S8(",\"stale\":true") : S8(",\"stale\":false"));
+                bq_mcp_append(result, flags & BQ_OBSERVATION_PAUSED ? S8(",\"live_export_paused\":true") : S8(",\"live_export_paused\":false"));
+                bq_mcp_append(result, flags & BQ_OBSERVATION_RECONCILIATION ? S8(",\"needs_reconciliation\":true") : S8(",\"needs_reconciliation\":false"));
+                bq_mcp_append(result, flags & BQ_OBSERVATION_QUARANTINE ? S8(",\"quarantined\":true") : S8(",\"quarantined\":false"));
+                bq_mcp_append(result, flags & BQ_OBSERVATION_LIFECYCLE_UNAVAILABLE ? S8(",\"lifecycle_unavailable\":true") : S8(",\"lifecycle_unavailable\":false"));
+                char const* decisions[] = {"none", "intent", "applied", "too_late"};
+                bq_mcp_append(result, S8(",\"cancellation_status\":"));
+                bq_mcp_string(result, string_from_pointer(decisions[bq_u32(observation + 20)]));
+            }
             bq_mcp_append(result, S8(",\"request_sha256\":"));
             bq_mcp_string(result, (String8){(char8*)data + 56, 64});
             bq_mcp_append(result, S8(",\"failure\":"));
             bq_mcp_string(result, string_from_pointer(bq_error_name((BqError)bq_u32(data + 120))));
-            bool bound = response->size == BQ_CONTROL_CAP;
+            bool bound = bq_response_body_size(response) == BQ_CONTROL_BODY;
             bq_mcp_append(result, bound ? S8(",\"result_bound\":true,\"artifacts\":{") : S8(",\"result_bound\":false}"));
             if (bound)
             {

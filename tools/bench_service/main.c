@@ -25,6 +25,9 @@
 #include "transport.c"
 #include "export_client.c"
 #include "native_client.c"
+#include "offhost_session.c"
+#include "offhost_control.c"
+#include "offhost_transport.c"
 #include <inttypes.h>
 #include <limits.h>
 
@@ -221,7 +224,49 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     u64 id = 0;
     u64 argument = 0;
     u64 attempt = 0;
-    if (argc == 3 && !strcmp(argv[1], "mcp"))
+    if (argc == 5 && !strcmp(argv[1], "control-serve"))
+    {
+        valid = true;
+        char machine[SHA256_HEX_CAPACITY] = {0};
+#ifdef __linux__
+        error = bq_offhost_operator_identity(machine);
+        if (error == BQ_OK) error = bq_control_serve(argv[2], argv[3], argv[4], machine);
+#else
+        error = BQ_UNSUPPORTED;
+#endif
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "worker-stdio"))
+    {
+        valid = true;
+#ifdef __linux__
+        error = bq_worker_stdio(fileno(input), fileno(output), BQ_OFFHOST_WORKER_SOCKET);
+#else
+        error = BQ_UNSUPPORTED;
+#endif
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "worker-agent"))
+    {
+        BqWorkerConfig config = {
+            .installed_root = S8("/opt/buster-bench/installed"),
+            .workspace_root = S8("/var/lib/buster-bench/workspaces"),
+            .lease_file = S8("/var/lib/buster-bench/lease/host.lock"),
+            .boot_id_file = S8("/proc/sys/kernel/random/boot_id"),
+            .cgroup_root = S8("/sys/fs/cgroup"),
+            .limits = {0, 8ull * 1024 * 1024 * 1024, 0, 256, 60ull * 60 * 1000000},
+            .quarantine = &bq_worker_quarantine,
+            .queue_root = S8("/var/lib/buster-bench/queue"),
+            .production_path = true,
+        };
+        valid = true;
+        error = bq_offhost_worker_agent("/var/lib/buster-bench/queue", &config);
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 3 && !strcmp(argv[1], "mcp"))
     {
         valid = true;
         error = bq_mcp_run(argv[2], input, output);

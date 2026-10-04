@@ -18,6 +18,9 @@
 #define BQ_SCHEMA_NATIVE 4u
 #define BQ_SCHEMA_RUNTIME 6u
 #define BQ_SCHEMA BQ_SCHEMA_RUNTIME
+/* Worker custody ledgers alone use the assigned generation; ordinary
+ * local/control journals stay at BQ_SCHEMA. */
+#define BQ_SCHEMA_ASSIGNED 7u
 #define BQ_CONTROL_SCHEMA 2u
 #define BQ_PENDING_CAP 8u
 /* Lifetime caps (#2114). Nothing durable encodes them: journal frames carry
@@ -69,7 +72,7 @@ typedef enum BqValidity
 
 typedef enum BqRecordKind
 {
-    BQ_SUBMIT = 1, BQ_RESERVE, BQ_ADVANCE, BQ_CANCEL, BQ_RECONCILE, BQ_RESULT_BIND
+    BQ_SUBMIT = 1, BQ_RESERVE, BQ_ADVANCE, BQ_CANCEL, BQ_RECONCILE, BQ_RESULT_BIND, BQ_ASSIGN_IMPORT
 } BqRecordKind;
 
 typedef enum BqRecipe
@@ -186,6 +189,7 @@ BUSTER_F_DECL BqError bq_open(BqQueue* queue, char const* existing_private_direc
 BUSTER_F_DECL void bq_close(BqQueue* queue);
 BUSTER_F_DECL BqError bq_submit(BqQueue* queue, BqRequest const* request, u64* id);
 BUSTER_F_DECL BqError bq_reserve(BqQueue* queue, u64* id, u64* token);
+BUSTER_F_DECL BqError bq_assigned_import(BqQueue* queue, BqRequest const* request, u64 id, u64 token);
 BUSTER_F_DECL BqError bq_cancel(BqQueue* queue, u64 id);
 BUSTER_F_DECL BqError bq_fake_step(BqQueue* queue, u64 id, u64 token);
 BUSTER_F_DECL BqError bq_fake_run(BqQueue* queue, u64* id);
@@ -203,6 +207,7 @@ BUSTER_F_DECL bool bq_recipe_blocked(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_fake(BqRequest const* request);
 BUSTER_F_DECL bool bq_recipe_real(BqRequest const* request);
 BUSTER_F_DECL BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token);
+BUSTER_F_DECL BqError bq_materialize_reserved(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token);
 BUSTER_F_DECL BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u64 token);
 BUSTER_F_DECL bool bq_workspace_name(char result[64], u64 id, u64 token);
 BUSTER_F_DECL BqError bq_failure_evidence(BqQueue* queue, BqJob const* job);

@@ -9,6 +9,12 @@
 #define BQ_CONTROL_BODY 512u
 #define BQ_CONTROL_CAP (BQ_CONTROL_HEADER + BQ_CONTROL_BODY)
 #define BQ_LOG_PAGE 4u
+#define BQ_OBSERVATION_SIZE 32u
+#define BQ_OBSERVATION_STALE 1u
+#define BQ_OBSERVATION_PAUSED 2u
+#define BQ_OBSERVATION_RECONCILIATION 4u
+#define BQ_OBSERVATION_QUARANTINE 8u
+#define BQ_OBSERVATION_LIFECYCLE_UNAVAILABLE 16u
 #define BQ_PACKET_CAP (BQ_CONTROL_HEADER + BQ_EXPORT_BODY_CAP)
 
 BUSTER_GLOBAL_LOCAL BqWorkerQuarantine bq_worker_quarantine = {.descriptor = -1};
@@ -56,10 +62,25 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
     "storage=private-local-posix-directory\n";
 #endif
 
+BUSTER_GLOBAL_LOCAL u8 const* bq_observation(BqPacket const* packet)
+{
+    u8 const* observation = packet->size >= BQ_CONTROL_HEADER + 4 + BQ_OBSERVATION_SIZE ?
+                            packet->bytes + packet->size - BQ_OBSERVATION_SIZE : NULL;
+    if (observation && memcmp(observation, "BQOBS001", 8)) observation = NULL;
+    return observation;
+}
+
+BUSTER_GLOBAL_LOCAL u32 bq_response_body_size(BqPacket const* packet)
+{
+    u32 size = packet->size >= BQ_CONTROL_HEADER ? packet->size - BQ_CONTROL_HEADER : 0;
+    if (bq_observation(packet)) size -= BQ_OBSERVATION_SIZE;
+    return size;
+}
+
 BUSTER_GLOBAL_LOCAL void bq_packet_schema(BqPacket* packet, u32 schema, u32 operation, u64 correlation, u8 const* body, u32 size)
 {
     *packet = (BqPacket){0};
-    if (size <= BQ_CONTROL_BODY || (operation == (BQ_OP_EXPORT | 0x80000000u) && size <= BQ_EXPORT_BODY_CAP))
+    if (size <= BQ_CONTROL_BODY + BQ_OBSERVATION_SIZE || (operation == (BQ_OP_EXPORT | 0x80000000u) && size <= BQ_EXPORT_BODY_CAP))
     {
         packet->size = BQ_CONTROL_HEADER + size;
         memcpy(packet->bytes, "BQP1", 4);
@@ -96,7 +117,10 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
     if (valid)
     {
         u32 operation = bq_u32(request->bytes + 8);
-        u32 length = response->size - BQ_CONTROL_HEADER;
+        u32 length = bq_response_body_size(response);
+        u8 const* observation = bq_observation(response);
+        if (observation && ((bq_u32(observation + 16) & ~31u) || bq_u32(observation + 20) > 3 ||
+                            bq_u32(observation + 24) || bq_u32(observation + 28))) valid = false;
         u8 const* data = response->bytes + BQ_CONTROL_HEADER;
         u8 const* arguments = request->bytes + BQ_CONTROL_HEADER;
         if (operation == BQ_OP_EXPORT)
@@ -131,7 +155,7 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
                 }
             }
         }
-        else if (response->size > BQ_CONTROL_CAP)
+        else if (length > BQ_CONTROL_BODY)
         {
             valid = false;
         }

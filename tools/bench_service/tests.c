@@ -5712,6 +5712,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_large_source_manifest(void)
 #include "export_tests.c"
 #include "native_tests.c"
 #include "mcp_tests.c"
+#include "offhost_tests.c"
 
 BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 {
@@ -5807,6 +5808,11 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lock_precedes_materialization();
     bq_test_transport_worker_retries_after_busy();
     bq_test_transport_worker_signal_handoff();
+    bq_test_offhost_codec();
+    bq_test_offhost_assigned_worker();
+    bq_test_offhost_cache(false);
+    bq_test_offhost_cache(true);
+    bq_test_offhost_quiet_load();
     bq_test_export_inventory();
     bq_test_export(true);
     bq_test_export(false);

@@ -1189,27 +1189,16 @@ BUSTER_GLOBAL_LOCAL BqError bq_materialization_finish_failure(BqQueue* queue, Bq
     return error;
 }
 
-BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token)
+BqError bq_materialize_reserved(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token)
 {
-    *id = 0;
-    *token = 0;
-    BqError error = queue->poisoned ? BQ_IO : queue->needs_reconciliation ? BQ_RECONCILIATION_REQUIRED : BQ_NOT_FOUND;
-    for (u32 i = 0; error == BQ_NOT_FOUND && i < queue->state.job_count; i += 1)
-    {
-        if (queue->state.jobs[i].phase == BQ_QUEUED)
-        {
-            error = bq_recipe_real(&queue->state.jobs[i].request) ? BQ_OK : BQ_UNSUPPORTED;
-        }
-    }
+    BqJob* selected = bq_job(&queue->state, *id);
+    BqError error = queue->poisoned ? BQ_IO : queue->needs_reconciliation ? BQ_RECONCILIATION_REQUIRED :
+                    !selected || selected->phase != BQ_RESERVED || selected->token != *token ||
+                    queue->state.active_id != *id ? BQ_INVALID_TRANSITION :
+                    !bq_recipe_real(&selected->request) ? BQ_UNSUPPORTED : BQ_OK;
     char installed_path[BQ_PATH_CAP + 1], workspaces_path[BQ_PATH_CAP + 1];
     if (error == BQ_OK && (!bq_string_path(installed_root, installed_path) || !bq_string_path(workspace_root, workspaces_path)))
-    {
         error = BQ_BAD_REQUEST;
-    }
-    if (error == BQ_OK)
-    {
-        error = bq_reserve(queue, id, token);
-    }
     BqJob* job = error == BQ_OK ? bq_job(&queue->state, *id) : NULL;
     int installed = error == BQ_OK ? bq_open_absolute_directory(installed_root) : -1;
     int workspaces = error == BQ_OK ? bq_open_absolute_directory(workspace_root) : -1;
@@ -1346,6 +1335,22 @@ BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace
 }
 
 typedef BqError (*BqWorkspaceBeforeTerminal)(BqQueue*, BqJob*, void*);
+
+BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token)
+{
+    *id = 0;
+    *token = 0;
+    BqError error = queue->poisoned ? BQ_IO : queue->needs_reconciliation ? BQ_RECONCILIATION_REQUIRED : BQ_NOT_FOUND;
+    for (u32 i = 0; error == BQ_NOT_FOUND && i < queue->state.job_count; i += 1)
+        if (queue->state.jobs[i].phase == BQ_QUEUED)
+            error = bq_recipe_real(&queue->state.jobs[i].request) ? BQ_OK : BQ_UNSUPPORTED;
+    char installed_path[BQ_PATH_CAP + 1], workspaces_path[BQ_PATH_CAP + 1];
+    if (error == BQ_OK && (!bq_string_path(installed_root, installed_path) || !bq_string_path(workspace_root, workspaces_path)))
+        error = BQ_BAD_REQUEST;
+    if (error == BQ_OK) error = bq_reserve(queue, id, token);
+    if (error == BQ_OK) error = bq_materialize_reserved(queue, installed_root, workspace_root, id, token);
+    return error;
+}
 
 BUSTER_GLOBAL_LOCAL BqError bq_workspace_reconcile_controlled(BqQueue* queue, String8 workspace_root,
                                                                u64 id, u64 token,
@@ -1528,6 +1533,12 @@ BqError bq_failure_evidence(BqQueue* queue, BqJob const* job)
 {
     (void)queue;
     (void)job;
+    return BQ_UNSUPPORTED;
+}
+
+BqError bq_materialize_reserved(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token)
+{
+    (void)queue; (void)installed_root; (void)workspace_root; (void)id; (void)token;
     return BQ_UNSUPPORTED;
 }
 

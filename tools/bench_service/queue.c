@@ -377,10 +377,31 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
 {
     BqError error = BQ_OK;
     BqJob* job = NULL;
-    if ((schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA) || (state->journal_schema && schema < state->journal_schema) ||
-        sequence != state->sequence + 1 || state->event_count == BQ_EVENT_CAP || kind < BQ_SUBMIT || kind > BQ_RESULT_BIND)
+    if ((schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA_ASSIGNED) || (state->journal_schema && schema < state->journal_schema) ||
+        sequence != state->sequence + 1 || state->event_count == BQ_EVENT_CAP || kind < BQ_SUBMIT || kind > BQ_ASSIGN_IMPORT)
     {
         error = BQ_INVALID_TRANSITION;
+    }
+    else if (kind == BQ_ASSIGN_IMPORT)
+    {
+        BqRequest request = {.size = size >= 20 ? bq_u32(body + 16) : 0};
+        u64 id = size >= 20 ? bq_u64(body) : 0;
+        u64 token = size >= 20 ? bq_u64(body + 8) : 0;
+        if (schema != BQ_SCHEMA_ASSIGNED || !id || !token || size < 20 || request.size > BQ_REQUEST_CAP ||
+            size != 20 + request.size || state->active_id || bq_job(state, id) || state->job_count == BQ_JOB_CAP)
+            error = BQ_INVALID_TRANSITION;
+        else
+        {
+            memcpy(request.bytes, body + 20, request.size);
+            if (!bq_request_valid(&request) || !bq_recipe_service(bq_request_recipe(&request))) error = BQ_BAD_REQUEST;
+            else
+            {
+                job = state->jobs + state->job_count++;
+                *job = (BqJob){.id = id, .token = token, .phase = BQ_RESERVED, .request = request};
+                bq_request_digest(&request, job->digest);
+                state->active_id = id;
+            }
+        }
     }
     else if (kind == BQ_SUBMIT)
     {
@@ -706,10 +727,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_replay(BqQueue* queue)
             u32 kind = bq_u32(frame + 12);
             u64 sequence = bq_u64(frame + 24);
             u32 schema = bq_u32(frame + 8);
-            if (memcmp(frame, "BQJNL001", 8) || schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA ||
+            if (memcmp(frame, "BQJNL001", 8) || schema < BQ_SCHEMA_LEGACY || schema > BQ_SCHEMA_ASSIGNED ||
                 (queue->state.journal_schema && schema < queue->state.journal_schema) || bq_u32(frame + 20) ||
-                length > BQ_JOURNAL_BODY_CAP || kind < BQ_SUBMIT || kind > BQ_RESULT_BIND ||
-                (kind != BQ_RESULT_BIND && length > BQ_REQUEST_CAP) ||
+                length > BQ_JOURNAL_BODY_CAP || kind < BQ_SUBMIT || kind > BQ_ASSIGN_IMPORT ||
+                (kind != BQ_RESULT_BIND && kind != BQ_ASSIGN_IMPORT && length > BQ_REQUEST_CAP) ||
                 sequence != queue->state.sequence + 1 || memcmp(frame + 32, digest, 64))
             {
                 error = BQ_CORRUPT;
@@ -841,12 +862,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_append(BqQueue* queue, BqRecordKind kind, u8 cons
     BqState next = queue->state;
     if (error == BQ_OK)
     {
-        error = bq_apply(&next, BQ_SCHEMA, kind, next.sequence + 1, body, size);
+        error = bq_apply(&next, next.journal_schema == BQ_SCHEMA_ASSIGNED || kind == BQ_ASSIGN_IMPORT ? BQ_SCHEMA_ASSIGNED : BQ_SCHEMA, kind, next.sequence + 1, body, size);
     }
     if (error == BQ_OK)
     {
         u8 frame[BQ_RECORD_CAP];
-        bq_frame(frame, kind, next.sequence, body, size);
+        bq_frame_schema(frame, next.journal_schema, kind, next.sequence, body, size);
 #ifndef _WIN32
         if (!bq_write(queue, frame, BQ_HEADER_SIZE + size) || queue->fault.before_sync || queue->fault.sync_error ||
             fsync(queue->journal_fd) != 0 || queue->fault.after_sync)
@@ -921,6 +942,26 @@ BqError bq_reserve(BqQueue* queue, u64* id, u64* token)
                 }
             }
         }
+    }
+    return error;
+}
+
+BqError bq_assigned_import(BqQueue* queue, BqRequest const* request, u64 id, u64 token)
+{
+    BqJob* existing = bq_job(&queue->state, id);
+    BqError error = !request || !id || !token || !bq_request_valid(request) ? BQ_BAD_REQUEST :
+                    queue->poisoned ? BQ_IO : BQ_OK;
+    if (error == BQ_OK && existing)
+        error = existing->token == token && existing->request.size == request->size &&
+                !memcmp(existing->request.bytes, request->bytes, request->size) ? BQ_OK : BQ_CONFLICT;
+    else if (error == BQ_OK)
+    {
+        u8 body[BQ_JOURNAL_BODY_CAP];
+        bq_put64(body, id);
+        bq_put64(body + 8, token);
+        bq_put32(body + 16, request->size);
+        memcpy(body + 20, request->bytes, request->size);
+        error = bq_append(queue, BQ_ASSIGN_IMPORT, body, 20 + request->size);
     }
     return error;
 }
