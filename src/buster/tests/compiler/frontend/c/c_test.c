@@ -219,6 +219,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_scratch_capacity(UnitTestArgu
     BUSTER_TEST(arguments, !c_test_ir_arena_reservation_advance(128, &position, 8, 1, 3));
     BUSTER_TEST(arguments, !c_test_ir_arena_reservation_advance(128, &position, 0, 1, 1));
     BUSTER_TEST(arguments, position == arena_minimum_position);
+    u64 reservation = 0;
+    BUSTER_TEST(arguments, c_test_ir_scratch_reservation_size(128, 128, &reservation) && reservation == 128);
+    BUSTER_TEST(arguments, c_test_ir_scratch_reservation_size(129, 128, &reservation) && reservation == 256);
+    BUSTER_TEST(arguments, c_test_ir_scratch_reservation_size(1000000000, 256, &reservation) && reservation == 1073741824);
+    BUSTER_TEST(arguments, c_test_ir_scratch_reservation_size(ARENA_MAX_RESERVATION, 128, &reservation) && reservation == ARENA_MAX_RESERVATION);
+    BUSTER_TEST(arguments, !c_test_ir_scratch_reservation_size(ARENA_MAX_RESERVATION + 1, 128, &reservation));
+    BUSTER_TEST(arguments, reservation == ARENA_MAX_RESERVATION);
+    BUSTER_TEST(arguments, !c_test_ir_scratch_reservation_size(128, 0, &reservation));
+    BUSTER_TEST(arguments, c_test_ir_function_scratch_size(32, 128, true, &reservation) && reservation == BUSTER_MB(256));
+    u64 memory_reservation = 0;
+    BUSTER_TEST(arguments, c_test_ir_function_scratch_size(1000000, 3000016, false, &memory_reservation) && memory_reservation > BUSTER_MB(256));
+    BUSTER_TEST(arguments, c_test_ir_function_scratch_size(1000000, 3000016, true, &reservation) && reservation >= memory_reservation);
+    BUSTER_TEST(arguments, !c_test_ir_function_scratch_size(UINT32_MAX, UINT32_MAX, true, &reservation));
     String8 source = S8("int probe(int* a) { int x = 0; x += a[0]; x += a[1]; return x; }");
     for (u32 form = 0; form < 2; form += 1)
     {
@@ -234,13 +247,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_scratch_capacity(UnitTestArgu
                 if (control == 3)
                 {
                     // Exercise the real million-token reservation estimate
-                    // before any source walk; the three small query cases
+                    // before any source walk, under an explicit fixed budget;
+                    // the three small query cases
                     // above establish success and both diagnostic owners.
                     large.token_count = 1000000;
                     parse.declarations = &large;
                 }
                 CIRLowerResult lowered = c_test_lower_to_ir_with_scratch_limits(temporary.arena, S8("lower-scratch.c"), preprocess, parse,
-                    target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0}, control == 1 ? arena_minimum_position : 0,
+                    target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0}, control == 1 ? arena_minimum_position : control == 3 ? BUSTER_MB(256) : 0,
                     control == 2 ? arena_minimum_position : 0);
                 if (control == 0)
                 {
@@ -278,6 +292,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_scratch_capacity(UnitTestArgu
             }
             scratch_end(temporary);
         }
+    }
+    return result;
+}
+
+// This valid declaration exceeds the old 256 MiB query reservation. Keep
+// one full frontend run, rather than multiplying the large source by modes.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_query_scratch_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* persistent = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(1), .flags = {.no_pool = true}});
+    BUSTER_TEST(arguments, persistent != 0);
+    if (persistent)
+    {
+        u32 const element_count = 400000;
+        String8 prefix = S8("unsigned char query_growth[] = {");
+        String8 suffix = S8("};");
+        u64 source_length = prefix.length + (u64)element_count * 2 + suffix.length;
+        char8* source_bytes = arena_allocate(persistent, char8, source_length);
+        memcpy(source_bytes, prefix.pointer, prefix.length);
+        for (u32 element = 0; element < element_count; element += 1)
+        {
+            source_bytes[prefix.length + (u64)element * 2] = (char8)('0' + element % 10);
+            source_bytes[prefix.length + (u64)element * 2 + 1] = ',';
+        }
+        memcpy(source_bytes + prefix.length + (u64)element_count * 2, suffix.pointer, suffix.length);
+        String8 source = {.pointer = source_bytes, .length = source_length};
+        CPreprocessResult preprocess = c_preprocess(persistent, source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParseResult parse = c_parse(persistent, preprocess);
+        if (BUSTER_REQUIRE(arguments, !preprocess.diagnostic_count && !parse.diagnostic_count && parse.declaration_count == 1))
+        {
+            // The same valid source must refuse a fixed old budget before
+            // publication, then succeed through the production growth path.
+            CIRLowerResult refused = c_test_lower_to_ir_with_scratch_limits(persistent, S8("query-scratch-growth.c"), preprocess, parse,
+                target_native, (CIRLowerOptions){0}, BUSTER_MB(256), 0);
+            BUSTER_TEST(arguments, !refused.program && !refused.canonical_ir_certified);
+            if (BUSTER_REQUIRE(arguments, refused.diagnostic_count == 1))
+            {
+                BUSTER_TEST(arguments, refused.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                BUSTER_STRING_TEST(arguments, refused.diagnostics[0].message, S8("C IR query capacity exceeds the lowering scratch reservation"));
+            }
+            CIRLowerResult lowered = c_lower_to_ir(persistent, S8("query-scratch-growth.c"), preprocess, parse, target_native);
+            BUSTER_TEST(arguments, !lowered.diagnostic_count && lowered.canonical_ir_certified);
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                if (BUSTER_REQUIRE(arguments, module->global_count == 1))
+                {
+                    IrGlobal* global = module->globals;
+                    IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+                    IrType* type = ir_type_from_id(&lowered.program->types, global->type);
+                    BUSTER_TEST(arguments, symbol && string_equal(symbol->name, S8("query_growth")));
+                    BUSTER_TEST(arguments, type && type->kind == IR_TYPE_ARRAY && type->element_count == element_count &&
+                                           type->layout.resolved && type->layout.size == element_count);
+                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && !global->relocation_count);
+                    if (BUSTER_REQUIRE(arguments, global->bytes.pointer && global->bytes.length == element_count))
+                    {
+                        u32 mismatches = 0;
+                        for (u32 element = 0; element < element_count; element += 1)
+                        {
+                            mismatches += global->bytes.pointer[element] != (char8)(element % 10);
+                        }
+                        BUSTER_TEST(arguments, mismatches == 0);
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, arena_destroy(persistent, 1));
     }
     return result;
 }
@@ -35745,6 +35829,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_type_identity_authority);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
     BUSTER_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
