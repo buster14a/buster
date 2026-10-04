@@ -81,7 +81,11 @@ through `-mattr=+feature,-feature`, and x86 assembly dialect selection through
 `-masm=att|intel`. CPU and feature options also accept separated values. CPU names use the canonical
 spellings printed by `cpu_model_to_string_os`, such as `baseline`, `native`,
 `haswell`, `znver5`, and `apple-m4`; incompatible target/model pairs are
-diagnosed. `-v` reports the selected CPU, the sorted effective feature set,
+diagnosed. x86-64 CPU selection requires AMD64 long mode: the historical
+`i486`, `pentium`, `k6`, `k6-2`, `k6-3`, `geode`, `athlon` and `athlon-xp`
+spellings are recognized but refused for x86-64, including through `-mcpu`.
+K8, Core 2 and newer represented x86-64 models remain available.
+`-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is

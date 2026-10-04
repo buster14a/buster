@@ -19391,6 +19391,50 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(incompatible_cpu_command_line));
     BUSTER_TEST(arguments, incompatible_cpu.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, incompatible_cpu.diagnostic, S8("CPU model is incompatible with target: apple-m4"));
+    typedef struct CompilerDriverX86ModeCase CompilerDriverX86ModeCase;
+    struct CompilerDriverX86ModeCase
+    {
+        String8 name;
+        bool has_long_mode;
+    };
+    CompilerDriverX86ModeCase x86_mode_cases[] = {
+        {S8("i486"), false}, {S8("pentium"), false}, {S8("k6"), false}, {S8("k6-2"), false},
+        {S8("k6-3"), false}, {S8("geode"), false}, {S8("athlon"), false}, {S8("athlon-xp"), false},
+        {S8("baseline"), true}, {S8("k8"), true}, {S8("k8-sse3"), true}, {S8("amdfam10"), true},
+        {S8("core2"), true}, {S8("bonnell"), true}, {S8("haswell"), true}, {S8("znver5"), true},
+    };
+    String8 cpu_mode_options[] = {S8("-march"), S8("-mcpu")};
+    for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(x86_mode_cases); mode_index += 1)
+    {
+        for (u32 option_index = 0; option_index < BUSTER_ARRAY_LENGTH(cpu_mode_options); option_index += 1)
+        {
+            for (u32 target_first = 0; target_first < 2; target_first += 1)
+            {
+                String8 target_option = S8("--target=x86_64-linux");
+                String8 selection = string_format(arguments->arena, S8("{S8}={S8}"), cpu_mode_options[option_index], x86_mode_cases[mode_index].name);
+                String8 joined[] = {target_first ? target_option : selection, target_first ? selection : target_option, S8("-c"), S8("source.c")};
+                String8 separated[] = {target_first ? target_option : cpu_mode_options[option_index],
+                                       target_first ? cpu_mode_options[option_index] : x86_mode_cases[mode_index].name,
+                                       target_first ? x86_mode_cases[mode_index].name : target_option, S8("-c"), S8("source.c")};
+                SliceString8 forms[] = {(SliceString8)BUSTER_ARRAY_TO_SLICE(joined), (SliceString8)BUSTER_ARRAY_TO_SLICE(separated)};
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+                {
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, forms[form]);
+                    BUSTER_TEST(arguments, invocation.error == (x86_mode_cases[mode_index].has_long_mode ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_ARGUMENT));
+                    if (x86_mode_cases[mode_index].has_long_mode)
+                    {
+                        BUSTER_TEST(arguments, target_cpu_features_are_valid(invocation.target));
+                        BUSTER_TEST(arguments, target_cpu_feature_has(invocation.target, TARGET_CPU_FEATURE_X86_SSE2));
+                    }
+                    else
+                    {
+                        BUSTER_STRING_TEST(arguments, invocation.diagnostic,
+                            string_format(arguments->arena, S8("CPU model is incompatible with target: {S8}"), x86_mode_cases[mode_index].name));
+                    }
+                }
+            }
+        }
+    }
     String8 unknown_cpu_command_line[] = {
         S8("-march=future-fast"),
         S8("-c"),
