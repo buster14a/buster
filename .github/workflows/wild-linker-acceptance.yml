@@ -104,12 +104,14 @@ jobs:
           cp "$root/mold/LICENSE" "$evidence/mold-source-LICENSE.txt"
           cp "$root/wild/LICENSE-MIT" "$evidence/wild-source-LICENSE-MIT.txt"
           cp "$root/wild/LICENSE-APACHE" "$evidence/wild-source-LICENSE-APACHE.txt"
-          rustc +1.94.0 -Vv > "$evidence/upstream-build.txt"
-          clang -v >> "$evidence/upstream-build.txt" 2>&1
-          env | sort | grep -E '^(CARGO_PROFILE_RELEASE_|RUSTFLAGS=)' >> "$evidence/upstream-build.txt"
-          printf '%s\n' 'Both: optimized level 3, no LTO/PGO, generic x86-64, stripped, libc allocator, LLVM linker. Different language/toolchain/runtime and mold system TBB/compression libraries are disclosed.' >> "$evidence/upstream-build.txt"
-          sha256sum "$root/wild/Cargo.lock" "$root/mold/CMakeLists.txt" "$root/mold-build/mold" "$root/wild/target/release/wild" >> "$evidence/upstream-build.txt"
-          ldd "$root/mold-build/mold" "$root/wild/target/release/wild" >> "$evidence/upstream-build.txt"
+          {
+            rustc +1.94.0 -Vv
+            clang -v
+            env | sort | grep -E '^(CARGO_PROFILE_RELEASE_|RUSTFLAGS=)'
+            printf '%s\n' 'Both: optimized level 3, no LTO/PGO, generic x86-64, stripped, libc allocator, LLVM linker. Different language/toolchain/runtime and mold system TBB/compression libraries are disclosed.'
+            sha256sum "$root/wild/Cargo.lock" "$root/mold/CMakeLists.txt" "$root/mold-build/mold" "$root/wild/target/release/wild"
+            ldd "$root/mold-build/mold" "$root/wild/target/release/wild"
+          } > "$evidence/upstream-build.txt" 2>&1
       - name: Record provenance and bootstrap existing C build driver
         shell: bash
         run: |
@@ -118,26 +120,30 @@ jobs:
           git rev-parse HEAD > "$evidence/source.txt"
           git status --porcelain=v1 > "$evidence/source-status.txt"
           git archive --format=tar HEAD build.c CMakeLists.txt cmake docs/agents .github/workflows tools/throughput tools/wild_linker_bench.c tools/wild_linker_acceptance.c LICENSES/README.md > "$evidence/inspected-source.tar"
-          uname -a > "$evidence/host.txt"
-          lscpu >> "$evidence/host.txt"
-          free -h >> "$evidence/host.txt"
-          nproc >> "$evidence/host.txt"
-          cat /proc/self/status /proc/loadavg /proc/self/cgroup >> "$evidence/host.txt"
-          for limit in /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu/cpu.cfs_quota_us /sys/fs/cgroup/cpu/cpu.cfs_period_us; do
-            if test -f "$limit"; then echo "$limit" >> "$evidence/host.txt"; cat "$limit" >> "$evidence/host.txt"; fi
-          done
-          cat /etc/os-release >> "$evidence/host.txt"
-          ps -eo pid,pcpu,pmem,comm --sort=-pcpu | sed -n '1,20p' >> "$evidence/host.txt"
-          df -T . >> "$evidence/host.txt"
-          clang --version > "$evidence/toolchains.txt"
-          gcc --version >> "$evidence/toolchains.txt"
-          cmake --version >> "$evidence/toolchains.txt"
-          wild --version >> "$evidence/toolchains.txt"
-          mold --version >> "$evidence/toolchains.txt"
-          gdb --version >> "$evidence/toolchains.txt"
-          llvm-dwarfdump --version >> "$evidence/toolchains.txt"
-          dpkg-query -W gdb llvm-21 libclang-rt-21-dev libc6 libc6-dev >> "$evidence/toolchains.txt"
-          sha256sum "$(command -v wild)" "$(command -v mold)" "$(command -v clang)" >> "$evidence/toolchains.txt"
+          {
+            uname -a
+            lscpu
+            free -h
+            nproc
+            cat /proc/self/status /proc/loadavg /proc/self/cgroup
+            for limit in /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu/cpu.cfs_quota_us /sys/fs/cgroup/cpu/cpu.cfs_period_us; do
+              if test -f "$limit"; then echo "$limit"; cat "$limit"; fi
+            done
+            cat /etc/os-release
+            ps -eo pid,pcpu,pmem,comm --sort=-pcpu | sed -n '1,20p'
+            df -T .
+          } > "$evidence/host.txt" 2>&1
+          {
+            clang --version
+            gcc --version
+            cmake --version
+            wild --version
+            mold --version
+            gdb --version
+            llvm-dwarfdump --version
+            dpkg-query -W gdb llvm-21 libclang-rt-21-dev libc6 libc6-dev
+            sha256sum "$(command -v wild)" "$(command -v mold)" "$(command -v clang)"
+          } > "$evidence/toolchains.txt" 2>&1
           cat "$evidence/toolchains.txt"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/wild-evaluation/build-driver"
           grep -n -C 8 -- 'BUILD_ARGUMENT_LINKER' build.c > "$evidence/linker-selection-source.txt"
