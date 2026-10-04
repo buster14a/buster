@@ -7,9 +7,9 @@ matrix. It complements the strict coverage floor and the native
 differential runner; it does not replace either or authorize backend retirement.
 
 The admitted input inventory is
-[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 560
-explicit SHA-256 rows bind every tracked test byte at the approval point: 412
-subject inputs (406 supported-object subjects and 6 registered non-object
+[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 559
+explicit SHA-256 rows bind every tracked test byte at the approval point: 411
+subject inputs (405 supported-object subjects and 6 registered non-object
 controls), 12 registered rejection controls, 72 support files and 64
 dormant custom-language files. An added, removed, renamed, reclassified
 or byte-changed test input makes manifest generation fail. Updating the contract
@@ -19,8 +19,8 @@ a fixture. Merging a contract change is the maintainer approval record.
 The #935 support decision updates only the byte/hash identity of
 `tests/ci_tools_test.py` after giving its 633-case real-shell aggregate check
 120 seconds on Windows (30 seconds elsewhere). Its role and compilation
-obligation remain `support-file` and `dependency-only`; the 560 inputs, 412
-subjects, and 79,104 row identities do not change. The previously approved
+obligation remain `support-file` and `dependency-only`; the 559 inputs, 411
+subjects, and 78,912 row identities do not change. The previously approved
 declaration digest remains accepted for historical evidence. The new exact
 declaration digest is `932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82`.
 The trusted digest-reader bootstrap must already be installed before this
@@ -33,7 +33,7 @@ The #1007 support decision updates only the byte/hash identity of
 Clang HOST/LIBRARY modes. This is a coverage refinement, not a claim that a
 compiler defect was demonstrated; the input and expected result are in range.
 The fixture remains one subject with the same applicability and compilation
-obligation. The inventory remains 560 inputs, 412 subjects, and 79,104 row
+obligation. The inventory remains 559 inputs, 411 subjects, and 78,912 row
 identities. The exact successor declaration digest is
 `a5bf7cb23b97874b7f4ff61f2bf0672892b4185a85043f4cdb539cc140d85932` (derived
 from `50fb3d9a4ad147ffca5eb9187fec1850bae60a8025a94fbf33110d3005543210` with
@@ -51,7 +51,7 @@ benchmark-service support pin.
 The #1808 support decision updates only the byte/hash identity of
 `tests/ci_tools_test.py`, whose workflow-policy assertions now cover the
 main-push reuse decision (642 aggregate cases). Its role and compilation
-obligation are unchanged, and so are the 560 inputs, 412 subjects and 79,104
+obligation are unchanged, and so are the 559 inputs, 411 subjects and 78,912
 row identities. The exact successor declaration digest is
 `434ef9a356cd11e7af0b37907172becf173a6855c98a6168f640ce769f0bcf61`: the #1007
 declaration with only this row changed to 80,307 bytes and
@@ -61,8 +61,8 @@ row and the benchmark-service support pin. Earlier digests remain accepted for
 historical evidence.
 
 The September 17, 2026 integration retains every subject admitted by the
-current support ledger. The integrated profile has 560 inputs,
-412 subjects, 19,776 groups and 79,104 rows: 406 supported-object
+current support ledger. The integrated profile has 559 inputs,
+411 subjects, 19,728 groups and 78,912 rows: 405 supported-object
 subjects plus 6 registered non-object controls. The original 192-row
 historical gap ledger and the original 341 applicability classifications remain
 explicit and source-bound. Eighteen additional source-bound target exclusions
@@ -230,8 +230,8 @@ identity digests. It proves exactly 4,032 archived MIR candidate rows: 264
 repo-owned project-header rows are closed, 3,768 remain diagnostic, and 24 iOS
 SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
 SDK headers are not fabricated by the materializer. These counts do not change
-the 560 input rows, 412 subject inputs (406 supported-object subjects and six
-non-object controls), 79,104 support-contract identities,
+the 558 input rows, 411 subject inputs (405 supported-object subjects and six
+non-object controls), 78,720 support-contract identities,
 or the support ledger bytes and digests. These are historical replay dispositions. The current full census supplies
 the authenticated 692-record project closure, including the target SDK headers
 and the project-owned MinGW varargs adapter described below.

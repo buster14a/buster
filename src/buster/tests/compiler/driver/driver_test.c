@@ -26072,7 +26072,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_int128_aggregate_constants.c"),
         S8("tests/basic_c_nested_string_initializers.c"),
         S8("tests/basic_c_float_integer_constants.c"),
-        S8("tests/basic_c_elided_string_rows.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/elided_string_rows.c"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_initializer_regression_paths); fixture_index += 1)
     {
