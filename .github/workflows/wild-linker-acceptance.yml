@@ -159,11 +159,6 @@ jobs:
             for file in summary.csv original-summary.csv build-link-share.csv negative-selection-status.txt cold-cache-status.txt completion.txt; do
               test ! -f "$root/$file" || { echo "$file"; cat "$root/$file"; }
             done
-            if rg -l 'Verifying|DIEs have overlapping|error:|warning:|Breakpoint 1,|#0 ' "$root" --glob '*.log' | while IFS= read -r file; do
-              echo "$file"
-              head -n 12 "$file"
-              tail -n 15 "$file"
-            done; then :; else test "$?" -eq 1; fi
           done
       - name: Retain compact reviewable evidence
         if: ${{ always() }}
