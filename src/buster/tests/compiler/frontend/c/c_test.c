@@ -10477,6 +10477,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_comma_omission(UnitTestArgume
     return result;
 }
 
+// C23 `__VA_OPT__` (6.10.5.2): the content stands only when the variable
+// argument has tokens after expansion, so an argument expanding to nothing
+// takes the placemarker; it is an operand of `#` and of `##` on either side,
+// its content substitutes `__VA_ARGS__` and pastes, and GNU named variadics
+// take it too. Expected rows are GCC's and Clang's -E output.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_va_opt(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 definitions = S8("#define EMPTY\n#define STR(...) #__VA_ARGS__\n#define XSTR(...) STR(__VA_ARGS__)\n"
+                             "#define F(...) [__VA_OPT__(x)]\n"
+                             "#define NARGS_(a, b, c, d, e, N, ...) N\n"
+                             "#define NARGS(...) NARGS_(__VA_ARGS__ __VA_OPT__(,) 5, 4, 3, 2, 1, 0)\n"
+                             "#define LOG(fmt, ...) f(fmt __VA_OPT__(,) __VA_ARGS__)\n"
+                             "#define G(...) __VA_OPT__(a) \"|\" #__VA_ARGS__\n"
+                             "#define P(a, ...) a ## __VA_OPT__(b c)\n"
+                             "#define Q(...) __VA_OPT__(b c) ## d\n"
+                             "#define S(...) #__VA_OPT__(x ## x __VA_ARGS__)\n"
+                             "#define N(x, args...) x __VA_OPT__(+ args)\n"
+                             "#define K(...) __VA_OPT__(<__VA_ARGS__>)\n"
+                             "#define NEST(...) __VA_OPT__(F(__VA_ARGS__) STR(__VA_ARGS__))\n");
+    struct
+    {
+        String8 input;
+        String8 expected;
+    } cases[] = {
+        {S8("NARGS() NARGS(a) NARGS(a, b, c) NARGS(EMPTY)"), S8("0 1 3 0")},
+        {S8("XSTR(F() F(EMPTY) F(1) F(,))"), S8("\"[] [] [x] [x]\"")},
+        {S8("LOG(\"a\") LOG(\"b\", 5)"), S8("f(\"a\") f(\"b\", 5)")},
+        {S8("G() G(1)"), S8("\"|\" \"\" a \"|\" \"1\"")},
+        {S8("P(z) P(z, 1)"), S8("z zb c")},
+        {S8("Q() Q(1)"), S8("d b cd")},
+        {S8("S() S(1 2) S(EMPTY)"), S8("\"\" \"xx 1 2\" \"\"")},
+        {S8("N(1) N(1, 2)"), S8("1 1 + 2")},
+        {S8("K() K(EMPTY) K(1, 2)"), S8("<1, 2>")},
+        {S8("NEST() NEST(EMPTY) NEST(1 + 2)"), S8("[x] \"1 + 2\"")},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23, C_PREPROCESS_DIALECT_C11, C_PREPROCESS_DIALECT_C23};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(dialects); mode += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena, S8("{S8}{S8}\n"), definitions, cases[case_index].input);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.dialect = dialects[mode]});
+            CLexResult expected = c_lex(temporary.arena, cases[case_index].expected);
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
+            BUSTER_TEST(arguments, expected.diagnostic_count == 0);
+            BUSTER_TEST_RAW(arguments, preprocess.token_count == expected.token_count, source);
+            for (u64 index = 0; index + 1 < expected.token_count && index + 1 < preprocess.token_count; index += 1)
+            {
+                c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
+                                          c_token_spelling(expected.spelling_base, expected.tokens[index]));
+            }
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 source;
+        CDiagnosticKind kind;
+    } invalid[] = {
+        {S8("#define A(x) __VA_OPT__(x)\n"), C_DIAGNOSTIC_INVALID_MACRO_DEFINITION},
+        {S8("#define A __VA_OPT__\n"), C_DIAGNOSTIC_INVALID_MACRO_DEFINITION},
+        {S8("#define A(...) __VA_OPT__\n"), C_DIAGNOSTIC_INVALID_MACRO_DEFINITION},
+        {S8("#define A(...) __VA_OPT__((x)\n"), C_DIAGNOSTIC_INVALID_MACRO_DEFINITION},
+        {S8("#define A(...) __VA_OPT__(__VA_OPT__())\n"), C_DIAGNOSTIC_INVALID_MACRO_DEFINITION},
+        {S8("#define A(...) __VA_OPT__(## x)\n"), C_DIAGNOSTIC_INVALID_MACRO_DEFINITION},
+        {S8("#define A(...) __VA_OPT__(x ##)\n"), C_DIAGNOSTIC_INVALID_MACRO_DEFINITION},
+        {S8("int __VA_OPT__;\n"), C_DIAGNOSTIC_INVALID_MACRO_INVOCATION},
+        {S8("#define ID(x) x\nID(__VA_OPT__)\n"), C_DIAGNOSTIC_INVALID_MACRO_INVOCATION},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index].source, (CPreprocessOptions){0});
+        bool diagnosed = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
+        {
+            diagnosed |= preprocess.diagnostics[diagnostic_index].kind == invalid[index].kind;
+        }
+        BUSTER_TEST_RAW(arguments, diagnosed, invalid[index].source);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_header_operands(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -34505,6 +34591,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_header_operands);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
     BUSTER_TEST_FIXTURE(arguments, c_test_variadic_comma_omission);
+    BUSTER_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
     BUSTER_TEST_FIXTURE(arguments, c_test_function_name_literals);

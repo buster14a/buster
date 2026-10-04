@@ -3876,6 +3876,10 @@ struct CMacroDefinition
     // row for a paste pass with nothing to do.
     bool has_paste;
     bool has_stringify;
+    // A variadic definition writing C23 `__VA_OPT__`: it stages like a paste
+    // and prescans its variable argument to decide whether the content
+    // stands.
+    bool has_va_opt;
     // Dynamic builtins belong to the saved definition just like replacement
     // tokens, so push/pop restores their synthesized behavior too.
     u8 builtin;
@@ -4557,6 +4561,7 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
     [C_SYMBOL_WELL_KNOWN_CONSTEXPR] = S8_INITIALIZER("constexpr"),
     [C_SYMBOL_WELL_KNOWN_CONST] = S8_INITIALIZER("const"),
     [C_SYMBOL_WELL_KNOWN_ATOMIC] = S8_INITIALIZER("_Atomic"),
+    [C_SYMBOL_WELL_KNOWN_VA_OPT] = S8_INITIALIZER("__VA_OPT__"),
 };
 
 enum
@@ -5046,6 +5051,85 @@ BUSTER_C_INTERNAL bool c_macro_is_paste(CToken token)
     return c_token_is_punctuator(&token, C_PUNCTUATOR_HASH_HASH);
 }
 
+BUSTER_C_INTERNAL bool c_macro_is_va_opt(CToken token)
+{
+    return token.kind == C_TOKEN_IDENTIFIER && token.symbol == C_SYMBOL_WELL_KNOWN_VA_OPT;
+}
+
+// The `)` closing the `__VA_OPT__` content whose `(` is at `open`, or
+// `replacement_count` when the list ends first.
+BUSTER_C_INTERNAL u32 c_macro_va_opt_close(CToken const* replacement, u32 replacement_count, u32 open)
+{
+    u32 depth = 0;
+    u32 index = open;
+    bool closed = false;
+    while (index < replacement_count && !closed)
+    {
+        if (c_token_is_punctuator(&replacement[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&replacement[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            depth -= 1;
+            closed = depth == 0;
+        }
+        index += closed ? 0 : 1;
+    }
+    return index;
+}
+
+// C23 6.10.5.2's constraints on `__VA_OPT__` in a replacement list: only a
+// variadic macro may write it, always as `__VA_OPT__ ( content )` with
+// balanced parentheses, never nested, and with no `##` at either end of the
+// content. The empty string means the list is valid; otherwise
+// `violation_index` names the offending `__VA_OPT__`.
+BUSTER_C_INTERNAL String8 c_macro_va_opt_violation(CToken const* replacement, u32 replacement_count, bool variadic, u32* violation_index)
+{
+    String8 message = {0};
+    u32 index = 0;
+    while (index < replacement_count && !message.length)
+    {
+        u32 next = index + 1;
+        if (c_macro_is_va_opt(replacement[index]))
+        {
+            u32 open = index + 1;
+            bool parenthesized = open < replacement_count && c_token_is_punctuator(&replacement[open], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            u32 close = parenthesized ? c_macro_va_opt_close(replacement, replacement_count, open) : replacement_count;
+            if (!variadic)
+            {
+                message = S8("'__VA_OPT__' can only appear in the replacement list of a variadic macro");
+            }
+            else if (!parenthesized)
+            {
+                message = S8("'__VA_OPT__' must be followed by '('");
+            }
+            else if (close >= replacement_count)
+            {
+                message = S8("unterminated '__VA_OPT__' content");
+            }
+            else if (close > open + 1 && (c_macro_is_paste(replacement[open + 1]) || c_macro_is_paste(replacement[close - 1])))
+            {
+                message = S8("'##' cannot appear at either end of '__VA_OPT__' content");
+            }
+            else
+            {
+                for (u32 inner = open + 1; inner < close && !message.length; inner += 1)
+                {
+                    if (c_macro_is_va_opt(replacement[inner]))
+                    {
+                        message = S8("'__VA_OPT__' cannot be nested in '__VA_OPT__' content");
+                    }
+                }
+            }
+            *violation_index = index;
+            next = close + 1;
+        }
+        index = next;
+    }
+    return message;
+}
+
 // The spelling ladder behind the definition-time parameter index: which
 // parameter, if any, `name` spells.
 BUSTER_C_INTERNAL s32 c_macro_parameter_index(CMacro* macro, String8 name)
@@ -5154,6 +5238,14 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
             {
                 macro->definition.has_stringify = true;
             }
+            if (variadic && c_macro_is_va_opt(replacement[index]))
+            {
+                macro->definition.has_va_opt = true;
+            }
+        }
+        if (macro->definition.has_va_opt)
+        {
+            parameter_expand_count[parameter_count - 1] += 1;
         }
     }
     return macro;
@@ -5547,6 +5639,127 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
     };
 }
 
+// The `##` pass over `items[0..count)`, compacted in place into
+// `*pasted_count_out` items. Placemarkers survive every paste in a chain and
+// are removed only when the rescan tokens are emitted. `__VA_OPT__` content
+// that `#` stringifies runs its own pass first, over just its tokens.
+BUSTER_C_INTERNAL bool c_macro_paste_tokens(Arena* arena, CSpellingSpace* space, CMacro* macro, CMacroDefinition const* definition, CMacroArgument const* arguments,
+                                             CSourceLocation location, u32 stamp, CPreprocessResult* result, CMacroReplacementToken* items, u32 count,
+                                             u32* pasted_count_out)
+{
+    char8 const* base = space->base;
+    bool ok = true;
+    u32 pasted_count = 0;
+    // Removing an empty left operand early would let `##` consume an
+    // unrelated preceding token or appear to be at an edge.
+    for (u32 index = 0; index < count && ok; index += 1)
+    {
+        CMacroReplacementToken item = items[index];
+        if (!c_macro_is_paste(item.token.token))
+        {
+            items[pasted_count++] = item;
+            continue;
+        }
+        if (!pasted_count || index + 1 >= count)
+        {
+            c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_TOKEN_PASTE,
+                                         string_format(arena, S8("'##' appears at the edge of macro '{S8}'"), macro->name));
+            ok = false;
+            continue;
+        }
+        CMacroReplacementToken right = items[++index];
+        CMacroReplacementToken* left = &items[pasted_count - 1];
+        if (right.placemarker)
+        {
+            if (item.comma_paste && arguments[definition->parameter_count - 1].omitted)
+            {
+                left->placemarker = true;
+            }
+            continue;
+        }
+        if (left->placemarker)
+        {
+            right.token.preceded_by_space = left->token.preceded_by_space;
+            *left = right;
+            continue;
+        }
+        if (item.comma_paste)
+        {
+            // Varargs present: GNU performs no paste here at all.  The comma
+            // already stands in the buffer; the argument's first token
+            // follows it as itself, and the rest of the argument flows
+            // through the loop as ordinary tokens.
+            items[pasted_count++] = right;
+            continue;
+        }
+        String8 left_spelling = c_token_spelling(base, left->token.token);
+        String8 right_spelling = c_token_spelling(base, right.token.token);
+        u64 joined_length = left_spelling.length + right_spelling.length;
+        // The joined text lives in the spelling space so the pasted token's
+        // offset resolves like any other; pasting never crosses a newline or
+        // splice, so relexing it cannot change its bytes and the relex is
+        // validation plus kind classification only.
+        char8* joined = c_space_allocate(space, joined_length + 1);
+        if (left_spelling.length)
+        {
+            memcpy(joined, left_spelling.pointer, left_spelling.length);
+        }
+        if (right_spelling.length)
+        {
+            memcpy(joined + left_spelling.length, right_spelling.pointer, right_spelling.length);
+        }
+        joined[joined_length] = 0;
+        TemporalArena paste_temporary = scratch_begin(&arena, 1);
+        CLexResult lex = c_lex_dispatch(paste_temporary.arena, 0, (String8){
+                                                                      .pointer = joined,
+                                                                      .length = joined_length,
+                                                                  }, false, false, result->dialect);
+        // The oversized-token diagnostics count here: a pasted identifier or
+        // number past the length field's reach fails as an invalid paste
+        // instead of storing a sentinel only literals may carry.
+        bool paste_valid = !lex.diagnostic_count && lex.token_count == 2 && lex.tokens[0].kind != C_TOKEN_END_OF_FILE &&
+                           c_token_length(lex.spelling_base, lex.tokens[0]) == joined_length;
+        CToken pasted_shape = paste_valid ? lex.tokens[0] : (CToken){0};
+        scratch_end(paste_temporary);
+        if (!paste_valid)
+        {
+            c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_TOKEN_PASTE,
+                                         string_format(arena, S8("token paste '{S8}##{S8}' in macro '{S8}' does not form one preprocessing token"),
+                                                       left_spelling, right_spelling, macro->name));
+            ok = false;
+            continue;
+        }
+        // A pasted identifier is interned where it is formed, exactly as
+        // the token pass interns every lexed one, so the id -- not the
+        // spelling -- is the name key every later phase reads. Left at 0,
+        // each downstream lookup re-interned the joined spelling and
+        // dropped the answer; interning here is once per paste. The
+        // joined bytes live in the spelling space, which outlives the
+        // table's borrowed name pointer.
+        u32 pasted_symbol = pasted_shape.kind == C_TOKEN_IDENTIFIER && result->symbols
+                                ? c_symbol_intern(result->symbols, (String8){.pointer = joined, .length = joined_length})
+                                : 0;
+        left->token = (CPpToken){
+            .token =
+                {
+                    .offset = c_space_offset(space, joined),
+                    .length = c_token_length_field(joined_length),
+                    .kind = pasted_shape.kind,
+                    .punctuator = pasted_shape.punctuator,
+                    .symbol = pasted_symbol,
+                },
+            .stamp = stamp & C_PP_STAMP_MASK,
+            .foreign = true,
+            // The joined token starts where its left operand started, so it
+            // inherits that operand's spacing; the pasted spelling itself
+            // carries none.
+            .preceded_by_space = left->token.preceded_by_space,
+        };
+    }
+    *pasted_count_out = pasted_count;
+    return ok;
+}
+
 // The invocation token is what a replacement token replaces, so it is what
 // the replacement list's first token inherits its spacing from: `A+B` where
 // `A` expands to `1` must stringify as "1+10", not "1 + 10". Every later
@@ -5562,7 +5775,6 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                                                     CPpToken invocation, CPpStampTable const* stamps, CPreprocessResult* result, CPpToken** tokens_out,
                                                     u32* token_count_out)
 {
-    char8 const* base = space->base;
     u32 stamp = invocation.stamp;
     CSourceLocation location = c_pp_stamp_location(stamps, stamp);
     u8 const* definition_spaces = definition->replacement_space;
@@ -5590,10 +5802,90 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
         }
         CMacroReplacementToken* materialized = arena_allocate(arena, CMacroReplacementToken, capacity);
         u32 materialized_count = 0;
-        for (u32 replacement_index = 0; replacement_index < definition->replacement_count; replacement_index += 1)
+        // `__VA_OPT__ ( content )` stands for its content when the variable
+        // argument has tokens after expansion and for a placemarker otherwise
+        // (C23 6.10.5.2). Standing content is materialized in place, so `##`
+        // on either side pastes against its edge tokens; `va_opt_close` is the
+        // `)` that ends the open content and `va_opt_start` its first item.
+        bool va_opt_present = definition->has_va_opt && arguments && arguments[definition->parameter_count - 1].expanded_token_count != 0;
+        u32 va_opt_close = UINT32_MAX;
+        u32 va_opt_start = 0;
+        bool va_opt_stringify = false;
+        bool va_opt_space = false;
+        for (u32 replacement_index = 0; replacement_index < definition->replacement_count && ok; replacement_index += 1)
         {
             CToken replacement = definition->replacement[replacement_index];
             bool replacement_space = replacement_index ? !definition_spaces || definition_spaces[replacement_index] != 0 : invocation.preceded_by_space;
+            if (replacement_index == va_opt_close)
+            {
+                va_opt_close = UINT32_MAX;
+                if (va_opt_stringify)
+                {
+                    u32 content_count = 0;
+                    ok = c_macro_paste_tokens(arena, space, macro, definition, arguments, location, stamp, result, materialized + va_opt_start,
+                                              materialized_count - va_opt_start, &content_count);
+                    CMacroArgument content = {.tokens = arena_allocate(arena, CPpToken, content_count)};
+                    for (u32 index = 0; index < content_count; index += 1)
+                    {
+                        if (!materialized[va_opt_start + index].placemarker)
+                        {
+                            content.tokens[content.token_count++] = materialized[va_opt_start + index].token;
+                        }
+                    }
+                    CPpToken stringified = c_macro_stringify(space, content, stamp);
+                    stringified.preceded_by_space = va_opt_space;
+                    materialized[va_opt_start] = (CMacroReplacementToken){
+                        .token = stringified,
+                    };
+                    materialized_count = va_opt_start + 1;
+                }
+                else if (materialized_count == va_opt_start)
+                {
+                    materialized[materialized_count++] = (CMacroReplacementToken){
+                        .token = {.token = replacement, .stamp = stamp & C_PP_STAMP_MASK, .foreign = true, .preceded_by_space = va_opt_space},
+                        .placemarker = true,
+                    };
+                }
+                else
+                {
+                    materialized[va_opt_start].token.preceded_by_space = va_opt_space;
+                }
+                continue;
+            }
+            bool stringify_va_opt = definition->has_va_opt && c_token_is_punctuator(&replacement, C_PUNCTUATOR_HASH) &&
+                                    replacement_index + 1 < definition->replacement_count &&
+                                    c_macro_is_va_opt(definition->replacement[replacement_index + 1]);
+            if (definition->has_va_opt && (stringify_va_opt || c_macro_is_va_opt(replacement)))
+            {
+                // c_macro_va_opt_violation admitted the definition, so the
+                // `(` follows and its `)` closes inside the list.
+                u32 open = replacement_index + (stringify_va_opt ? 2 : 1);
+                u32 close = c_macro_va_opt_close(definition->replacement, definition->replacement_count, open);
+                if (va_opt_present)
+                {
+                    va_opt_close = close;
+                    va_opt_start = materialized_count;
+                    va_opt_stringify = stringify_va_opt;
+                    va_opt_space = replacement_space;
+                    replacement_index = open;
+                }
+                else
+                {
+                    CMacroReplacementToken absent = {
+                        .token = {.token = replacement, .stamp = stamp & C_PP_STAMP_MASK, .foreign = true, .preceded_by_space = replacement_space},
+                        .placemarker = true,
+                    };
+                    if (stringify_va_opt)
+                    {
+                        absent.token = c_macro_stringify(space, (CMacroArgument){0}, stamp);
+                        absent.token.preceded_by_space = replacement_space;
+                        absent.placemarker = false;
+                    }
+                    materialized[materialized_count++] = absent;
+                    replacement_index = close;
+                }
+                continue;
+            }
             if (definition->function_like && c_token_is_punctuator(&replacement, C_PUNCTUATOR_HASH) &&
                 replacement_index + 1 < definition->replacement_count)
             {
@@ -5659,114 +5951,8 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 };
             }
         }
-        // Compact into the materialized buffer so placemarkers survive every
-        // paste in a chain. Removing an empty left operand early lets `##`
-        // consume an unrelated preceding token or appear to be at an edge.
         u32 pasted_count = 0;
-        for (u32 index = 0; index < materialized_count && ok; index += 1)
-        {
-            CMacroReplacementToken item = materialized[index];
-            if (!c_macro_is_paste(item.token.token))
-            {
-                materialized[pasted_count++] = item;
-                continue;
-            }
-            if (!pasted_count || index + 1 >= materialized_count)
-            {
-                c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_TOKEN_PASTE,
-                                             string_format(arena, S8("'##' appears at the edge of macro '{S8}'"), macro->name));
-                ok = false;
-                continue;
-            }
-            CMacroReplacementToken right = materialized[++index];
-            CMacroReplacementToken* left = &materialized[pasted_count - 1];
-            if (right.placemarker)
-            {
-                if (item.comma_paste && arguments[definition->parameter_count - 1].omitted)
-                {
-                    left->placemarker = true;
-                }
-                continue;
-            }
-            if (left->placemarker)
-            {
-                right.token.preceded_by_space = left->token.preceded_by_space;
-                *left = right;
-                continue;
-            }
-            if (item.comma_paste)
-            {
-                // Varargs present: GNU performs no paste here at all.  The comma
-                // already stands in the buffer; the argument's first token
-                // follows it as itself, and the rest of the argument flows
-                // through the loop as ordinary tokens.
-                materialized[pasted_count++] = right;
-                continue;
-            }
-            String8 left_spelling = c_token_spelling(base, left->token.token);
-            String8 right_spelling = c_token_spelling(base, right.token.token);
-            u64 joined_length = left_spelling.length + right_spelling.length;
-            // The joined text lives in the spelling space so the pasted token's
-            // offset resolves like any other; pasting never crosses a newline or
-            // splice, so relexing it cannot change its bytes and the relex is
-            // validation plus kind classification only.
-            char8* joined = c_space_allocate(space, joined_length + 1);
-            if (left_spelling.length)
-            {
-                memcpy(joined, left_spelling.pointer, left_spelling.length);
-            }
-            if (right_spelling.length)
-            {
-                memcpy(joined + left_spelling.length, right_spelling.pointer, right_spelling.length);
-            }
-            joined[joined_length] = 0;
-            TemporalArena paste_temporary = scratch_begin(&arena, 1);
-            CLexResult lex = c_lex_dispatch(paste_temporary.arena, 0, (String8){
-                                                                          .pointer = joined,
-                                                                          .length = joined_length,
-                                                                      }, false, false, result->dialect);
-            // The oversized-token diagnostics count here: a pasted identifier or
-            // number past the length field's reach fails as an invalid paste
-            // instead of storing a sentinel only literals may carry.
-            bool paste_valid = !lex.diagnostic_count && lex.token_count == 2 && lex.tokens[0].kind != C_TOKEN_END_OF_FILE &&
-                               c_token_length(lex.spelling_base, lex.tokens[0]) == joined_length;
-            CToken pasted_shape = paste_valid ? lex.tokens[0] : (CToken){0};
-            scratch_end(paste_temporary);
-            if (!paste_valid)
-            {
-                c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_TOKEN_PASTE,
-                                             string_format(arena, S8("token paste '{S8}##{S8}' in macro '{S8}' does not form one preprocessing token"),
-                                                           left_spelling, right_spelling, macro->name));
-                ok = false;
-                continue;
-            }
-            // A pasted identifier is interned where it is formed, exactly as
-            // the token pass interns every lexed one, so the id -- not the
-            // spelling -- is the name key every later phase reads. Left at 0,
-            // each downstream lookup re-interned the joined spelling and
-            // dropped the answer; interning here is once per paste. The
-            // joined bytes live in the spelling space, which outlives the
-            // table's borrowed name pointer.
-            u32 pasted_symbol = pasted_shape.kind == C_TOKEN_IDENTIFIER && result->symbols
-                                    ? c_symbol_intern(result->symbols, (String8){.pointer = joined, .length = joined_length})
-                                    : 0;
-            left->token = (CPpToken){
-                .token =
-                    {
-                        .offset = c_space_offset(space, joined),
-                        .length = c_token_length_field(joined_length),
-                        .kind = pasted_shape.kind,
-                        .punctuator = pasted_shape.punctuator,
-                        .symbol = pasted_symbol,
-                    },
-                .stamp = stamp & C_PP_STAMP_MASK,
-                .foreign = true,
-                // The joined token starts where its left operand started, so it
-                // inherits that operand's spacing; the pasted spelling itself
-                // carries none.
-                .preceded_by_space = left->token.preceded_by_space,
-            };
-        }
+        ok = ok && c_macro_paste_tokens(arena, space, macro, definition, arguments, location, stamp, result, materialized, materialized_count, &pasted_count);
         if (ok)
         {
             CPpToken* output = arena_allocate(arena, CPpToken, pasted_count);
@@ -6021,7 +6207,7 @@ BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, CSpellingSpace* space, 
             c_macro_expansion_tasks_push(arena, tasks, &pragma, 1, macro, definition->generation);
         }
     }
-    else if (!definition->builtin && !definition->has_paste && !definition->has_stringify)
+    else if (!definition->builtin && !definition->has_paste && !definition->has_stringify && !definition->has_va_opt)
     {
         macro->disabled = macro->disabled || definition->generation == macro->definition.generation;
         c_macro_produce_plain_tasks(arena, tasks, macro, definition, arguments, invocation);
@@ -6125,6 +6311,18 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                     // argument's expanded tokens get in the parent context.
                     // Paint the refusal onto the token instead.
                     token.no_expand = token.no_expand || (macro && macro->definition.defined && macro->disabled);
+                    if (c_macro_is_va_opt(token.token))
+                    {
+                        // Every admitted replacement list consumes its
+                        // `__VA_OPT__`, so one reaching the output was written
+                        // outside a variadic macro's replacement list.
+                        if (!token.foreign && !token.stamp)
+                        {
+                            token.stamp = c_pp_stamp_push(stamps, c_preprocess_recover_location(frame, file, token.token)) & C_PP_STAMP_MASK;
+                        }
+                        c_preprocess_diagnostic_push(arena, result, c_pp_stamp_location(stamps, token.stamp), C_DIAGNOSTIC_INVALID_MACRO_INVOCATION,
+                                                     S8("'__VA_OPT__' can only appear in the replacement list of a variadic macro"));
+                    }
                     c_preprocess_output_push(arena, &context->first_output, &context->last_output, token, &context->output_count);
                 }
                 else
@@ -9403,9 +9601,19 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
             replacement[replacement_count++] = candidate;
         }
     }
-    CMacro* macro = c_macro_define(arena, lex.spelling_base, symbols, first_macro, last_macro, c_token_spelling(lex.spelling_base, name), replacement,
-                                   (u32)replacement_count, parameters, parameter_count, function_like, variadic);
-    macro->definition.replacement_space = c_macro_replacement_spaces(arena, lex.spelling_base, replacement, (u32)replacement_count);
+    u32 va_opt_index = 0;
+    String8 va_opt_violation = c_macro_va_opt_violation(replacement, (u32)replacement_count, variadic, &va_opt_index);
+    if (va_opt_violation.length)
+    {
+        c_preprocess_diagnostic_push(arena, result, c_lex_token_location(&lex, replacement[va_opt_index]), C_DIAGNOSTIC_INVALID_MACRO_DEFINITION,
+                                     va_opt_violation);
+    }
+    else
+    {
+        CMacro* macro = c_macro_define(arena, lex.spelling_base, symbols, first_macro, last_macro, c_token_spelling(lex.spelling_base, name), replacement,
+                                       (u32)replacement_count, parameters, parameter_count, function_like, variadic);
+        macro->definition.replacement_space = c_macro_replacement_spaces(arena, lex.spelling_base, replacement, (u32)replacement_count);
+    }
 }
 
 BUSTER_C_INTERNAL void c_preprocess_undefine_directive(Arena* arena, CSymbolTable* symbols, CLexResult lex, u64* token_index, CMacro* first_macro,
@@ -11110,7 +11318,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         // A line whose identifiers name no defined macro expands to itself,
         // so its lexed tokens stream straight to the output with the
         // newlines stripped and the expansion machinery (a task node and an
-        // output node per token) is skipped. Locations are not materialized
+        // output node per token) is skipped. A stray `__VA_OPT__` takes the
+        // expansion path, which diagnoses it. Locations are not materialized
         // at all on this path: the file's source-map entry recovers them
         // from the offsets on demand.
         bool needs_expansion = false;
@@ -11128,7 +11337,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 {
                     u64 scan = word_index * C_PP_CLASS_MASK_WINDOW + mask64_first_set(names);
                     CMacro* line_macro = c_macro_find_token(first_macro, symbol_table, space->base, &lex.tokens[scan]);
-                    needs_expansion = line_macro && line_macro->definition.defined;
+                    needs_expansion = (line_macro && line_macro->definition.defined) || c_macro_is_va_opt(lex.tokens[scan]);
                     names = mask64_and(names, names - 1);
                 }
             }
@@ -11140,7 +11349,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 if (lex.tokens[scan].kind == C_TOKEN_IDENTIFIER)
                 {
                     CMacro* line_macro = c_macro_find_token(first_macro, symbol_table, space->base, &lex.tokens[scan]);
-                    needs_expansion = line_macro && line_macro->definition.defined;
+                    needs_expansion = (line_macro && line_macro->definition.defined) || c_macro_is_va_opt(lex.tokens[scan]);
                 }
             }
         }
