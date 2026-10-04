@@ -2054,7 +2054,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_expanded_label_initializers(Unit
                     BUSTER_TEST_RAW(arguments, linked.error == JIT_ERROR_NONE, jit_error_string(linked.error));
                     if (linked.error == JIT_ERROR_NONE)
                     {
-                        void* address = jit_program_symbol(&linked, target.os == OPERATING_SYSTEM_MACOS ? S8("_probe") : S8("probe"));
+                        // The in-memory canonical object retains source names;
+                        // only Mach-O serialization adds the leading underscore.
+                        void* address = jit_program_symbol(&linked, S8("probe"));
                         CodegenTestFunction2* probe = 0;
                         memcpy(&probe, &address, sizeof(probe));
                         BUSTER_TEST(arguments, probe != 0);
