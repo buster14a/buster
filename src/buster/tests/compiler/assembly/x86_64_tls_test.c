@@ -1,4 +1,5 @@
 // Independent byte oracles: tests/x86_64_tls_encoding_oracle.s.
+// MOV IE rows: src/buster/tests/compiler/assembly/fixtures/x86_64_tls_mov_encoding_oracle.s.
 #include <buster/tests/compiler/assembly/x86_64_tls_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
