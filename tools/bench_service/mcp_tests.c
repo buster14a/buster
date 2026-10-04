@@ -46,6 +46,11 @@ BUSTER_GLOBAL_LOCAL bool bq_test_mcp_result(BqMcpBuffer const* output, BqMcpJson
 BUSTER_GLOBAL_LOCAL void bq_test_mcp_protocol(void)
 {
     char const* missing = "/tmp/buster-mcp-no-service.sock";
+#ifdef __linux__
+    char const* transport_error = "io-uncertain";
+#else
+    char const* transport_error = "unsupported";
+#endif
     BqMcpJson json;
     char const* bad_json[] = {"", "{", "{}{}", "{\"a\":1,}", "[1,]", "{\"a\":01}", "{\"a\":1.}",
         "{\"a\":1e+}", "{\"a\":-}", "{\"a\":truex}", "{\"a\":nul}", "{\"a\":\"\\x\"}",
@@ -133,7 +138,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_protocol(void)
     bq_mcp_message(&session, missing, S8("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"progressToken\":\"test\"}}}"), &output);
     BQ_CHECK(bq_test_mcp_contains(&output, "bench_capabilities") && !bq_test_mcp_contains(&output, "\"error\""));
     bq_mcp_message(&session, missing, S8("{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"bench_capabilities\",\"_meta\":{\"progressToken\":1}}}"), &output);
-    BQ_CHECK(bq_test_mcp_contains(&output, "structuredContent") && bq_test_mcp_contains(&output, "io-uncertain"));
+    BQ_CHECK(bq_test_mcp_contains(&output, "structuredContent") && bq_test_mcp_contains(&output, transport_error));
     char const* bad_arguments[] = {"null", "[]", "{}", "{\"job_id\":null}", "{\"job_id\":true}",
         "{\"job_id\":1}", "{\"job_id\":1.0}", "{\"job_id\":{}}", "{\"job_id\":\"0\"}",
         "{\"job_id\":\"01\"}", "{\"job_id\":\"-1\"}", "{\"job_id\":\"1e2\"}", "{\"job_id\":\"18446744073709551616\"}",
