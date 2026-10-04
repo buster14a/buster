@@ -5437,23 +5437,43 @@ BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgume
 {
     char8 const* base = space->base;
     u64 length = 2;
+    u64 trailing_backslashes = 0;
     for (u64 token_index = 0; token_index < argument.token_count; token_index += 1)
     {
-        String8 spelling = c_token_spelling(base, argument.tokens[token_index].token);
+        CToken token = argument.tokens[token_index].token;
+        String8 spelling = c_token_spelling(base, token);
+        bool literal = token.kind == C_TOKEN_STRING_LITERAL || token.kind == C_TOKEN_CHARACTER_LITERAL;
         length += spelling.length;
-        length += token_index != 0 && argument.tokens[token_index].preceded_by_space;
+        bool separated = token_index != 0 && argument.tokens[token_index].preceded_by_space;
+        length += separated;
+        if (separated)
+        {
+            trailing_backslashes = 0;
+        }
         for (u64 character_index = 0; character_index < spelling.length; character_index += 1)
         {
             char8 character = spelling.pointer[character_index];
-            length += character == '\\' || character == '"';
+            length += literal && (character == '\\' || character == '"');
+            if (!literal && character == '\\')
+            {
+                trailing_backslashes += 1;
+            }
+            else
+            {
+                trailing_backslashes = 0;
+            }
         }
     }
+    bool escape_trailing_backslash = trailing_backslashes & 1;
+    length += escape_trailing_backslash;
     char8* spelling = c_space_allocate(space, length + 1);
     u64 output = 0;
     spelling[output++] = '"';
     for (u64 token_index = 0; token_index < argument.token_count; token_index += 1)
     {
-        String8 token_spelling = c_token_spelling(base, argument.tokens[token_index].token);
+        CToken token = argument.tokens[token_index].token;
+        String8 token_spelling = c_token_spelling(base, token);
+        bool literal = token.kind == C_TOKEN_STRING_LITERAL || token.kind == C_TOKEN_CHARACTER_LITERAL;
         // One space for every run of white space the argument was written
         // with, and none at all between tokens that were written adjacent:
         // `#V` on `A.B.C` is "A.B.C", not "A . B . C".
@@ -5464,7 +5484,9 @@ BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgume
         for (u64 character_index = 0; character_index < token_spelling.length; character_index += 1)
         {
             char8 character = token_spelling.pointer[character_index];
-            if (character == '\\' || character == '"')
+            bool trailing_backslash = escape_trailing_backslash && token_index + 1 == argument.token_count &&
+                                      character_index + 1 == token_spelling.length && character == '\\';
+            if ((literal && (character == '\\' || character == '"')) || trailing_backslash)
             {
                 spelling[output++] = '\\';
             }
@@ -5477,9 +5499,9 @@ BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgume
         .token =
             {
                 .offset = c_space_offset(space, spelling),
-                // Every interior quote and backslash was escaped above, so
-                // the closing quote terminates the literal exactly and an
-                // oversized result satisfies the sentinel's contract.
+                // Literal-token quotes and backslashes are escaped; an odd
+                // trailing run from other tokens escapes its last backslash
+                // so the closing quote terminates the literal exactly.
                 .length = c_token_length_field(output),
                 .kind = C_TOKEN_STRING_LITERAL,
             },
