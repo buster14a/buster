@@ -38,12 +38,17 @@ int main(int argc, char** argv)
                 must("arm-actual-full-dwarf", "llvm-dwarfdump --verify build-wild-arm/Debug/ide");
                 BenchResult runtime = run_command("arm-ide-object-emission", "WILD", -1,
                     format("build-wild-arm/Debug/ide cc -g -c %s -o %s", quote(format("%s/probe.c", evidence)), quote(format("%s/arm-produced.o", evidence))));
+                interoperability("build-wild-arm/Debug/ide");
+                BenchResult debugger = run_command("arm-actual-ide-source-and-unwind", "WILD", -1,
+                    format("gdb -q -batch -ex 'break entry_point' -ex run -ex bt --args build-wild-arm/Debug/ide cc -g -c %s -o %s", quote(format("%s/probe.c", evidence)), quote(format("%s/gdb-object.o", evidence))));
+                const char* stack = read_text(debugger.log);
+                if (debugger.status || !strstr(stack, "entry_point") || !strstr(stack, "buster_entry_point")) ++failures;
                 write_text(format("%s/arm-object-status.txt", evidence), format("object_emission_exit=%d; emission alone does not qualify native/external ARM linking.\n", runtime.status));
             }
         }
         write_text(format("%s/completion.txt", evidence), format("arm_fixture_failures=%d\narm_configure_exit=%d\narm_build_exit=%d\nNo ARM benchmark or native-linker replacement. Full Buster ARM support requires successful build/runtime checks; preserve unsupported diagnostics.\n", fixture_failures, config.status, build_status));
         if (fclose(raw) || fclose(commands) || fclose(summary)) fail("close files");
-        result = fixture_failures || config.status || build_status ? 1 : 0;
+        result = failures || config.status || build_status ? 1 : 0;
     }
     else fprintf(stderr, "usage: %s DRIVER EVIDENCE\n", argv[0]);
     return result;
