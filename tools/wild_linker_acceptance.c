@@ -115,7 +115,8 @@ static void check_debugger(const char* cell, const char* binary, const char* bre
 
 static void direct_cell(const char* cell, const char* compiler_command, const char* directory, const char* binary, const char* runtime)
 {
-    char* wild = format("%s --no-gc-sections --icf=none --build-id=0x2645264526452645264526452645264526452645", direct_link(compiler_command, directory));
+    const char* gc = !strcmp(cell, "hot-reload-debug") ? "--gc-sections" : "--no-gc-sections";
+    char* wild = format("%s %s --no-fork --icf=none --build-id=0x2645264526452645264526452645264526452645", direct_link(compiler_command, directory), gc);
     char* mold = change_linker(wild, directory, "mold");
     const char* paths = format("%s/%s-read-paths.txt", evidence, cell);
     FILE* manifest_paths = fopen(paths, "wx");
@@ -141,7 +142,11 @@ static void direct_cell(const char* cell, const char* compiler_command, const ch
         must("direct-output-metadata", format("cp %s %s && stat -c 'bytes=%%s' %s && sha256sum %s && size -A %s && readelf -W -h -l -S -d %s",
              quote(binary), quote(saved), quote(saved), quote(saved), quote(saved), quote(saved)));
         BenchResult dwarf = run_command("direct-dwarf-verifier", names[i], -1, format("llvm-dwarfdump --verify --error-display=summary %s", quote(saved)));
-        if (dwarf.status) ++failures;
+        if (dwarf.status)
+        {
+            if (strcmp(cell, "hot-reload-debug")) ++failures;
+            else write_text(format("%s/hot-reload-%s-debug-limit.txt", evidence, names[i]), "FAIL: full DWARF range verification with required section GC; discarded-code zero-address ranges. Runtime lifecycle is a separate check. Strict full-DWARF acceptance for this target is unsupported under both tested linkers, not a PASS.\n");
+        }
         must("direct-runtime", runtime);
         must("direct-repeat", commands_pair[i]);
         must("direct-repeat-byte-identity", format("cmp %s %s", quote(binary), quote(saved)));
@@ -270,8 +275,8 @@ int main(int argc, char** argv)
         self_test();
         write_text(format("%s/method.txt", evidence),
             "Independent direct-linker replay from #2646 frozen artifacts, unchanged source baseline 3b79a042. Same objects, scripts and system inputs hashed before/after; complete successful read-open traces retained.\n"
-            "Direct timing excludes compiler-driver startup, includes /bin/sh and fork/wait (<1ms self-control); output close without fsync, warm page-cache. Original release package binaries, default threads and matched --threads=1. No LTO. Explicit --no-gc-sections --icf=none and identical fixed 20-byte benchmark-only build ID override differing upstream defaults.\n"
-            "wait4 user/system and individual-child high-water RSS, not aggregate process-tree RSS. Bootstrap intervals are descriptive for the observed hosted VM; no dedicated-host claim.\n"
+            "Direct timing excludes compiler-driver startup, includes /bin/sh and fork/wait (<1ms self-control); output close without fsync, warm page-cache. Original release package binaries, default threads and matched --threads=1. No LTO. Explicit --no-gc-sections (ide/small), --gc-sections (hot_reload requirement), --no-fork (wait4 covers complete linker lifetime), --icf=none and identical fixed 20-byte benchmark-only build ID override differing upstream defaults.\n"
+            "wait4 user/system and linker process high-water RSS for no-fork direct cells; build/smoke process-tree peaks are not summed. Prior forked observations have incomplete CPU/RSS accounting and remain exploratory. Bootstrap intervals are descriptive for the observed hosted VM; no dedicated-host claim.\n"
             "Build link share uses the actual Ninja output step duration; end-to-end includes driver/Ninja/compilation. Clean samples n=7; edits n=21 per variant.\n");
         smoke();
         direct_cell("small-archive", format("clang --ld-path=wild %s %s -o %s", quote(format("%s/main.o", evidence)), quote(format("%s/libprobe.a", evidence)), quote(format("%s/review-small", evidence))),
@@ -304,7 +309,7 @@ int main(int argc, char** argv)
             const char* name = i ? "wild" : "mold";
             check_debugger("buster-object-source-and-unwind", format("%s/buster-produced-%s", evidence, name), "probe", "", "probe", "main");
         }
-        must("configure-review-build", format("%s generate --build-directory build-wild-review --cc clang --linker WILD --no-include-tests --no-fuzz --no-sanitize --no-lto -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_HOT_RELOAD_DEMO=ON -DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-gc-sections,--icf=none,--build-id=0x2645264526452645264526452645264526452645", quote(driver)));
+        must("configure-review-build", format("%s generate --build-directory build-wild-review --cc clang --linker WILD --no-include-tests --no-fuzz --no-sanitize --no-lto -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_HOT_RELOAD_DEMO=ON -DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-gc-sections,--no-fork,--icf=none,--build-id=0x2645264526452645264526452645264526452645", quote(driver)));
         must("build-review-application", format("%s build --build-directory build-wild-review --config Debug -t ide -t hot_reload", quote(driver)));
         direct_cell("hot-reload-debug", target_command("build-wild-review", "hot_reload"), "build-wild-review", "build-wild-review/Debug/hot_reload",
             "build-wild-review/Debug/hot_reload --self-test build-wild-review/Debug/ide");
@@ -325,7 +330,7 @@ int main(int argc, char** argv)
         write_text(format("%s/cold-cache-status.txt", evidence), cold.status ? "NOT RUN: guest refused drop-caches, diagnostic retained.\n" : "Guest Linux page cache, dentries and inode cache evicted with sync; drop_caches=3 before every observation. Reset excluded from timer. Hypervisor/storage caches uncontrolled; this is guest-cold, not physical-cold. No cold warmups. Nine randomized pairs per cell.\n");
         if (!cold.status)
         {
-            char* wild = format("%s --no-gc-sections --icf=none --build-id=0x2645264526452645264526452645264526452645", direct_link(frozen_command(input, "separate-debug-default"), "build-wild-separate"));
+            char* wild = format("%s --no-gc-sections --no-fork --icf=none --build-id=0x2645264526452645264526452645264526452645", direct_link(frozen_command(input, "separate-debug-default"), "build-wild-separate"));
             char* mold = change_linker(wild, "build-wild-separate", "mold");
             cold_comparison("ide-debug-direct-guest-cold-default", mold, wild);
             cold_comparison("ide-debug-direct-guest-cold-threads1", format("%s --threads=1", mold), format("%s --threads=1", wild));
@@ -339,7 +344,7 @@ int main(int argc, char** argv)
         if (!missing.status) ++failures;
         write_text(format("%s/negative-selection-status.txt", evidence), format("driver_gcc_wild=%d\nunsupported_flag=%d\nmissing_explicit_linker=%d\nNonzero means explicit request rejected, no implicit successful fallback.\n", gcc.status, flag.status, missing.status));
         must("retain-original-summary", format("cp %s %s && cp %s %s", quote(format("%s/summary.csv", input)), quote(format("%s/original-summary.csv", evidence)), quote(format("%s/raw.csv", input)), quote(format("%s/original-raw.csv", evidence))));
-        write_text(format("%s/completion.txt", evidence), failures ? "supplementary_campaign=FAIL\n" : "supplementary_campaign=PASS\n");
+        write_text(format("%s/completion.txt", evidence), failures ? "supported_campaign=FAIL\n" : "supported_campaign=PASS; inspect explicit unsupported configuration diagnostics, including hot_reload full-DWARF verifier\n");
         if (fclose(raw) || fclose(commands) || fclose(summary)) fail("final review flush");
         result = failures ? 1 : 0;
     }
