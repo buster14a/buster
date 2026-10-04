@@ -136,6 +136,12 @@
   For cancelled current-PR validation, see [bounded CI recovery](../ci-cancellation-recovery.md)
   and its offline checks: `python3 tests/ci_recovery_test.py` and
   `python3 .github/scripts/test_merge_queue_fail_fast.py`.
+  The lint job's `Validate the performance audit index` step also runs
+  `tools/check_markdown_links.py`: every relative inline link, image and
+  reference definition in tracked Markdown must resolve to a tracked path.
+  Fenced code, code spans, URL schemes and `#anchor` fragments are not checked,
+  and audit records get no exemption, so deleting a linked file fails with
+  `file:line: target`.
   Changing a `runs-on` label means changing `.github/actionlint.yaml` too,
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
