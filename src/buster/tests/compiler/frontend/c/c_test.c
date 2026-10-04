@@ -2429,6 +2429,209 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_function_declaration(UnitT
     return result;
 }
 
+// Repeated declarations with linkage retain source-local rows without
+// becoming automatic objects; no-linkage duplicates remain invalid (#1562).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 accepted[] = {
+        S8("int z = 3; int test(void) { extern int z; extern int z; return z - 3; }"),
+        S8("int test(void) { extern int z; extern int z; return z - 3; } int z = 3;"),
+        S8("int test(void) { int add(int); extern int add(int); int add(int); return add(3) - 4; } int add(int x) { return x + 1; }"),
+        S8("typedef int F(int); int test(void) { F add; extern F add; int add(int); return add(3) - 4; } int add(int x) { return x + 1; }"),
+        S8("static int z = 17; static int ignored(void) { return 99; } static int add(int x) { return z + x; } int test(void) { extern int z; extern int z; int add(int); extern int add(int); return add(2) - z - 2; }"),
+        S8("int values[3] = {1, 2, 7}; int test(void) { extern int values[3]; extern int values[]; extern int values[3]; _Static_assert(sizeof values == 3 * sizeof(int), \"complete\"); return values[2] - 7; }"),
+        S8("_Alignas(16) int z = 3; int test(void) { _Alignas(0) extern int z; _Alignas(16) extern int z; extern int z; _Alignas(0) extern int z; return z - 3; }"),
+        S8("int add(int x) { return x + 1; } int (*callback)(int) = add; int test(void) { extern int (*callback)(int); extern int (*callback)(int); return callback(3) - 4; }"),
+        S8("int z = 3; int test(void) { extern int z, z; { extern int z; extern int z; } return z - 3; }"),
+        S8("static int dead_target(int x) { return x; } static int dead_owner(void) { int dead_target(int); extern int dead_target(int); return dead_target(1); } int test(void) { return 0; }"),
+        S8("static int add(int x) { return x + 1; } int test(void) { int add(int); extern int add(int); return (&add)(3) - 4; }"),
+        S8("int add(int x) { return x + 1; } int test(void) { int add(int); int add(); return add(3) - 4; }"),
+    };
+    typedef struct CLocalRedeclarationFailure CLocalRedeclarationFailure;
+    struct CLocalRedeclarationFailure
+    {
+        String8 source;
+        CDiagnosticKind kind;
+    };
+    CLocalRedeclarationFailure rejected[] = {
+        {S8("int test(void) { extern int z; extern long z; return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
+        {S8("int test(void) { int add(int); int add(long); return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
+        {S8("int test(void) { extern int z; int z(void); return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
+        {S8("int test(void) { extern int z; extern const int z; return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
+        {S8("int test(void) { extern int z[2]; extern int z[3]; return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
+        {S8("int test(void) { extern _Thread_local int z; extern int z; return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
+        {S8("int test(void) { int z; int z; return 0; }"), C_DIAGNOSTIC_REDEFINITION},
+        {S8("int test(void) { static int z; static int z; return 0; }"), C_DIAGNOSTIC_REDEFINITION},
+        {S8("int test(void) { int z; extern int z; return 0; }"), C_DIAGNOSTIC_REDEFINITION},
+        {S8("int test(void) { extern int z; int z; return 0; }"), C_DIAGNOSTIC_REDEFINITION},
+        {S8("int test(void) { int (*callback)(int); int (*callback)(int); return 0; }"), C_DIAGNOSTIC_REDEFINITION},
+        {S8("_Alignas(16) int z = 1; int test(void) { _Alignas(16) extern int z; _Alignas(32) extern int z; return 0; }"), C_DIAGNOSTIC_INVALID_ALIGNMENT},
+        {S8("_Alignas(16) int z = 1; int test(void) { _Alignas(16) extern int z; extern int z; _Alignas(32) extern int z; return 0; }"), C_DIAGNOSTIC_INVALID_ALIGNMENT},
+        {S8("int test(void) { _Alignas(0) int add(int); return 0; }"), C_DIAGNOSTIC_INVALID_ALIGNMENT},
+        {S8("int test(void) { int add(int); _Alignas(0) int add(int); return 0; }"), C_DIAGNOSTIC_INVALID_ALIGNMENT},
+        {S8("int test(void) { int add(int); _Alignas(16) int add(int); return 0; }"), C_DIAGNOSTIC_INVALID_ALIGNMENT},
+    };
+    for (u32 dialect = 0; dialect < 2; dialect += 1)
+    {
+        CPreprocessOptions options = {.target = target_native, .data_layout = target_data_layout(target_native),
+                                     .dialect = dialect ? C_PREPROCESS_DIALECT_GNU17 : C_PREPROCESS_DIALECT_C17};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(accepted); index += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, accepted[index], options);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && analysis.diagnostic_count == 0))
+                {
+                    if (index == BUSTER_ARRAY_LENGTH(accepted) - 1)
+                    {
+                        u32 local_prototypes = 0;
+                        bool retained = true;
+                        for (u32 entity = 0; entity < analysis.entity_count; entity += 1)
+                        {
+                            CEntity local = analysis.entities[entity];
+                            if (local.kind == C_ENTITY_LOCAL && string_equal(local.name, S8("add")))
+                            {
+                                local_prototypes += 1;
+                                retained = retained && local.type.value < analysis.type_count &&
+                                    analysis.types[local.type.value].kind == C_TYPE_FUNCTION &&
+                                    !analysis.types[local.type.value].is_unprototyped && analysis.types[local.type.value].parameter_count == 1;
+                            }
+                        }
+                        BUSTER_TEST(arguments, local_prototypes == 2 && retained);
+                    }
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("local-redeclarations.c"), tokens, analysis,
+                        target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    bool has_module = lowered.program && !lowered.diagnostic_count && lowered.program->module_count;
+                    BUSTER_TEST_RAW(arguments, has_module, string_format(temporary.arena, S8("source={S8}\ndiagnostic={S8}"), accepted[index],
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : (String8){0}));
+                    if (has_module)
+                    {
+                        IrModule* module = lowered.program->modules;
+                        BUSTER_TEST_RAW(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE, accepted[index]);
+                        if (index == 4 || index == 10)
+                        {
+                            IrFunction* linked = c_test_find_ir_function(module, S8("add"));
+                            BUSTER_TEST(arguments, linked && linked->state == IR_FUNCTION_LOWERED);
+                        }
+                        if (index == 4)
+                        {
+                            BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("ignored")) == 0);
+                        }
+                        if (index == 9)
+                        {
+                            BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("dead_owner")) == 0);
+                            BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("dead_target")) == 0);
+                        }
+                        IrFunction* function = c_test_find_ir_function(module, S8("test"));
+                        if (BUSTER_REQUIRE(arguments, function != 0))
+                        {
+                            u32 local_count = 0;
+                            for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+                            {
+                                local_count += function->instructions[instruction].opcode == IR_OPCODE_LOCAL;
+                            }
+                            BUSTER_TEST_RAW(arguments, function->local_count == 0 && local_count == 0, accepted[index]);
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, rejected[index].source, options);
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            bool found = false;
+            bool incorrect_redefinition = false;
+            for (u32 diagnostic = 0; diagnostic < analysis.diagnostic_count; diagnostic += 1)
+            {
+                found |= analysis.diagnostics[diagnostic].kind == rejected[index].kind;
+                incorrect_redefinition |= rejected[index].kind != C_DIAGNOSTIC_REDEFINITION &&
+                                          analysis.diagnostics[diagnostic].kind == C_DIAGNOSTIC_REDEFINITION;
+            }
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && found && !incorrect_redefinition, rejected[index].source);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 text = S8("static int saved = 17; static int add_saved(int x) { return saved + x; }\n"
+                      "int outside = 9; int values[3] = {1, 2, 7}; _Alignas(16) int aligned = 5;\n"
+                      "typedef int F(int);\n"
+                      "int probe(void) { extern int outside; extern int outside; F add; extern F add; int add(int); int add();\n"
+                      " extern int values[3]; extern int values[]; extern int saved; extern int saved;\n"
+                      " int add_saved(int); extern int add_saved(int); _Alignas(0) extern int aligned;\n"
+                      " _Alignas(16) extern int aligned; extern int aligned; _Alignas(0) extern int aligned;\n"
+                      " return outside != 9 || add(3) != 12 || saved != 17 || add_saved(2) != 19 ||\n"
+                      " sizeof values != 3 * sizeof(int) || values[2] != 7 || aligned != 5; }\n"
+                      "int add(int x) { return outside + x; } int main(void) { return probe(); }\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("local-linkage-redeclarations"), S8(".c"));
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                String8 actions[] = {S8("-fsyntax-only"), S8("-c")};
+                for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("local-linkage-object"), S8(".o"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], frontends[form], actions[action], S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                                   string_format(temporary.arena, S8("local redeclarations {S8} {S8}: {S8}"), actions[action], frontends[form], compiled.diagnostic));
+                    scratch_end(temporary);
+                }
+                for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("local-linkage-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], frontends[form], allocators[allocator],
+                                         S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = allocator != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                                   string_format(temporary.arena, S8("local redeclarations {S8} {S8}: {S8}"), allocators[allocator], frontends[form], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                                   (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // C11 6.2.1p4: a block-scope function declaration's identifier has block
 // scope, so a file-scope typedef or enumerator of the same spelling is that
 // name again once the block closes (#1715).
@@ -35095,6 +35298,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, c_test_vla_row_places);
     BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
+    BUSTER_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations);
+    BUSTER_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     BUSTER_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);

@@ -50,6 +50,22 @@ allocator modes and both frontend forms.
   `c_parse_entity_kind_redeclares` in `c_parse.c` is what keeps this spelling
   and an ordinary prototype one entity, which in musl every published name
   has.
+- Compatible repeated block-scope `extern` object declarations and function
+  declarations keep separate declaration-local rows for token-range ownership;
+  `c_parse_local_declarations` permits the repeated binding only when both
+  declarations have linkage. Type and thread-storage conflicts are diagnosed
+  as conflicting declarations; explicit nonzero alignment requests must agree.
+  An omitted request or `_Alignas(0)` keeps an earlier request, and an incomplete
+  array or unprototyped function spelling keeps an earlier complete type.
+  Function alignment specifiers remain invalid even when their request is zero.
+  Lowering resolves linked local function uses through the function-name index
+  when building definition dependencies, retaining called static functions
+  without rooting unused function bodies or their dependencies.
+  No-linkage object duplicates remain redefinitions. Registered
+  `c_test_local_linkage_redeclarations` checks semantic-only analysis and both
+  canonical-IR frontend forms. Its runtime companion exercises syntax-only,
+  object output and linked executables in C17/GNU17 and all native allocator
+  modes, including visible internal-linkage objects/functions.
 - **Usual integer arithmetic conversions choose rank before representation.**
   The parse-side expression typer and canonical lowering both call
   `c_semantic_integer_arithmetic_kind` after their context's integer
