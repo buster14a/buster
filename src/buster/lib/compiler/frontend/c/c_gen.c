@@ -2686,6 +2686,45 @@ struct CIrPreparedControlExpression
 
 typedef struct CIrLowerFrame CIrLowerFrame;
 
+// What every root-classification question of the expression machine reads
+// from one expression range [start, end): the depth-0 operators that decide
+// whether the range is a comma, assignment, conditional or logical
+// expression, found once (c_ir_range_root) instead of by one scan per
+// question. Positions are stored plus one so a zeroed row holds no answer.
+typedef struct CIrRangeRoot CIrRangeRoot;
+struct CIrRangeRoot
+{
+    // The range end this row describes; zero in an empty slot.
+    u32 end;
+    // The first depth-0 `?`, whichever operators precede it.
+    u32 question_plus_one;
+    // The `:` pairing that `?` at the same conditional nesting.
+    u32 colon_plus_one;
+    // The first depth-0 assignment operator before the first depth-0 `?`.
+    u32 assignment_plus_one;
+    // The last depth-0 `,` outside every depth-0 `?`/`:` pair.
+    u32 last_comma_plus_one;
+    // C_IR_RANGE_ROOT_* bits.
+    u8 flags;
+    u8 reserved[3];
+};
+
+enum
+{
+    // Every group inside the range closes inside it and no closer stands at
+    // depth 0, so the row answers the questions below exactly. A range that
+    // fails this keeps each question's own scan, whose verdicts on malformed
+    // input differ from one another.
+    C_IR_RANGE_ROOT_VALID = 1 << 0,
+    // A depth-0 `||`, or a depth-0 `&&` that is not a GNU label address.
+    C_IR_RANGE_ROOT_LOGICAL = 1 << 1,
+    // A depth-0 `,` anywhere, inside a conditional's arms included.
+    C_IR_RANGE_ROOT_COMMA = 1 << 2,
+    // A depth-0 `:` after a depth-0 `?`, whether or not it pairs the first
+    // one: the shape c_ir_has_root_control_operator calls a conditional.
+    C_IR_RANGE_ROOT_CONDITIONAL = 1 << 3,
+};
+
 typedef struct CIrLowerMachine CIrLowerMachine;
 typedef struct CIrLowerFrameResult CIrLowerFrameResult;
 struct CIrLowerFrameResult
@@ -2831,6 +2870,11 @@ struct CIntegerIrBuilder
     // unprobed, 1 is "not a type name", anything else the IrTypeId plus two.
     // c_ir_group_type_name owns it and says which groups are never stored.
     u32* group_type_names;
+    // The depth-0 operator facts of the expression range starting at each
+    // body token (CIrRangeRoot), indexed like group_type_names by the range's
+    // first token and owned by c_ir_range_root. A row answers only the range
+    // end it was computed for; a question about another end recomputes it.
+    CIrRangeRoot* range_roots;
     u32* matching_delimiters_plus_one;
     // Whole-stream matching-delimiter array borrowed from the parse position
     // index, non-null only when the index scanned the stream with zero
@@ -3564,6 +3608,7 @@ BUSTER_C_INTERNAL bool c_ir_build_delimiter_index(CIntegerIrBuilder* builder)
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
+    WORK_LEDGER_RECORD(LOWER_DELIMITER_QUERIES, 1);
     if (builder->stream_matching_delimiters_plus_one)
     {
         if (open < builder->preprocess.token_count)
@@ -3577,6 +3622,7 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
                 return match;
             }
         }
+        WORK_LEDGER_RECORD(LOWER_DELIMITER_INDEX_MISSES, 1);
         return c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
     }
     if (open >= builder->body_token_start)
@@ -3592,6 +3638,7 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
             }
         }
     }
+    WORK_LEDGER_RECORD(LOWER_DELIMITER_INDEX_MISSES, 1);
     return c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
 }
 
@@ -3813,6 +3860,111 @@ BUSTER_C_INTERNAL CIrGroupScan c_ir_scan_delimiter_group(CIntegerIrBuilder* buil
     }
     *index_in_out = close;
     return C_IR_GROUP_SCAN_SKIPPED;
+}
+
+BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
+
+#if BUSTER_INCLUDE_TESTS
+// Test seam: a true value sends every root-classification question back to
+// its own scan, so the differential test can compare the two paths.
+BUSTER_GLOBAL_LOCAL bool c_ir_range_root_memo_disabled;
+
+void c_test_set_range_root_memo_disabled(bool disabled)
+{
+    c_ir_range_root_memo_disabled = disabled;
+}
+#endif
+
+// The depth-0 operator facts of [start, end), computed by one group-skipping
+// pass and memoized in the body row of `start` for that `end`. The eight
+// root-classification questions the expression machine asks of one range --
+// the comma, assignment and conditional splits of c_ir_lower_expression_step,
+// c_ir_root_conditional, c_ir_expression_has_root_logical,
+// c_ir_has_root_assignment, c_ir_has_root_control_operator,
+// c_ir_has_top_level_comma and c_ir_expression_core_range -- each walked the
+// range again for one operator: 2.612.867 scans stepping 14.148.109 tokens on
+// a stage-1 self-compile, 6,8 visits per body token, where the questions are
+// all read off this one row. A row is VALID only for a properly nested range,
+// and every reader keeps its own scan for the rest, so the verdicts on
+// malformed input are unchanged.
+BUSTER_C_INTERNAL CIrRangeRoot c_ir_range_root(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    CIrRangeRoot* slot = 0;
+    CIrRangeRoot root;
+    if (builder->range_roots && start >= builder->body_token_start && start - builder->body_token_start < builder->body_token_count)
+    {
+        slot = builder->range_roots + (start - builder->body_token_start);
+    }
+    if (slot && slot->end == end && end)
+    {
+        root = *slot;
+    }
+    else
+    {
+        root = (CIrRangeRoot){.end = end, .flags = C_IR_RANGE_ROOT_VALID};
+        // Conditionals still waiting for their colon: `questions` from the
+        // range's first `?` on, deciding which `:` pairs it, and `commas`
+        // from any `?`, deciding which commas stand outside every pair.
+        u32 questions = 0;
+        u32 commas = 0;
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
+        for (u32 index = start; index < end && (root.flags & C_IR_RANGE_ROOT_VALID); index += 1)
+        {
+            WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_FUSED_TOKENS, 1);
+            u8 punctuator = builder->preprocess.tokens[index].punctuator;
+            CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+            if (scan == C_IR_GROUP_SCAN_SKIPPED)
+            {
+                continue;
+            }
+            if (scan == C_IR_GROUP_SCAN_UNCLOSED || punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || punctuator == C_PUNCTUATOR_RIGHT_BRACKET ||
+                punctuator == C_PUNCTUATOR_RIGHT_BRACE)
+            {
+                root.flags = (u8)(root.flags & ~C_IR_RANGE_ROOT_VALID);
+            }
+            else if (punctuator == C_PUNCTUATOR_QUESTION)
+            {
+                root.question_plus_one = root.question_plus_one ? root.question_plus_one : index + 1;
+                questions += root.colon_plus_one ? 0 : 1;
+                commas += 1;
+            }
+            else if (punctuator == C_PUNCTUATOR_COLON)
+            {
+                if (questions)
+                {
+                    questions -= 1;
+                    root.colon_plus_one = questions ? root.colon_plus_one : index + 1;
+                }
+                root.flags |= root.question_plus_one ? C_IR_RANGE_ROOT_CONDITIONAL : 0;
+                commas -= commas ? 1 : 0;
+            }
+            else if (punctuator == C_PUNCTUATOR_COMMA)
+            {
+                root.flags |= C_IR_RANGE_ROOT_COMMA;
+                root.last_comma_plus_one = commas ? root.last_comma_plus_one : index + 1;
+            }
+            else if (punctuator == C_PUNCTUATOR_PIPE_PIPE ||
+                     (punctuator == C_PUNCTUATOR_AMPERSAND_AMPERSAND && !c_ir_label_address_prefix(builder, start, index)))
+            {
+                root.flags |= C_IR_RANGE_ROOT_LOGICAL;
+            }
+            else if (!root.question_plus_one && !root.assignment_plus_one && c_ir_assignment_operator(builder->preprocess.tokens[index]))
+            {
+                root.assignment_plus_one = index + 1;
+            }
+        }
+        if (slot)
+        {
+            *slot = root;
+        }
+    }
+#if BUSTER_INCLUDE_TESTS
+    if (c_ir_range_root_memo_disabled)
+    {
+        root.flags = (u8)(root.flags & ~C_IR_RANGE_ROOT_VALID);
+    }
+#endif
+    return root;
 }
 
 BUSTER_C_INTERNAL IrInstruction c_ir_instruction_initialize(IrOpcode opcode, IrTypeId type)
@@ -14912,6 +15064,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_frame_push(CIntegerIrBuilder* builder, CIrLowe
     }
     frame.stage = (u8)C_IR_LOWER_STAGE_BEGIN;
     machine->frames[machine->frame_count++] = frame;
+    WORK_LEDGER_RECORD(LOWER_FRAME_PUSHES, 1);
+    WORK_LEDGER_RECORD(LOWER_EXPRESSION_ROOTS, frame.kind == C_IR_LOWER_FRAME_EXPRESSION);
     return true;
 }
 
@@ -17943,6 +18097,7 @@ BUSTER_C_INTERNAL CIrPreparedControlExpression* c_ir_prepared_control_expression
 {
     for (u32 index = 0; index < builder->prepared_control_expression_count; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_PREPARED_CONTROL_LIST_VISITS, 1);
         CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
         if (expression->open_index == open_index)
         {
@@ -17956,6 +18111,7 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains(CIntegerIrBuild
 {
     for (u32 index = 0; index < builder->prepared_control_expression_count; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_PREPARED_CONTROL_LIST_VISITS, 1);
         CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
         if (expression->emitted && expression->open_index < token_index && token_index < expression->close_index)
         {
@@ -17993,14 +18149,18 @@ BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 to
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_ir_has_root_control_operator(CIntegerIrBuilder* builder, u32 start, u32 end)
+// The scan c_ir_has_root_control_operator keeps for a range whose row is not
+// VALID; see c_ir_range_root.
+BUSTER_C_INTERNAL bool c_ir_has_root_control_operator_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     u32 parentheses = 0;
     u32 brackets = 0;
     u32 braces = 0;
     u32 questions = 0;
+    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
     for (u32 index = start; index < end; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_LOGICAL_TOKENS, 1);
         CToken token = builder->preprocess.tokens[index];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -18056,9 +18216,23 @@ BUSTER_C_INTERNAL bool c_ir_has_root_control_operator(CIntegerIrBuilder* builder
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
+BUSTER_C_INTERNAL bool c_ir_has_root_control_operator(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result;
+    CIrRangeRoot root = c_ir_range_root(builder, start, end);
+    if (root.flags & C_IR_RANGE_ROOT_VALID)
+    {
+        result = (root.flags & (C_IR_RANGE_ROOT_LOGICAL | C_IR_RANGE_ROOT_CONDITIONAL)) != 0;
+    }
+    else
+    {
+        result = c_ir_has_root_control_operator_scan(builder, start, end);
+    }
+    return result;
+}
 
-BUSTER_C_INTERNAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32 start, u32 end)
+// The scan c_ir_has_root_assignment keeps for a range whose row is not VALID.
+BUSTER_C_INTERNAL bool c_ir_has_root_assignment_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     u32 parentheses = 0;
     u32 brackets = 0;
@@ -18069,8 +18243,10 @@ BUSTER_C_INTERNAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32 
     // retaining the tail bit until the end is sufficient (a later arm cannot
     // become a root assignment of the whole conditional).
     bool conditional_tail = false;
+    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
     for (u32 index = start; index < end; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_ASSIGNMENT_TOKENS, 1);
         CToken token = builder->preprocess.tokens[index];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -18108,10 +18284,27 @@ BUSTER_C_INTERNAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32 
     return false;
 }
 
+BUSTER_C_INTERNAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result;
+    CIrRangeRoot root = c_ir_range_root(builder, start, end);
+    if (root.flags & C_IR_RANGE_ROOT_VALID)
+    {
+        result = root.assignment_plus_one != 0;
+    }
+    else
+    {
+        result = c_ir_has_root_assignment_scan(builder, start, end);
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_has_assignment_anywhere(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
+    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
     for (u32 index = start; index < end; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_ASSIGNMENT_TOKENS, 1);
         if (c_ir_assignment_operator(builder->preprocess.tokens[index]))
         {
             return true;
@@ -18127,8 +18320,10 @@ BUSTER_C_INTERNAL bool c_ir_has_assignment_anywhere(CIntegerIrBuilder* builder, 
 BUSTER_C_INTERNAL bool c_ir_has_control_operator_anywhere(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     bool found = false;
+    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
     for (u32 index = start; index < end && !found; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_LOGICAL_TOKENS, 1);
         CToken token = builder->preprocess.tokens[index];
         found = c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
                 c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE);
@@ -18142,13 +18337,15 @@ BUSTER_C_INTERNAL bool c_ir_has_control_operator_anywhere(CIntegerIrBuilder* bui
 // before an earlier call in the comma's left operand.  Keep this scan local to
 // balanced top-level commas; calls/assignments in ordinary argument groups do
 // not need the special ordering path.
-BUSTER_C_INTERNAL bool c_ir_has_top_level_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_ir_has_top_level_comma_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     u32 parentheses = 0;
     u32 brackets = 0;
     u32 braces = 0;
+    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
     for (u32 index = start; index < end; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_COMMA_TOKENS, 1);
         CToken token = builder->preprocess.tokens[index];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -18182,10 +18379,26 @@ BUSTER_C_INTERNAL bool c_ir_has_top_level_comma(CIntegerIrBuilder* builder, u32 
     return false;
 }
 
+BUSTER_C_INTERNAL bool c_ir_has_top_level_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result;
+    CIrRangeRoot root = c_ir_range_root(builder, start, end);
+    if (root.flags & C_IR_RANGE_ROOT_VALID)
+    {
+        result = (root.flags & C_IR_RANGE_ROOT_COMMA) != 0;
+    }
+    else
+    {
+        result = c_ir_has_top_level_comma_scan(builder, start, end);
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_range(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     for (u32 index = 0; index < builder->prepared_control_expression_count; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_PREPARED_CONTROL_LIST_VISITS, 1);
         CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
         if (expression->lowering && expression->open_index < start && expression->close_index >= end)
         {
@@ -18234,6 +18447,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     {
         u32 index = frame->as.prepare_control.index++;
         CToken token = builder->preprocess.tokens[index];
+        WORK_LEDGER_RECORD(LOWER_PREPARE_CONTROL_TOKENS, 1);
         // The sizeof owner decides whether a VLA expression must run. When it
         // does, it lowers the operand in a child expression frame, which runs
         // its own preparation pass. This scan must not hoist control groups
@@ -19034,6 +19248,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
     CIrLazyOperandScan lazy = c_ir_lazy_operand_scan_start();
     for (u32 index = start; index + 1 < end; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_PREPARE_CALL_TOKENS, 1);
         while (active_call_count && index > builder->prepared_calls[active_calls[active_call_count - 1]].close_index)
         {
             active_call_count -= 1;
@@ -28769,6 +28984,8 @@ BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 
         }
     }
     u32 suffix_end = c_ir_postfix_suffix_end(builder, index, end);
+    WORK_LEDGER_RECORD(LOWER_UNARY_END_SCANS, 1);
+    WORK_LEDGER_RECORD(LOWER_UNARY_END_TOKENS, suffix_end == UINT32_MAX || suffix_end <= start ? 0 : suffix_end - start);
     return suffix_end == UINT32_MAX ? start : suffix_end;
 }
 
@@ -29146,6 +29363,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     *state = (CIrExpressionCoreState){0};
     frame->as.expression_core.state = state;
     frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+    WORK_LEDGER_RECORD(LOWER_EXPRESSION_CORE_RUNS, 1);
     bool prefix_place_update = start + 1 < end && (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_PLUS_PLUS) ||
                                                    c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_MINUS_MINUS));
     bool postfix_place_update = start + 1 < end && (c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_PLUS_PLUS) ||
@@ -29174,6 +29392,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     bool update_operand_expects_operand = true;
     for (u32 update_index = update_operand_start; (prefix_place_update || postfix_place_update) && update_index < update_operand_end; update_index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_UPDATE_TOKENS, 1);
         CToken token = builder->preprocess.tokens[update_index];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
         {
@@ -29254,6 +29473,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
 c_ir_expression_core_loop:
     for (; index < end; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_EXPRESSION_CORE_TOKENS, 1);
         builder->failure_token_index = index;
         CToken token = builder->preprocess.tokens[index];
         IrSourceRange source = c_ir_token_source_range(builder, token);
@@ -32263,6 +32483,7 @@ BUSTER_C_INTERNAL void c_ir_lower_frame_fallback(CIntegerIrBuilder* builder)
     CIrLowerMachine* machine = &builder->lower_machine;
     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
     CIrLowerFrame* active = machine->frames + machine->frame_count - 1;
+    WORK_LEDGER_RECORD(LOWER_DISPATCH_STEPS, 1);
     switch (active->kind)
     {
         case C_IR_LOWER_FRAME_PLACE:
@@ -32437,21 +32658,14 @@ BUSTER_C_INTERNAL bool c_ir_prepare_vla_pointer_local(CIntegerIrBuilder* builder
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* builder, u32 start, u32 end)
+// The scan c_ir_expression_has_root_logical keeps for a range whose row is
+// not VALID; `start` and `end` have already shed their redundant parentheses.
+BUSTER_C_INTERNAL bool c_ir_expression_has_root_logical_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
-    while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-           !c_ir_group_is_statement_expression(builder, start, end))
-    {
-        u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (close != end - 1)
-        {
-            break;
-        }
-        start += 1;
-        end -= 1;
-    }
+    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
     for (u32 index = start; index < end; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_LOGICAL_TOKENS, 1);
         CToken token = builder->preprocess.tokens[index];
         CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
         if (scan == C_IR_GROUP_SCAN_SKIPPED)
@@ -32474,6 +32688,32 @@ BUSTER_C_INTERNAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* build
         }
     }
     return false;
+}
+
+BUSTER_C_INTERNAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result;
+    while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           !c_ir_group_is_statement_expression(builder, start, end))
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close != end - 1)
+        {
+            break;
+        }
+        start += 1;
+        end -= 1;
+    }
+    CIrRangeRoot root = c_ir_range_root(builder, start, end);
+    if (root.flags & C_IR_RANGE_ROOT_VALID)
+    {
+        result = (root.flags & C_IR_RANGE_ROOT_LOGICAL) != 0;
+    }
+    else
+    {
+        result = c_ir_expression_has_root_logical_scan(builder, start, end);
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
@@ -32591,25 +32831,18 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
     c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
 }
 
-BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                               u32* expression_end)
+// The scan c_ir_root_conditional keeps for a range whose row is not VALID;
+// `start` and `end` have already shed their redundant parentheses.
+BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end)
 {
-    while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-           !c_ir_group_is_statement_expression(builder, start, end))
-    {
-        u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (close != end - 1)
-        {
-            break;
-        }
-        start += 1;
-        end -= 1;
-    }
     u32 found_question = UINT32_MAX;
     u32 nested_questions = 0;
     bool root_assignment = false;
+    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
     for (u32 index = start; index < end; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_CONDITIONAL_TOKENS, 1);
         u32 punctuator = builder->preprocess.tokens[index].punctuator;
         CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
         if (scan == C_IR_GROUP_SCAN_SKIPPED)
@@ -32671,6 +32904,83 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
     return false;
 }
 
+BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                               u32* expression_end)
+{
+    bool result;
+    while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           !c_ir_group_is_statement_expression(builder, start, end))
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close != end - 1)
+        {
+            break;
+        }
+        start += 1;
+        end -= 1;
+    }
+    CIrRangeRoot root = c_ir_range_root(builder, start, end);
+    if (root.flags & C_IR_RANGE_ROOT_VALID)
+    {
+        // The row's first `?` is the root only when no assignment precedes
+        // it (`lhs = c ? a : b` is an assignment) and its `:` leaves an
+        // operand on every side.
+        u32 found_question = root.question_plus_one - 1;
+        u32 found_colon = root.colon_plus_one - 1;
+        result = root.question_plus_one && root.colon_plus_one && !root.assignment_plus_one && found_question != start &&
+                 found_question + 1 != found_colon && found_colon + 1 != end;
+        if (result)
+        {
+            *expression_start = start;
+            *question = found_question;
+            *colon = found_colon;
+            *expression_end = end;
+        }
+    }
+    else
+    {
+        result = c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
+    }
+    return result;
+}
+
+// The scan c_ir_expression_core_range keeps for a range whose row is not
+// VALID: the last depth-0 comma outside every `?`/`:` pair, as the row's
+// last_comma_plus_one, with UINT32_MAX for none.
+BUSTER_C_INTERNAL u32 c_ir_expression_core_range_comma_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 last_comma = UINT32_MAX;
+    u32 conditional_depth = 0;
+    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
+    for (u32 index = start; index < end; index += 1)
+    {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_COMMA_TOKENS, 1);
+        u32 punctuator = builder->preprocess.tokens[index].punctuator;
+        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+        if (scan == C_IR_GROUP_SCAN_SKIPPED)
+        {
+            continue;
+        }
+        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
+        {
+            break;
+        }
+        if (punctuator == C_PUNCTUATOR_QUESTION)
+        {
+            conditional_depth += 1;
+        }
+        else if (punctuator == C_PUNCTUATOR_COLON && conditional_depth)
+        {
+            conditional_depth -= 1;
+        }
+        else if (punctuator == C_PUNCTUATOR_COMMA && !conditional_depth)
+        {
+            last_comma = index;
+        }
+    }
+    return last_comma;
+}
+
 BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u32* start_in_out, u32* end_in_out)
 {
     u32 start = *start_in_out;
@@ -32687,33 +32997,8 @@ BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u3
             end -= 1;
             narrowed = true;
         }
-        u32 last_comma = UINT32_MAX;
-        u32 conditional_depth = 0;
-        for (u32 index = start; index < end; index += 1)
-        {
-            u32 punctuator = builder->preprocess.tokens[index].punctuator;
-            CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
-            if (scan == C_IR_GROUP_SCAN_SKIPPED)
-            {
-                continue;
-            }
-            if (scan == C_IR_GROUP_SCAN_UNCLOSED)
-            {
-                break;
-            }
-            if (punctuator == C_PUNCTUATOR_QUESTION)
-            {
-                conditional_depth += 1;
-            }
-            else if (punctuator == C_PUNCTUATOR_COLON && conditional_depth)
-            {
-                conditional_depth -= 1;
-            }
-            else if (punctuator == C_PUNCTUATOR_COMMA && !conditional_depth)
-            {
-                last_comma = index;
-            }
-        }
+        CIrRangeRoot root = c_ir_range_root(builder, start, end);
+        u32 last_comma = root.flags & C_IR_RANGE_ROOT_VALID ? root.last_comma_plus_one - 1 : c_ir_expression_core_range_comma_scan(builder, start, end);
         if (last_comma != UINT32_MAX)
         {
             start = last_comma + 1;
@@ -34168,6 +34453,111 @@ BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBui
     return pushed;
 }
 
+// The two scans c_ir_lower_expression_step keeps for a range whose
+// CIrRangeRoot row is not VALID: the last depth-0 comma outside every
+// `?`/`:` pair (UINT32_MAX for none), and the first depth-0 assignment
+// operator before any depth-0 `?` (`end` for none). Both count delimiter
+// depth token by token, which is the verdict a malformed range gets.
+BUSTER_C_INTERNAL u32 c_ir_expression_step_comma_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 last_comma = UINT32_MAX;
+    u32 comma_parentheses = 0;
+    u32 comma_brackets = 0;
+    u32 comma_braces = 0;
+    u32 comma_conditionals = 0;
+    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
+    for (u32 index = start; index < end; index += 1)
+    {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_STEP_TOKENS, 1);
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            comma_parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && comma_parentheses)
+        {
+            comma_parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            comma_brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && comma_brackets)
+        {
+            comma_brackets -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            comma_braces += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && comma_braces)
+        {
+            comma_braces -= 1;
+        }
+        else if (!comma_parentheses && !comma_brackets && !comma_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            comma_conditionals += 1;
+        }
+        else if (!comma_parentheses && !comma_brackets && !comma_braces && comma_conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+        {
+            comma_conditionals -= 1;
+        }
+        else if (!comma_parentheses && !comma_brackets && !comma_braces && !comma_conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            last_comma = index;
+        }
+    }
+    return last_comma;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_expression_step_assignment_scan(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 assignment = end;
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    bool conditional_tail = false;
+    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
+    for (u32 index = start; index < end && assignment == end; index += 1)
+    {
+        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_STEP_TOKENS, 1);
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+        {
+            parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
+        {
+            brackets -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
+        {
+            braces -= 1;
+        }
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            conditional_tail = true;
+        }
+        else if (!conditional_tail && !parentheses && !brackets && !braces && c_ir_assignment_operator(token))
+        {
+            assignment = index;
+        }
+    }
+    return assignment;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -34494,8 +34884,10 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             u32 parentheses = 0;
             u32 brackets = 0;
             u32 braces = 0;
+            WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
             for (u32 index = conditional_question + 1; index < conditional_colon; index += 1)
             {
+                WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_STEP_TOKENS, 1);
                 CToken token = builder->preprocess.tokens[index];
                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
@@ -34661,8 +35053,10 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                     u32 parentheses = 0;
                     u32 brackets = 0;
                     u32 braces = 0;
+                    WORK_LEDGER_RECORD(LOWER_ROOT_SCANS, 1);
                     for (u32 scan = assignment_start; scan < assignment_close; scan += 1)
                     {
+                        WORK_LEDGER_RECORD(LOWER_ROOT_SCAN_STEP_TOKENS, 1);
                         CToken token = builder->preprocess.tokens[scan];
                         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                         {
@@ -34734,51 +35128,13 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         }
         frame->as.expression.start = start;
         frame->as.expression.end = end;
-        u32 last_comma = UINT32_MAX;
-        u32 comma_parentheses = 0;
-        u32 comma_brackets = 0;
-        u32 comma_braces = 0;
-        u32 comma_conditionals = 0;
-        for (u32 index = start; index < end; index += 1)
-        {
-            CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                comma_parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && comma_parentheses)
-            {
-                comma_parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                comma_brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && comma_brackets)
-            {
-                comma_brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                comma_braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && comma_braces)
-            {
-                comma_braces -= 1;
-            }
-            else if (!comma_parentheses && !comma_brackets && !comma_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
-            {
-                comma_conditionals += 1;
-            }
-            else if (!comma_parentheses && !comma_brackets && !comma_braces && comma_conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
-            {
-                comma_conditionals -= 1;
-            }
-            else if (!comma_parentheses && !comma_brackets && !comma_braces && !comma_conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-            {
-                last_comma = index;
-            }
-        }
+        // The comma, assignment and conditional splits below are three
+        // questions about one range: the row answers all three (and the
+        // logical-value and core-range questions the children ask next),
+        // while a range the row cannot describe keeps each question's scan.
+        CIrRangeRoot root = c_ir_range_root(builder, start, end);
+        bool root_valid = (root.flags & C_IR_RANGE_ROOT_VALID) != 0;
+        u32 last_comma = root_valid ? root.last_comma_plus_one - 1 : c_ir_expression_step_comma_scan(builder, start, end);
         if (last_comma != UINT32_MAX)
         {
             if (last_comma == start || last_comma + 1 >= end ||
@@ -34799,49 +35155,12 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             frame->as.expression.end = last_comma;
             continue;
         }
-        u32 assignment = end;
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        bool conditional_tail = false;
         CConditionalOperator assignment_operation = C_CONDITIONAL_OPERATOR_COUNT;
-        for (u32 index = start; index < end; index += 1)
+        u32 assignment = root_valid ? (root.assignment_plus_one ? root.assignment_plus_one - 1 : end)
+                                    : c_ir_expression_step_assignment_scan(builder, start, end);
+        if (assignment < end)
         {
-            CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-            {
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-            {
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
-            {
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
-            {
-                conditional_tail = true;
-            }
-            else if (!conditional_tail && !parentheses && !brackets && !braces &&
-                     (c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) || c_ir_compound_assignment_operator(token, &assignment_operation)))
-            {
-                assignment = index;
-                break;
-            }
+            c_ir_compound_assignment_operator(builder->preprocess.tokens[assignment], &assignment_operation);
         }
         if (assignment < end && assignment != start && assignment + 1 < end)
         {
@@ -35801,6 +36120,7 @@ BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, S
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
+    WORK_LEDGER_RECORD(LOWER_DELIMITER_SCANS, 1);
     // The shape sidecar answers this whole query 64 tokens at a time; the row
     // scan below stays as the definition for a stream that carries no
     // sidecar, for a host without the wide compares, and as the reference the
@@ -35809,7 +36129,9 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 
     CTokenShape const* shapes = c_preprocess_token_shapes(&preprocess);
     if (BUSTER_LIKELY(shapes != 0))
     {
-        return c_shape_matching_delimiter(shapes, open, end, opening, closing);
+        u32 match = c_shape_matching_delimiter(shapes, open, end, opening, closing);
+        WORK_LEDGER_RECORD(LOWER_DELIMITER_SCAN_TOKENS, match < end ? match + 1 - open : end > open ? end - open : 0);
+        return match;
     }
 #endif
     // The pair is loop-invariant, so it becomes one set the scan tests each
@@ -35820,6 +36142,7 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 
     u32 depth = 0;
     for (u32 index = open; index < end; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_DELIMITER_SCAN_TOKENS, 1);
         u8 punctuator = preprocess.tokens[index].punctuator;
         if (c_punctuator_in_set(punctuator, delimiters))
         {
@@ -36031,8 +36354,10 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CPreprocessResult preproc
     u32 parentheses = 0;
     u32 brackets = 0;
     u32 braces = 0;
+    WORK_LEDGER_RECORD(LOWER_STATEMENT_SPAN_SCANS, 1);
     for (u32 index = cursor; !measured && index < end; index += 1)
     {
+        WORK_LEDGER_RECORD(LOWER_STATEMENT_SPAN_TOKENS, 1);
         CToken token = preprocess.tokens[index];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -53316,6 +53641,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), call_array_capacity, BUSTER_ALIGN_OF(u32)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrRangeRoot), body_array_capacity, BUSTER_ALIGN_OF(CIrRangeRoot)) &&
             (stream_matching_delimiters_plus_one || c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32))) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedControlExpression),
                                           prepared_control_expression_capacity ? prepared_control_expression_capacity : 1,
@@ -53445,6 +53771,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         builder.prepared_call_token_heads = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
         builder.prepared_call_token_next = arena_allocate(lowering_temporary.arena, u32, call_array_capacity);
         builder.group_type_names = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
+        builder.range_roots = arena_allocate(lowering_temporary.arena, CIrRangeRoot, body_array_capacity);
         builder.matching_delimiters_plus_one = stream_matching_delimiters_plus_one ? 0 : arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
         builder.prepared_control_expressions = arena_allocate(lowering_temporary.arena, CIrPreparedControlExpression,
                                                               prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
@@ -53455,6 +53782,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             builder.prepared_call_token_heads[token_offset] = UINT32_MAX;
             builder.group_type_names[token_offset] = 0;
         }
+        // A zero `end` is the empty row; nothing else in a row is read first.
+        memset(builder.range_roots, 0, sizeof(*builder.range_roots) * (u64)builder.body_token_count);
         if (!builder.stream_matching_delimiters_plus_one)
         {
             for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)

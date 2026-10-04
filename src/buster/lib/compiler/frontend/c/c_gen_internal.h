@@ -106,4 +106,8 @@ struct CTestInitializerRelocationReplay
 BUSTER_F_DECL void c_test_initializer_relocation_replay(Arena* arena, u32 pointer_size, u64 byte_count, u32 capacity,
                                                         CTestInitializerRelocationOperation const* operations, u32 operation_count,
                                                         CTestInitializerRelocationReplay* replay);
+
+// Root-classification memo (c_ir_range_root): a true value sends every
+// question back to its own scan so a differential can compare the two paths.
+BUSTER_F_DECL void c_test_set_range_root_memo_disabled(bool disabled);
 #endif

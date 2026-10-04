@@ -23,6 +23,11 @@
 //             layout solve) instead of to the query's own data
 //   literal   string-literal bytes counted/decoded and numbers converted
 //   lookup    symbol interning calls, probes and bytes hashed
+//   lower     the C body lowering machine's own traversals: frames pushed and
+//             dispatched, expression roots and core runs, tokens stepped by
+//             each root-classification scan, by the two preparation prepasses,
+//             by operand delimitation and statement measurement, and the
+//             matching-delimiter queries those scans ask
 //   target    per-process x86-64 metadata preparation versus what a compile
 //             reads back
 //   machine   machine records selected, placed, encoded and described
@@ -72,6 +77,30 @@
     X(LOOKUP_SYMBOL_INTERNS, lookup, symbol_interns) \
     X(LOOKUP_SYMBOL_INTERN_PROBES, lookup, symbol_intern_probes) \
     X(LOOKUP_SYMBOL_INTERN_BYTES_HASHED, lookup, symbol_intern_bytes_hashed) \
+    X(LOWER_FRAME_PUSHES, lower, frame_pushes) \
+    X(LOWER_DISPATCH_STEPS, lower, dispatch_steps) \
+    X(LOWER_EXPRESSION_ROOTS, lower, expression_roots) \
+    X(LOWER_EXPRESSION_CORE_RUNS, lower, expression_core_runs) \
+    X(LOWER_EXPRESSION_CORE_TOKENS, lower, expression_core_tokens) \
+    X(LOWER_ROOT_SCANS, lower, root_scans) \
+    X(LOWER_ROOT_SCAN_CONDITIONAL_TOKENS, lower, root_scan_conditional_tokens) \
+    X(LOWER_ROOT_SCAN_LOGICAL_TOKENS, lower, root_scan_logical_tokens) \
+    X(LOWER_ROOT_SCAN_ASSIGNMENT_TOKENS, lower, root_scan_assignment_tokens) \
+    X(LOWER_ROOT_SCAN_COMMA_TOKENS, lower, root_scan_comma_tokens) \
+    X(LOWER_ROOT_SCAN_STEP_TOKENS, lower, root_scan_step_tokens) \
+    X(LOWER_ROOT_SCAN_UPDATE_TOKENS, lower, root_scan_update_tokens) \
+    X(LOWER_ROOT_SCAN_FUSED_TOKENS, lower, root_scan_fused_tokens) \
+    X(LOWER_PREPARE_CONTROL_TOKENS, lower, prepare_control_tokens) \
+    X(LOWER_PREPARE_CALL_TOKENS, lower, prepare_call_tokens) \
+    X(LOWER_PREPARED_CONTROL_LIST_VISITS, lower, prepared_control_list_visits) \
+    X(LOWER_UNARY_END_SCANS, lower, unary_end_scans) \
+    X(LOWER_UNARY_END_TOKENS, lower, unary_end_tokens) \
+    X(LOWER_STATEMENT_SPAN_SCANS, lower, statement_span_scans) \
+    X(LOWER_STATEMENT_SPAN_TOKENS, lower, statement_span_tokens) \
+    X(LOWER_DELIMITER_QUERIES, lower, delimiter_queries) \
+    X(LOWER_DELIMITER_INDEX_MISSES, lower, delimiter_index_misses) \
+    X(LOWER_DELIMITER_SCANS, lower, delimiter_scans) \
+    X(LOWER_DELIMITER_SCAN_TOKENS, lower, delimiter_scan_tokens) \
     X(TARGET_X86_POOL_BYTES_COPIED, target, x86_pool_bytes_copied) \
     X(TARGET_X86_NUL_DISTANCE_ENTRIES, target, x86_nul_distance_entries) \
     X(TARGET_X86_NUL_DISTANCE_READS, target, x86_nul_distance_reads) \

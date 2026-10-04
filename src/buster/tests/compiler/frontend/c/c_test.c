@@ -6,6 +6,7 @@
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/compiler/work_ledger.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
@@ -11068,6 +11069,177 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_memo(UnitTestArguments*
     // Narrow valid fragments only: the plain, u8, escaped and empty shapes,
     // four of every eight, plus three of the final partial cycle's four.
     BUSTER_TEST(arguments, recorded == 1500 / 8 * 4 + 3);
+    return result;
+}
+
+// The native code and data bytes one lowering of the root-memo fixture
+// produced, copied out of the run's arena; `success` is false when any
+// stage refused the unit.
+typedef struct CTestRangeRootArtifact CTestRangeRootArtifact;
+struct CTestRangeRootArtifact
+{
+    ByteSlice bytes;
+    bool success;
+    u8 reserved[7];
+};
+
+// Lowers `source` for `target` in the requested frontend form with the
+// root-classification memo (c_ir_range_root) enabled or sent back to the
+// per-question scans, generates native code for it, and copies the code and
+// data bytes out so two runs can be compared byte for byte after their arenas
+// are released. Native code rather than LLVM bitcode, because the fixture
+// takes label addresses, which the bitcode emitter does not implement.
+BUSTER_GLOBAL_LOCAL CTestRangeRootArtifact c_test_range_root_lower(UnitTestArguments* arguments, String8 source, Target target, bool memory_form,
+                                                             bool memo_disabled, u32* diagnostics_out)
+{
+    CTestRangeRootArtifact artifact = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+    c_test_set_range_root_memo_disabled(memo_disabled);
+    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("range-root.c"), preprocess, syntax, target,
+                                                    (CIRLowerOptions){.disable_direct_ssa = memory_form});
+    c_test_set_range_root_memo_disabled(false);
+    *diagnostics_out = (u32)(preprocess.diagnostic_count + syntax.diagnostic_count + lowered.diagnostic_count);
+    if (lowered.program && lowered.program->module_count && !*diagnostics_out)
+    {
+        IrModule* module = lowered.program->modules;
+        CodegenModule generated = {0};
+        if (ir_prepare_canonical_module(lowered.program, module, false).error == IR_VALIDATION_NONE)
+        {
+            generated = codegen_generate_canonical_module(temporary.arena, lowered.program, module, target, (CodegenModuleOptions){0});
+        }
+        if (generated.error == CODEGEN_ERROR_NONE && generated.code.length)
+        {
+            u64 length = generated.code.length + generated.read_only_data.length + generated.writable_data.length;
+            u8* copy = arena_allocate(arguments->arena, u8, length);
+            memcpy(copy, generated.code.pointer, generated.code.length);
+            memcpy(copy + generated.code.length, generated.read_only_data.pointer, generated.read_only_data.length);
+            memcpy(copy + generated.code.length + generated.read_only_data.length, generated.writable_data.pointer, generated.writable_data.length);
+            artifact = (CTestRangeRootArtifact){.bytes = {.pointer = copy, .length = length}, .success = true};
+        }
+    }
+    scratch_end(temporary);
+    return artifact;
+}
+
+// The root-classification memo (c_ir_range_root, #1700): every question the
+// expression machine asks of one range -- comma, assignment and conditional
+// splits, logical root, control operator, top-level comma, core range -- is
+// read off one row. The shapes below are the ones whose verdicts differ by
+// which operator is seen first: an assignment before a `?` (the whole is an
+// assignment), an assignment inside an arm (the whole is a conditional), a
+// comma inside an arm against one after it, a logical inside a conditional, a
+// statement expression that must keep its parentheses, a GNU label address
+// spelled with `&&`, nested conditionals, void-cast assignments and comma
+// groups holding assignments. Both frontend forms must lower to identical
+// bitcode with the memo and with the scans, and in the diagnostic build the
+// memo must leave no per-question scan at all on a well-formed unit, while a
+// malformed one keeps the scans' verdicts and diagnostics.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_range_root_memo(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct Node { int v; struct Node* next; };\n"
+                        "int side(int);\n"
+                        "int g(int* p, int a, int b, int c, struct Node* n)\n"
+                        "{\n"
+                        "    int x, y = 0, z = 0;\n"
+                        "    x = a > b ? a : b;\n"
+                        "    y = a ? x = 1 : 2;\n"
+                        "    z = (a, b) ? (c, a) : b, x += 1;\n"
+                        "    x = a && b ? side(c) : side(a) || b;\n"
+                        "    y = a ? b ? c : a : b ? a : c;\n"
+                        "    z += (a, b ? c : a), y;\n"
+                        "    (void)(n = n->next);\n"
+                        "    (void)(x = side(a), y = side(b));\n"
+                        "    x = ({ int t = a; int u = b; t ? u : a; });\n"
+                        "    y = (a ? side(b) : side(a)) + (b ? c : (a, b));\n"
+                        "    z = a ? (b, side(c)) : (c, side(a));\n"
+                        "    p[0] = a ? b : (c = side(a));\n"
+                        "    x = y = a ? b : c;\n"
+                        "    if ((x = side(a)) != 0 && (y = side(b)) > 1) z = 1;\n"
+                        "    while (a-- > 0 ? b : c) x += a ? 1 : 2;\n"
+                        "    for (y = 0, x = 1; x < 4 && (y, x); x++, y += a ? 1 : 2) z ^= x;\n"
+                        "    return x + y + z + side(a ? b : c) + (a, b, c);\n"
+                        "}\n"
+                        "int h(int a, int b)\n"
+                        "{\n"
+                        "    static void* targets[] = {&&one, &&two};\n"
+                        "    void* q = a ? &&one : &&two;\n"
+                        "    int r = a && b ? 1 : 2;\n"
+                        "    if (a > 1) goto *targets[b & 1];\n"
+                        "    if (b > 1) goto *q;\n"
+                        "one:\n"
+                        "    r += 1;\n"
+                        "two:\n"
+                        "    r += a ? b : 2;\n"
+                        "    return r;\n"
+                        "}\n");
+    // A balanced range the row describes but no path can lower (a `?`
+    // without its `:`), and an unbalanced one every question's scan refuses.
+    String8 const malformed_sources[] = {
+        S8("int side(int);\n"
+           "int k(int a, int b)\n"
+           "{\n"
+           "    int x = a ? b;\n"
+           "    return x + side(a);\n"
+           "}\n"),
+        S8("int side(int);\n"
+           "int k(int a, int b)\n"
+           "{\n"
+           "    int x = (a ? b : side(a;\n"
+           "    return x;\n"
+           "}\n"),
+    };
+    Target targets[2] = {target_native, target_native};
+    targets[0].cpu_arch = CPU_ARCH_X86_64;
+    targets[0].os = OPERATING_SYSTEM_LINUX;
+    targets[1].cpu_arch = CPU_ARCH_AARCH64;
+    targets[1].os = OPERATING_SYSTEM_LINUX;
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            u32 diagnostics[2] = {0};
+            CTestRangeRootArtifact memo = c_test_range_root_lower(arguments, source, targets[target_index], form != 0, false, &diagnostics[0]);
+            CTestRangeRootArtifact scans = c_test_range_root_lower(arguments, source, targets[target_index], form != 0, true, &diagnostics[1]);
+            BUSTER_TEST(arguments, diagnostics[0] == 0 && diagnostics[1] == 0);
+            BUSTER_TEST(arguments, memo.success && scans.success);
+            BUSTER_TEST(arguments, memo.bytes.length == scans.bytes.length && !memcmp(memo.bytes.pointer, scans.bytes.pointer, memo.bytes.length));
+            for (u32 malformed = 0; malformed < BUSTER_ARRAY_LENGTH(malformed_sources); malformed += 1)
+            {
+                u32 malformed_diagnostics[2] = {0};
+                CTestRangeRootArtifact memo_malformed =
+                    c_test_range_root_lower(arguments, malformed_sources[malformed], targets[target_index], form != 0, false, &malformed_diagnostics[0]);
+                CTestRangeRootArtifact scans_malformed =
+                    c_test_range_root_lower(arguments, malformed_sources[malformed], targets[target_index], form != 0, true, &malformed_diagnostics[1]);
+                BUSTER_TEST(arguments, malformed_diagnostics[0] != 0 && malformed_diagnostics[0] == malformed_diagnostics[1]);
+                BUSTER_TEST(arguments, !memo_malformed.success && !scans_malformed.success);
+            }
+        }
+    }
+#if BUSTER_BENCH_ALLOCATIONS
+    // On a well-formed unit every range the machine classifies is properly
+    // nested, so the memo answers every question and no per-question scan
+    // steps a token; the one fused pass per range stays within the tokens the
+    // whole body holds times the ranges that start at a token.
+    for (u32 memo_disabled = 0; memo_disabled < 2; memo_disabled += 1)
+    {
+        u32 diagnostics = 0;
+        WorkLedgerCounters before = work_ledger_counters();
+        CTestRangeRootArtifact artifact = c_test_range_root_lower(arguments, source, targets[0], false, memo_disabled != 0, &diagnostics);
+        WorkLedgerCounters after = work_ledger_counters();
+        BUSTER_TEST(arguments, artifact.success && diagnostics == 0 && !after.overflowed);
+        u64 question_scans = (after.values[WORK_LEDGER_LOWER_ROOT_SCAN_CONDITIONAL_TOKENS] - before.values[WORK_LEDGER_LOWER_ROOT_SCAN_CONDITIONAL_TOKENS]) +
+                             (after.values[WORK_LEDGER_LOWER_ROOT_SCAN_LOGICAL_TOKENS] - before.values[WORK_LEDGER_LOWER_ROOT_SCAN_LOGICAL_TOKENS]) +
+                             (after.values[WORK_LEDGER_LOWER_ROOT_SCAN_ASSIGNMENT_TOKENS] - before.values[WORK_LEDGER_LOWER_ROOT_SCAN_ASSIGNMENT_TOKENS]) +
+                             (after.values[WORK_LEDGER_LOWER_ROOT_SCAN_COMMA_TOKENS] - before.values[WORK_LEDGER_LOWER_ROOT_SCAN_COMMA_TOKENS]) +
+                             (after.values[WORK_LEDGER_LOWER_ROOT_SCAN_STEP_TOKENS] - before.values[WORK_LEDGER_LOWER_ROOT_SCAN_STEP_TOKENS]);
+        u64 fused = after.values[WORK_LEDGER_LOWER_ROOT_SCAN_FUSED_TOKENS] - before.values[WORK_LEDGER_LOWER_ROOT_SCAN_FUSED_TOKENS];
+        BUSTER_TEST(arguments, fused != 0);
+        BUSTER_TEST(arguments, memo_disabled ? question_scans != 0 : question_scans == 0);
+    }
+#endif
     return result;
 }
 
@@ -34380,6 +34552,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_number_facts);
     BUSTER_TEST_FIXTURE(arguments, c_test_string_literal_memo);
+    BUSTER_TEST_FIXTURE(arguments, c_test_range_root_memo);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     BUSTER_TEST_FIXTURE(arguments, c_test_position_index_tiles);
     BUSTER_TEST_FIXTURE(arguments, c_test_validation_candidates);
