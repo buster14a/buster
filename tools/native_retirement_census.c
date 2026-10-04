@@ -34,10 +34,10 @@ BUSTER_GLOBAL_LOCAL NrcTarget const nrc_targets[] = {
 
 BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_manifest_name = S8_INITIALIZER(BUSTER_NATIVE_RETIREMENT_POLICY_PATH);
 BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_snapshot_name = S8_INITIALIZER(BUSTER_NATIVE_RETIREMENT_SNAPSHOT_PATH);
-BUSTER_GLOBAL_LOCAL u64 const nrc_full_input_count = 559;
-BUSTER_GLOBAL_LOCAL u64 const nrc_full_subject_count = 411;
-BUSTER_GLOBAL_LOCAL u64 const nrc_full_group_count = 19728;
-BUSTER_GLOBAL_LOCAL u64 const nrc_full_row_count = 78912;
+BUSTER_GLOBAL_LOCAL u64 const nrc_full_input_count = 560;
+BUSTER_GLOBAL_LOCAL u64 const nrc_full_subject_count = 412;
+BUSTER_GLOBAL_LOCAL u64 const nrc_full_group_count = 19776;
+BUSTER_GLOBAL_LOCAL u64 const nrc_full_row_count = 79104;
 BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER(BUSTER_NATIVE_RETIREMENT_POLICY_SHA256);
 BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_snapshot_sha256 = S8_INITIALIZER(BUSTER_NATIVE_RETIREMENT_SNAPSHOT_SHA256);
 BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER(BUSTER_NATIVE_RETIREMENT_RECEIPT_SHA256);

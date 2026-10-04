@@ -6,8 +6,6 @@
 // storage, so the shape check, the store walker and the constant image all
 // see it.
 
-#include <string.h>
-
 struct Scalar { int n; char t[2][3]; };
 struct Array { int m[2][2]; char s[2][3]; };
 struct Nested { struct { int a, b; } p; char s[2][3]; };
@@ -19,7 +17,8 @@ static struct Rows file_rows[] = { "ab", "cd", "ef" };
 
 static int check_rows(char (*t)[3], char const* first, char const* second)
 {
-    return !memcmp(t[0], first, 3) && !memcmp(t[1], second, 3);
+    return t[0][0] == first[0] && t[0][1] == first[1] && t[0][2] == first[2] &&
+           t[1][0] == second[0] && t[1][1] == second[1] && t[1][2] == second[2];
 }
 
 static int check_array(struct Array* k)
