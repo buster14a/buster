@@ -250,9 +250,7 @@ void arena_set_position(Arena* arena, u64 position)
 
 BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position)
 {
-#if BUSTER_INCLUDE_TESTS
-    arena->test_high_water = BUSTER_MAX(arena->test_high_water, arena->position);
-#endif
+    arena->high_water = BUSTER_MAX(arena->high_water, arena->position);
     arena->dirty_position = BUSTER_MAX(arena->dirty_position, BUSTER_MAX(arena->position, position));
     arena->position = position;
 }
@@ -260,9 +258,7 @@ BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position
 bool arena_set_position_and_decommit(Arena* arena, u64 position)
 {
     BUSTER_VALIDATE(arena && arena->position <= arena->reserved_size && position >= arena_minimum_position && position <= arena->position);
-#if BUSTER_INCLUDE_TESTS
-    arena->test_high_water = BUSTER_MAX(arena->test_high_water, arena->position);
-#endif
+    arena->high_water = BUSTER_MAX(arena->high_water, arena->position);
     u64 page_size = os_get_page_size();
     BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
     // Arena granularities may legally be smaller than a native page. Start at
