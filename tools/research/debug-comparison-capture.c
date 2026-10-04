@@ -169,7 +169,7 @@ int main(int argc, char **argv)
         valid[arm] = command(cmd, name) == 0;
         if (valid[arm])
         {
-            snprintf(cmd, sizeof(cmd), "gcc -no-pie evidence/caller.o evidence/%s-kernels.o external/tcc/lib/tcc/libtcc1.a -o evidence/%s-runtime", arms[arm].name, arms[arm].name);
+            snprintf(cmd, sizeof(cmd), "gcc -no-pie -Wl,--no-eh-frame-hdr evidence/caller.o evidence/%s-kernels.o -o evidence/%s-runtime", arms[arm].name, arms[arm].name);
             snprintf(name, sizeof(name), "%s-link", arms[arm].name);
             valid[arm] = command(cmd, name) == 0;
         }
@@ -228,6 +228,9 @@ int main(int argc, char **argv)
         command(cmd, name);
     }
     command("sha256sum evidence/*.c evidence/*.o evidence/*-runtime > evidence/artifacts-sha256.txt", "artifact-hashes");
+    /* A bounded text receipt also survives browser artifact-download restrictions.
+     * Excludes executable objects: the normal uploaded artifact retains those. */
+    if (system("tar -czf replay-receipt.tar.gz evidence/*.c evidence/*.csv evidence/*.txt evidence/*.log evidence/CMakeCache.txt evidence/compile_commands.json evidence/tcc-COPYING evidence/tcc-README && sha256sum replay-receipt.tar.gz && base64 -w 4000 replay-receipt.tar.gz")) failures++;
     fprintf(stderr, "capture failures=%d; debugger/unsupported failures are retained\n", failures);
     return failures != 0;
 }
