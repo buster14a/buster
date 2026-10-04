@@ -149,6 +149,27 @@ static void direct_cell(const char* cell, const char* compiler_command, const ch
     must("verify-frozen-system-and-object-inputs", format("sha256sum --check %s", quote(hashes)));
 }
 
+
+static void cold_comparison(const char* cell, const char* a, const char* b)
+{
+    double values[2][BUSTER_BENCH_SAMPLES];
+    const char* variants[] = {"A", "B"};
+    const char* command[] = {a, b};
+    for (unsigned round = 0; round < 9; ++round)
+    {
+        unsigned first = random_u32() & 1;
+        for (unsigned position = 0; position < 2; ++position)
+        {
+            unsigned which = first ^ position;
+            must("cold-guest-cache-reset", "sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'");
+            BenchResult result = run_command(cell, variants[which], (int)round, command[which]);
+            if (result.status) fail("cold direct link failed");
+            values[which][round] = result.wall_ms;
+        }
+    }
+    report(cell, values[0], values[1], 9);
+}
+
 static char* target_command(const char* directory, const char* target)
 {
     BenchResult captured = must("capture-target-command", format("ninja -C %s -f build-Debug.ninja -t commands %s", quote(directory), target));
@@ -264,7 +285,11 @@ int main(int argc, char** argv)
             const char* binary = format("%s/%s/ide", directory, config);
             direct_cell(cells[i], frozen_command(input, original_cells[i]), directory, binary,
                 format("%s cc -g -c %s -o %s", quote(binary), quote(format("%s/probe.c", evidence)), quote(format("%s/review-check.o", evidence))));
-            if (!i) check_debugger("ide-source-and-unwind", binary, "entry_point", "", "entry_point", "buster_entry_point");
+            if (!i)
+            {
+                check_debugger("ide-mold-source-and-unwind", format("%s/ide-debug-mold.elf", evidence), "entry_point", "", "entry_point", "buster_entry_point");
+                check_debugger("ide-wild-source-and-unwind", format("%s/ide-debug-wild.elf", evidence), "entry_point", "", "entry_point", "buster_entry_point");
+            }
         }
         interoperability(format("%s/ide-unity-release-wild.elf", evidence));
         for (unsigned i = 0; i < 2; ++i)
@@ -278,7 +303,22 @@ int main(int argc, char** argv)
             "build-wild-review/Debug/hot_reload --self-test build-wild-review/Debug/ide");
         build_shares("build-wild-review");
         BenchResult cold = run_command("guest-cold-cache-admission", "drop-caches", -1, "sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'");
-        write_text(format("%s/cold-cache-status.txt", evidence), cold.status ? "NOT RUN: guest refused drop-caches, diagnostic retained.\n" : "Guest cache eviction available; timing cold runs is deferred pending full input residency control. No cold-cache ranking claimed.\n");
+        write_text(format("%s/cold-cache-status.txt", evidence), cold.status ? "NOT RUN: guest refused drop-caches, diagnostic retained.\n" : "Guest Linux page cache, dentries and inode cache evicted with sync; drop_caches=3 before every observation. Reset excluded from timer. Hypervisor/storage caches uncontrolled; this is guest-cold, not physical-cold. No cold warmups. Nine randomized pairs per cell.\n");
+        if (!cold.status)
+        {
+            char* wild = direct_link(frozen_command(input, "separate-debug-default"), "build-wild-separate");
+            char* mold = change_linker(wild, "build-wild-separate", "mold");
+            cold_comparison("ide-debug-direct-guest-cold-default", mold, wild);
+            cold_comparison("ide-debug-direct-guest-cold-threads1", format("%s --threads=1", mold), format("%s --threads=1", wild));
+            must("cold-frozen-input-check", format("sha256sum --check %s", quote(format("%s/ide-debug-all-read-inputs.sha256", evidence))));
+        }
+        BenchResult gcc = run_command("driver-gcc-wild-diagnostic", "expected-failure", -1, format("%s generate --build-directory build-wild-review-gcc --cc gcc --linker WILD --no-include-tests --no-fuzz --no-sanitize --no-lto", quote(driver)));
+        if (!gcc.status) ++failures;
+        BenchResult flag = run_command("wild-unsupported-flag", "expected-failure", -1, "wild --buster-invalid-linker-option");
+        if (!flag.status) ++failures;
+        BenchResult missing = run_command("clang-missing-explicit-linker", "expected-failure", -1, format("clang --ld-path=/definitely/missing/wild %s %s -o %s", quote(format("%s/main.o", evidence)), quote(format("%s/libprobe.a", evidence)), quote(format("%s/missing-output", evidence))));
+        if (!missing.status) ++failures;
+        write_text(format("%s/negative-selection-status.txt", evidence), format("driver_gcc_wild=%d\nunsupported_flag=%d\nmissing_explicit_linker=%d\nNonzero means explicit request rejected, no implicit successful fallback.\n", gcc.status, flag.status, missing.status));
         must("retain-original-summary", format("cp %s %s && cp %s %s", quote(format("%s/summary.csv", input)), quote(format("%s/original-summary.csv", evidence)), quote(format("%s/raw.csv", input)), quote(format("%s/original-raw.csv", evidence))));
         write_text(format("%s/completion.txt", evidence), failures ? "supplementary_campaign=FAIL\n" : "supplementary_campaign=PASS\n");
         if (fclose(raw) || fclose(commands) || fclose(summary)) fail("final review flush");
