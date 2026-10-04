@@ -56,7 +56,7 @@ jobs:
           {
             echo "schema=IR_LAYOUT_LAB_HOST_V1"
             echo "source_sha=$(git rev-parse HEAD)"
-            echo "tree_sha=$(git rev-parse HEAD^{tree})"
+            echo "tree_sha=$(git rev-parse 'HEAD^{tree}')"
             echo "lab_source_sha256=$(sha256sum "$LAB_SOURCE" | cut -d' ' -f1)"
             echo "ImageOS=${ImageOS:-} ImageVersion=${ImageVersion:-} RUNNER_ARCH=${RUNNER_ARCH:-}"
             echo "kernel=$(uname -srv)"
@@ -84,13 +84,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build/lab
-          FLAGS="-O3 -g -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions \
-            -DBUSTER_UNITY_BUILD=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_BENCH_ALLOCATIONS=0 \
-            -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_INSTRUMENT=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_COMPILER_ZIG=0 \
-            -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_LSAN_SUPPORTED=0 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 \
-            -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Wshadow -Wconversion -Wno-missing-field-initializers -Isrc"
-          clang $FLAGS -march=native "$LAB_SOURCE" -o build/lab/ir_layout_lab_native -lm -lpthread
-          clang $FLAGS "$LAB_SOURCE" -o build/lab/ir_layout_lab_baseline -lm -lpthread
+          FLAGS=(-O3 -g -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions
+            -DBUSTER_UNITY_BUILD=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_BENCH_ALLOCATIONS=0
+            -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_INSTRUMENT=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_COMPILER_ZIG=0
+            -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_LSAN_SUPPORTED=0 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0
+            -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Wshadow -Wconversion -Wno-missing-field-initializers -Isrc)
+          clang "${FLAGS[@]}" -march=native "$LAB_SOURCE" -o build/lab/ir_layout_lab_native -lm -lpthread
+          clang "${FLAGS[@]}" "$LAB_SOURCE" -o build/lab/ir_layout_lab_baseline -lm -lpthread
           sha256sum build/lab/ir_layout_lab_native build/lab/ir_layout_lab_baseline | tee "$RUNNER_TEMP/lab/binaries.sha256"
 
       - name: Timed lab, stage-1 unity unit (direct SSA), independent processes
