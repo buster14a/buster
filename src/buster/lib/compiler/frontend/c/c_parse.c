@@ -17944,6 +17944,14 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                                                       CEntityId entity)
 {
     CToken token = preprocess.tokens[token_index];
+    bool hidden_typedef = false;
+    if (entity.value < result->entity_count && result->entities[entity.value].scope.value == 0 &&
+        result->entities[entity.value].declaration_token_plus_one > token_index + 1)
+    {
+        // C11 6.2.1p7 starts scope just after the declarator.
+        hidden_typedef = result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+        entity = C_ENTITY_ID_INVALID;
+    }
     bool first_use = token_index < result->identifier_use_by_token_capacity && !result->identifier_use_by_token_plus_one[token_index];
     BUSTER_VALIDATE(result->identifier_use_count < result->identifier_use_capacity);
     u32 use_index = result->identifier_use_count++;
@@ -17996,7 +18004,12 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                                     string_equal(spelling, S8("__imag__")) || string_equal(spelling, S8("__imag"));
         predefined_function_name |= c_preprocess_dialect_is_c23(preprocess.dialect) &&
                                     (string_equal(spelling, S8("true")) || string_equal(spelling, S8("false")) || string_equal(spelling, S8("nullptr")));
-        if (unmodeled_builtin_type)
+        if (hidden_typedef)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
+                               string_format(arena, S8("unknown type name '{S8}'"), spelling));
+        }
+        else if (unmodeled_builtin_type)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
                                string_format(arena, S8("unknown type name '{S8}'"), spelling));
