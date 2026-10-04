@@ -2,7 +2,7 @@ name: Bounded compiler debug comparison
 on:
   push:
     branches: [codex/2334-debug-comparison-capture]
-    paths: [.github/workflows/comparison-capture.yml, tools/research/debug-comparison-capture.c]
+    paths: [.github/workflows/comparison-capture.yml, tools/research/debug-comparison-capture.c, tools/research/cproc-study.c]
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,6 +23,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh run download 37198781376 --repo buster14a/buster -n compiler-debug-comparison-37198781376 -D prior-evidence
+          gh run download 37200061341 --repo buster14a/buster -n compiler-debug-comparison-37200061341 -D prior-cproc-evidence
+          cat prior-cproc-evidence/secondary-evidence/cproc-build.log prior-cproc-evidence/secondary-evidence/qbe-license.log
           cat prior-evidence/evidence/clang-debug-debug-build.log prior-evidence/evidence/tcc-debug-link.log prior-evidence/evidence/buster-debug-gdb.log
       - name: Install debugger from Ubuntu
         run: sudo apt-get update -qq && sudo apt-get install -y gdb
@@ -64,6 +66,7 @@ jobs:
           path: |
             evidence
             prior-evidence
+            prior-cproc-evidence
             secondary-evidence
             tools/research/debug-comparison-capture.c
             tools/research/cproc-study.c
