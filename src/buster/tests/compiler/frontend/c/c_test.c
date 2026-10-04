@@ -20077,7 +20077,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
             expression_parts[2 * operand + 1] = operand + 1 == height ? S8(" + (int)u") : S8(" + ");
         }
         String8 expression = string_join_arena(arguments->arena, (SliceString8){expression_parts, 2 * height}, false);
-        String8 sizes[] = {S8("int"), S8("long")};
+        String8 sizes[] = {S8("int"), S8("long long")};
         for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(sizes); size += 1)
         {
             Arena* conflicts[] = {arguments->arena};
