@@ -4,7 +4,7 @@ This guide owns Wild-specific build/link support. The C build driver remains the
 
 ## Qualified configuration
 
-The hosted qualification uses Linux x86-64, Clang 21.1.8, CMake 4.4.3, Wild 0.10.0 and mold 2.42.1. Install an optional Wild executable named `wild` on PATH. CMake's Clang rule invokes `--ld-path=wild`; the recorded command and executable checksum, rather than the configure option alone, establish which linker ran.
+The hosted qualification uses Linux x86-64 / Clang 21.1.8 and Linux AArch64 / Clang 18.1.3, with CMake 4.4.3, Wild 0.10.0 and mold 2.42.1. ARM qualification is a runtime/debug smoke campaign, not a performance or sanitizer matrix. Install an optional Wild executable named `wild` on PATH. CMake's Clang rule invokes `--ld-path=wild`; the recorded command and executable checksum, rather than the configure option alone, establish which linker ran.
 
 For a debug-information-preserving application build:
 
@@ -22,10 +22,11 @@ Wild 0.10.0 enables section GC by default, unlike mold 2.42.1. The explicit no-G
 | Configuration | Evidence / support boundary |
 | --- | --- |
 | Linux x86-64, Clang 21.1.8, CMake 4.4.3, Wild 0.10.0, no LTO | Actual executable/archive/shared links, runtime, source breakpoints/unwinding, independent DWARF verification and affected sanitized regressions exercised. |
+| Linux AArch64, Clang 18.1.3, CMake 4.4.3, Wild 0.10.0 | Hosted ide build/runtime, full DWARF, actual source/unwind and Buster-produced object external links PASS. ARM performance/sanitizer/LTO matrix NOT RUN. |
 | GCC 15.2.0 with explicit WILD | CMake rejects this combination; hosted C-driver generation exits nonzero. No fallback. |
 | Missing explicit Wild path or unsupported Wild flag | Clang/linker exits nonzero; diagnostic and status retained. |
 | CMake before 4.4 | Native WILD linker type is unavailable upstream; unsupported here, not an older-CMake backport. |
-| GCC 16+, Linux AArch64, Windows/macOS external Wild, other versions | NOT RUN for this qualification. Do not infer support from upstream listings. Existing Windows/macOS defaults remain unchanged. |
+| GCC 16+, Windows/macOS external Wild, other versions | NOT RUN for this qualification. Do not infer support from upstream listings. Existing Windows/macOS defaults remain unchanged. |
 | LTO, full sanitizer matrix, physical-host acceptance | NOT RUN / outside this evaluation. |
 | GC-enabled hot_reload full-DWARF verification | FAIL with both linkers; runtime lifecycle PASS. Explicitly unsupported strict-debug configuration. |
 
