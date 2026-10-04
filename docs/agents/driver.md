@@ -798,7 +798,12 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
   fixed-address writer. `.rodata`, the initializer arrays, `.dynamic` and
   `.got` sit under `PT_GNU_RELRO`; `PT_GNU_STACK` is not executable.
 - Thread-local storage in a PIE is relaxed to local-exec as in a fixed-address
-  executable. In a shared object general-dynamic keeps its `__tls_get_addr`
+  executable. Initial-exec accepts both Buster's `add reg,[rip+x@GOTTPOFF]`
+  and GCC/Clang's `mov reg,[rip+x@GOTTPOFF]`: each becomes the same-length
+  ADD or sign-extending MOV immediate, with REX.R moved to REX.B. Metadata
+  validates the instruction envelope before writing; arbitrary field bytes
+  and ignored input REX.X/B bits never change the destination register.
+  In a shared object general-dynamic keeps its `__tls_get_addr`
   call with a `DTPMOD64`/`DTPOFF64` pair, initial-exec gets `TPOFF64` and
   `DF_STATIC_TLS`, and local-exec is refused.
 - Local-dynamic TLS, which this compiler never emits but GCC and Clang do for a
@@ -824,6 +829,15 @@ headers exist, and the `-fPIC` refusal.
 local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
 runs them, the shared object under both a Buster PIE and the host toolchain.
 AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
+
+`compiler_driver_test_initial_exec_tls` serializes independent MOV-form ELF
+fixtures using rax and r8, then links and executes them as fixed-address and
+PIE images. Available GCC/Clang compilers add default `-O2`, `-O0 -fno-pie`
+and `-O2 -fPIC -ftls-model=initial-exec` objects, with host-linked controls and
+initialized/zero TLS reads before and after mutation. Malformed MOV sites
+fail without replacing output. The driver emits its `-fPIC` hint only when
+the ELF planner identifies a refused fixed-address relocation; generic
+relocation failures, including malformed TLS sites, do not imply that cause.
 
 ## Pass-through options
 
