@@ -100,8 +100,8 @@ struct TemporalArena
 
 #define arena_minimum_position ((u64)sizeof(Arena))
 // Every reservation is capped far below 2^64. Allocation additionally checks
-// the cursor and alignment rounding, then subtracts the rounded offset from
-// the reservation before adding the request, so valid bump arithmetic cannot
+// the cursor and absolute-address alignment rounding, then subtracts the
+// rounded offset from the reservation before adding the request, so valid bump arithmetic cannot
 // wrap.
 #define ARENA_MAX_RESERVATION ((u64)1 << 48)
 
@@ -231,12 +231,35 @@ BUSTER_F_DECL void arena_benchmark_flush(bool final);
 // adds the size, tests the committed high-water mark, and publishes the new
 // position. The checked alignment helper is header-inline, while commit-only
 // work and its reservation-bound validation remain outlined in arena.c.
+BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool arena_align_position_checked(Arena const* arena, u64 position, u64 alignment, u64* result)
+{
+    // Mappings guarantee native page alignment, which can be smaller than an
+    // allocation's requested alignment. Round the address, then recover the
+    // offset; neither arithmetic failure may publish a partial result.
+    bool valid = result != 0;
+    if (valid)
+    {
+        u64 address;
+        valid = u64_add_checked((u64)arena, position, &address);
+        if (valid)
+        {
+            u64 aligned_address;
+            valid = align_forward_checked(address, alignment, &aligned_address);
+            if (valid)
+            {
+                *result = aligned_address - (u64)arena;
+            }
+        }
+    }
+    return valid;
+}
+
 BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 {
     BUSTER_VALIDATE(size <= ARENA_MAX_RESERVATION);
     BUSTER_VALIDATE(arena->position >= arena_minimum_position && arena->position <= arena->reserved_size);
     u64 aligned_offset;
-    BUSTER_VALIDATE(align_forward_checked(arena->position, alignment, &aligned_offset));
+    BUSTER_VALIDATE(arena_align_position_checked(arena, arena->position, alignment, &aligned_offset));
     BUSTER_VALIDATE(aligned_offset <= arena->reserved_size);
     BUSTER_VALIDATE(size <= arena->reserved_size - aligned_offset);
     u64 aligned_size_after = aligned_offset + size;
