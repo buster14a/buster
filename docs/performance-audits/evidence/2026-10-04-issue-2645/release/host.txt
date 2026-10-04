@@ -1,0 +1,147 @@
+Linux runnervmb40mh 7.0.0-1012-azure #12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026 x86_64 GNU/Linux
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           48 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  4
+On-line CPU(s) list:                     0-3
+Vendor ID:                               AuthenticAMD
+Model name:                              AMD EPYC 7763 64-Core Processor
+CPU family:                              25
+Model:                                   1
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+Stepping:                                1
+BogoMIPS:                                4890.85
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves user_shstk clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload umip vaes vpclmulqdq rdpid fsrm
+Virtualization:                          AMD-V
+Hypervisor vendor:                       Microsoft
+Virtualization type:                     full
+L1d cache:                               64 KiB (2 instances)
+L1i cache:                               64 KiB (2 instances)
+L2 cache:                                1 MiB (2 instances)
+L3 cache:                                32 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-3
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Vulnerable: Safe RET, no microcode
+Vulnerability Spec store bypass:         Vulnerable
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Vulnerable: No microcode
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       1.1Gi        11Gi        84Mi       3.6Gi        14Gi
+Swap:          3.0Gi          0B       3.0Gi
+4
+Name:	cat
+Umask:	0022
+State:	R (running)
+Tgid:	2729
+Ngid:	0
+Pid:	2729
+PPid:	2714
+TracerPid:	0
+Uid:	1001	1001	1001	1001
+Gid:	1001	1001	1001	1001
+FDSize:	256
+Groups:	4 100 113 999 1001 
+NStgid:	2729
+NSpid:	2729
+NSpgid:	2134
+NSsid:	2134
+Kthread:	0
+VmPeak:	   17536 kB
+VmSize:	   17536 kB
+VmLck:	       0 kB
+VmPin:	       0 kB
+VmHWM:	    7492 kB
+VmRSS:	    7492 kB
+RssAnon:	    1380 kB
+RssFile:	    6112 kB
+RssShmem:	       0 kB
+VmData:	     424 kB
+VmStk:	     136 kB
+VmExe:	    4928 kB
+VmLib:	    3868 kB
+VmPTE:	      76 kB
+VmSwap:	       0 kB
+HugetlbPages:	       0 kB
+CoreDumping:	0
+THP_enabled:	1
+untag_mask:	0xffffffffffffffff
+Threads:	1
+SigQ:	0/58129
+SigPnd:	0000000000000000
+ShdPnd:	0000000000000000
+SigBlk:	0000000000000000
+SigIgn:	0000000000001000
+SigCgt:	0000000000000000
+CapInh:	0000000000000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+Seccomp:	0
+Seccomp_filters:	0
+Speculation_Store_Bypass:	vulnerable
+SpeculationIndirectBranch:	always enabled
+Cpus_allowed:	f
+Cpus_allowed_list:	0-3
+Mems_allowed:	00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001
+Mems_allowed_list:	0
+voluntary_ctxt_switches:	0
+nonvoluntary_ctxt_switches:	0
+x86_Thread_features:	
+x86_Thread_features_locked:	
+1.19 0.36 0.13 1/268 2729
+0::/system.slice/hosted-compute-agent.service
+PRETTY_NAME="Ubuntu 26.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="26.04"
+VERSION="26.04.1 LTS (Resolute Raccoon)"
+VERSION_CODENAME=resolute
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=resolute
+LOGO=ubuntu-logo
+    PID %CPU %MEM COMMAND
+   2207  9.7  0.8 Runner.Worker
+      1  6.5  0.1 systemd
+   2188  3.2  0.5 Runner.Listener
+   2163  1.8  0.8 provjobd3668927
+    401  1.8  0.0 hv_kvp_daemon
+   1405  1.7  0.2 ExtHandler
+     59  1.0  0.0 kworker/3:1-events
+    232  0.7  0.0 systemd-udevd
+     86  0.7  0.0 kworker/u16:3-flush-8:0
+   1439  0.6  0.5 dockerd
+     48  0.6  0.0 kworker/u16:2-flush-8:0
+    162  0.6  0.1 systemd-journal
+   1192  0.5  0.2 Daemon
+   1278  0.5  0.3 containerd
+   1356  0.4  0.0 systemd
+     11  0.4  0.0 kworker/u16:0-ext4-rsv-conversion
+   1100  0.3  0.1 networkd-dispat
+   1083  0.3  0.0 dbus-daemon
+     46  0.3  0.0 kworker/u16:1-events_power_efficient
+Filesystem     Type 1K-blocks     Used Available Use% Mounted on
+/dev/root      ext4 151361008 56322512  95022112  38% /
