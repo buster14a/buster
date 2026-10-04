@@ -100,6 +100,50 @@ class DispatchInventoryTests(unittest.TestCase):
         self.assertEqual(checked["run_ids"], [1])
         self.assertEqual(checked["api_runs"], 141)
 
+    def test_999_records_complete_ten_pages_preserve_every_original_byte(self):
+        records = self.runs(999)
+        responses = [json.dumps({"workflow_runs": records[index * 100:(index + 1) * 100],
+                                 "total_count": 999, "original_page": index + 1}, indent=2).encode("utf-8") +
+                     (b"\n" if index % 2 else b"") for index in range(10)]
+        with self.api(responses):
+            reference = inventory.collect(self.publication, self.output)
+        manifest_path = Path(reference["path"])
+        manifest = json.loads(manifest_path.read_bytes())
+        self.assertEqual(reference["sha256"], hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+        self.assertEqual([page["page"] for page in manifest["pages"]], list(range(1, 11)))
+        self.assertEqual([command[-1] for command, _ in self.commands],
+                         ["page=" + str(page) for page in range(1, 11)])
+        retained = []
+        for page, original in zip(manifest["pages"], responses):
+            response = page["response"]
+            actual = (self.output / response["path"]).read_bytes()
+            self.assertEqual(actual, original)
+            self.assertEqual(response["sha256"], hashlib.sha256(original).hexdigest())
+            retained.extend(json.loads(actual)["workflow_runs"])
+        self.assertEqual(retained, records)
+        self.assertFalse((self.output / "failure.json").exists())
+        self.assertFalse((self.output / "page-011.json").exists())
+        archive = self.root / "run.json"
+        archive.write_text(json.dumps(records[0]) + "\n", encoding="utf-8")
+        attempt = {"run": {"path": archive.name, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest()},
+                   "intake_completed_at": "2026-10-04T08:30:00Z"}
+        checked = population.dispatch_inventory(self.root, reference, inventory.timestamp(self.published), [attempt])
+        self.assertEqual(checked["api_runs"], 999)
+        self.assertEqual(checked["run_ids"], [1])
+
+    def test_1000_cap_saturation_retains_first_page_and_stops_without_manifest(self):
+        original = json.dumps({"total_count": 1000, "workflow_runs": self.runs(100)},
+                              indent=3).encode("utf-8")
+        failure = self.assert_failed([original])
+        self.assertEqual(len(self.commands), 1)
+        self.assertEqual(self.commands[0][0][-1], "page=1")
+        self.assertEqual((self.output / "page-001.json").read_bytes(), original)
+        expected = {"path": "page-001.json", "sha256": hashlib.sha256(original).hexdigest()}
+        self.assertEqual(failure["pages"], [{"page": 1, "response": expected}])
+        self.assertIn(expected, failure["retained_files"])
+        self.assertIn("cap", failure["error"])
+        self.assertFalse((self.output / "page-002.json").exists())
+
     def test_valid_original_api_json_without_final_lf_is_not_rewritten(self):
         raw = b'{"total_count":0,"workflow_runs":[]}'
         with self.api([raw]):

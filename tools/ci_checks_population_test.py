@@ -531,6 +531,21 @@ class PopulationEpochTests(unittest.TestCase):
                 self.assert_pending_error(report)
                 self.assertEqual(report["samples"], [])
 
+    def test_api_cap_boundary_cannot_establish_exhaustive_history(self):
+        campaign_records = self.inventory_records()
+        self.refresh_inventory(campaign_records + self.unrelated_dispatches(963))
+        self.fixed_inventory = True
+        report = self.report()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["timing_status"], "accepted")
+        self.assertEqual(report["dispatch_inventory"]["api_runs"], 999)
+        self.assertEqual(report["dispatch_inventory"]["complete_pages"], 10)
+        self.refresh_inventory(campaign_records + self.unrelated_dispatches(964))
+        report = self.report()
+        self.assert_pending_error(report)
+        self.assertEqual(report["samples"], [])
+        self.assertIn("API cap", report["errors"][0])
+
     def test_original_A1_B1_and_duplicate_runs_never_enter_replacement_epoch(self):
         for run_id in (37191738110, 37193669465, 100001):
             self.replace_record(self.campaign["attempts"][1]["run"], lambda run: run.update(id=run_id))

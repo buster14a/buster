@@ -204,8 +204,8 @@ def dispatch_inventory(root, reference, published, attempts):
         response = json.loads(qualification.retained(manifest_path.parent, page["response"]).read_bytes())
         if total is None:
             total = response.get("total_count")
-        require(type(total) is int and 0 <= total <= 1000 and response.get("total_count") == total,
-                "dispatch history exceeds API limit or changed during pagination")
+        require(type(total) is int and 0 <= total < 1000 and response.get("total_count") == total,
+                "dispatch history meets/exceeds API cap or changed during pagination")
         rows = response.get("workflow_runs")
         expected = min(100, max(0, total - (index - 1) * 100))
         require(isinstance(rows, list) and len(rows) == expected, "dispatch API page is incomplete")

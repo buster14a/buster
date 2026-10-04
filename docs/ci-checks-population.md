@@ -122,7 +122,11 @@ python3 -B tools/ci_checks_dispatch_inventory.py \
 The collector performs read-only paginated API requests for all `ci.yml`
 manual dispatches since publication, retaining the original page bytes.
 It stops on changing page totals, incomplete pages, request failure or the
-1,000-result API limit. It never retries, dispatches or refreshes credentials.
+1,000-result API limit (including exactly 1,000). GitHub documents the
+[filtered-result cap](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow),
+without guaranteeing an uncapped `total_count`. The gate conservatively treats
+cap saturation as inconclusive, even if exactly 1,000 complete records might
+exist. It never retries, dispatches or refreshes credentials.
 Use a fresh directory per capture; failed partial captures remain evidence.
 
 A campaign manifest has this structure, with real digest references:

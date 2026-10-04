@@ -125,8 +125,8 @@ def collect(publication_path, output_directory):
             response_path, response = fetch_page(directory, created_after, page, deadline)
             pages.append({"page": page, "response": reference(response_path)})
             count = response.get("total_count")
-            require(type(count) is int and 0 <= count <= MAX_RUNS and (total is None or count == total),
-                    "dispatch count exceeds API limit or changed during pagination")
+            require(type(count) is int and 0 <= count < MAX_RUNS and (total is None or count == total),
+                    "dispatch count meets/exceeds API cap or changed during pagination")
             total = count
             rows = response.get("workflow_runs")
             expected = min(PER_PAGE, max(0, total - (page - 1) * PER_PAGE))
