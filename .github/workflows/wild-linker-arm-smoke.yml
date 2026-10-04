@@ -1,0 +1,97 @@
+name: Wild linker AArch64 qualification
+
+# Explicitly scoped research execution. Never selects a self-hosted machine.
+on:
+  push:
+    branches: [codex/2645-wild-arm-evidence]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wild-linker-arm-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    env:
+      LC_ALL: C
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - name: Require hosted execution admission
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install independent validation tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gdb llvm-18 libclang-rt-18-dev
+          echo /usr/lib/llvm-18/bin >> "$GITHUB_PATH"
+      - name: Install pinned external evaluation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wild-evaluation/tools" "$RUNNER_TEMP/wild-evaluation/evidence" "$RUNNER_TEMP/wild-evaluation/bin"
+          cd "$RUNNER_TEMP/wild-evaluation/tools"
+          curl --fail --location --retry 2 -o wild.tar.gz https://github.com/wild-linker/wild/releases/download/0.10.0/wild-linker-0.10.0-aarch64-unknown-linux-gnu.tar.gz
+          curl --fail --location --retry 2 -o mold.tar.gz https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-aarch64-linux.tar.gz
+          curl --fail --location --retry 2 -o cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-linux-aarch64.tar.gz
+          printf '%s\n' 'e9d670e41f76481a68984f816e25bd2f124664db3ac935053e1a6fc41d2894c2  wild.tar.gz' '16b025652d3d7456689e6025a77e1903bb2a15e7630877c26cc133f5df95b9c6  mold.tar.gz' '2efc974dbd63b4444c0e8494b92f2e80c2d7e635b4b80eac2916985ddd8f72a6  cmake.tar.gz' > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          cp SHA256SUMS ../evidence/upstream-archives.sha256
+          mkdir wild mold cmake
+          tar -xzf wild.tar.gz -C wild
+          tar -xzf mold.tar.gz -C mold --strip-components=1
+          tar -xzf cmake.tar.gz -C cmake --strip-components=1
+          wild_binary=$(find "$PWD/wild" -type f -name wild -print -quit)
+          test -n "$wild_binary"
+          ln -s "$wild_binary" ../bin/wild
+          ln -s "$wild_binary" ../bin/ld.wild
+          ln -s "$PWD/mold/bin/mold" ../bin/mold
+          ln -s "$PWD/mold/bin/mold" ../bin/ld.mold
+          echo "$RUNNER_TEMP/wild-evaluation/bin" >> "$GITHUB_PATH"
+          echo "$PWD/cmake/bin" >> "$GITHUB_PATH"
+      - name: Record provenance and bootstrap existing C build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/wild-evaluation/evidence"
+          git rev-parse HEAD > "$evidence/source.txt"
+          git status --porcelain=v1 > "$evidence/source-status.txt"
+          git archive --format=tar HEAD build.c CMakeLists.txt cmake docs/agents .github/workflows tools/throughput tools/wild_linker_bench.c LICENSES/README.md > "$evidence/inspected-source.tar"
+          uname -a > "$evidence/host.txt"
+          lscpu >> "$evidence/host.txt"
+          free -h >> "$evidence/host.txt"
+          df -T . >> "$evidence/host.txt"
+          clang --version > "$evidence/toolchains.txt"
+          gcc --version >> "$evidence/toolchains.txt"
+          cmake --version >> "$evidence/toolchains.txt"
+          wild --version >> "$evidence/toolchains.txt"
+          mold --version >> "$evidence/toolchains.txt"
+          gdb --version >> "$evidence/toolchains.txt"
+          llvm-dwarfdump --version >> "$evidence/toolchains.txt"
+          dpkg-query -W gdb llvm-18 libclang-rt-18-dev libc6 libc6-dev >> "$evidence/toolchains.txt"
+          sha256sum "$(command -v wild)" "$(command -v mold)" "$(command -v clang)" >> "$evidence/toolchains.txt"
+          cat "$evidence/toolchains.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/wild-evaluation/build-driver"
+          grep -n -C 8 -- 'BUILD_ARGUMENT_LINKER' build.c > "$evidence/linker-selection-source.txt"
+      - name: Run native C evaluation harness
+        run: |
+          clang -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic tools/wild_linker_arm_smoke.c -o "$RUNNER_TEMP/wild-evaluation/bench"
+          "$RUNNER_TEMP/wild-evaluation/bench" "$RUNNER_TEMP/wild-evaluation/build-driver" "$RUNNER_TEMP/wild-evaluation/evidence"
+      - name: Retain original evidence including setup failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wild-linker-evaluation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/wild-evaluation/evidence
+          if-no-files-found: error
+          retention-days: 30
