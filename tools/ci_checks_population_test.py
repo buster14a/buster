@@ -12,6 +12,7 @@ from unittest import mock
 import ci_checks_population as population
 import ci_checks_qualification as qualification
 import github_ci_time as github
+import analyzer_reference
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -121,6 +122,10 @@ class NativeCatalogueTests(unittest.TestCase):
                 module[field] = float(module[field])
             with self.subTest(field=field):
                 self.assert_refused(observation)
+        observation = self.observation()
+        identity = next(iter(observation["platforms"].values()))["identity"]
+        identity["cpu_budget"] = float(identity["cpu_budget"])
+        self.assert_refused(observation)
 
 
 class PopulationEpochTests(unittest.TestCase):
@@ -144,9 +149,10 @@ class PopulationEpochTests(unittest.TestCase):
         for ordinal, variant in enumerate(order, 1):
             run = self.run_fixture(ordinal, variant)
             run_ref = reference(self.root, f"runs/{ordinal}.json", run)
-            sample_ref = reference(self.root, f"samples/{ordinal}.json",
-                                   dict(variant=variant, run=dict(run_ref, path="../" + run_ref["path"]), synthetic_id=ordinal))
-            self.campaign["attempts"].append(dict(ordinal=ordinal, run=run_ref, sample=sample_ref,
+            item = dict(variant=variant, run=dict(run_ref, path="../" + run_ref["path"]), synthetic_id=ordinal)
+            inputs_ref = self.input_fixture(ordinal, item, run)
+            sample_ref = reference(self.root, f"samples/{ordinal}.json", item)
+            self.campaign["attempts"].append(dict(ordinal=ordinal, run=run_ref, sample=sample_ref, input_evidence=inputs_ref,
                                                    intake_completed_at=self.stamp(ordinal * 2000 + 1100)))
             self.observations[ordinal] = dict(variant=variant, run_id=run["id"], head_sha=run["head_sha"],
                                              workflow_blob_sha=run["workflow_blob_sha"], conditions={"synthetic": "constant"},
@@ -186,6 +192,59 @@ class PopulationEpochTests(unittest.TestCase):
                     head_branch=qualification.COHORT_BRANCHES[qualification.PROSPECTIVE_COHORT][variant],
                     head_sha=self.catalogue["head_sha"], workflow_blob_sha=self.catalogue["workflow_blob_sha"],
                     status="completed", conclusion="success", run_attempt=1, created_at=self.stamp(created), jobs=jobs)
+
+    def input_fixture(self, ordinal, item, run):
+        prefix = f"witnesses/{ordinal}"
+        desktop_names = github.SPLIT_COMBINATION_PLATFORMS if item["variant"] == "split-overlap" else github.COMBINATION_PLATFORMS
+        configure, desktops, jobs = [], [], {}
+        for index, job in enumerate(desktop_names):
+            phase_directory = f"{prefix}/{index}/matrix-phases"
+            (self.root / phase_directory).mkdir(parents=True, exist_ok=True)
+            manifest = dict(schema=1, kind="cmake-configure-evidence", role="diagnostic-only", profile_requested=False,
+                            profiles_captured=0, errors=[], files=[], tree_count=0, captured_bytes=0,
+                            identity=dict(GITHUB_REPOSITORY="buster14a/buster", GITHUB_SHA=run["head_sha"],
+                                          GITHUB_RUN_ID=str(run["id"]), GITHUB_RUN_ATTEMPT="1",
+                                          RUNNER_OS=job.split(" ", 1)[0], RUNNER_ARCH="X64" if "x86-64" in job else "ARM64",
+                                          ImageOS="synthetic", ImageVersion="1"))
+            manifest_ref = reference(self.root, f"{prefix}/{index}/configure/manifest.json", manifest)
+            configure.append(dict(job=job, manifest=dict(manifest_ref, path=f"{index}/configure/manifest.json")))
+            desktops.append(dict(job=job, phase_directory="../" + phase_directory))
+            jobs[job] = dict(image_os="synthetic", image_version="1")
+        ninja_ref = reference(self.root, f"{prefix}/analyzer/selected-ninja.json", {"synthetic": True})
+        jobs["Clang analyzer shards"] = dict(selected_tools=dict(ninja=dict(ninja_ref, path="../" + ninja_ref["path"])))
+        conditions_ref = reference(self.root, f"{prefix}/conditions.json", dict(jobs=jobs))
+        item.update(desktops=desktops, conditions=dict(conditions_ref, path="../" + conditions_ref["path"]))
+        selection = dict(event="workflow_dispatch", requested="false", candidate_revision=run["head_sha"], reference_revision=run["head_sha"],
+                         candidate_tree=self.catalogue["source_tree"], reference_tree=self.catalogue["source_tree"],
+                         candidate_closure_sha256="a" * 64, reference_closure_sha256="a" * 64,
+                         candidate_complete="true", reference_complete="true", candidate_manifest_sha256="b" * 64,
+                         reference_manifest_sha256="b" * 64, selection="skip", reason="same-revision")
+        path = self.root / prefix / "analyzer/comparison-selection.txt"
+        path.write_text(analyzer_reference.SELECTION_SCHEMA + "\n" + "\n".join(key + "=" + selection[key] for key in analyzer_reference.SELECTION_KEYS) + "\n")
+        selection_ref = dict(path="analyzer/comparison-selection.txt", sha256=population.digest(path))
+        return reference(self.root, prefix + "/inputs.json",
+                         dict(schema="buster-ci-checks-population-inputs-v1", configure=configure, analyzer_selection=selection_ref))
+
+    def change_configure(self, index, change):
+        wrapper_ref = self.campaign["attempts"][0]["input_evidence"]
+        wrapper_path = self.root / wrapper_ref["path"]
+        wrapper = json.loads(wrapper_path.read_text())
+        manifest_ref = wrapper["configure"][index]["manifest"]
+        path = wrapper_path.parent / manifest_ref["path"]
+        value = json.loads(path.read_text())
+        change(value)
+        updated = reference(self.root, str(path.relative_to(self.root)), value)
+        updated["path"] = manifest_ref["path"]
+        self.replace_record(wrapper_ref, lambda wrapper: wrapper["configure"][index].update(manifest=updated))
+
+    def change_selection(self, change, update_digest=True):
+        wrapper_ref = self.campaign["attempts"][0]["input_evidence"]
+        wrapper_path = self.root / wrapper_ref["path"]
+        wrapper = json.loads(wrapper_path.read_text())
+        path = wrapper_path.parent / wrapper["analyzer_selection"]["path"]
+        path.write_text(change(path.read_text()), encoding="ascii")
+        if update_digest:
+            self.replace_record(wrapper_ref, lambda wrapper: wrapper["analyzer_selection"].update(sha256=population.digest(path)))
 
     def replace_record(self, retained_reference, change):
         path = self.root / retained_reference["path"]
@@ -288,6 +347,9 @@ class PopulationEpochTests(unittest.TestCase):
         self.assertFalse(report["performance_accepted"])
         self.assertEqual(len(report["samples"]), 36)
         self.assertEqual(len(report["dispatches"]), 36)
+        for sample in report["samples"]:
+            self.assertIs(sample["dispatch_inputs"]["cmake_profile"], False)
+            self.assertIs(sample["dispatch_inputs"]["analyzer_comparison"], False)
         self.assertEqual(report["issues"]["2119"]["time_ratio"], .90)
         self.assertEqual(report["issues"]["2120"]["time_ratio"], .85)
         self.assertTrue(all(issue["runner_seconds_ratio"] == 1.05 for issue in report["issues"].values()))
@@ -323,8 +385,7 @@ class PopulationEpochTests(unittest.TestCase):
                 ordinal = attempt["ordinal"]
                 run = self.run_fixture(ordinal, self.observations[ordinal]["variant"])
                 attempt["run"] = reference(self.root, f"runs/{ordinal}.json", run)
-                attempt["sample"] = reference(self.root, f"samples/{ordinal}.json",
-                    dict(variant=self.observations[ordinal]["variant"], run=dict(attempt["run"], path=f"../runs/{ordinal}.json"), synthetic_id=ordinal))
+                self.replace_record(attempt["sample"], lambda item: item.update(run=dict(attempt["run"], path=f"../runs/{ordinal}.json")))
 
     def test_ratio_of_variant_medians_is_not_median_of_paired_ratios(self):
         observations = []
@@ -410,6 +471,23 @@ class PopulationEpochTests(unittest.TestCase):
         self.assertEqual(report["dispatch_inventory"]["api_runs"], 141)
         self.assertEqual(report["dispatch_inventory"]["campaign_dispatches"], 36)
         self.assertEqual(report["dispatch_inventory"]["complete_pages"], 2)
+
+    def test_original_raw_api_json_without_final_newline_is_supported(self):
+        receipt_ref = self.campaign["publication"]
+        receipt_path = self.root / receipt_ref["path"]
+        receipt_path.write_bytes(receipt_path.read_bytes().rstrip(b"\n"))
+        receipt_ref["sha256"] = population.digest(receipt_path)
+        manifest_ref = self.campaign["dispatch_inventory"]
+        self.fixed_inventory = True
+        def change(manifest):
+            page_ref = manifest["pages"][0]["response"]
+            page_path = (self.root / manifest_ref["path"]).parent / page_ref["path"]
+            page_path.write_bytes(page_path.read_bytes().rstrip(b"\n"))
+            page_ref["sha256"] = population.digest(page_path)
+        self.replace_record(manifest_ref, change)
+        report = self.report()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["timing_status"], "accepted")
 
     def test_incomplete_reordered_duplicate_and_unstable_api_pages_fail_closed(self):
         records = self.inventory_records() + self.unrelated_dispatches(105)
@@ -506,6 +584,21 @@ class PopulationEpochTests(unittest.TestCase):
         self.replace_record(self.campaign["attempts"][1]["run"], lambda run: run.update(created_at=self.stamp(2849)))
         self.assert_pending_error(self.report(), 2)
 
+    def test_same_second_completion_or_intake_cannot_prove_next_dispatch_order(self):
+        second = self.campaign["attempts"][1]
+        for boundary in (2850, 4000):
+            self.campaign["attempts"][0]["intake_completed_at"] = self.stamp(boundary)
+            self.replace_record(second["run"], lambda run: run.update(created_at=self.stamp(boundary)))
+            self.replace_record(second["sample"], lambda item: item["run"].update(sha256=second["run"]["sha256"]))
+            with self.subTest(boundary=boundary, relation="same-second"):
+                self.assert_pending_error(self.report(), 2)
+            self.replace_record(second["run"], lambda run: run.update(created_at=self.stamp(boundary + 1)))
+            self.replace_record(second["sample"], lambda item: item["run"].update(sha256=second["run"]["sha256"]))
+            with self.subTest(boundary=boundary, relation="later-second"):
+                report = self.report()
+                self.assertEqual(report["errors"], [])
+                self.assertEqual(report["timing_status"], "accepted")
+
     def test_metadata_tail_is_excluded_from_metric_but_not_chronology(self):
         # Parser consistency control only: frozen workflow dependencies normally
         # finish this metadata job before the required workloads.
@@ -544,12 +637,12 @@ class PopulationEpochTests(unittest.TestCase):
         self.assertIn("digest mismatch", report["errors"][0])
 
     def test_declaration_source_tree_workflow_producer_catalogue_reader_pins_are_enforced(self):
-        for field in ("head_sha", "workflow_blob_sha", "source_tree", "producer_blobs", "reader_sha256", "catalogue", "blocks", "seed", "excluded_runs"):
+        for field in ("head_sha", "workflow_blob_sha", "source_tree", "producer_blobs", "input_producer_blobs", "reader_sha256", "catalogue", "blocks", "seed", "excluded_runs"):
             original = json.loads((self.root / self.campaign["declaration"]["path"]).read_text())
             def change(declaration):
                 if field in ("head_sha", "workflow_blob_sha"):
                     declaration["cohort"][field] = "0" * 40
-                elif field in ("producer_blobs", "reader_sha256"):
+                elif field in ("producer_blobs", "input_producer_blobs", "reader_sha256"):
                     key = next(iter(declaration[field]))
                     declaration[field][key] = "0" * len(declaration[field][key])
                 elif field == "catalogue":
@@ -565,6 +658,110 @@ class PopulationEpochTests(unittest.TestCase):
                 self.assert_pending_error(self.report())
             self.change_declaration(lambda declaration: (declaration.clear(), declaration.update(original)))
 
+    def test_declared_optional_inputs_require_literal_false_for_both_flags(self):
+        original = json.loads((self.root / self.campaign["declaration"]["path"]).read_text())
+        for flag in ("cmake_profile", "analyzer_comparison"):
+            for value in (True, 0, None, "false"):
+                self.change_declaration(lambda declaration: declaration["dispatch_inputs"].update({flag: value}))
+                with self.subTest(flag=flag, value=value):
+                    self.assert_pending_error(self.report())
+                self.change_declaration(lambda declaration: (declaration.clear(), declaration.update(original)))
+
+    def test_configure_witness_flags_types_and_capture_errors_are_enforced(self):
+        path = self.root / "witnesses/1/0/configure/manifest.json"
+        original = json.loads(path.read_text())
+        changes = (dict(profile_requested=True), dict(profile_requested=0), dict(profile_requested=None),
+                   dict(profile_requested="false"), dict(profiles_captured=1), dict(profiles_captured=True),
+                   dict(profiles_captured=0.0), dict(errors=["retention failure"]), dict(errors=None),
+                   dict(schema=True), dict(kind="other"), dict(role="other"))
+        for change in changes:
+            self.change_configure(0, lambda value: value.update(change))
+            with self.subTest(change=change):
+                self.assert_pending_error(self.report(), 1)
+            self.change_configure(0, lambda value: (value.clear(), value.update(original)))
+
+    def test_configure_witness_has_exact_source_run_attempt_repository_and_runner_identity(self):
+        path = self.root / "witnesses/1/0/configure/manifest.json"
+        original = json.loads(path.read_text())
+        replacements = dict(GITHUB_REPOSITORY="other/repository", GITHUB_SHA="0" * 40, GITHUB_RUN_ID="9999", GITHUB_RUN_ATTEMPT="2",
+                            RUNNER_OS="other", RUNNER_ARCH="other", ImageOS="other", ImageVersion="other")
+        for field, value in replacements.items():
+            self.change_configure(0, lambda receipt: receipt["identity"].update({field: value}))
+            with self.subTest(field=field):
+                self.assert_pending_error(self.report(), 1)
+            self.change_configure(0, lambda value: (value.clear(), value.update(original)))
+        self.change_configure(0, lambda receipt: receipt["identity"].update(GITHUB_RUN_ID=100001))
+        self.assert_pending_error(self.report(), 1)
+
+    def test_configure_witness_requires_every_exact_desktop_artifact_sibling(self):
+        wrapper_ref = self.campaign["attempts"][0]["input_evidence"]
+        original = json.loads((self.root / wrapper_ref["path"]).read_text())
+        for change in ("missing", "duplicate", "extra", "foreign-sibling", "wrong-schema"):
+            def mutate(value):
+                if change == "missing":
+                    value["configure"].pop()
+                elif change == "duplicate":
+                    value["configure"].append(copy.deepcopy(value["configure"][0]))
+                elif change == "extra":
+                    value["configure"].append(dict(value["configure"][0], job="unrelated desktop"))
+                elif change == "foreign-sibling":
+                    value["configure"][1]["manifest"] = copy.deepcopy(value["configure"][0]["manifest"])
+                else:
+                    value["schema"] = "other"
+            self.replace_record(wrapper_ref, mutate)
+            with self.subTest(change=change):
+                self.assert_pending_error(self.report(), 1)
+            self.replace_record(wrapper_ref, lambda value: (value.clear(), value.update(original)))
+
+    def test_missing_or_tampered_input_receipts_stop_epoch(self):
+        wrapper_ref = self.campaign["attempts"][0]["input_evidence"]
+        original = json.loads((self.root / wrapper_ref["path"]).read_text())
+        for change in ("missing-wrapper", "missing-configure", "configure-digest", "analyzer-digest"):
+            if change == "missing-wrapper":
+                self.campaign["attempts"][0]["input_evidence"] = None
+            elif change == "missing-configure":
+                self.replace_record(wrapper_ref, lambda value: value["configure"][0]["manifest"].update(path="missing.json"))
+            elif change == "configure-digest":
+                self.replace_record(wrapper_ref, lambda value: value["configure"][0]["manifest"].update(sha256="0" * 64))
+            else:
+                self.replace_record(wrapper_ref, lambda value: value["analyzer_selection"].update(sha256="0" * 64))
+            with self.subTest(change=change):
+                self.assert_pending_error(self.report(), 1)
+            self.campaign["attempts"][0]["input_evidence"] = wrapper_ref
+            self.replace_record(wrapper_ref, lambda value: (value.clear(), value.update(original)))
+
+    def test_analyzer_selection_semantics_source_and_tree_are_observed_false(self):
+        original = (self.root / "witnesses/1/analyzer/comparison-selection.txt").read_text()
+        replacements = dict(event="push", requested="true", selection="compare", reason="requested",
+                            candidate_revision="0" * 40, reference_revision="0" * 40,
+                            candidate_tree="0" * 40, reference_tree="0" * 40,
+                            candidate_complete="false", reference_complete="false",
+                            candidate_closure_sha256="0" * 64, reference_closure_sha256="0" * 64,
+                            candidate_manifest_sha256="0" * 64, reference_manifest_sha256="0" * 64)
+        for field, value in replacements.items():
+            def change(text):
+                lines = [field + "=" + value if line.startswith(field + "=") else line for line in text.splitlines()]
+                return "\n".join(lines) + "\n"
+            self.change_selection(change)
+            with self.subTest(field=field):
+                self.assert_pending_error(self.report(), 1)
+            self.change_selection(lambda text: original)
+
+    def test_analyzer_selection_sibling_and_native_parser_framing_are_enforced(self):
+        wrapper_ref = self.campaign["attempts"][0]["input_evidence"]
+        wrapper = json.loads((self.root / wrapper_ref["path"]).read_text())
+        original = (self.root / "witnesses/1/analyzer/comparison-selection.txt").read_text()
+        copy_path = self.root / "witnesses/1/copied-selection.txt"
+        copy_path.write_text(original)
+        self.replace_record(wrapper_ref, lambda value: value["analyzer_selection"].update(path="copied-selection.txt", sha256=population.digest(copy_path)))
+        self.assert_pending_error(self.report(), 1)
+        self.replace_record(wrapper_ref, lambda value: (value.clear(), value.update(wrapper)))
+        for change in (lambda text: text.rstrip("\n"), lambda text: text + "unexpected=field\n",
+                       lambda text: text.replace("requested=false", "requested=0"), lambda text: "malformed\n"):
+            self.change_selection(change)
+            self.assert_pending_error(self.report(), 1)
+            self.change_selection(lambda text: original)
+
     def test_every_sample_is_bound_to_run_source_workflow_and_conditions(self):
         for field in ("run_id", "head_sha", "workflow_blob_sha", "conditions"):
             original = copy.deepcopy(self.observations[8])
@@ -572,6 +769,10 @@ class PopulationEpochTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assert_pending_error(self.report(), 8)
             self.observations[8] = original
+        for observed in self.observations.values():
+            observed["conditions"] = {"synthetic_boolean": True}
+        self.observations[8]["conditions"] = {"synthetic_boolean": 1}
+        self.assert_pending_error(self.report(), 8)
 
     def test_unknown_profile_stops_epoch_and_retains_full_observed_census(self):
         observation = self.observations[1]

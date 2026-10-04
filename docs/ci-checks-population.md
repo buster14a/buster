@@ -97,7 +97,7 @@ python3 -B tools/ci_checks_population.py --prepare work/population/declaration.j
 This writes once, retains an exact portable catalogue copy beside the
 declaration, and prints its SHA-256 reference and publication marker. It
 freezes the source/tree/workflow/producer pins, full reader/collector dependency
-bytes, catalogue digest, order, seed, false diagnostic inputs and archived-run
+bytes, input-witness producer blobs, catalogue digest, order, seed, false diagnostic inputs and archived-run
 disposition. Publishing
 the exact marker as a standalone line on issue #2610 before sampling binds
 the declaration to a retained original API comment. Keep the original receipt
@@ -138,10 +138,24 @@ A campaign manifest has this structure, with real digest references:
 ```
 
 Each ordered attempt contains `ordinal`, original enriched `run` REF,
-assembled `sample` REF and `intake_completed_at`. Failed/incomplete attempts
-keep their run receipt and may have null sample/intake fields. References are
+assembled `sample` REF, `input_evidence` REF and `intake_completed_at`. Failed/incomplete attempts
+keep their run receipt and may have null sample/input/intake fields. References are
 relative to their containing manifest. The sample retains its own reference
 root; its original run path and digest must resolve to the same dispatch.
+
+The input manifest has schema `buster-ci-checks-population-inputs-v1`,
+`configure: [{"job": "<exact desktop job>", "manifest": REF}]` for every
+desktop, and `analyzer_selection: REF`. Retain each original
+`<phase_directory>.parent/configure/manifest.json`. The reader checks that
+exact sibling path, source/run/attempt/repository/runner identity, the observed
+boolean `profile_requested: false`, integer `profiles_captured: 0`, and no
+capture errors. Retain the analyzer's original `comparison-selection.txt`
+beside its already authenticated selected-Ninja receipt. The source-pinned
+V3 parser must observe `workflow_dispatch`, `requested=false`, same-revision
+skip and the declared candidate/reference source and tree. Missing witnesses,
+inconsistent same-revision provenance, enabled flags and cross-artifact
+substitutions stop the epoch. These existing
+worker artifacts require no change to the frozen producer workflow.
 
 The dispatch-inventory manifest binds endpoint, event, publication lower
 bound, capture time, per-page size and every original numbered response.
@@ -151,7 +165,8 @@ An omitted earlier failure, selected window or extra 37th run is not a
 complete campaign. Other manual-dispatch refs remain in the raw inventory
 and do not become campaign samples. Every previous executed job and complete
 intake must finish before the next dispatch; inventory capture must follow
-the retained intakes.
+the retained intakes. A later API snapshot cannot reconstruct a run deleted
+before capture; original dispatch custody remains a separate review obligation.
 
 ```sh
 python3 -B tools/ci_checks_population.py work/population/campaign.json
@@ -163,9 +178,10 @@ Retained SHA-256 references bind bytes and internal joins. They do not
 authenticate fabricated API records, reconstruct missing native observations
 or prove that a local declaration was published. Original trusted collection
 and retained publication provenance remain required, as with the legacy
-evidence path. The run API does not echo original dispatch inputs: retain their
-original request/native evidence for the separate input/origin review; declaring
-false does not reconstruct a missing observation. All controls are finite
+evidence path. The run API does not echo original dispatch inputs: the reader
+requires the actual worker witnesses above, and original authenticated dispatch
+requests and artifact custody remain subject to the separate origin review.
+Declaring false does not reconstruct a missing observation. All controls are finite
 parser/collector fixtures and do not
 constitute hosted timing observations.
 

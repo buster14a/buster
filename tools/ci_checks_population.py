@@ -10,7 +10,7 @@ the source-reviewed catalogue. Timing arithmetic never grants landing approval.
 Prepare: python3 -B tools/ci_checks_population.py --prepare DECLARATION.json
 Read:    python3 -B tools/ci_checks_population.py CAMPAIGN.json
 Campaign has schema=buster-ci-checks-population-v1, declaration=REF,
-publication=REF, dispatch_inventory=REF and attempts=[{ordinal,run:REF,sample:REF|null,
+publication=REF, dispatch_inventory=REF and attempts=[{ordinal,run:REF,sample:REF|null,input_evidence:REF|null,
 intake_completed_at:ISO|null}]. Paths are relative to the containing manifest.
 Publication is the retained original issue #2610 API comment containing the
 returned declaration marker. REF is {path,sha256}; no network or native runs.
@@ -30,6 +30,7 @@ from pathlib import Path
 import statistics
 import sys
 
+import analyzer_reference
 import ci_checks_qualification as qualification
 import github_ci_time as github
 
@@ -41,11 +42,13 @@ BLOCKS = ("CAB", "ACB", "CBA", "BAC", "BCA", "ABC", "ABC", "CBA", "ACB", "BCA", 
 SEED = "5bb691c893e292c2469686a078cfe9ae50b6afe8ed510da4d99785428dd85050"
 VARIANTS = dict(zip("ABC", qualification.VARIANTS))
 EXCLUDED_RUNS = [37191738110, 37193669465]
+INPUT_PRODUCERS = {"tools/analyzer_reference.py": "9fb89b30c21a16886cd2cdcddbf11acf4f58f227",
+                   "tools/ci_configure_evidence.py": "7d052f908a5a42293f2e476728909f1e86ba1aae"}
 READER_FILES = ("ci_checks_population.py", "ci_checks_qualification.py", "ci_matrix_phases.py",
                 "ci_summary_core.py", "ci_unit_tests_measure.py", "ci_unit_tests_campaign.py", "github_ci_time.py",
-                "ci_checks_dispatch_inventory.py")
+                "ci_checks_dispatch_inventory.py", "analyzer_reference.py")
 PENDING_REVIEWS = ["native-profile population imbalance and timing uncertainty",
-                   "original dispatch inputs and evidence collection origin", "CPU time and memory observations",
+                   "original dispatch requests and evidence collection origin", "CPU time and memory observations",
                    "resource/deadline/capture/cleanup/reliability comparison"]
 require = qualification.require
 
@@ -66,7 +69,7 @@ def read_declaration(root, reference):
     path = qualification.retained(root, reference)
     value = qualification.phases.read(path)
     fields = {"schema", "repository", "experiment", "cohort", "source_tree", "producer_blobs",
-              "reader_sha256", "catalogue", "blocks", "seed", "excluded_runs", "dispatch_inputs"}
+              "reader_sha256", "catalogue", "blocks", "seed", "excluded_runs", "dispatch_inputs", "input_producer_blobs"}
     require(set(value) == fields and value["schema"] == DECLARATION_SCHEMA and
             value["repository"] == "buster14a/buster" and value["experiment"] == "issue2610-standard-hosted-v1",
             "unknown population declaration")
@@ -76,6 +79,7 @@ def read_declaration(root, reference):
             json.dumps({"cmake_profile": False, "analyzer_comparison": False}, sort_keys=True),
             "optional diagnostic inputs are not declared false")
     require(value["reader_sha256"] == reader_bindings(), "reader bytes differ from prospective declaration")
+    require(value["input_producer_blobs"] == INPUT_PRODUCERS, "input witness producer bindings changed")
     require(value["catalogue"]["sha256"] == CATALOGUE_SHA256, "unreviewed census catalogue")
     catalogue = qualification.record(path.parent, value["catalogue"])
     require(catalogue["schema"] == CATALOGUE_SCHEMA, "unknown census catalogue schema")
@@ -85,7 +89,7 @@ def read_declaration(root, reference):
             value["source_tree"] == catalogue["source_tree"] and value["producer_blobs"] == catalogue["producer_blobs"],
             "declaration differs from reviewed source/tree/workflow/producer bindings")
     for name in READER_FILES:
-        producer = catalogue["producer_blobs"].get("tools/" + name)
+        producer = catalogue["producer_blobs"].get("tools/" + name, INPUT_PRODUCERS.get("tools/" + name))
         if producer is not None:
             data = (Path(__file__).parent / name).read_bytes()
             blob = hashlib.sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
@@ -128,6 +132,55 @@ def validate_census(observed, catalogue):
             require(len(matches) == 1, "unknown or ambiguous complete native profile: " + row_id)
             require(json.dumps(census, sort_keys=True) == json.dumps(matches[0], sort_keys=True),
                     "complete module/assertion census differs for observed profile: " + row_id)
+
+
+def input_evidence(root, reference, sample_root, item, run, source_tree):
+    """Bind actual worker input flags to the already validated artifact siblings."""
+    path = qualification.retained(root, reference)
+    value = qualification.phases.read(path)
+    require(set(value) == {"schema", "configure", "analyzer_selection"} and
+            value["schema"] == "buster-ci-checks-population-inputs-v1", "unknown input witness schema")
+    witnesses = value["configure"]
+    require(isinstance(witnesses, list) and
+            Counter(witness["job"] for witness in witnesses) == Counter(desktop["job"] for desktop in item["desktops"]),
+            "missing/duplicate desktop input witnesses")
+    by_job = {witness["job"]: witness for witness in witnesses}
+    conditions = qualification.record(sample_root, item["conditions"])["jobs"]
+    for desktop in item["desktops"]:
+        witness = by_job[desktop["job"]]
+        require(set(witness) == {"job", "manifest"}, "unknown configure witness fields")
+        actual = qualification.retained(path.parent, witness["manifest"])
+        expected = (sample_root / desktop["phase_directory"]).parent / "configure" / "manifest.json"
+        require(actual.resolve() == expected.resolve(), "configure witness is not the exact desktop artifact sibling")
+        receipt = qualification.phases.read(actual)
+        require(type(receipt.get("schema")) is int and receipt["schema"] == 1 and
+                receipt.get("kind") == "cmake-configure-evidence" and receipt.get("role") == "diagnostic-only" and
+                receipt.get("profile_requested") is False and type(receipt.get("profiles_captured")) is int and
+                receipt["profiles_captured"] == 0 and receipt.get("errors") == [], "configure profiling input is not observed false")
+        condition = conditions[desktop["job"]]
+        identity = {"GITHUB_REPOSITORY": "buster14a/buster", "GITHUB_SHA": run["head_sha"],
+                    "GITHUB_RUN_ID": str(run["id"]), "GITHUB_RUN_ATTEMPT": "1",
+                    "RUNNER_OS": {"Linux": "Linux", "Windows": "Windows", "macOS": "macOS"}[desktop["job"].split(" ", 1)[0]],
+                    "RUNNER_ARCH": "X64" if "x86-64" in desktop["job"] else "ARM64",
+                    "ImageOS": condition["image_os"], "ImageVersion": condition["image_version"]}
+        require(receipt.get("identity") == identity, "configure input witness source/run/attempt/runner identity mismatch")
+    selection_path = qualification.retained(path.parent, value["analyzer_selection"])
+    ninja = qualification.retained(sample_root, conditions["Clang analyzer shards"]["selected_tools"]["ninja"])
+    require(selection_path.resolve() == (ninja.parent / "comparison-selection.txt").resolve(),
+            "analyzer input witness is not the exact selected-tool artifact sibling")
+    try:
+        selection = analyzer_reference.load_selection(selection_path)
+    except analyzer_reference.ProvenanceError as error:
+        raise ValueError(str(error)) from error
+    expected = {"event": "workflow_dispatch", "requested": "false", "selection": "skip", "reason": "same-revision",
+                "candidate_revision": run["head_sha"], "reference_revision": run["head_sha"],
+                "candidate_tree": source_tree, "reference_tree": source_tree,
+                "candidate_complete": "true", "reference_complete": "true"}
+    require(all(selection[key] == expected_value for key, expected_value in expected.items()),
+            "analyzer comparison input/source/tree is not observed false")
+    require(all(selection["candidate_" + key] == selection["reference_" + key]
+                for key in ("closure_sha256", "manifest_sha256")), "same-revision analyzer provenance differs")
+    return {"cmake_profile": False, "analyzer_comparison": False, "evidence": reference}
 
 
 def dispatch_inventory(root, reference, published, attempts):
@@ -250,7 +303,8 @@ def qualify(path):
         attempts = campaign["attempts"]
         require(isinstance(attempts, list), "dispatch history is not an ordered list")
         output["dispatches"] = [{"ordinal": item.get("ordinal"), "run": item.get("run"),
-                                 "sample": item.get("sample"), "intake_completed_at": item.get("intake_completed_at")}
+                                 "sample": item.get("sample"), "input_evidence": item.get("input_evidence"),
+                                 "intake_completed_at": item.get("intake_completed_at")}
                                 for item in attempts]
         require(len(attempts) <= 36, "prospective budget exceeded")
         declaration, catalogue = read_declaration(path.parent, campaign["declaration"])
@@ -263,7 +317,7 @@ def qualify(path):
         run_ids = set()
         for ordinal, attempt in enumerate(attempts, 1):
             output["stop_ordinal"] = ordinal
-            require(set(attempt) == {"ordinal", "run", "sample", "intake_completed_at"} and
+            require(set(attempt) == {"ordinal", "run", "sample", "input_evidence", "intake_completed_at"} and
                     type(attempt["ordinal"]) is int and attempt["ordinal"] == ordinal, "missing, repeated or reordered dispatch ordinal")
             run_path = qualification.retained(path.parent, attempt["run"])
             run = qualification.phases.read(run_path)
@@ -278,7 +332,7 @@ def qualify(path):
             require(run.get("head_branch") == qualification.COHORT_BRANCHES[qualification.PROSPECTIVE_COHORT][variant],
                     "dispatch differs from prospective variant order")
             created = github.timestamp(run.get("created_at"))
-            require(created is not None and created > published and created >= previous_end and created >= previous_intake,
+            require(created is not None and created > published and created > previous_end and created > previous_intake,
                     "dispatch predates publication, prior completion or archive intake")
             timing, end = job_timing(run, variant)
             intake = github.timestamp(attempt.get("intake_completed_at"))
@@ -295,6 +349,8 @@ def qualify(path):
             output["samples"].append(observed)
             observed["population_census_validated"] = False
             observed["ordinal"] = ordinal
+            observed["dispatch_inputs"] = input_evidence(path.parent, attempt["input_evidence"], sample_path.parent,
+                                                        item, run, declaration["source_tree"])
             validate_census(observed, catalogue)
             if observations:
                 require(json.dumps(observed["conditions"], sort_keys=True) == json.dumps(observations[0]["conditions"], sort_keys=True),
@@ -338,6 +394,7 @@ def prepare(path):
              "cohort": {"name": qualification.PROSPECTIVE_COHORT,
                         **{key: catalogue[key] for key in ("head_sha", "workflow_blob_sha")}},
              "source_tree": catalogue["source_tree"], "producer_blobs": catalogue["producer_blobs"],
+             "input_producer_blobs": INPUT_PRODUCERS,
              "reader_sha256": reader_bindings(), "catalogue": {"path": retained_catalogue.name, "sha256": CATALOGUE_SHA256},
              "blocks": list(BLOCKS), "seed": SEED, "excluded_runs": EXCLUDED_RUNS,
              "dispatch_inputs": {"cmake_profile": False, "analyzer_comparison": False}}

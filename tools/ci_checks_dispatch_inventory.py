@@ -10,7 +10,7 @@ never a qualifying manifest. Existing output directories are never overwritten.
 Usage: python3 -B tools/ci_checks_dispatch_inventory.py
        --publication ORIGINAL_ISSUE2610_COMMENT.json --output NEW_DIRECTORY
 Success prints the manifest REF {path,sha256}; paths inside it are relative.
-The unchanged population reader independently replays the pages and reconciles
+The population reader independently replays the pages and reconciles
 every campaign dispatch. A digest proves retained bytes, not external origin;
 the operator must retain actual authenticated API custody. Collection cannot
 prove that a run deleted from GitHub before capture ever existed. It makes no
