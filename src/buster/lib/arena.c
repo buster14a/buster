@@ -9,6 +9,98 @@ BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position);
+
+typedef struct ArenaCommitAttempt ArenaCommitAttempt;
+struct ArenaCommitAttempt
+{
+    OsCommitFailureContext failure;
+    bool succeeded;
+    bool forced_for_test;
+};
+
+typedef struct ArenaCommitFailureMessage ArenaCommitFailureMessage;
+struct ArenaCommitFailureMessage
+{
+    char8 bytes[1024];
+    u64 length;
+};
+
+BUSTER_COLD BUSTER_GLOBAL_LOCAL void arena_commit_failure_append(ArenaCommitFailureMessage* message, String8 value)
+{
+    for (u64 index = 0; index < value.length && message->length < BUSTER_ARRAY_LENGTH(message->bytes); index += 1)
+    {
+        message->bytes[message->length] = value.pointer[index];
+        message->length += 1;
+    }
+}
+
+BUSTER_COLD BUSTER_GLOBAL_LOCAL void arena_commit_failure_append_u64(ArenaCommitFailureMessage* message, u64 value, u32 radix)
+{
+    char8 digits[20];
+    u64 length = 0;
+    do
+    {
+        u64 digit = value % radix;
+        digits[length] = (char8)(digit < 10 ? '0' + digit : 'a' + digit - 10);
+        length += 1;
+        value /= radix;
+    } while (value && length < BUSTER_ARRAY_LENGTH(digits));
+    while (length && message->length < BUSTER_ARRAY_LENGTH(message->bytes))
+    {
+        length -= 1;
+        message->bytes[message->length] = digits[length];
+        message->length += 1;
+    }
+}
+
+BUSTER_NORETURN BUSTER_COLD BUSTER_GLOBAL_LOCAL void arena_commit_failure(Arena* arena, u64 requested_end, void* address, u64 size,
+                                                                         ArenaCommitAttempt attempt, u32 line, String8 function, String8 file)
+{
+    ArenaCommitFailureMessage message = {0};
+    arena_commit_failure_append(&message, S8("arena commit failed origin="));
+    arena_commit_failure_append(&message, attempt.forced_for_test ? S8("forced-test") : S8("os"));
+    arena_commit_failure_append(&message, S8(" error="));
+    arena_commit_failure_append_u64(&message, attempt.failure.error.v, 10);
+    arena_commit_failure_append(&message, S8(" address=0x"));
+    arena_commit_failure_append_u64(&message, (u64)address, 16);
+    arena_commit_failure_append(&message, S8(" size="));
+    arena_commit_failure_append_u64(&message, size, 10);
+    arena_commit_failure_append(&message, S8(" requested_end="));
+    arena_commit_failure_append_u64(&message, requested_end, 10);
+    arena_commit_failure_append(&message, S8(" arena=0x"));
+    arena_commit_failure_append_u64(&message, (u64)arena, 16);
+    arena_commit_failure_append(&message, S8(" position="));
+    arena_commit_failure_append_u64(&message, arena->position, 10);
+    arena_commit_failure_append(&message, S8(" os_position="));
+    arena_commit_failure_append_u64(&message, arena->os_position, 10);
+    arena_commit_failure_append(&message, S8(" reserved="));
+    arena_commit_failure_append_u64(&message, arena->reserved_size, 10);
+    arena_commit_failure_append(&message, S8(" page_size="));
+    arena_commit_failure_append_u64(&message, attempt.failure.page_size, 10);
+    if (attempt.failure.system_memory_observed)
+    {
+        arena_commit_failure_append(&message, S8(" system_commit_limit="));
+        arena_commit_failure_append_u64(&message, attempt.failure.system_commit_limit_bytes, 10);
+        arena_commit_failure_append(&message, S8(" system_commit_available="));
+        arena_commit_failure_append_u64(&message, attempt.failure.system_commit_available_bytes, 10);
+        arena_commit_failure_append(&message, S8(" physical_available="));
+        arena_commit_failure_append_u64(&message, attempt.failure.physical_available_bytes, 10);
+    }
+    else
+    {
+        arena_commit_failure_append(&message, S8(" system_memory=unavailable"));
+    }
+    if (attempt.failure.process_memory_observed)
+    {
+        arena_commit_failure_append(&message, S8(" process_commit="));
+        arena_commit_failure_append_u64(&message, attempt.failure.process_commit_bytes, 10);
+    }
+    else
+    {
+        arena_commit_failure_append(&message, S8(" process_commit=unavailable"));
+    }
+    os_fail_raw(line, function, file, (String8){.pointer = message.bytes, .length = message.length});
+}
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_reserve;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_commit;
@@ -47,18 +139,19 @@ BUSTER_GLOBAL_LOCAL void* arena_reserve_attempt(void* base, u64 size, Protection
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool arena_commit_attempt(void* address, u64 size, ProtectionFlags protection, bool prefault)
+BUSTER_GLOBAL_LOCAL ArenaCommitAttempt arena_commit_attempt(void* address, u64 size, ProtectionFlags protection, bool prefault)
 {
-    bool result = false;
+    ArenaCommitAttempt result = {0};
 #if BUSTER_INCLUDE_TESTS
     if (arena_fail_next_commit)
     {
         arena_fail_next_commit = false;
+        result.forced_for_test = true;
     }
     else
 #endif
     {
-        result = os_commit(address, size, protection, prefault);
+        result.succeeded = os_commit_diagnose(address, size, protection, prefault, &result.failure);
     }
     return result;
 }
@@ -107,12 +200,12 @@ void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
     u64 size_to_commit = target_committed_size - os_position;
     u8* commit_pointer = (u8*)arena + os_position;
 
-    bool commit_succeeded = arena_commit_attempt(commit_pointer, size_to_commit,
-                                                    (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute},
-                                                    arena->flags.prefault_pages);
-    if (!commit_succeeded)
+    ArenaCommitAttempt commit = arena_commit_attempt(commit_pointer, size_to_commit,
+                                                       (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute},
+                                                       arena->flags.prefault_pages);
+    if (!commit.succeeded)
     {
-        os_fail_message(S8("arena commit failed"));
+        arena_commit_failure(arena, aligned_size_after, commit_pointer, size_to_commit, commit, (u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__));
     }
     arena->os_position = arena_os_position_after_commit(target_committed_size, arena->reserved_size);
 }
@@ -404,7 +497,7 @@ Arena* arena_create(ArenaCreation original_creation)
             bool committed_enough = committed >= creation.initial_size;
             if (!committed_enough)
             {
-                committed_enough = arena_commit_attempt(pooled, creation.initial_size, (ProtectionFlags){.read = 1, .write = 1}, false);
+                committed_enough = arena_commit_attempt(pooled, creation.initial_size, (ProtectionFlags){.read = 1, .write = 1}, false).succeeded;
                 committed = arena_os_position_after_commit(creation.initial_size, individual_reserved_size);
             }
             if (committed_enough)
@@ -440,7 +533,7 @@ Arena* arena_create(ArenaCreation original_creation)
 
                 // Only the commit decides whether this arena exists. The
                 // prefault request it carries is advisory and cannot fail it.
-                bool commit_result = arena_commit_attempt(arena, creation.initial_size, protection_flags, creation.flags.prefault_pages);
+                bool commit_result = arena_commit_attempt(arena, creation.initial_size, protection_flags, creation.flags.prefault_pages).succeeded;
                 if (commit_result)
                 {
                     *arena = (Arena){

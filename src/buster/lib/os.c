@@ -386,6 +386,25 @@ int generic_fd_to_posix(OsFileDescriptor* fd)
     return (int)((u64)fd - 1);
 }
 #elif defined(_WIN32)
+// TinyCC has neither psapi.h nor its import stubs. This is the fixed ABI of
+// PROCESS_MEMORY_COUNTERS; resolve the existing kernel32 export at runtime.
+typedef struct OsProcessMemoryCounters OsProcessMemoryCounters;
+struct OsProcessMemoryCounters
+{
+    DWORD cb;
+    DWORD page_fault_count;
+    SIZE_T peak_working_set_size;
+    SIZE_T working_set_size;
+    SIZE_T quota_peak_paged_pool_usage;
+    SIZE_T quota_paged_pool_usage;
+    SIZE_T quota_peak_non_paged_pool_usage;
+    SIZE_T quota_non_paged_pool_usage;
+    SIZE_T pagefile_usage;
+    SIZE_T peak_pagefile_usage;
+};
+
+BUSTER_GLOBAL_LOCAL ProcessResourceStatus os_windows_process_memory_counters(HANDLE handle, OsProcessMemoryCounters* counters, OsError* error);
+
 BUSTER_GLOBAL_LOCAL DWORD os_windows_protection_flags(ProtectionFlags flags)
 {
     DWORD result;
@@ -589,18 +608,64 @@ OsPrefaultResult os_prefault(void* address, u64 size)
     return result;
 }
 
-bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault)
+#if defined(_WIN32)
+BUSTER_GLOBAL_LOCAL void os_windows_commit_failure_context(OsCommitFailureContext* context)
+{
+    // Use runtime lookup because TinyCC's kernel32 import stubs do not carry
+    // GlobalMemoryStatusEx. These observations are diagnostic only; failure to
+    // query either source must not overwrite the native commit error.
+    typedef BOOL(WINAPI* GlobalMemoryStatusExProc)(MEMORYSTATUSEX*);
+    GlobalMemoryStatusExProc global_memory_status_ex =
+        (GlobalMemoryStatusExProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GlobalMemoryStatusEx");
+    MEMORYSTATUSEX status = {0};
+    status.dwLength = sizeof(status);
+    if (global_memory_status_ex && global_memory_status_ex(&status))
+    {
+        context->system_commit_limit_bytes = status.ullTotalPageFile;
+        context->system_commit_available_bytes = status.ullAvailPageFile;
+        context->physical_available_bytes = status.ullAvailPhys;
+        context->system_memory_observed = true;
+    }
+
+    OsProcessMemoryCounters counters = {0};
+    OsError ignored_error = {0};
+    if (os_windows_process_memory_counters(GetCurrentProcess(), &counters, &ignored_error) == PROCESS_RESOURCE_OBSERVED)
+    {
+        context->process_commit_bytes = (u64)counters.pagefile_usage;
+        context->process_memory_observed = true;
+    }
+}
+#endif
+
+bool os_commit_diagnose(void* address, u64 size, ProtectionFlags protection, bool prefault, OsCommitFailureContext* failure_context)
 {
     bool result = 1;
+    OsCommitFailureContext context;
+    if (failure_context)
+    {
+        memset(&context, 0, sizeof(context));
+    }
 
 #if defined(__linux__) || defined(__APPLE__)
     int protection_flags = os_posix_protection_flags(protection);
     int os_result = mprotect(address, size, protection_flags);
     result = os_result == 0;
+    if (!result && failure_context)
+    {
+        context.error = os_get_last_error();
+        context.page_size = os_get_page_size();
+    }
 #elif defined(_WIN32)
     DWORD protection_flags = os_windows_protection_flags(protection);
     void* os_result = VirtualAlloc(address, size, MEM_COMMIT, protection_flags);
     result = os_result != 0;
+    if (!result && failure_context)
+    {
+        // No call may intervene between VirtualAlloc and this capture.
+        context.error = os_get_last_error();
+        context.page_size = os_get_page_size();
+        os_windows_commit_failure_context(&context);
+    }
 #endif
 
     // Strictly subordinate and strictly advisory: the request is issued only
@@ -614,7 +679,16 @@ bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefaul
 #if BUSTER_BENCH_ALLOCATIONS
     arena_benchmark_event(ARENA_BENCHMARK_OS_COMMIT, S8(__FILE__), S8(__func__), __LINE__, size, 0, 0, 0, result);
 #endif
+    if (failure_context)
+    {
+        *failure_context = context;
+    }
     return result;
+}
+
+bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault)
+{
+    return os_commit_diagnose(address, size, protection, prefault, 0);
 }
 
 bool os_protect(void* address, u64 size, ProtectionFlags protection)
@@ -5067,23 +5141,6 @@ bool os_process_group_ownership_loss_self_test(void)
 #endif
 
 #if BUSTER_WINDOWS
-// TinyCC has neither psapi.h nor its import stubs. This is the fixed ABI of
-// PROCESS_MEMORY_COUNTERS; resolve the existing kernel32 export at runtime.
-typedef struct OsProcessMemoryCounters OsProcessMemoryCounters;
-struct OsProcessMemoryCounters
-{
-    DWORD cb;
-    DWORD page_fault_count;
-    SIZE_T peak_working_set_size;
-    SIZE_T working_set_size;
-    SIZE_T quota_peak_paged_pool_usage;
-    SIZE_T quota_paged_pool_usage;
-    SIZE_T quota_peak_non_paged_pool_usage;
-    SIZE_T quota_non_paged_pool_usage;
-    SIZE_T pagefile_usage;
-    SIZE_T peak_pagefile_usage;
-};
-
 BUSTER_GLOBAL_LOCAL ProcessResourceStatus os_windows_process_memory_counters(HANDLE handle, OsProcessMemoryCounters* counters, OsError* error)
 {
     ProcessResourceStatus result = PROCESS_RESOURCE_UNSUPPORTED;
