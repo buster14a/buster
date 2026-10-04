@@ -9,6 +9,7 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
+#include <buster/lib/compiler/wasm/wasm.h>
 #include <buster/lib/file.h>
 #include <buster/lib/os_internal.h>
 #include <buster/lib/os.h>
@@ -25910,6 +25911,143 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_constant_bytes(UnitTestArgum
     return result;
 }
 
+// #2564: IEEE binary128 storage is shared by the two WebAssembly C ABIs.
+// Byte images below use the IEEE format directly, independently of host floats.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wasm_long_double_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "_Static_assert(__SIZEOF_LONG_DOUBLE__ == 16, \"predefine size\");\n"
+        "_Static_assert(__LONG_DOUBLE_WIDTH__ == 128 && __LDBL_MANT_DIG__ == 113, \"binary128 precision\");\n"
+        "_Static_assert(__LDBL_MAX_EXP__ == 16384, \"binary128 exponent\");\n"
+        "_Static_assert(sizeof(long double) == 16 && _Alignof(long double) == 16, \"scalar layout\");\n"
+        "_Static_assert(sizeof(long double[3]) == 48, \"array stride\");\n"
+        "struct WasmRecord { unsigned char first; long double value; unsigned char last; };\n"
+        "_Static_assert(sizeof(struct WasmRecord) == 48 && _Alignof(struct WasmRecord) == 16, \"record layout\");\n"
+        "_Static_assert(__builtin_offsetof(struct WasmRecord, value) == 16, \"value offset\");\n"
+        "_Static_assert(__builtin_offsetof(struct WasmRecord, last) == 32, \"last offset\");\n"
+        "const long double wasm_one = 1.0L;\n"
+        "const long double wasm_precise = 0x1.0000000000000000000000000001p0L;\n"
+        "const long double wasm_negative_zero = -0.0L;\n"
+        "long double wasm_array[2] = {1.0L, -0.0L};\n"
+        "struct WasmRecord wasm_record = {7, 1.0L, 9};\n"
+        "extern float wasm_backend_width(void);\n"
+        "int wasm_layout_query(void) { return sizeof(long double); }\n");
+    u8 one[16] = {0};
+    one[14] = 0xff;
+    one[15] = 0x3f;
+    u8 precise[16] = {0};
+    memcpy(precise, one, sizeof(one));
+    precise[0] = 1;
+    u8 negative_zero[16] = {0};
+    negative_zero[15] = 0x80;
+    u8 array[32] = {0};
+    memcpy(array, one, sizeof(one));
+    memcpy(array + 16, negative_zero, sizeof(negative_zero));
+    u8 record[48] = {0};
+    record[0] = 7;
+    memcpy(record + 16, one, sizeof(one));
+    record[32] = 9;
+    String8 names[] = {S8("wasm_one"), S8("wasm_precise"), S8("wasm_negative_zero"), S8("wasm_array"), S8("wasm_record")};
+    ByteSlice images[] = {(ByteSlice)BUSTER_ARRAY_TO_SLICE(one), (ByteSlice)BUSTER_ARRAY_TO_SLICE(precise),
+                          (ByteSlice)BUSTER_ARRAY_TO_SLICE(negative_zero), (ByteSlice)BUSTER_ARRAY_TO_SLICE(array),
+                          (ByteSlice)BUSTER_ARRAY_TO_SLICE(record)};
+    String8 refused_sources[] = {
+        S8("long double wasm_identity(long double value) { return value; }"),
+        S8("void wasm_runtime(long double* sink) { *sink = 1.0L; }"),
+    };
+    String8 refusal_messages[] = {
+        S8("C IR lowering does not yet support the parameter or return value types of function 'wasm_identity'"),
+        S8("in function 'wasm_runtime': C IR lowering does not yet support runtime binary128 values on WebAssembly"),
+    };
+    CpuArch architectures[] = {CPU_ARCH_WASM32, CPU_ARCH_WASM64};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(architectures); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = {.cpu_arch = architectures[target_index], .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_FREESTANDING};
+            CPreprocessOptions options = {.target = target, .data_layout = target_data_layout(target),
+                                          .dialect = C_PREPROCESS_DIALECT_GNU17, .source_path = S8("wasm-long-double-storage.c")};
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CIRLowerOptions lower_options = {.disable_direct_ssa = form != 0};
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, options.source_path, tokens, syntax, target, lower_options);
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !lowered.diagnostic_count &&
+                               lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                for (u32 image_index = 0; image_index < BUSTER_ARRAY_LENGTH(names); image_index += 1)
+                {
+                    IrGlobal* global = c_test_find_ir_global(module, lowered.program, names[image_index]);
+                    if (BUSTER_REQUIRE(arguments, global != 0))
+                    {
+                        IrType* type = ir_type_from_id(&lowered.program->types, global->type);
+                        BUSTER_TEST(arguments, type && type->layout.size == images[image_index].length && type->layout.alignment == 16);
+                        if (BUSTER_REQUIRE(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES &&
+                                           global->bytes.length == images[image_index].length && global->bytes.pointer))
+                        {
+                            BUSTER_TEST(arguments, memory_compare(global->bytes.pointer, images[image_index].pointer, images[image_index].length));
+                        }
+                    }
+                }
+                WasmOptions wasm_options = WASM_OPTIONS_DEFAULT;
+                wasm_options.pointer_size = target_index == 0 ? 4 : 8;
+                WasmArtifact artifact = wasm_emit(temporary.arena, lowered.program, module, 1, wasm_options);
+                BUSTER_TEST_RAW(arguments, artifact.success, artifact.error.message);
+                BUSTER_TEST(arguments, artifact.success && artifact.stats.static_data_bytes >= 128);
+                BUSTER_TEST(arguments, artifact.stats.import_count == 1);
+                // Bypass the frontend's intentional wide-signature refusal
+                // only in canonical test data. The same valid import must be
+                // refused when its scalar width changes from f32 to binary128.
+                IrType* backend_return = 0;
+                for (u32 symbol_index = 0; symbol_index < lowered.program->symbols.count; symbol_index += 1)
+                {
+                    IrSymbol* symbol = lowered.program->symbols.symbols + symbol_index;
+                    if (symbol->kind == IR_SYMBOL_FUNCTION && string_equal(symbol->name, S8("wasm_backend_width")))
+                    {
+                        IrType* function_type = ir_type_from_id(&lowered.program->types, symbol->type);
+                        if (function_type && function_type->kind == IR_TYPE_POINTER)
+                        {
+                            function_type = ir_type_from_id(&lowered.program->types, function_type->element_type);
+                        }
+                        if (function_type && function_type->kind == IR_TYPE_FUNCTION)
+                        {
+                            backend_return = ir_type_from_id(&lowered.program->types, function_type->return_type);
+                        }
+                    }
+                }
+                if (BUSTER_REQUIRE(arguments, backend_return && backend_return->kind == IR_TYPE_FLOAT && backend_return->bit_width == 32))
+                {
+                    backend_return->bit_width = 128;
+                    backend_return->layout.size = 16;
+                    backend_return->layout.alignment = 16;
+                    if (BUSTER_REQUIRE(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE))
+                    {
+                        WasmArtifact refused_backend = wasm_emit(temporary.arena, lowered.program, module, 1, wasm_options);
+                        BUSTER_TEST(arguments, !refused_backend.success && refused_backend.error.code == WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI);
+                        BUSTER_STRING_TEST(arguments, refused_backend.error.message, S8("aggregate or unsupported result ABI in WebAssembly function"));
+                    }
+                }
+            }
+            for (u32 refused_index = 0; refused_index < BUSTER_ARRAY_LENGTH(refused_sources); refused_index += 1)
+            {
+                CPreprocessResult refused_tokens = c_preprocess(temporary.arena, refused_sources[refused_index], options);
+                CParserResult refused_syntax = c_parse_ast(temporary.arena, refused_tokens);
+                CIRLowerResult refused = c_analyze_with_options(temporary.arena, options.source_path, refused_tokens, refused_syntax, target, lower_options);
+                BUSTER_TEST(arguments, !refused_tokens.diagnostic_count && !refused_syntax.diagnostic_count);
+                if (BUSTER_REQUIRE(arguments, refused.diagnostic_count == 1))
+                {
+                    BUSTER_STRING_TEST(arguments, refused.diagnostics[0].message, refusal_messages[refused_index]);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -34514,6 +34652,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_cleanup_signature_calls);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_initializers);
+    BUSTER_TEST_FIXTURE(arguments, c_test_wasm_long_double_storage);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_constant_bytes);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
     BUSTER_TEST_FIXTURE(arguments, c_test_wide_float_android_boundaries);
