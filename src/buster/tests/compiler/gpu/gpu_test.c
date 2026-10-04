@@ -78,11 +78,34 @@ BUSTER_GLOBAL_LOCAL GpuPipelineOptions gpu_test_options(String8* inputs, u32 inp
 
 BUSTER_GLOBAL_LOCAL bool gpu_test_path_is_within(String8 path, String8 directory)
 {
-    bool result = path.length > directory.length && string_starts_with_sequence(path, directory);
-    if (result)
+    bool result = directory.length && path.length > directory.length && string_starts_with_sequence(path, directory);
+    if (result && directory.pointer[directory.length - 1] != '/' && directory.pointer[directory.length - 1] != '\\')
     {
         char8 separator = path.pointer[directory.length];
         result = separator == '/' || separator == '\\';
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool gpu_test_workspace_is_child(String8 path, String8 root)
+{
+    bool result = gpu_test_path_is_within(path, root);
+    if (result)
+    {
+        u64 begin = root.length;
+        while (begin < path.length && (path.pointer[begin] == '/' || path.pointer[begin] == '\\'))
+        {
+            begin += 1;
+        }
+        String8 child = string_slice(path, begin, path.length);
+        String8 prefix = S8(".buster-gpu-");
+        String8 suffix = S8(".temps");
+        result = child.length > prefix.length + suffix.length && string_starts_with_sequence(child, prefix) &&
+                 memory_compare(child.pointer + child.length - suffix.length, suffix.pointer, suffix.length);
+        for (u64 index = 0; result && index < child.length; index += 1)
+        {
+            result = child.pointer[index] != '/' && child.pointer[index] != '\\';
+        }
     }
     return result;
 }
@@ -127,11 +150,489 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType gpu_test_concurrent_execute(void* argument)
     }
 }
 
+BUSTER_GLOBAL_LOCAL String8 gpu_test_default_scratch_root(Arena* arena)
+{
+#if BUSTER_WINDOWS
+    BUSTER_UNUSED(arena);
+    String8 result = os_get_environment_variable(S8("TEMP"));
+    if (!result.length)
+    {
+        result = os_get_environment_variable(S8("TMP"));
+    }
+#else
+    String8 result = os_get_environment_variable(S8("TMPDIR"));
+    if (!result.length)
+    {
+#if BUSTER_ANDROID
+        BUSTER_UNUSED(arena);
+        result = buster_android_internal_data_path;
+#elif BUSTER_IOS
+        String8 home = os_get_environment_variable(S8("HOME"));
+        if (home.length)
+        {
+            result = string_format_z(arena, S8("{S8}/tmp"), home);
+        }
+#else
+        BUSTER_UNUSED(arena);
+        result = S8("/tmp");
+#endif
+    }
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_scratch_roots(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 root = buster_test_temporary_path(arena, S8("gpu-scratch-root"), S8(""));
+    String8 input = buster_test_temporary_path(arena, S8("gpu-scratch-input"), S8(".spv"));
+    String8 output = buster_test_temporary_path(arena, S8("gpu-scratch-output"), S8(".spv"));
+    String8 foreign = string_format_z(arena, S8("{S8}/foreign.bin"), root);
+    u8 good_data[] = {0x03, 0x02, 0x23, 0x07, 0, 0, 0, 0};
+    ByteSlice good = (ByteSlice)BUSTER_ARRAY_TO_SLICE(good_data);
+    String8 sentinel = S8("preserve-parent-and-output");
+    ByteSlice sentinel_bytes = {(u8*)sentinel.pointer, sentinel.length};
+    OsDirectoryCreateResult created = os_make_directory_exclusive(root);
+    BUSTER_TEST(arguments, created.created && !created.error.v);
+    if (created.created)
+    {
+        BUSTER_TEST(arguments, file_write(input, good));
+        BUSTER_TEST(arguments, file_write(output, sentinel_bytes));
+        BUSTER_TEST(arguments, file_write(foreign, sentinel_bytes));
+        String8 inputs[] = {input};
+        GpuPipelineOptions options = gpu_test_options(inputs, 1, gpu_test_target(S8("spirv64")), GPU_PIPELINE_ACTION_OBJECT);
+        options.output_path = output;
+        options.temporary_directory = root;
+        GpuPipelineResult explicit_root = gpu_pipeline_execute(arena, options);
+        BUSTER_TEST_RAW(arguments, explicit_root.error == GPU_PIPELINE_ERROR_NONE, explicit_root.diagnostic);
+        BUSTER_TEST(arguments, explicit_root.published && !explicit_root.cleanup_failed);
+        BUSTER_TEST(arguments, gpu_test_path_is_within(explicit_root.temporary_directory, root));
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(explicit_root.temporary_directory, OS_FILE_KIND_MISSING));
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(root, OS_FILE_KIND_DIRECTORY));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, foreign, sentinel_bytes));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, good));
+
+        options.temporary_directory = string_format_z(arena, S8("{S8}/"), root);
+        options.save_temporaries = true;
+        GpuPipelineResult saved = gpu_pipeline_execute(arena, options);
+        BUSTER_TEST_RAW(arguments, saved.error == GPU_PIPELINE_ERROR_NONE, saved.diagnostic);
+        bool saved_owned = gpu_test_workspace_is_child(saved.temporary_directory, root);
+        BUSTER_TEST(arguments, saved_owned);
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(saved.temporary_directory, OS_FILE_KIND_DIRECTORY));
+        if (saved_owned)
+        {
+            BUSTER_TEST(arguments, os_directory_delete(saved.temporary_directory));
+        }
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(root, OS_FILE_KIND_DIRECTORY));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, foreign, sentinel_bytes));
+
+        // Do not replace the real platform default with the fixture root.
+        // This COPY path runs on mobile too, where subprocesses are unavailable.
+        options.temporary_directory = (String8){0};
+        GpuPipelineResult default_root = gpu_pipeline_execute(arena, options);
+        String8 expected_root = gpu_test_default_scratch_root(arena);
+        BUSTER_TEST_RAW(arguments, default_root.error == GPU_PIPELINE_ERROR_NONE, default_root.diagnostic);
+        bool default_owned = gpu_test_workspace_is_child(default_root.temporary_directory, expected_root);
+        BUSTER_TEST(arguments, default_owned);
+        BUSTER_TEST(arguments, gpu_test_path_has_kind(default_root.temporary_directory, OS_FILE_KIND_DIRECTORY));
+        if (default_owned)
+        {
+            BUSTER_TEST(arguments, os_directory_delete(default_root.temporary_directory));
+        }
+        arguments->show(arguments, S8("GPU_SCRATCH_DEFAULT root={S8} owned_child={u32} error={u32}\n"), expected_root,
+                        (u32)default_owned, (u32)default_root.error);
+
+        options.temporary_directory = foreign;
+        options.save_temporaries = false;
+        BUSTER_TEST(arguments, file_write(output, sentinel_bytes));
+        GpuPipelineResult unavailable = gpu_pipeline_execute(arena, options);
+        BUSTER_TEST(arguments, unavailable.error == GPU_PIPELINE_ERROR_FILE_WRITE && unavailable.process_result == PROCESS_RESULT_FAILED);
+        BUSTER_TEST(arguments, !unavailable.temporary_directory.length && !unavailable.published);
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, sentinel_bytes));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, foreign, sentinel_bytes));
+
+        options.temporary_directory = (String8){.length = 1};
+        GpuPipelineResult malformed_root = gpu_pipeline_execute(arena, options);
+        BUSTER_TEST(arguments, malformed_root.error == GPU_PIPELINE_ERROR_INVALID_INPUT && malformed_root.process_result == PROCESS_RESULT_FAILED);
+        BUSTER_TEST(arguments, !malformed_root.temporary_directory.length && !malformed_root.published);
+        BUSTER_STRING_TEST(arguments, malformed_root.diagnostic, S8("GPU scratch root requires a valid path"));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, sentinel_bytes));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, foreign, sentinel_bytes));
+
+        String8 invalid_inputs[] = {S8("gpu-invalid-input.unknown")};
+        options.input_paths = invalid_inputs;
+        options.temporary_directory = foreign;
+        GpuPipelineResult invalid = gpu_pipeline_execute(arena, options);
+        BUSTER_TEST(arguments, invalid.error == GPU_PIPELINE_ERROR_INVALID_INPUT && invalid.process_result == PROCESS_RESULT_FAILED);
+        BUSTER_TEST(arguments, !invalid.temporary_directory.length && !invalid.published);
+        // Reusing arena storage after an invalid plan must not corrupt its
+        // allocated diagnostic, even when the scratch root is unusable.
+        u8* overwrite = arena_allocate(arena, u8, BUSTER_KB(64));
+        for (u64 index = 0; index < BUSTER_KB(64); index += 1)
+        {
+            overwrite[index] = 0x5a;
+        }
+        BUSTER_STRING_TEST(arguments, invalid.diagnostic, S8("cannot infer GPU source language from gpu-invalid-input.unknown; use -x"));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, sentinel_bytes));
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, foreign, sentinel_bytes));
+        BUSTER_TEST(arguments, os_directory_delete(root));
+        BUSTER_TEST(arguments, os_file_delete(input));
+        BUSTER_TEST(arguments, os_file_delete(output));
+    }
+    return result;
+}
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL bool gpu_test_environment_key_equal(String8 left, String8 right)
+{
+    bool result = left.length == right.length;
+    for (u64 index = 0; result && index < left.length; index += 1)
+    {
+        char8 a = left.pointer[index];
+        char8 b = right.pointer[index];
+#if BUSTER_WINDOWS
+        if (a >= 'a' && a <= 'z')
+        {
+            a = (char8)(a - ('a' - 'A'));
+        }
+        if (b >= 'a' && b <= 'z')
+        {
+            b = (char8)(b - ('a' - 'A'));
+        }
+#endif
+        result = a == b;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessWaitResult gpu_test_scratch_child(Arena* arena, SliceString8 arguments, String8* override_keys, String8* override_values,
+                                                            u32 override_count)
+{
+    SliceString8 inherited_keys = program_state->input.environment_keys;
+    SliceString8 inherited_values = program_state->input.environment_values;
+    String8* keys = arena_allocate(arena, String8, inherited_keys.length + override_count);
+    String8* values = arena_allocate(arena, String8, inherited_keys.length + override_count);
+    u64 count = override_count;
+    for (u32 index = 0; index < override_count; index += 1)
+    {
+        keys[index] = override_keys[index];
+        values[index] = override_values[index];
+    }
+    for (u64 inherited = 0; inherited < inherited_keys.length; inherited += 1)
+    {
+        bool overridden = false;
+        for (u32 index = 0; index < override_count && !overridden; index += 1)
+        {
+            overridden = gpu_test_environment_key_equal(inherited_keys.pointer[inherited], override_keys[index]);
+        }
+        if (!overridden)
+        {
+            keys[count] = inherited_keys.pointer[inherited];
+            values[count] = inherited_values.pointer[inherited];
+            count += 1;
+        }
+    }
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){keys, count}, (SliceString8){values, count},
+                                                (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                                      .new_process_group = true});
+    ProcessWaitResult result;
+    if (spawn.error.v || spawn.failure != PROCESS_SPAWN_FAILURE_NONE)
+    {
+        result = (ProcessWaitResult){.result = PROCESS_RESULT_FAILED};
+    }
+    else
+    {
+        result = os_process_wait_deadline(arena, spawn, UINT64_C(30000000));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 gpu_test_child_stream(ProcessWaitResult child, StandardStream stream)
+{
+    ByteSlice bytes = child.streams[stream];
+    return (String8){(char8*)bytes.pointer, bytes.length};
+}
+
+BUSTER_GLOBAL_LOCAL String8 gpu_test_saved_workspace(Arena* arena, ProcessWaitResult child)
+{
+    String8 result = {0};
+    String8 marker = S8("GPU temporary files: ");
+    for (u32 stream = STANDARD_STREAM_OUTPUT; stream <= STANDARD_STREAM_ERROR && !result.length; stream += 1)
+    {
+        String8 text = gpu_test_child_stream(child, (StandardStream)stream);
+        u64 index = string_first_sequence(text, marker);
+        if (index != BUSTER_STRING_NO_MATCH)
+        {
+            u64 begin = index + marker.length;
+            u64 end = begin;
+            while (end < text.length && text.pointer[end] != '\n' && text.pointer[end] != '\r')
+            {
+                end += 1;
+            }
+            result = string_format_z(arena, S8("{S8}"), string_slice(text, begin, end));
+        }
+    }
+    return result;
+}
+
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_windows_scratch_environment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 first = buster_test_temporary_path(arena, S8("gpu-env-temp"), S8(""));
+    String8 second = buster_test_temporary_path(arena, S8("gpu-env-tmp"), S8(""));
+    String8 input = buster_test_temporary_path(arena, S8("gpu-env-input"), S8(".spv"));
+    String8 output = buster_test_temporary_path(arena, S8("gpu-env-output"), S8(".spv"));
+    String8 unavailable = buster_test_temporary_path(arena, S8("gpu-env-unavailable"), S8(".bin"));
+    u8 good_data[] = {0x03, 0x02, 0x23, 0x07, 0, 0, 0, 0};
+    ByteSlice good = (ByteSlice)BUSTER_ARRAY_TO_SLICE(good_data);
+    String8 sentinel = S8("keep-existing-output");
+    ByteSlice sentinel_bytes = {(u8*)sentinel.pointer, sentinel.length};
+    OsDirectoryCreateResult first_created = os_make_directory_exclusive(first);
+    OsDirectoryCreateResult second_created = os_make_directory_exclusive(second);
+    BUSTER_TEST(arguments, first_created.created && second_created.created);
+    if (first_created.created && second_created.created)
+    {
+        first = os_path_absolute_lexical(arena, first, true);
+        second = os_path_absolute_lexical(arena, second, true);
+        BUSTER_TEST(arguments, file_write(input, good));
+        BUSTER_TEST(arguments, file_write(unavailable, sentinel_bytes));
+        String8 executable = os_path_absolute_lexical(arena, program_state->input.arguments.pointer[0], true);
+        String8 command[] = {executable, S8("cc"), S8("-target=spirv64"), S8("-c"), input, S8("-o"), output, S8("--save-temps")};
+        String8 keys[] = {S8("TEMP"), S8("TMP")};
+        String8 values[] = {first, second};
+        for (u32 control = 0; control < 4; control += 1)
+        {
+            BUSTER_TEST(arguments, file_write(output, sentinel_bytes));
+            values[0] = control == 0 ? first : control == 3 ? unavailable : (String8){0};
+            values[1] = control == 2 ? (String8){0} : second;
+            ProcessWaitResult child = gpu_test_scratch_child(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), keys, values,
+                                                           BUSTER_ARRAY_LENGTH(keys));
+            BUSTER_TEST(arguments, !child.timed_out && !child.capture_failed && !child.process_tree_cleanup_failed);
+            if (control < 2)
+            {
+                String8 workspace = gpu_test_saved_workspace(arena, child);
+                String8 selected = control == 0 ? first : second;
+                bool owned = gpu_test_workspace_is_child(workspace, selected);
+                BUSTER_TEST_RAW(arguments, child.result == PROCESS_RESULT_SUCCESS, gpu_test_child_stream(child, STANDARD_STREAM_ERROR));
+                BUSTER_TEST(arguments, owned && gpu_test_path_has_kind(workspace, OS_FILE_KIND_DIRECTORY));
+                BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, good));
+                if (owned)
+                {
+                    BUSTER_TEST(arguments, os_directory_delete(workspace));
+                }
+            }
+            else
+            {
+                BUSTER_TEST(arguments, child.result == PROCESS_RESULT_FAILED);
+                BUSTER_TEST(arguments, !gpu_test_saved_workspace(arena, child).length);
+                BUSTER_TEST(arguments, gpu_test_file_equals(arena, output, sentinel_bytes));
+                String8 diagnostic = gpu_test_child_stream(child, STANDARD_STREAM_ERROR);
+                BUSTER_TEST(arguments, string_first_sequence(diagnostic, control == 2 ? S8("no GPU scratch root is configured")
+                                                                                     : S8("could not create a private GPU temporary directory under")) != BUSTER_STRING_NO_MATCH);
+            }
+        }
+        BUSTER_TEST(arguments, gpu_test_file_equals(arena, unavailable, sentinel_bytes));
+        BUSTER_TEST(arguments, os_file_delete(input));
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, os_file_delete(unavailable));
+    }
+    if (first_created.created)
+    {
+        BUSTER_TEST(arguments, os_directory_delete(first));
+    }
+    if (second_created.created)
+    {
+        BUSTER_TEST(arguments, os_directory_delete(second));
+    }
+    return result;
+}
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL bool gpu_test_directory_entry_count(String8 path, u64* count)
+{
+    *count = 0;
+    DIR* directory = opendir((const char*)path.pointer);
+    bool result = directory != 0;
+    if (directory)
+    {
+        errno = 0;
+        struct dirent* entry;
+        while ((entry = readdir(directory)) != 0)
+        {
+            String8 name = string_from_pointer((const char8*)entry->d_name);
+            if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+            {
+                *count += 1;
+            }
+        }
+        result = errno == 0;
+        if (closedir(directory) != 0)
+        {
+            result = false;
+        }
+    }
+    return result;
+}
+#endif
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_readonly_source_scratch(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 effective_uid = (u64)geteuid();
+    BUSTER_TEST(arguments, effective_uid != 0);
+    String8 fixture = buster_test_temporary_path(arena, S8("gpu-readonly-fixture"), S8(""));
+    OsDirectoryCreateResult fixture_created = os_make_directory_exclusive(fixture);
+    BUSTER_TEST(arguments, fixture_created.created && !fixture_created.error.v);
+    if (fixture_created.created)
+    {
+        fixture = os_path_absolute_lexical(arena, fixture, true);
+        String8 source = string_format_z(arena, S8("{S8}/source"), fixture);
+        String8 scratch = string_format_z(arena, S8("{S8}/scratch"), fixture);
+        String8 writable = string_format_z(arena, S8("{S8}/writable"), fixture);
+        String8 input = string_format_z(arena, S8("{S8}/kernel.cu"), source);
+        String8 writable_input = string_format_z(arena, S8("{S8}/kernel.cu"), writable);
+        String8 default_output = string_format_z(arena, S8("{S8}/kernel.ptx"), writable);
+        String8 output = string_format_z(arena, S8("{S8}/named.ptx"), writable);
+        String8 tool = string_format_z(arena, S8("{S8}/tool.sh"), fixture);
+        String8 marker = string_format_z(arena, S8("{S8}/tool-invoked"), fixture);
+        String8 unavailable = string_format_z(arena, S8("{S8}/not-a-directory"), fixture);
+        String8 source_bytes = S8("//GPU_PERMISSION_INPUT\n__global__ void kernel(void) {}\n");
+        String8 preprocessed = S8("int gpu_permission_preprocessed;\n");
+        String8 assembly = S8(".version 7.0\n.target sm_70\n.address_size 64\n");
+        String8 script = S8("#!/bin/sh\nset -eu\nmode=assembly\ninput=\noutput=\nwhile [ \"$#\" -gt 0 ]; do\n    argument=$1\n    shift\n    case \"$argument\" in\n        -fsyntax-only) mode=syntax ;;\n        -E) mode=preprocess ;;\n        -o) output=$1; shift ;;\n        *.cu) input=$argument ;;\n    esac\ndone\nIFS= read -r first < \"$input\"\n[ \"$first\" = '//GPU_PERMISSION_INPUT' ]\nprintf '%s\\n' \"$mode\" >> \"${0%/*}/tool-invoked\"\nif [ \"$mode\" != syntax ]; then\n    [ -n \"$output\" ]\n    if [ \"$mode\" = preprocess ]; then\n        printf 'int gpu_permission_preprocessed;\\n' > \"$output\"\n    else\n        printf '.version 7.0\\n.target sm_70\\n.address_size 64\\n' > \"$output\"\n    fi\nfi\n");
+        OsDirectoryCreateResult source_created = os_make_directory_exclusive(source);
+        OsDirectoryCreateResult scratch_created = os_make_directory_exclusive(scratch);
+        OsDirectoryCreateResult writable_created = os_make_directory_exclusive(writable);
+        BUSTER_TEST(arguments, source_created.created && scratch_created.created && writable_created.created);
+        bool ready = source_created.created && scratch_created.created && writable_created.created;
+        if (ready)
+        {
+            ready = file_write(input, (ByteSlice){(u8*)source_bytes.pointer, source_bytes.length}) &&
+                    file_write(writable_input, (ByteSlice){(u8*)source_bytes.pointer, source_bytes.length}) &&
+                    file_write(tool, (ByteSlice){(u8*)script.pointer, script.length}) &&
+                    file_write(marker, (ByteSlice){(u8*)S8("").pointer, 0}) &&
+                    file_write(unavailable, (ByteSlice){(u8*)source_bytes.pointer, source_bytes.length}) &&
+                    chmod((const char*)tool.pointer, 0700) == 0;
+            BUSTER_TEST(arguments, ready);
+        }
+        bool read_only = ready && chmod((const char*)source.pointer, 0555) == 0;
+        BUSTER_TEST(arguments, read_only);
+        if (read_only && effective_uid != 0)
+        {
+            String8 denied_path = string_format_z(arena, S8("{S8}/denied-probe"), source);
+            OsDirectoryCreateResult denied = os_make_directory_exclusive(denied_path);
+            BUSTER_TEST(arguments, denied.error.v && !denied.created && !denied.already_exists);
+            if (denied.created)
+            {
+                BUSTER_TEST(arguments, os_directory_delete(denied_path));
+            }
+            u64 entries = 0;
+            BUSTER_TEST(arguments, gpu_test_directory_entry_count(source, &entries) && entries == 1);
+            arguments->show(arguments, S8("GPU_READONLY_SOURCE_PERMISSION euid={u64} denied_error={u32} source_entries={u64}\n"),
+                            effective_uid, denied.error.v, entries);
+            String8 executable = os_path_absolute_lexical(arena, program_state->input.arguments.pointer[0], true);
+            BUSTER_TEST(arguments, executable.length != 0);
+            String8 keys[] = {S8("TMPDIR"), S8("BUSTER_GPU_CLANG")};
+            String8 values[] = {scratch, tool};
+            String8 expected_calls = S8("");
+            for (u32 control = 0; control < 10; control += 1)
+            {
+                String8 action = control == 1 || control == 6 ? S8("-E") : control == 2 || control == 3 ? S8("-S") :
+                                 control == 4 || control == 5 ? S8("-c") : S8("-fsyntax-only");
+                String8 command[8] = {executable, S8("cc"), S8("-target=nvptx64"), action, control == 5 ? writable_input : input};
+                u64 command_count = 5;
+                if (control == 3)
+                {
+                    command[command_count++] = S8("-o");
+                    command[command_count++] = output;
+                }
+                if (control == 6 || control == 9)
+                {
+                    command[command_count++] = S8("--save-temps");
+                }
+                values[0] = control == 7 ? source : control == 8 ? unavailable : control == 9 ? (String8){0} : scratch;
+                ProcessWaitResult child = gpu_test_scratch_child(arena, (SliceString8){command, command_count}, keys, values,
+                                                               BUSTER_ARRAY_LENGTH(keys));
+                BUSTER_TEST(arguments, !child.timed_out && !child.capture_failed && !child.process_tree_cleanup_failed);
+                bool succeeds = control != 4 && control != 7 && control != 8;
+                BUSTER_TEST_RAW(arguments, child.result == (succeeds ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED),
+                                gpu_test_child_stream(child, STANDARD_STREAM_ERROR));
+                if (control < 7 || control == 9)
+                {
+                    String8 mode = control == 0 || control == 9 ? S8("syntax") : control == 1 || control == 6 ? S8("preprocess") : S8("assembly");
+                    expected_calls = string_format_z(arena, S8("{S8}{S8}\n"), expected_calls, mode);
+                }
+                BUSTER_TEST(arguments, gpu_test_file_equals(arena, marker, (ByteSlice){(u8*)expected_calls.pointer, expected_calls.length}));
+                BUSTER_TEST(arguments, gpu_test_directory_entry_count(source, &entries) && entries == 1);
+                u64 source_entries = entries;
+                BUSTER_TEST(arguments, gpu_test_file_equals(arena, input, (ByteSlice){(u8*)source_bytes.pointer, source_bytes.length}));
+                if (control == 1 || control == 2 || control == 6)
+                {
+                    BUSTER_STRING_TEST(arguments, gpu_test_child_stream(child, STANDARD_STREAM_OUTPUT), control == 2 ? assembly : preprocessed);
+                }
+                if (control == 3 || control == 5)
+                {
+                    BUSTER_TEST(arguments, gpu_test_file_equals(arena, control == 3 ? output : default_output,
+                                                               (ByteSlice){(u8*)assembly.pointer, assembly.length}));
+                }
+                if (control == 6 || control == 9)
+                {
+                    String8 workspace = gpu_test_saved_workspace(arena, child);
+                    String8 selected = control == 9 ? S8("/tmp") : scratch;
+                    bool owned = gpu_test_workspace_is_child(workspace, selected);
+                    BUSTER_TEST(arguments, owned && gpu_test_path_has_kind(workspace, OS_FILE_KIND_DIRECTORY));
+                    if (owned)
+                    {
+                        BUSTER_TEST(arguments, os_directory_delete(workspace));
+                    }
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, !gpu_test_saved_workspace(arena, child).length);
+                }
+                BUSTER_TEST(arguments, gpu_test_directory_entry_count(scratch, &entries) && entries == 0);
+                if (control == 7 || control == 8)
+                {
+                    BUSTER_TEST(arguments, string_first_sequence(gpu_test_child_stream(child, STANDARD_STREAM_ERROR),
+                                                               S8("could not create a private GPU temporary directory under")) != BUSTER_STRING_NO_MATCH);
+                }
+                arguments->show(arguments, S8("GPU_READONLY_SOURCE_CONTROL euid={u64} control={u32} result={u32} source_entries={u64}\n"),
+                                effective_uid, control, (u32)child.result, source_entries);
+            }
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, unavailable, (ByteSlice){(u8*)source_bytes.pointer, source_bytes.length}));
+        }
+        // Restore permissions before owned-fixture cleanup on every path.
+        if (source_created.created)
+        {
+            BUSTER_TEST(arguments, chmod((const char*)source.pointer, 0700) == 0);
+        }
+        BUSTER_TEST(arguments, os_directory_delete(fixture));
+    }
+    arguments->show(arguments, S8("GPU_READONLY_SOURCE_SUMMARY euid={u64} passed={u64} failed={u64}\n"), effective_uid,
+                    result.succeeded_test_count, result.test_count - result.succeeded_test_count);
+    return result;
+}
+#endif
 
 UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
+
+    BUSTER_TEST_FIXTURE(arguments, gpu_test_scratch_roots);
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, gpu_test_readonly_source_scratch);
+#endif
+#if BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, gpu_test_windows_scratch_environment);
+#endif
 
     {
         GpuTargetParseResult parsed = gpu_target_parse(S8("spirv"));
@@ -661,6 +1162,7 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_delete(input));
         BUSTER_TEST(arguments, os_file_delete(output));
         BUSTER_TEST(arguments, file_write(input, good));
+        options.temporary_directory = (String8){0};
         for (u32 existing = 0; existing < 2; existing += 1)
         {
             BUSTER_TEST(arguments, existing ? file_write(output, old) : os_file_delete(output));
@@ -724,7 +1226,7 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, string_first_sequence(driver.diagnostic, S8("GPU artifact published to")) != BUSTER_STRING_NO_MATCH);
         // The public artifact path is preserved; the owned workspace path is
         // included in the error text for remediation. Remove only this test's
-        // workspace, found through its unique output-adjacent namespace below.
+        // workspace, found through its uniquely reported scratch path below.
         String8 marker = S8("could not remove owned GPU temporary directory ");
         u64 marker_index = string_first_sequence(driver.diagnostic, marker);
         BUSTER_TEST(arguments, marker_index != BUSTER_STRING_NO_MATCH);
@@ -754,6 +1256,7 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, file_write(first, (ByteSlice)BUSTER_ARRAY_TO_SLICE(spirv_bytes)));
         BUSTER_TEST(arguments, file_write(second, (ByteSlice)BUSTER_ARRAY_TO_SLICE(spirv_bytes)));
         GpuPipelineOptions options = gpu_test_options(inputs, BUSTER_ARRAY_LENGTH(inputs), gpu_test_target(S8("spirv64")), GPU_PIPELINE_ACTION_LINK);
+        options.temporary_directory = (String8){0};
         options.output_path = output;
         options.tools.spirv_link_path = tool;
         options.tool_timeout_microseconds = 100000;

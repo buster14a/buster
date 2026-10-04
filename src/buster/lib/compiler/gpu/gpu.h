@@ -157,9 +157,9 @@ struct GpuPipelineOptions
     String8* undefinitions;
     String8* extra_arguments;
     String8 output_path;
-    // Direct planner callers provide a directory whose ownership they have
-    // already established. gpu_pipeline_execute replaces this with a freshly
-    // and exclusively created per-invocation directory.
+    // Direct planner callers supply an already owned directory. Execution
+    // treats a nonempty value as a parent scratch root and exclusively creates
+    // its own child there; an empty value selects the platform temporary root.
     String8 temporary_directory;
     String8 sysroot;
     String8 cuda_path;
