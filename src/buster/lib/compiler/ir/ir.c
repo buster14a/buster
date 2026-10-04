@@ -28,7 +28,12 @@
 // selection or Wasm emission so a diagnosed frontend failure cannot leak a
 // half-built function into codegen. Its module-scope and per-function halves
 // (ir_validate_canonical_scope, ir_validate_canonical_function) let local
-// promotion attribute a defect to the function that already had it.
+// promotion attribute a defect to the function that already had it. The
+// per-function half is one walk over the block chains (ir_validate_block_rows:
+// ownership, each row, the value the row defines) plus a sweep over the values
+// nothing defined; the historical three-pass form survives under
+// BUSTER_INCLUDE_TESTS as ir_test_validate_canonical_module_reference, the
+// oracle its traversal is compared against.
 
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
@@ -5188,69 +5193,6 @@ IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBl
     return result;
 }
 
-// Runs the ownership proof over every lowered function ahead of the
-// per-instruction checks, so those can walk `next` without a cycle guard and
-// can trust that block->last_instruction really terminates its chain. One
-// scratch array sized to the largest function serves the whole module.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* module)
-{
-    IrValidationResult result = {
-        .function = IR_FUNCTION_ID_INVALID,
-        .block = IR_BLOCK_ID_INVALID,
-        .instruction = IR_INSTRUCTION_ID_INVALID,
-    };
-    u32 capacity = 0;
-    for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
-    {
-        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTION_SCANS, 1);
-        IrFunction* function = module->functions + function_index;
-        if (function->state == IR_FUNCTION_LOWERED)
-        {
-            if ((function->block_count && !function->blocks) || (function->instruction_count && !function->instructions) ||
-                (function->value_count && !function->values) ||
-                (function->label_metadata_count && (!function->label_metadata || !function->label_metadata_values)) ||
-                (function->extra_count && (!function->extras || !function->extra_instructions)))
-            {
-                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
-            }
-            else
-            {
-                if (function->published_cfg)
-                {
-                    IR_CONSTRUCTION_RECORD(VALIDATION_PUBLISHED_CFG_CHECKS, 1);
-                    result = ir_validate_published_cfg(function);
-                }
-                capacity = BUSTER_MAX(capacity, function->instruction_count);
-            }
-        }
-    }
-    if (result.error == IR_VALIDATION_NONE)
-    {
-        TemporalArena scratch = scratch_begin(0, 0);
-        IrBlockId* owners = arena_allocate(scratch.arena, IrBlockId, capacity);
-        for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
-        {
-            IrFunction* function = module->functions + function_index;
-            if (function->state != IR_FUNCTION_LOWERED)
-            {
-                continue;
-            }
-            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTIONS, 1);
-            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BLOCKS, function->block_count);
-            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_INSTRUCTIONS, function->instruction_count);
-            IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BYTES_CLEARED, sizeof(*owners) * function->instruction_count);
-            IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
-            if (ownership.error != IR_VALIDATION_NONE)
-            {
-                result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
-                break;
-            }
-        }
-        scratch_end(scratch);
-    }
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL bool ir_canonical_conversion_valid(IrType* source, IrType* destination, IrConversionOperation operation)
 {
     if (source && destination)
@@ -5527,99 +5469,109 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
     return error;
 }
 
-// Every value's type, label provenance and alignment. These faults name the
-// instruction that defined the value rather than a block.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* program, IrFunction* function)
+// How the fused walk below records who defines a value: nobody yet, the one
+// row whose result names it, or the one block parameter that carries it.
+enum
+{
+    IR_VALIDATION_DEFINED_NONE = 0,
+    IR_VALIDATION_DEFINED_INSTRUCTION = 1,
+    IR_VALIDATION_DEFINED_PARAMETER = 2,
+};
+
+// One value's definition consistency, type, label provenance and alignment.
+// `is_parameter` says whether a block parameter carries the value. These
+// faults name the instruction that defined the value rather than a block; a
+// parameter or an unreferenced value names IR_INSTRUCTION_ID_INVALID.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_value(IrProgram* program, IrFunction* function, IrValueId value_id, bool is_parameter)
 {
     IrValidationResult result = ir_validation_ok();
-    TemporalArena temporary = scratch_begin(&program->arena, 1);
-    u8* parameter_definitions = arena_allocate(temporary.arena, u8, function->value_count);
-    memset(parameter_definitions, 0, function->value_count);
-    for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
+    IR_CONSTRUCTION_RECORD(VALIDATION_VALUES, 1);
+    IrValue* value = function->values + value_id.value;
+    IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
+    if (!value_type || (value->definition.value >= function->instruction_count &&
+                        !(value->definition.value == IR_ID_UNDERLYING_INVALID && is_parameter && value->category == IR_VALUE_VALUE)))
     {
-        IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_BLOCKS, 1);
-        IrBlock* block = function->blocks + block_index;
-        IrPublishedCfg const* cfg = function->published_cfg;
-        IrBlockParameter* builder_parameter = block->first_parameter;
-        for (u32 index = 0; index < block->parameter_count && result.error == IR_VALIDATION_NONE; index += 1)
+        result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, value->definition);
+    }
+    else if (value->definition.value < function->instruction_count && is_parameter)
+    {
+        // A value has exactly one definition: the row it names cannot
+        // also share it with a block parameter.
+        result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, IR_BLOCK_ID_INVALID, value->definition);
+    }
+    else
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_CHECKS, 1);
+        IrValueLabelMetadata metadata = ir_value_label_metadata(function, value_id);
+        bool transfer_valid = ir_label_metadata_transfer_valid(program, function, value_id);
+        bool shape_valid = ir_label_metadata_shape_valid(program, function, value_id);
+        // Shape has already proved count/pointer agreement, uniqueness,
+        // block bounds and the direct/storage flag constraints once.
+        bool direct_valid = shape_valid && metadata.is_label_value && !metadata.has_non_label_provenance;
+        bool storage_valid = shape_valid && metadata.has_label_provenance;
+        if ((metadata.is_label_value && !metadata.has_label_provenance && !metadata.has_non_label_provenance && !direct_valid) ||
+            (metadata.has_label_provenance && !storage_valid) || !transfer_valid || !shape_valid)
         {
-            IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PARAMETERS, 1);
-            IrValueId value = IR_VALUE_ID_INVALID;
-            if (cfg)
+            result = ir_validation_error(IR_VALIDATION_OPERATION, function, IR_BLOCK_ID_INVALID, value->definition);
+        }
+        else if (direct_valid || storage_valid)
+        {
+            for (u32 label_index = 0; label_index < metadata.label_block_count && result.error == IR_VALIDATION_NONE; label_index += 1)
             {
-                value = cfg->parameters[cfg->blocks[block_index].parameter_offset + index].value;
-            }
-            else if (builder_parameter)
-            {
-                value = builder_parameter->value;
-                builder_parameter = builder_parameter->next;
-            }
-            if (value.value >= function->value_count || parameter_definitions[value.value])
-            {
-                result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
-            }
-            else
-            {
-                parameter_definitions[value.value] = 1;
+                IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_BLOCKS, 1);
+                if (metadata.label_blocks[label_index].value >= function->block_count)
+                {
+                    result = ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, IR_BLOCK_ID_INVALID, value->definition);
+                }
             }
         }
-        if (!cfg && builder_parameter)
+        if (result.error == IR_VALIDATION_NONE && value->alignment &&
+            ((value->alignment & (value->alignment - 1)) || !value_type->layout.resolved || value->alignment < value_type->layout.alignment))
+        {
+            result = ir_validation_error(IR_VALIDATION_ALIGNMENT, function, IR_BLOCK_ID_INVALID, value->definition);
+        }
+    }
+    return result;
+}
+
+// A block's parameter values: each in range, carried by no other parameter,
+// and -- through ir_validate_value -- defined by no row. `defined` records the
+// claim so the row walk can refuse a result that a parameter already carries.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameter_values(IrProgram* program, IrFunction* function, IrBlock* block, u8* defined)
+{
+    IrValidationResult result = ir_validation_ok();
+    IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_BLOCKS, 1);
+    IrPublishedCfg const* cfg = function->published_cfg;
+    IrBlockParameter* builder_parameter = block->first_parameter;
+    for (u32 index = 0; index < block->parameter_count && result.error == IR_VALIDATION_NONE; index += 1)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PARAMETERS, 1);
+        IrValueId value = IR_VALUE_ID_INVALID;
+        if (cfg)
+        {
+            value = cfg->parameters[cfg->blocks[block->id.value].parameter_offset + index].value;
+        }
+        else if (builder_parameter)
+        {
+            value = builder_parameter->value;
+            builder_parameter = builder_parameter->next;
+        }
+        if (value.value >= function->value_count || defined[value.value] == IR_VALIDATION_DEFINED_PARAMETER)
         {
             result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
         }
-    }
-    for (u32 value_index = 0; value_index < function->value_count && result.error == IR_VALIDATION_NONE; value_index += 1)
-    {
-        IR_CONSTRUCTION_RECORD(VALIDATION_VALUES, 1);
-        IrValue* value = function->values + value_index;
-        IrValueId value_id = {.value = value_index};
-        IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
-        if (!value_type || (value->definition.value >= function->instruction_count &&
-                            !(value->definition.value == IR_ID_UNDERLYING_INVALID && parameter_definitions[value_index] &&
-                              value->category == IR_VALUE_VALUE)))
-        {
-            result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, value->definition);
-        }
-        else if (value->definition.value < function->instruction_count && parameter_definitions[value_index])
-        {
-            // A value has exactly one definition: the row it names cannot
-            // also share it with a block parameter.
-            result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, IR_BLOCK_ID_INVALID, value->definition);
-        }
         else
         {
-            IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_CHECKS, 1);
-            IrValueLabelMetadata metadata = ir_value_label_metadata(function, value_id);
-            bool transfer_valid = ir_label_metadata_transfer_valid(program, function, value_id);
-            bool shape_valid = ir_label_metadata_shape_valid(program, function, value_id);
-            // Shape has already proved count/pointer agreement, uniqueness,
-            // block bounds and the direct/storage flag constraints once.
-            bool direct_valid = shape_valid && metadata.is_label_value && !metadata.has_non_label_provenance;
-            bool storage_valid = shape_valid && metadata.has_label_provenance;
-            if ((metadata.is_label_value && !metadata.has_label_provenance && !metadata.has_non_label_provenance && !direct_valid) ||
-                (metadata.has_label_provenance && !storage_valid) || !transfer_valid || !shape_valid)
-            {
-                result = ir_validation_error(IR_VALIDATION_OPERATION, function, IR_BLOCK_ID_INVALID, value->definition);
-            }
-            else if (direct_valid || storage_valid)
-            {
-                for (u32 label_index = 0; label_index < metadata.label_block_count && result.error == IR_VALIDATION_NONE; label_index += 1)
-                {
-                    IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_BLOCKS, 1);
-                    if (metadata.label_blocks[label_index].value >= function->block_count)
-                    {
-                        result = ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, IR_BLOCK_ID_INVALID, value->definition);
-                    }
-                }
-            }
-            if (result.error == IR_VALIDATION_NONE && value->alignment &&
-                ((value->alignment & (value->alignment - 1)) || !value_type->layout.resolved || value->alignment < value_type->layout.alignment))
-            {
-                result = ir_validation_error(IR_VALIDATION_ALIGNMENT, function, IR_BLOCK_ID_INVALID, value->definition);
-            }
+            // A value a visited row already defines fails inside as the
+            // shared definition it is, naming that row.
+            defined[value.value] = IR_VALIDATION_DEFINED_PARAMETER;
+            result = ir_validate_value(program, function, value, true);
         }
     }
-    scratch_end(temporary);
+    if (result.error == IR_VALIDATION_NONE && !cfg && builder_parameter)
+    {
+        result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+    }
     return result;
 }
 
@@ -6397,101 +6349,122 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     return error;
 }
 
-// One block's instruction chain. ir_validate_module_ownership already proved
-// the chain is a simple path of in-range ids, which is why there is no range or
-// revisit guard here.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram* program, IrFunction* function, IrType* signature, IrBlock* block)
+// One row's own obligations: its position after a terminator, opcode, type,
+// storage pointers, operand and target ranges, result binding and operation.
+// The caller holds the row's block and id for the attribution.
+BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_row(IrProgram* program, IrFunction* function, IrType* signature,
+                                                                  IrInstructionId instruction_id, IrInstruction* instruction, bool after_terminator)
+{
+    IrValidationError error = IR_VALIDATION_NONE;
+    IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTIONS, 1);
+    IR_CONSTRUCTION_RECORD(VALIDATION_TERMINATOR_CHECKS, 1);
+    if (after_terminator || instruction->opcode >= IR_OPCODE_COUNT || !ir_type_from_id(&program->types, instruction->canonical_type))
+    {
+        error = after_terminator ? IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR : IR_VALIDATION_INVALID_ID;
+    }
+    else if ((instruction->operand_count && !instruction->operands) || (instruction->target_count && !instruction->targets) ||
+             (instruction->immediate_count && !instruction->immediates))
+    {
+        error = IR_VALIDATION_OPERATION;
+    }
+    else
+    {
+        for (u32 operand_index = 0; operand_index < instruction->operand_count && error == IR_VALIDATION_NONE; operand_index += 1)
+        {
+            IR_CONSTRUCTION_RECORD(VALIDATION_OPERAND_IDS, 1);
+            if (instruction->operands[operand_index].value >= function->value_count)
+            {
+                error = IR_VALIDATION_INVALID_ID;
+            }
+        }
+        for (u32 target_index = 0; target_index < instruction->target_count && error == IR_VALIDATION_NONE; target_index += 1)
+        {
+            IR_CONSTRUCTION_RECORD(VALIDATION_TARGET_IDS, 1);
+            if (instruction->targets[target_index].value >= function->block_count)
+            {
+                error = IR_VALIDATION_BRANCH_TARGET;
+            }
+        }
+        if (error == IR_VALIDATION_NONE && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+            (instruction->result.value >= function->value_count ||
+             function->values[instruction->result.value].definition.value != instruction_id.value ||
+             function->values[instruction->result.value].canonical_type.value != instruction->canonical_type.value))
+        {
+            error = IR_VALIDATION_RESULT_TYPE;
+        }
+        if (error == IR_VALIDATION_NONE && instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IR_CONSTRUCTION_RECORD(VALIDATION_RESULT_RELATIONSHIPS, 1);
+        }
+        if (error == IR_VALIDATION_NONE)
+        {
+            error = ir_validate_instruction_operation(program, function, signature, instruction);
+        }
+    }
+    return error;
+}
+
+// One block's chain, which is also its ownership proof: `visited` is the set
+// that bounds the walk, so a cycle, a tail shared with an earlier block and an
+// out-of-range id are refused at the first row that shows them, and the tail
+// the chain reaches must be the one the block records. A row's result value
+// is checked at this, its one definition site, ahead of the row itself; the
+// function-level sweep afterwards reaches only values no row or parameter
+// defines.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_rows(IrProgram* program, IrFunction* function, IrType* signature, IrBlock* block,
+                                                               u8* visited, u8* defined, u32* visited_count)
 {
     IrValidationResult result = ir_validation_ok();
     IrInstructionId instruction_id = block->first_instruction;
+    IrInstructionId tail = IR_INSTRUCTION_ID_INVALID;
     bool terminated = false;
     while (instruction_id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
     {
-        IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTIONS, 1);
-        IR_CONSTRUCTION_RECORD(VALIDATION_TERMINATOR_CHECKS, 1);
-        IrInstruction* instruction = function->instructions + instruction_id.value;
-        IrValidationError error = IR_VALIDATION_NONE;
-        if (terminated || instruction->opcode >= IR_OPCODE_COUNT || !ir_type_from_id(&program->types, instruction->canonical_type))
+        if (instruction_id.value >= function->instruction_count)
         {
-            error = terminated ? IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR : IR_VALIDATION_INVALID_ID;
+            result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, instruction_id);
         }
-        else if ((instruction->operand_count && !instruction->operands) || (instruction->target_count && !instruction->targets) ||
-                 (instruction->immediate_count && !instruction->immediates))
+        else if (visited[instruction_id.value])
         {
-            error = IR_VALIDATION_OPERATION;
+            result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, instruction_id);
         }
         else
         {
-            for (u32 operand_index = 0; operand_index < instruction->operand_count && error == IR_VALIDATION_NONE; operand_index += 1)
+            visited[instruction_id.value] = 1;
+            *visited_count += 1;
+            IrInstruction* instruction = function->instructions + instruction_id.value;
+            u32 defined_value = instruction->result.value;
+            if (defined_value < function->value_count && function->values[defined_value].definition.value == instruction_id.value)
             {
-                IR_CONSTRUCTION_RECORD(VALIDATION_OPERAND_IDS, 1);
-                if (instruction->operands[operand_index].value >= function->value_count)
+                result = ir_validate_value(program, function, instruction->result, defined[defined_value] == IR_VALIDATION_DEFINED_PARAMETER);
+                defined[defined_value] = IR_VALIDATION_DEFINED_INSTRUCTION;
+            }
+            if (result.error == IR_VALIDATION_NONE)
+            {
+                IrValidationError error = ir_validate_instruction_row(program, function, signature, instruction_id, instruction, terminated);
+                if (error != IR_VALIDATION_NONE)
                 {
-                    error = IR_VALIDATION_INVALID_ID;
+                    result = ir_validation_error(error, function, block->id, instruction_id);
+                }
+                else
+                {
+                    terminated = ir_instruction_is_terminator(instruction);
+                    tail = instruction_id;
+                    instruction_id = ir_block_next_instruction(function, block, instruction_id);
                 }
             }
-            for (u32 target_index = 0; target_index < instruction->target_count && error == IR_VALIDATION_NONE; target_index += 1)
-            {
-                IR_CONSTRUCTION_RECORD(VALIDATION_TARGET_IDS, 1);
-                if (instruction->targets[target_index].value >= function->block_count)
-                {
-                    error = IR_VALIDATION_BRANCH_TARGET;
-                }
-            }
-            if (error == IR_VALIDATION_NONE && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-                (instruction->result.value >= function->value_count ||
-                 function->values[instruction->result.value].definition.value != instruction_id.value ||
-                 function->values[instruction->result.value].canonical_type.value != instruction->canonical_type.value))
-            {
-                error = IR_VALIDATION_RESULT_TYPE;
-            }
-            if (error == IR_VALIDATION_NONE && instruction->result.value != IR_ID_UNDERLYING_INVALID)
-            {
-                IR_CONSTRUCTION_RECORD(VALIDATION_RESULT_RELATIONSHIPS, 1);
-            }
-            if (error == IR_VALIDATION_NONE)
-            {
-                error = ir_validate_instruction_operation(program, function, signature, instruction);
-            }
         }
-        if (error != IR_VALIDATION_NONE)
-        {
-            result = ir_validation_error(error, function, block->id, instruction_id);
-        }
-        else
-        {
-            terminated = ir_instruction_is_terminator(instruction);
-            instruction_id = ir_block_next_instruction(function, block, instruction_id);
-        }
+    }
+    // last_instruction is what the appenders extend and what the emitters
+    // treat as the terminator slot, so a value the chain never reaches
+    // would let both walk different instruction sequences.
+    if (result.error == IR_VALIDATION_NONE && tail.value != block->last_instruction.value)
+    {
+        result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, block->last_instruction);
     }
     if (result.error == IR_VALIDATION_NONE && !terminated)
     {
         result = ir_validation_error(IR_VALIDATION_UNTERMINATED_BLOCK, function, block->id, block->last_instruction);
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_blocks(IrProgram* program, IrFunction* function, IrType* signature)
-{
-    IrValidationResult result = ir_validation_ok();
-    bool validate_label_provenance = function->label_metadata_count != 0;
-    for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
-    {
-        IR_CONSTRUCTION_RECORD(VALIDATION_BLOCKS, 1);
-        IrBlock* block = function->blocks + block_index;
-        if (!block->terminated || !block->sealed)
-        {
-            result = ir_validation_error(!block->terminated ? IR_VALIDATION_UNTERMINATED_BLOCK : IR_VALIDATION_BLOCK_PARAMETER, function, block->id,
-                                         block->last_instruction);
-        }
-        else
-        {
-            result = ir_validate_block_parameters(function, block, validate_label_provenance);
-            if (result.error == IR_VALIDATION_NONE)
-            {
-                result = ir_validate_block_instructions(program, function, signature, block);
-            }
-        }
     }
     return result;
 }
@@ -6547,9 +6520,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_initializer(IrProgram* program
     return result;
 }
 
-// The module-scope half of ir_validate_canonical_module: the argument guard,
-// the ownership proof for every lowered function, and the globals, aliases and
-// initializers. A failure here is not a verdict on one function's rows.
+// The module-scope half of ir_validate_canonical_module: the argument guard
+// and the globals, aliases and initializers. A failure here is not a verdict
+// on one function's rows; every function-level proof, ownership included, is
+// ir_validate_canonical_function's own.
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_scope(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = ir_validation_ok();
@@ -6564,7 +6538,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_scope(IrProgram* pr
     }
     else
     {
-        result = ir_validate_module_ownership(module);
         for (u32 global_index = 0; global_index < module->global_count && result.error == IR_VALIDATION_NONE; global_index += 1)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_GLOBALS, 1);
@@ -6588,27 +6561,91 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_scope(IrProgram* pr
     return result;
 }
 
-// The function-scope half: one lowered function's signature, values, blocks
-// and rows. It walks instruction chains without a cycle guard, so it runs only
-// after ir_validate_canonical_scope has proven ownership for the module.
+// The function-scope half: one lowered function's storage, signature, blocks,
+// parameters, rows and values, self-contained. One walk over the block chains
+// proves ownership (every row in exactly one chain, each chain ending at its
+// recorded tail) while it checks each row and the value that row defines;
+// parameters are checked with their block; the sweep that follows reaches
+// only the values nothing defined. Scratch is one byte per row and per value.
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram* program, IrFunction* function)
 {
-    IrValidationResult result;
+    IrValidationResult result = ir_validation_ok();
     IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
+    IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTION_SCANS, 1);
     IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
-    if (!signature || signature->kind != IR_TYPE_FUNCTION ||
-        (signature->parameter_count && !signature->parameter_types) ||
-        !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
+    if ((function->block_count && !function->blocks) || (function->instruction_count && !function->instructions) ||
+        (function->value_count && !function->values) ||
+        (function->label_metadata_count && (!function->label_metadata || !function->label_metadata_values)) ||
+        (function->extra_count && (!function->extras || !function->extra_instructions)))
     {
         result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
     }
-    else
+    if (result.error == IR_VALIDATION_NONE && function->published_cfg)
     {
-        result = ir_validate_function_values(program, function);
-        if (result.error == IR_VALIDATION_NONE)
+        IR_CONSTRUCTION_RECORD(VALIDATION_PUBLISHED_CFG_CHECKS, 1);
+        result = ir_validate_published_cfg(function);
+    }
+    if (result.error == IR_VALIDATION_NONE &&
+        (!signature || signature->kind != IR_TYPE_FUNCTION || (signature->parameter_count && !signature->parameter_types) ||
+         !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count))
+    {
+        result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+    }
+    if (result.error == IR_VALIDATION_NONE)
+    {
+        TemporalArena temporary = scratch_begin(&program->arena, 1);
+        u8* visited = arena_allocate(temporary.arena, u8, function->instruction_count);
+        u8* defined = arena_allocate(temporary.arena, u8, function->value_count);
+        memset(visited, 0, function->instruction_count);
+        memset(defined, IR_VALIDATION_DEFINED_NONE, function->value_count);
+        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTIONS, 1);
+        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BLOCKS, function->block_count);
+        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_INSTRUCTIONS, function->instruction_count);
+        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BYTES_CLEARED, (u64)function->instruction_count + function->value_count);
+        bool validate_label_provenance = function->label_metadata_count != 0;
+        u32 visited_count = 0;
+        for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
         {
-            result = ir_validate_function_blocks(program, function, signature);
+            IR_CONSTRUCTION_RECORD(VALIDATION_BLOCKS, 1);
+            IrBlock* block = function->blocks + block_index;
+            if (!block->terminated || !block->sealed)
+            {
+                result = ir_validation_error(!block->terminated ? IR_VALIDATION_UNTERMINATED_BLOCK : IR_VALIDATION_BLOCK_PARAMETER, function, block->id,
+                                             block->last_instruction);
+            }
+            else
+            {
+                result = ir_validate_block_parameter_values(program, function, block, defined);
+                if (result.error == IR_VALIDATION_NONE)
+                {
+                    result = ir_validate_block_parameters(function, block, validate_label_provenance);
+                }
+                if (result.error == IR_VALIDATION_NONE)
+                {
+                    result = ir_validate_block_rows(program, function, signature, block, visited, defined, &visited_count);
+                }
+            }
         }
+        // A row no chain reaches is still read out of the dense array by
+        // every later pass; name the first one.
+        for (u32 instruction_index = 0; visited_count != function->instruction_count && instruction_index < function->instruction_count &&
+                                        result.error == IR_VALIDATION_NONE;
+             instruction_index += 1)
+        {
+            if (!visited[instruction_index])
+            {
+                result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, IR_BLOCK_ID_INVALID,
+                                             (IrInstructionId){.value = instruction_index});
+            }
+        }
+        for (u32 value_index = 0; value_index < function->value_count && result.error == IR_VALIDATION_NONE; value_index += 1)
+        {
+            if (defined[value_index] == IR_VALIDATION_DEFINED_NONE)
+            {
+                result = ir_validate_value(program, function, (IrValueId){.value = value_index}, false);
+            }
+        }
+        scratch_end(temporary);
     }
     return result;
 }
@@ -6626,6 +6663,182 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
     }
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+// The historical three-pass validator, retained unchanged as the independent
+// oracle for the fused walk above: the module-wide ownership proof first, then
+// every value of a function, then its blocks and rows. It shares the leaf
+// predicates (ir_validate_value, ir_validate_block_parameters,
+// ir_validate_instruction_row) and differs only in traversal, which is what
+// the fused walk changed. ir_test_validate_canonical_module_reference is the
+// entry; ir_test.c compares verdicts on adversarial and random functions.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* module)
+{
+    IrValidationResult result = {
+        .function = IR_FUNCTION_ID_INVALID,
+        .block = IR_BLOCK_ID_INVALID,
+        .instruction = IR_INSTRUCTION_ID_INVALID,
+    };
+    u32 capacity = 0;
+    for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
+    {
+        IrFunction* function = module->functions + function_index;
+        if (function->state == IR_FUNCTION_LOWERED)
+        {
+            if ((function->block_count && !function->blocks) || (function->instruction_count && !function->instructions) ||
+                (function->value_count && !function->values) ||
+                (function->label_metadata_count && (!function->label_metadata || !function->label_metadata_values)) ||
+                (function->extra_count && (!function->extras || !function->extra_instructions)))
+            {
+                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+            }
+            else
+            {
+                if (function->published_cfg)
+                {
+                    result = ir_validate_published_cfg(function);
+                }
+                capacity = BUSTER_MAX(capacity, function->instruction_count);
+            }
+        }
+    }
+    if (result.error == IR_VALIDATION_NONE)
+    {
+        TemporalArena scratch = scratch_begin(0, 0);
+        IrBlockId* owners = arena_allocate(scratch.arena, IrBlockId, capacity);
+        for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state == IR_FUNCTION_LOWERED)
+            {
+                IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
+                if (ownership.error != IR_VALIDATION_NONE)
+                {
+                    result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
+                }
+            }
+        }
+        scratch_end(scratch);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* program, IrFunction* function)
+{
+    IrValidationResult result = ir_validation_ok();
+    TemporalArena temporary = scratch_begin(&program->arena, 1);
+    u8* parameter_definitions = arena_allocate(temporary.arena, u8, function->value_count);
+    memset(parameter_definitions, 0, function->value_count);
+    for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        IrPublishedCfg const* cfg = function->published_cfg;
+        IrBlockParameter* builder_parameter = block->first_parameter;
+        for (u32 index = 0; index < block->parameter_count && result.error == IR_VALIDATION_NONE; index += 1)
+        {
+            IrValueId value = IR_VALUE_ID_INVALID;
+            if (cfg)
+            {
+                value = cfg->parameters[cfg->blocks[block_index].parameter_offset + index].value;
+            }
+            else if (builder_parameter)
+            {
+                value = builder_parameter->value;
+                builder_parameter = builder_parameter->next;
+            }
+            if (value.value >= function->value_count || parameter_definitions[value.value])
+            {
+                result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+            }
+            else
+            {
+                parameter_definitions[value.value] = 1;
+            }
+        }
+        if (!cfg && builder_parameter)
+        {
+            result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+        }
+    }
+    for (u32 value_index = 0; value_index < function->value_count && result.error == IR_VALIDATION_NONE; value_index += 1)
+    {
+        result = ir_validate_value(program, function, (IrValueId){.value = value_index}, parameter_definitions[value_index] != 0);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_blocks(IrProgram* program, IrFunction* function, IrType* signature)
+{
+    IrValidationResult result = ir_validation_ok();
+    bool validate_label_provenance = function->label_metadata_count != 0;
+    for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        if (!block->terminated || !block->sealed)
+        {
+            result = ir_validation_error(!block->terminated ? IR_VALIDATION_UNTERMINATED_BLOCK : IR_VALIDATION_BLOCK_PARAMETER, function, block->id,
+                                         block->last_instruction);
+        }
+        else
+        {
+            result = ir_validate_block_parameters(function, block, validate_label_provenance);
+            IrInstructionId instruction_id = block->first_instruction;
+            bool terminated = false;
+            while (instruction_id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
+            {
+                IrInstruction* instruction = function->instructions + instruction_id.value;
+                IrValidationError error = ir_validate_instruction_row(program, function, signature, instruction_id, instruction, terminated);
+                if (error != IR_VALIDATION_NONE)
+                {
+                    result = ir_validation_error(error, function, block->id, instruction_id);
+                }
+                else
+                {
+                    terminated = ir_instruction_is_terminator(instruction);
+                    instruction_id = ir_block_next_instruction(function, block, instruction_id);
+                }
+            }
+            if (result.error == IR_VALIDATION_NONE && !terminated)
+            {
+                result = ir_validation_error(IR_VALIDATION_UNTERMINATED_BLOCK, function, block->id, block->last_instruction);
+            }
+        }
+    }
+    return result;
+}
+
+IrValidationResult ir_test_validate_canonical_module_reference(IrProgram* program, IrModule* module)
+{
+    IrValidationResult result = ir_validate_canonical_scope(program, module);
+    if (result.error == IR_VALIDATION_NONE)
+    {
+        result = ir_validate_module_ownership(module);
+    }
+    for (u32 function_index = 0; result.error == IR_VALIDATION_NONE && function_index < module->function_count; function_index += 1)
+    {
+        IrFunction* function = module->functions + function_index;
+        if (function->state == IR_FUNCTION_LOWERED)
+        {
+            IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+            if (!signature || signature->kind != IR_TYPE_FUNCTION || (signature->parameter_count && !signature->parameter_types) ||
+                !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
+            {
+                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+            }
+            else
+            {
+                result = ir_validate_function_values(program, function);
+                if (result.error == IR_VALIDATION_NONE)
+                {
+                    result = ir_validate_function_blocks(program, function, signature);
+                }
+            }
+        }
+    }
+    return result;
+}
+#endif
 
 #include <buster/lib/compiler/ir/ir_cfg.c>
 #include <buster/lib/compiler/ir/ir_promote.c>

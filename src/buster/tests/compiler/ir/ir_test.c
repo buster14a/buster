@@ -35,6 +35,7 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(IrFunction* function, IrB
 #include <buster/tests/compiler/ir/ir_label_owner_test.c>
 #include <buster/tests/compiler/ir/ir_label_sets_test.c>
 #include <buster/tests/compiler/ir/ir_label_paths_test.c>
+#include <buster/tests/compiler/ir/ir_validate_test.c>
 
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_wide_float_constant(Arena* arena, u32 bit_width, u64 low, u64 high,
                                                                                      u32 immediate_count, u32 target_count,
@@ -733,7 +734,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_validation_census(UnitTestArguments* 
     IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_FUNCTIONS, 1);
     IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_BLOCKS, 1);
     IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_INSTRUCTIONS, 3);
-    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_BYTES_CLEARED, sizeof(IrBlockId) * 3);
+    // The fused walk clears one visited byte per row and one definition byte
+    // per value, not a block id per row.
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_BYTES_CLEARED, 3 + 1);
     IR_VALIDATION_EXPECT(VALIDATION_FUNCTIONS, 1);
     IR_VALIDATION_EXPECT(VALIDATION_VALUE_BLOCKS, 1);
     IR_VALIDATION_EXPECT(VALIDATION_VALUES, 1);
@@ -1117,6 +1120,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult protocol = ir_construction_protocol_tests(arguments);
     result.test_count += protocol.test_count;
     result.succeeded_test_count += protocol.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, ir_validate_equivalence_tests);
 
     IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
         {{.offset = 0, .size = 1}},

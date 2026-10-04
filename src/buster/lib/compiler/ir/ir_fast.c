@@ -552,7 +552,6 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             // cause their defects, and an unchecked build accepts them.
             TemporalArena scratch = scratch_begin(&program->arena, 1);
             u8* attribution = 0;
-            bool ownership_checked = false;
             if (input_certified && BUSTER_IR_TRANSFORM_CHECKS && module->function_count)
             {
                 attribution = arena_allocate(scratch.arena, u8, module->function_count);
@@ -563,20 +562,12 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 IrFunction* function = module->functions + index;
                 if (function->state == IR_FUNCTION_LOWERED)
                 {
-                    if (attribution && ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL)))
+                    // Function validation carries its own ownership proof, so
+                    // one function attributes without a module-wide scan.
+                    if (attribution && ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL)) &&
+                        ir_validate_canonical_function(program, function).error != IR_VALIDATION_NONE)
                     {
-                        if (!ownership_checked)
-                        {
-                            // Function validation walks chains that only the
-                            // module ownership proof bounds. Without it no
-                            // function can be attributed; check the module whole.
-                            ownership_checked = true;
-                            attribution = ir_validate_module_ownership(module).error == IR_VALIDATION_NONE ? attribution : 0;
-                        }
-                        if (attribution && ir_validate_canonical_function(program, function).error != IR_VALIDATION_NONE)
-                        {
-                            attribution[index] |= IR_PROMOTION_INPUT_INVALID;
-                        }
+                        attribution[index] |= IR_PROMOTION_INPUT_INVALID;
                     }
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_FUNCTIONS, 1);
                     u64 promoted_before = module->local_promotion.promoted_locals;
