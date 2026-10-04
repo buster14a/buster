@@ -3888,6 +3888,10 @@ typedef enum CMacroBuiltin
     C_MACRO_BUILTIN_NONE,
     C_MACRO_BUILTIN_LINE,
     C_MACRO_BUILTIN_FILE,
+    C_MACRO_BUILTIN_COUNTER,
+    C_MACRO_BUILTIN_INCLUDE_LEVEL,
+    C_MACRO_BUILTIN_BASE_FILE,
+    C_MACRO_BUILTIN_FILE_NAME,
 } CMacroBuiltin;
 
 struct CMacro
@@ -3908,14 +3912,17 @@ struct CMacro
     u32 by_symbol_capacity;
     u32 next_generation;
     bool disabled;
-    // Head-of-list state for the lazy builtin macros: the main preprocess
-    // loop stores the current frame and token offset here each iteration
-    // (two stores, no location recovery), and __LINE__/__FILE__ recover the
-    // logical line from them only when actually expanded.
+    // Head-of-list state for lazy builtin macros: the main preprocess loop
+    // stores the current frame and token offset here each iteration (two
+    // stores, no location recovery), and dynamic values are read on expansion.
     u32 builtin_line;
     struct CPreprocessSourceFrame* builtin_frame;
     u32 builtin_token_offset;
     String8 builtin_path;
+    // Per-translation-unit state: __COUNTER__ advances once per expansion,
+    // while __BASE_FILE__ retains the root path independently of #line.
+    u32 builtin_counter;
+    String8 builtin_base_path;
 };
 
 typedef struct CMacroPushMacro CMacroPushMacro;
@@ -5489,16 +5496,30 @@ BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgume
 }
 
 BUSTER_C_INTERNAL u32 c_preprocess_builtin_line(CMacro* first);
+BUSTER_C_INTERNAL u32 c_preprocess_builtin_include_level(CMacro* first);
 BUSTER_C_INTERNAL CSourceLocation c_preprocess_recover_location(struct CPreprocessSourceFrame* frame, u32 file, CToken token);
 
 BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* first, u8 builtin, u32 stamp, u32 line)
 {
-    if (builtin == C_MACRO_BUILTIN_LINE)
+    CPpToken result = {0};
+    if (builtin == C_MACRO_BUILTIN_LINE || builtin == C_MACRO_BUILTIN_COUNTER || builtin == C_MACRO_BUILTIN_INCLUDE_LEVEL)
     {
         char8* digits = c_space_allocate(space, 11);
-        // The invocation stamp owns the line, including argument tokens
-        // on another physical line within the same expansion batch.
-        u32 value = line ? line : c_preprocess_builtin_line(first);
+        u32 value = 0;
+        if (builtin == C_MACRO_BUILTIN_LINE)
+        {
+            // The invocation stamp owns the line, including argument tokens
+            // on another physical line within the same expansion batch.
+            value = line ? line : c_preprocess_builtin_line(first);
+        }
+        else if (builtin == C_MACRO_BUILTIN_COUNTER)
+        {
+            value = first->builtin_counter++;
+        }
+        else
+        {
+            value = c_preprocess_builtin_include_level(first);
+        }
         u32 length = 0;
         do
         {
@@ -5507,7 +5528,7 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
             length += 1;
         } while (value);
         digits[10] = 0;
-        return (CPpToken){
+        result = (CPpToken){
             .token =
                 {
                     .offset = c_space_offset(space, digits + 10 - length),
@@ -5518,33 +5539,49 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
             .foreign = true,
         };
     }
-    String8 path = first->builtin_path;
-    u64 capacity = path.length * 2 + 3;
-    char8* quoted = c_space_allocate(space, capacity);
-    u64 output = 0;
-    quoted[output++] = '"';
-    for (u64 index = 0; index < path.length; index += 1)
+    else
     {
-        char8 character = path.pointer[index];
-        if (character == '\\' || character == '"')
+        String8 path = builtin == C_MACRO_BUILTIN_BASE_FILE ? first->builtin_base_path : first->builtin_path;
+        if (builtin == C_MACRO_BUILTIN_FILE_NAME)
         {
-            quoted[output++] = '\\';
-        }
-        quoted[output++] = character;
-    }
-    quoted[output++] = '"';
-    quoted[output] = 0;
-    c_space_shrink(space, capacity - (output + 1));
-    return (CPpToken){
-        .token =
+            u64 basename_start = 0;
+            for (u64 index = 0; index < path.length; index += 1)
             {
-                .offset = c_space_offset(space, quoted),
-                .length = c_token_length_field(output),
-                .kind = C_TOKEN_STRING_LITERAL,
-            },
-        .stamp = stamp & C_PP_STAMP_MASK,
-        .foreign = true,
-    };
+                if (path.pointer[index] == '/' || path.pointer[index] == '\\')
+                {
+                    basename_start = index + 1;
+                }
+            }
+            path = string_slice(path, basename_start, path.length);
+        }
+        u64 capacity = path.length * 2 + 3;
+        char8* quoted = c_space_allocate(space, capacity);
+        u64 output = 0;
+        quoted[output++] = '"';
+        for (u64 index = 0; index < path.length; index += 1)
+        {
+            char8 character = path.pointer[index];
+            if (character == '\\' || character == '"')
+            {
+                quoted[output++] = '\\';
+            }
+            quoted[output++] = character;
+        }
+        quoted[output++] = '"';
+        quoted[output] = 0;
+        c_space_shrink(space, capacity - (output + 1));
+        result = (CPpToken){
+            .token =
+                {
+                    .offset = c_space_offset(space, quoted),
+                    .length = c_token_length_field(output),
+                    .kind = C_TOKEN_STRING_LITERAL,
+                },
+            .stamp = stamp & C_PP_STAMP_MASK,
+            .foreign = true,
+        };
+    }
+    return result;
 }
 
 // The invocation token is what a replacement token replaces, so it is what
@@ -7522,6 +7559,11 @@ struct CPreprocessSourceFrame
     CIncludeSearchOrigin include_origin;
 };
 
+BUSTER_C_INTERNAL u32 c_preprocess_builtin_include_level(CMacro* first)
+{
+    return first->builtin_frame ? first->builtin_frame->depth : 0;
+}
+
 // Test instrumentation observes the real probe loops without adding state or
 // work to tests-disabled compiler builds.
 #if BUSTER_INCLUDE_TESTS
@@ -9211,17 +9253,26 @@ BUSTER_C_INTERNAL void c_preprocess_command_operations(Arena* arena, CSpellingSp
     }
 }
 
-// __LINE__ and __FILE__ are defined once as builtin-kind macros; the main
-// preprocess loop refreshes the head-of-list line/path state each iteration
-// and c_macro_replacement_tokens materializes the value only on expansion.
+// Dynamic builtins are defined once as builtin-kind macros; the main
+// preprocess loop refreshes head-of-list frame/path state each iteration and
+// c_macro_replacement_tokens materializes their values only on expansion.
 BUSTER_C_INTERNAL void c_preprocess_builtins(Arena* arena, CSymbolTable* symbols, CMacro** first_macro, CMacro** last_macro, String8 path, CSourceLocation location)
 {
     CMacro* line_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__LINE__"), 0, 0, 0, 0, false, false);
     line_macro->definition.builtin = C_MACRO_BUILTIN_LINE;
     CMacro* file_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__FILE__"), 0, 0, 0, 0, false, false);
     file_macro->definition.builtin = C_MACRO_BUILTIN_FILE;
+    CMacro* counter_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__COUNTER__"), 0, 0, 0, 0, false, false);
+    counter_macro->definition.builtin = C_MACRO_BUILTIN_COUNTER;
+    CMacro* include_level_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__INCLUDE_LEVEL__"), 0, 0, 0, 0, false, false);
+    include_level_macro->definition.builtin = C_MACRO_BUILTIN_INCLUDE_LEVEL;
+    CMacro* base_file_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__BASE_FILE__"), 0, 0, 0, 0, false, false);
+    base_file_macro->definition.builtin = C_MACRO_BUILTIN_BASE_FILE;
+    CMacro* file_name_macro = c_macro_define(arena, 0, symbols, first_macro, last_macro, S8("__FILE_NAME__"), 0, 0, 0, 0, false, false);
+    file_name_macro->definition.builtin = C_MACRO_BUILTIN_FILE_NAME;
     (*first_macro)->builtin_line = location.line;
     (*first_macro)->builtin_path = path;
+    (*first_macro)->builtin_base_path = path;
 }
 
 BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable* symbols, CLexResult lex, u64* token_index, CMacro** first_macro, CMacro** last_macro,
@@ -10333,8 +10384,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // parse the SHAPE -- CPython's platform.py rejects sys.version when the
     // date field carries anything outside [\w ], which is what the
     // getbuildinfo fallback ("xx/xx/xx") for a missing __DATE__ does.
+    // __TIMESTAMP__ follows the same fixed epoch in asctime shape ("Ddd Mmm dd hh:mm:ss yyyy").
     C_DEFINE_TYPE_MACRO("__DATE__", S8("\"Jan  1 1970\""));
     C_DEFINE_TYPE_MACRO("__TIME__", S8("\"00:00:00\""));
+    C_DEFINE_TYPE_MACRO("__TIMESTAMP__", S8("\"Thu Jan  1 00:00:00 1970\""));
     if (!layout.plain_char_is_signed)
     {
         C_DEFINE_TYPE_MACRO("__CHAR_UNSIGNED__", S8("1"));
