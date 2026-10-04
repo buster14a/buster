@@ -2956,7 +2956,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("void f(int x){&(x+1);}\n"), false, true},
         {S8("int f(int x){return x[0];}\n"), false, true},
         {S8("int f(int*p,double x){return p[x];}\n"), false, true},
-        {S8("void g(void);int f(void){return g()+1;}\n"), true, true},
+        {S8("void g(void);int f(void){return g()+1;}\n"), false, true},
         {S8("struct S{int x;};int f(struct S s){if(s)return 1;return 0;}\n"), false, true},
         {S8("struct S{int x;};void f(struct S s){while(s){break;}}\n"), false, true},
         {S8("struct S{int x;};void f(struct S s){-s;}\n"), false, true},

@@ -6020,10 +6020,13 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             if (left_pointer && right_pointer && c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS))
                 pointer_valid = c_parse_types_compatible(arena, result, preprocess,
                     c_parse_unqualified_type(result, left_type->element_type), c_parse_unqualified_type(result, right_type->element_type));
-            bool invalid = aggregate || !null_valid || !pointer_valid || (!vector && integer_operator && !integers);
+            bool void_operand = left_type->kind == C_TYPE_VOID || right_type->kind == C_TYPE_VOID;
+            bool invalid = aggregate || void_operand || !null_valid || !pointer_valid || (!vector && integer_operator && !integers);
             if (invalid || (complex && !complex_operator))
             {
-                machine->expression_constraint = invalid ? S8("could not lower logical expression core") : S8("this operator has no complex form");
+                machine->expression_constraint = void_operand ? S8("void value not ignored as it ought to be")
+                                                 : invalid    ? S8("could not lower logical expression core")
+                                                              : S8("this operator has no complex form");
                 machine->expression_constraint_token = task->end;
             }
         }
@@ -26027,9 +26030,10 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             }
             if (shape.message.length)
             {
-                String8 message = simple_conversion_failure
-                    ? simple_conversion_message
-                    : string_format(result->arena, S8("could not lower initializer expression for local '{S8}'"), entity->name);
+                String8 message = simple_conversion_failure ? simple_conversion_message
+                                  : string_equal(shape.message, S8("void value not ignored as it ought to be"))
+                                      ? shape.message
+                                      : string_format(result->arena, S8("could not lower initializer expression for local '{S8}'"), entity->name);
                 u32 token = simple_conversion_failure ? shape_start : location;
                 if (!simple_conversion_failure && shape.container.value < result->type_count &&
                     string_equal(shape.message, S8("aggregate designator names an unknown field")))

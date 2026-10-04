@@ -5386,6 +5386,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         // each beside the valid spelling it must not catch.
         {S8("void f(void) { } int g(void) { return f(); }"), S8("void value not ignored"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("void f(void) { } int g(void) { int x = f(); return x; }"), S8("void value not ignored"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("void f(void) { } int g(void) { int y = 1 + f(); return y; }"), S8("void value not ignored"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("void f(void) { } int id(int v) { return v; } int g(void) { return id(f()); }"), S8("void value not ignored"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("void f(void) { } void g(void) { (void)f(); f(); }"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("int g(void) { return (int)sizeof(struct U); }"), S8("invalid application of 'sizeof' to an incomplete type"), C_PREPROCESS_DIALECT_GNU17, false},
