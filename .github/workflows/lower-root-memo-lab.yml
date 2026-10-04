@@ -94,7 +94,7 @@ jobs:
           EOF
           python3 candidate/docs/performance-audits/evidence/2026-10-04T114428Z/interleave_pairs.py \
             --baseline out/subject-baseline/ide-plain --candidate out/subject-candidate/ide-plain \
-            --workloads out/workloads.json --pairs "${{ inputs.pairs }}" --cpu 1 --output out/timing 2>&1 | tee out/timing.log
+            --workloads out/workloads.json --pairs "$TIMING_PAIRS" --cpu 1 --output out/timing 2>&1 | tee out/timing.log
           rm -f out/timing/*.o
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
