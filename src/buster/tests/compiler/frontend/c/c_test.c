@@ -25958,7 +25958,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wasm_long_double_storage(UnitTestArgum
     };
     String8 refusal_messages[] = {
         S8("C IR lowering does not yet support the parameter or return value types of function 'wasm_identity'"),
-        S8("C IR lowering does not yet support runtime binary128 values on WebAssembly"),
+        S8("in function 'wasm_runtime': C IR lowering does not yet support runtime binary128 values on WebAssembly"),
     };
     CpuArch architectures[] = {CPU_ARCH_WASM32, CPU_ARCH_WASM64};
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(architectures); target_index += 1)

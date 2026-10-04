@@ -889,7 +889,23 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, cpu_model_from_string(S8("not-a-processor")) == CPU_MODEL_ERROR);
     BUSTER_STRING_TEST(arguments, cpu_model_to_string_os(CPU_MODEL_ERROR), S8("error"));
     BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_ERROR) == CPU_MODEL_NATIVE);
+    BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_COUNT) == CPU_MODEL_NATIVE);
+    BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_NATIVE) == CPU_MODEL_NATIVE);
+    BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_BASELINE) == CPU_MODEL_BASELINE);
+    BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_AMD_ATHLON_XP) == CPU_MODEL_NATIVE);
+    Target detected_profile = target_native;
+    detected_profile.cpu_model = cpu_model_resolve_detected(CPU_MODEL_AMD_ATHLON_XP);
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(detected_profile));
+    BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(detected_profile),
+                                                    target_cpu_features_effective(target_native)));
+#if BUSTER_CPU_ARCH_X86_64
+    BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_AMD_K8) == CPU_MODEL_AMD_K8);
     BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_AMD_ZEN_5) == CPU_MODEL_AMD_ZEN_5);
+    BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_A64_APPLE_M4) == CPU_MODEL_NATIVE);
+#elif BUSTER_CPU_ARCH_AARCH64
+    BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_AMD_ZEN_5) == CPU_MODEL_NATIVE);
+    BUSTER_TEST(arguments, cpu_model_resolve_detected(CPU_MODEL_A64_APPLE_M4) == CPU_MODEL_A64_APPLE_M4);
+#endif
     CpuModel ia32_only_models[] = {CPU_MODEL_AMD_I486, CPU_MODEL_AMD_PENTIUM, CPU_MODEL_AMD_K6, CPU_MODEL_AMD_K6_2,
                                   CPU_MODEL_AMD_K6_3, CPU_MODEL_AMD_GEODE, CPU_MODEL_AMD_ATHLON, CPU_MODEL_AMD_ATHLON_XP};
     for (u32 model_index = 0; model_index < BUSTER_ARRAY_LENGTH(ia32_only_models); model_index += 1)
@@ -899,7 +915,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_mode));
         BUSTER_TEST(arguments, !target_cpu_features_any(target_cpu_features_default(invalid_mode.cpu_arch, invalid_mode.cpu_model)));
         BUSTER_TEST(arguments, !target_cpu_features_any(target_cpu_features_effective(invalid_mode)));
-        BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, invalid_mode), S8(""));
+        BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, invalid_mode), S8("none"));
         invalid_mode.cpu_features_explicit = true;
         invalid_mode.cpu_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SSE2);
         BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_mode));
@@ -3283,7 +3299,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
             .cpu_arch = CPU_ARCH_X86_64,
             .cpu_model = model_case->model,
             .os = OPERATING_SYSTEM_LINUX,
-        }));
+        }) == target_test_x86_has_long_mode(model_case->model));
     }
     u8 x86_sha_model_digest[32] = {0};
     link_sha256(arguments->arena, (u8 const*)x86_sha_model_text, x86_sha_model_length, x86_sha_model_digest);
@@ -3351,7 +3367,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
             .cpu_arch = CPU_ARCH_X86_64,
             .cpu_model = model_case->model,
             .os = OPERATING_SYSTEM_LINUX,
-        }));
+        }) == target_test_x86_has_long_mode(model_case->model));
         TargetCpuFeature const crypto_features[] = {
             TARGET_CPU_FEATURE_X86_SHA512, TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4,
         };

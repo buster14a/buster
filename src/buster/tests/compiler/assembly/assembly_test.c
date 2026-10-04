@@ -4157,8 +4157,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
 
     Target x86_target = {
         .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
         .os = OPERATING_SYSTEM_LINUX,
     };
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(x86_target));
     BUSTER_TEST_FIXTURE(arguments, assembly_test_shift_layout);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_scalar_layout);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_legacy_layout);

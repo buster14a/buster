@@ -553,7 +553,10 @@ TargetParseResult target_parse_triple(String8 triple)
 
 CpuModel cpu_model_resolve_detected(CpuModel model)
 {
-    return model == CPU_MODEL_ERROR ? CPU_MODEL_NATIVE : model;
+    // Virtualized CPUID family/model identities can resemble an IA-32-only
+    // processor while the host actually executes x86-64. Keep the probed
+    // feature set and use the dynamic native identity in that case.
+    return cpu_model_supports_arch(model, target_native.cpu_arch) ? model : CPU_MODEL_NATIVE;
 }
 
 CpuModel cpu_detect_model(void)
