@@ -868,6 +868,8 @@ function(buster_filter_supported_c_flags out_var)
             string(APPEND CMAKE_REQUIRED_FLAGS " -Werror=unknown-warning-option")
         endif()
 
+        # Callers re-filter only on a new compiler signature; drop the previous compiler's answer.
+        unset(${flag_var} CACHE)
         check_c_compiler_flag("${flag}" ${flag_var})
         set(CMAKE_REQUIRED_FLAGS "${saved_required_flags}")
 
