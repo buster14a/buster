@@ -3,7 +3,7 @@ name: Wild linker evaluation
 # Explicitly scoped research execution. Never selects a self-hosted machine.
 on:
   push:
-    branches: [codex/2645-wild-linker-benchmark]
+    branches: ['codex/2645-wild-linker-benchmark']
   workflow_dispatch:
 
 permissions:
