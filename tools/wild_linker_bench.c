@@ -283,11 +283,12 @@ static const char* link_command(const char* directory, const char* config)
     {
         char* end = strchr(at, '\n');
         if (end) *end = 0;
-        if (strstr(at, "-fuse-ld=wild") && strstr(at, " -o ")) last = at;
+        if ((strstr(at, "--ld-path=wild") || strstr(at, "-fuse-ld=wild")) && strstr(at, " -o ")) last = at;
         if (!end) break;
         at = end + 1;
     }
     if (!last) fail("cannot identify the generated Wild link command");
+    if (strstr(last, "-fuse-ld=wild")) last = replace_one(last, "-fuse-ld=wild", "--ld-path=wild");
     return format("cd %s && %s", quote(directory), last);
 }
 
@@ -307,12 +308,18 @@ static void link_cell(const char* directory, const char* config, const char* cel
 {
     must("build-inputs", format("%s build --build-directory %s --config %s -t ide", quote(driver), quote(directory), config));
     const char* wild = link_command(directory, config);
-    const char* mold = replace_one(wild, "-fuse-ld=wild", "-fuse-ld=mold");
+    const char* mold = replace_one(wild, "--ld-path=wild", "--ld-path=mold");
     must("freeze-object-manifest", format("find %s -type f \\( -name '*.o' -o -name '*.a' \\) -print0 | sort -z | xargs -0 sha256sum > %s",
          quote(directory), quote(format("%s/%s-inputs.sha256", evidence, cell))));
+    must("freeze-cell-provenance", format("cp %s %s && cp %s %s",
+         quote(format("%s/CMakeCache.txt", directory)), quote(format("%s/%s.CMakeCache.txt", evidence, cell)),
+         quote(format("%s/compile_commands.json", directory)), quote(format("%s/%s.compile_commands.json", evidence, cell))));
+    must("freeze-object-inputs", format("find %s -type f \\( -name '*.o' -o -name '*.a' \\) -print0 > %s && tar --null -T %s -czf %s",
+         quote(directory), quote(format("%s/%s-inputs.list", evidence, cell)),
+         quote(format("%s/%s-inputs.list", evidence, cell)), quote(format("%s/%s-inputs.tar.gz", evidence, cell))));
     compare(format("%s-default", cell), mold, wild, BUSTER_BENCH_SAMPLES);
-    compare(format("%s-threads1", cell), replace_one(mold, "-fuse-ld=mold", "-fuse-ld=mold -Wl,--threads=1"),
-            replace_one(wild, "-fuse-ld=wild", "-fuse-ld=wild -Wl,--threads=1"), BUSTER_BENCH_SAMPLES);
+    compare(format("%s-threads1", cell), replace_one(mold, "--ld-path=mold", "--ld-path=mold -Wl,--threads=1"),
+            replace_one(wild, "--ld-path=wild", "--ld-path=wild -Wl,--threads=1"), BUSTER_BENCH_SAMPLES);
     if (!strcmp(cell, "separate-debug"))
     {
         compare("mold-aa-control", mold, mold, 9);
@@ -445,6 +452,7 @@ int main(int argc, char** argv)
         else
         {
             write_text(format("%s/method.txt", evidence),
+                "Debug is always non-unity under the existing CMake policy, even when BUSTER_UNITY_BUILD=ON. default-debug-nonunity and separate-debug are two build-root controls, not distinct unity modes.\n"
                 "A=mold; B=Wild except named A/A controls. Seed=2645; 2 warmups and 21 randomized AB/BA pairs per link-only cell. Warm page-cache only. Full relinking, not incremental linking. Link-only includes shell/compiler-driver startup but no source compilation.\n"
                 "Wall includes fork/exec/wait; CPU is wait4 user/system including waited descendants. Linux ru_maxrss is maximum child high-water, NOT simultaneous process-tree peak. Raw minor/major faults retained. Matched --threads=1 and each linker's default. Output is closed, not fsynced; same filesystem and output path.\n"
                 "CI95 is 4001 paired bootstrap medians, descriptive on this VM only. Clean builds have only 3 pairs and are exploratory. Content edit adds a named volatile global to ide.c, then restores source; 7 pairs. No source/vendor/compiler changes.\n"
@@ -452,7 +460,7 @@ int main(int argc, char** argv)
             smoke();
             must("latest-audit-identity", "ls docs/performance-audits/*.md | sort | tail -1 | xargs cat");
             must("configure-unity", format("%s generate --build-directory build-wild-unity --cc clang --linker WILD --no-include-tests --no-fuzz --no-sanitize -- -DBUSTER_UNITY_BUILD=ON -DBUSTER_LTO=OFF -DBUSTER_DEBUG_INFO=ON -DBUSTER_FRAME_POINTERS=ON", quote(driver)));
-            link_cell("build-wild-unity", "Debug", "unity-debug");
+            link_cell("build-wild-unity", "Debug", "default-debug-nonunity");
             link_cell("build-wild-unity", "Release", "unity-release");
             interoperability(format("%s/unity-release-wild", evidence));
             must("self-host", format("%s test_self_host --build-directory build-wild-unity --config Release", quote(driver)));

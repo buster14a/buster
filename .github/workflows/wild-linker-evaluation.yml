@@ -30,6 +30,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Install independent validation tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gdb llvm-21 libclang-rt-21-dev
+          echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
       - name: Install pinned external evaluation tools
         shell: bash
         run: |
@@ -71,6 +76,9 @@ jobs:
           cmake --version >> "$evidence/toolchains.txt"
           wild --version >> "$evidence/toolchains.txt"
           mold --version >> "$evidence/toolchains.txt"
+          gdb --version >> "$evidence/toolchains.txt"
+          llvm-dwarfdump --version >> "$evidence/toolchains.txt"
+          dpkg-query -W gdb llvm-21 libclang-rt-21-dev libc6 libc6-dev >> "$evidence/toolchains.txt"
           sha256sum "$(command -v wild)" "$(command -v mold)" "$(command -v clang)" >> "$evidence/toolchains.txt"
           cat "$evidence/toolchains.txt"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/wild-evaluation/build-driver"
