@@ -1,0 +1,889 @@
+diff --git a/build.c b/build.c
+index 5a86d337a..82ac4c60b 100644
+--- a/build.c
++++ b/build.c
+@@ -95,6 +95,9 @@ typedef enum BuildCommand
+     BUILD_COMMAND_BENCH_SERVICE_BROKER,
+     BUILD_COMMAND_BENCH_SERVICE_RECIPE,
+     BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
++    BUILD_COMMAND_BENCH_SERVICE_COMPARE_RECIPE,
++    BUILD_COMMAND_BENCH_SERVICE_COMPARE_BUILD,
++    BUILD_COMMAND_BENCH_SERVICE_COMPARE_TEST,
+     BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE,
+     BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE,
+     BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST,
+@@ -39575,6 +39578,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
+ }
+ 
+ #include "tools/bench_service/zen5_recipe.c"
++#include "tools/bench_service/compiler_compare_recipe.c"
+ 
+ #if BUSTER_LINUX
+ typedef struct BenchServiceRecipeTestFixture BenchServiceRecipeTestFixture;
+@@ -40793,6 +40797,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
+         [BUILD_COMMAND_BENCH_SERVICE_BROKER] = S8_INITIALIZER("bench_service_broker"),
+         [BUILD_COMMAND_BENCH_SERVICE_RECIPE] = S8_INITIALIZER("bench_service_recipe"),
+         [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
++        [BUILD_COMMAND_BENCH_SERVICE_COMPARE_RECIPE] = S8_INITIALIZER("bench_service_compare_recipe"),
++        [BUILD_COMMAND_BENCH_SERVICE_COMPARE_BUILD] = S8_INITIALIZER("bench_service_compare_build"),
++        [BUILD_COMMAND_BENCH_SERVICE_COMPARE_TEST] = S8_INITIALIZER("bench_service_compare_test"),
+         [BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE] = S8_INITIALIZER("bench_service_zen5_recipe"),
+         [BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE] = S8_INITIALIZER("bench_service_zen5_capture"),
+         [BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_zen5_recipe_self_test"),
+@@ -40950,7 +40957,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
+     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
+     {
+         String8 argument = arguments.pointer[argument_i];
+-        if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_BROKER ||
++        if (command == BUILD_COMMAND_BENCH_SERVICE_COMPARE_RECIPE || command == BUILD_COMMAND_BENCH_SERVICE_COMPARE_BUILD ||
++            command == BUILD_COMMAND_BENCH_SERVICE_COMPARE_TEST || command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_BROKER ||
+             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
+             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST || command == BUILD_COMMAND_BENCH_THROUGHPUT ||
+             command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE || command == BUILD_COMMAND_BENCH_SERVICE_ZEN5_CAPTURE ||
+@@ -41929,6 +41937,18 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
+                      bench_service_recipe_self_test(arena);
+         }
+         break;
++        case BUILD_COMMAND_BENCH_SERVICE_COMPARE_RECIPE:
++        case BUILD_COMMAND_BENCH_SERVICE_COMPARE_BUILD:
++        case BUILD_COMMAND_BENCH_SERVICE_COMPARE_TEST:
++        {
++#if BUSTER_LINUX
++            SliceString8 args = string8_list_to_slice(arena, throughput_arguments);
++            result = command == BUILD_COMMAND_BENCH_SERVICE_COMPARE_RECIPE ? bench_compare_run(arena, args) :
++                     command == BUILD_COMMAND_BENCH_SERVICE_COMPARE_BUILD ? bench_compare_build(arena, args) : bench_compare_test(arena, args);
++#else
++            result = PROCESS_RESULT_FAILED;
++#endif
++        } break;
+         case BUILD_COMMAND_BENCH_SERVICE_ZEN5_RECIPE:
+         {
+             result = bench_service_zen5_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
+diff --git a/tools/bench_service/credential_gate.c b/tools/bench_service/credential_gate.c
+index 87b293c75..601f0293d 100644
+--- a/tools/bench_service/credential_gate.c
++++ b/tools/bench_service/credential_gate.c
+@@ -24,13 +24,14 @@
+ #include <sys/types.h>
+ #include <unistd.h>
+ #include "zen5_stage.h"
++#include "compiler_compare_stage.h"
+ 
+ #define BQ_GATE_SERVICE "/usr/local/libexec/buster-bench-service"
+ #define BQ_GATE_BUILD "/usr/local/libexec/buster-bench-build"
+ #define BQ_GATE_THROUGHPUT "/usr/local/libexec/buster-bench-throughput"
+ #define BQ_GATE_MAX_GROUPS 32
+ /* Stages 0..5 are the smoke recipe's; 16..28 are the zen5 stages. */
+-#define BQ_GATE_LAST_STAGE (BQ_ZEN5_STAGE_FIRST_NUMBER + BQ_ZEN5_STAGE_COUNT - 1u)
++#define BQ_GATE_LAST_STAGE (BQ_COMPARE_FIRST_STAGE + BQ_COMPARE_STAGE_COUNT - 1u)
+ 
+ static bool bq_gate_decimal(char const* text, unsigned long* output)
+ {
+@@ -145,7 +146,7 @@ static bool bq_gate_privileges(void)
+ static bool bq_gate_zen5(unsigned long stage, char const* program, char const* first_argument)
+ {
+     unsigned long index = stage - BQ_ZEN5_STAGE_FIRST_NUMBER;
+-    bool ok = stage >= BQ_ZEN5_STAGE_FIRST_NUMBER && stage <= BQ_GATE_LAST_STAGE;
++    bool ok = stage >= BQ_ZEN5_STAGE_FIRST_NUMBER && stage < BQ_ZEN5_STAGE_FIRST_NUMBER + BQ_ZEN5_STAGE_COUNT;
+     if (ok && index < BQ_ZEN5_STAGE_ORACLE)
+         ok = !strcmp(program, BQ_ZEN5_STAGE_DRIVER) && !strcmp(first_argument, index % 2u == 0 ? "generate" : "build");
+     else if (ok && index == BQ_ZEN5_STAGE_PMU)
+@@ -158,11 +159,19 @@ static bool bq_gate_zen5(unsigned long stage, char const* program, char const* f
+ static bool bq_gate_program(unsigned long stage, char const* program, char const* first_argument)
+ {
+     bool ok = program && first_argument && (stage <= 5 || (stage >= BQ_ZEN5_STAGE_FIRST_NUMBER &&
+-                                                          stage <= BQ_GATE_LAST_STAGE));
++                                                          stage < BQ_ZEN5_STAGE_FIRST_NUMBER + BQ_ZEN5_STAGE_COUNT) ||
++                                                          (stage >= BQ_COMPARE_FIRST_STAGE && stage <= BQ_GATE_LAST_STAGE));
+     if (ok && stage == 0)
+         ok = !strcmp(program, BQ_GATE_SERVICE) && !strcmp(first_argument, "worker-unit");
+     else if (ok && stage == 5)
+         ok = !strcmp(program, BQ_GATE_THROUGHPUT) && !strcmp(first_argument, "run");
++    else if (ok && stage >= BQ_COMPARE_FIRST_STAGE)
++    {
++        unsigned long index = stage - BQ_COMPARE_FIRST_STAGE;
++        ok = !strcmp(program, index == 4 ? BQ_COMPARE_THROUGHPUT : BQ_COMPARE_DRIVER) &&
++             !strcmp(first_argument, index < 2 ? "bench_service_compare_build" :
++                     index < 4 ? "bench_service_compare_test" : "run");
++    }
+     else if (ok && stage >= BQ_ZEN5_STAGE_FIRST_NUMBER)
+         ok = bq_gate_zen5(stage, program, first_argument);
+     else if (ok)
+diff --git a/tools/bench_service/protocol.c b/tools/bench_service/protocol.c
+index 5f3558c39..75cf2e513 100644
+--- a/tools/bench_service/protocol.c
++++ b/tools/bench_service/protocol.c
+@@ -39,11 +39,11 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
+ #endif
+ 
+ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
+-    "schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=512\n"
+-    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1 "
++    "schema=2 journal=6 executor=supervisor pending=8 jobs=512\n"
++    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1,compiler-compare-v1 "
+     "blocked-recipes=native-retirement-performance-v1\n"
+     "validity=not-evaluated materialization=read-only workspace=per-attempt\n"
+-    "worker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic "
++    "worker=fixed-systemd-service admission=idle-only-atomic "
+     "export=1 "
+ #ifdef __linux__
+     "transport=unix-seqpacket authentication=peer-uid-gid\n"
+diff --git a/tools/bench_service/queue.c b/tools/bench_service/queue.c
+index 734f93052..c7ebe208e 100644
+--- a/tools/bench_service/queue.c
++++ b/tools/bench_service/queue.c
+@@ -3,6 +3,7 @@
+  */
+ #include "queue.h"
+ #include "zen5_calibration_profile.h"
++#include "compiler_compare_profile.h"
+ #ifndef _WIN32
+ #include <fcntl.h>
+ #include <unistd.h>
+@@ -37,6 +38,7 @@ BUSTER_GLOBAL_LOCAL char const bq_native_retirement_blocked_profile[] =
+ /* Served (#426): the systemd broker's version-2 recipe selector starts its
+  * outer unit and the thirteen typed stages of zen5_stage.h. */
+ BUSTER_GLOBAL_LOCAL char const bq_zen5_calibration_profile[] = BQ_ZEN5_CALIBRATION_PROFILE;
++BUSTER_GLOBAL_LOCAL char const bq_compiler_compare_profile[] = BQ_COMPILER_COMPARE_PROFILE;
+ 
+ u32 bq_u32(u8 const* bytes)
+ {
+@@ -139,7 +141,8 @@ BqRecipe bq_recipe_from_name(String8 name)
+                       string_equal(name, S8("validate-buster-v1")) ? BQ_RECIPE_VALIDATE_BUSTER :
+                       string_equal(name, S8("native-retirement-performance-v1")) ?
+                       BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED :
+-                      string_equal(name, S8("zen5-calibration-v1")) ? BQ_RECIPE_ZEN5_CALIBRATION : BQ_RECIPE_UNKNOWN;
++                      string_equal(name, S8("zen5-calibration-v1")) ? BQ_RECIPE_ZEN5_CALIBRATION :
++                      string_equal(name, S8("compiler-compare-v1")) ? BQ_RECIPE_COMPILER_COMPARE : BQ_RECIPE_UNKNOWN;
+     return result;
+ }
+ 
+@@ -158,6 +161,7 @@ String8 bq_recipe_name(BqRecipe recipe)
+     else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
+         result = S8("native-retirement-performance-v1");
+     else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION) result = S8("zen5-calibration-v1");
++    else if (recipe == BQ_RECIPE_COMPILER_COMPARE) result = S8("compiler-compare-v1");
+     return result;
+ }
+ 
+@@ -171,6 +175,8 @@ String8 bq_recipe_profile(BqRecipe recipe)
+                            sizeof(bq_native_retirement_blocked_profile) - 1};
+     else if (recipe == BQ_RECIPE_ZEN5_CALIBRATION)
+         result = (String8){(char8*)bq_zen5_calibration_profile, sizeof(bq_zen5_calibration_profile) - 1};
++    else if (recipe == BQ_RECIPE_COMPILER_COMPARE)
++        result = (String8){(char8*)bq_compiler_compare_profile, sizeof(bq_compiler_compare_profile) - 1};
+     return result;
+ }
+ 
+@@ -179,10 +185,11 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
+     String8 name = bq_recipe_name(recipe);
+     char const* profile_suffix = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? ".blocked" : ".recipe";
+     char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" :
+-                          recipe == BQ_RECIPE_ZEN5_CALIBRATION ? "bench_service_zen5_recipe" : "";
++                          recipe == BQ_RECIPE_ZEN5_CALIBRATION ? "bench_service_zen5_recipe" :
++                          recipe == BQ_RECIPE_COMPILER_COMPARE ? "bench_service_compare_recipe" : "";
+     bool described = files && (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+                                recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ||
+-                               recipe == BQ_RECIPE_ZEN5_CALIBRATION);
++                               recipe == BQ_RECIPE_ZEN5_CALIBRATION || recipe == BQ_RECIPE_COMPILER_COMPARE);
+     if (files) *files = (BqRecipeFiles){0};
+     int name_length = described && name.length <= BQ_RECIPE_NAME_CAP ?
+                       snprintf(files->name, sizeof(files->name), "%.*s", (int)name.length, name.pointer) : -1;
+@@ -208,13 +215,15 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
+ bool bq_recipe_admitted(BqRecipe recipe)
+ {
+     bool result = recipe == BQ_RECIPE_FAKE_SUCCESS || recipe == BQ_RECIPE_FAKE_FAILURE ||
+-                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
++                  recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
++                  recipe == BQ_RECIPE_COMPILER_COMPARE;
+     return result;
+ }
+ 
+ bool bq_recipe_service(BqRecipe recipe)
+ {
+-    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION;
++    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER || recipe == BQ_RECIPE_ZEN5_CALIBRATION ||
++                  recipe == BQ_RECIPE_COMPILER_COMPARE;
+     return result;
+ }
+ 
+@@ -246,6 +255,7 @@ bool bq_request_valid(BqRequest const* request)
+     String8 candidate = bq_field(request, 4);
+     bool ok = bq_name(principal, 32) && bq_name(key, 64) && bq_recipe_admitted(bq_recipe_from_name(recipe)) &&
+               bq_source_identity(base) && bq_source_identity(candidate) && base.length == candidate.length &&
++              (bq_recipe_from_name(recipe) != BQ_RECIPE_COMPILER_COMPARE || base.length == 40) &&
+               /* zen5-calibration-v1 measures one immutable source named twice. */
+               (bq_recipe_from_name(recipe) != BQ_RECIPE_ZEN5_CALIBRATION ||
+                (base.length == 40 && string_equal(base, candidate))) &&
+@@ -370,7 +380,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
+         {
+             request.size = size;
+             memcpy(request.bytes, body, size);
+-            if (!bq_request_valid(&request) || (schema == BQ_SCHEMA_LEGACY && bq_recipe_real(&request)))
++            if (!bq_request_valid(&request) || (schema == BQ_SCHEMA_LEGACY && bq_recipe_real(&request)) ||
++                (schema < BQ_SCHEMA_COMPARE && bq_request_recipe(&request) == BQ_RECIPE_COMPILER_COMPARE))
+             {
+                 error = BQ_BAD_REQUEST;
+             }
+@@ -497,13 +508,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
+                 bool advance = next == (u32)job->phase + 1 && next <= BQ_FINISHED;
+                 bool cancel_cleanup = job->cancel_requested && job->phase < BQ_CLEANING && next == BQ_CLEANING;
+                 bool failure_outcome = outcome == (u32)(job->cancel_requested ? BQ_CANCELLED : BQ_FAILED) ||
+-                                       (schema == BQ_SCHEMA && !job->cancel_requested && outcome == BQ_INTERRUPTED);
++                                       (schema >= BQ_SCHEMA_WORKER && !job->cancel_requested && outcome == BQ_INTERRUPTED);
+                 bool failure_cleanup = schema >= BQ_SCHEMA_MATERIALIZATION && bq_recipe_real(&job->request) &&
+                                        job->phase < BQ_CLEANING && next == BQ_CLEANING &&
+                                        failure_outcome;
+                 if (next == BQ_FINALIZING)
+                 {
+-                    bool worker_terminal = schema == BQ_SCHEMA && bq_recipe_real(&job->request) &&
++                    bool worker_terminal = schema >= BQ_SCHEMA_WORKER && bq_recipe_real(&job->request) &&
+                                            outcome == BQ_SUCCEEDED;
+                     expected = worker_terminal ? (BqOutcome)outcome :
+                                string_equal(bq_field(&job->request, 2), S8("fake-success-v1")) ? BQ_SUCCEEDED : BQ_FAILED;
+@@ -512,7 +523,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
+                 {
+                     expected = BQ_CANCELLED;
+                 }
+-                if (schema == BQ_SCHEMA && !job->cancel_requested && bq_recipe_real(&job->request) && job->phase == BQ_CLEANING &&
++                if (schema >= BQ_SCHEMA_WORKER && !job->cancel_requested && bq_recipe_real(&job->request) && job->phase == BQ_CLEANING &&
+                     next == BQ_FINISHED && outcome == BQ_INTERRUPTED)
+                 {
+                     expected = BQ_INTERRUPTED;
+diff --git a/tools/bench_service/queue.h b/tools/bench_service/queue.h
+index 9a7ec073c..3bd911371 100644
+--- a/tools/bench_service/queue.h
++++ b/tools/bench_service/queue.h
+@@ -14,7 +14,9 @@
+ 
+ #define BQ_SCHEMA_LEGACY 1u
+ #define BQ_SCHEMA_MATERIALIZATION 2u
+-#define BQ_SCHEMA 3u
++#define BQ_SCHEMA_WORKER 3u
++#define BQ_SCHEMA_COMPARE 6u
++#define BQ_SCHEMA BQ_SCHEMA_COMPARE
+ #define BQ_CONTROL_SCHEMA 2u
+ #define BQ_PENDING_CAP 8u
+ /* Lifetime caps (#2114). Nothing durable encodes them: journal frames carry
+@@ -76,7 +78,8 @@ typedef enum BqRecipe
+     BQ_RECIPE_FAKE_FAILURE,
+     BQ_RECIPE_VALIDATE_BUSTER,
+     BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED,
+-    BQ_RECIPE_ZEN5_CALIBRATION
++    BQ_RECIPE_ZEN5_CALIBRATION,
++    BQ_RECIPE_COMPILER_COMPARE = 9
+ } BqRecipe;
+ 
+ typedef struct BqRecipeFiles
+diff --git a/tools/bench_service/systemd_broker.c b/tools/bench_service/systemd_broker.c
+index 58d24935c..b9a4317fb 100644
+--- a/tools/bench_service/systemd_broker.c
++++ b/tools/bench_service/systemd_broker.c
+@@ -48,6 +48,7 @@
+ #include <unistd.h>
+ #include <sys/xattr.h>
+ #include "zen5_stage.h"
++#include "compiler_compare_stage.h"
+ 
+ #define BQ_BROKER_SOCKET "/run/buster-bench-systemd-broker/control.sock"
+ #define BQ_BROKER_QUEUE "/var/lib/buster-bench/queue"
+@@ -89,7 +90,7 @@ enum { BQ_BROKER_OUTER = 0, BQ_BROKER_BASE_GENERATE = 1, BQ_BROKER_BASE_BUILD =
+ enum { BQ_BROKER_TERM = 1, BQ_BROKER_KILL = 2, BQ_BROKER_CONT = 3 };
+ /* The smoke recipe is the zero selector every smoke and signal request keeps;
+  * 1 is the #1020 retirement selector, which this broker does not serve. */
+-enum { BQ_BROKER_RECIPE_SMOKE = 0, BQ_BROKER_RECIPE_RETIREMENT = 1, BQ_BROKER_RECIPE_ZEN5 = 2 };
++enum { BQ_BROKER_RECIPE_SMOKE = 0, BQ_BROKER_RECIPE_RETIREMENT = 1, BQ_BROKER_RECIPE_ZEN5 = 2, BQ_BROKER_RECIPE_COMPARE = 6 };
+ 
+ typedef struct BqBrokerRequest
+ {
+@@ -170,6 +171,7 @@ typedef struct BqBrokerStartGroups
+ static char const* const bq_broker_stages[] = {
+     "", "base-generate", "base-build", "candidate-generate", "candidate-build", "throughput"
+ };
++static char const* const bq_broker_compare_stages[BQ_COMPARE_STAGE_COUNT] = {BQ_COMPARE_STAGE_NAMES};
+ static char const* const bq_broker_zen5_stages[BQ_ZEN5_STAGE_COUNT] = {BQ_ZEN5_STAGE_NAMES};
+ 
+ static bool bq_broker_zen5_stage(uint32_t stage)
+@@ -178,9 +180,14 @@ static bool bq_broker_zen5_stage(uint32_t stage)
+     return zen5;
+ }
+ 
++static bool bq_broker_compare_stage(uint32_t stage)
++{
++    return stage >= BQ_COMPARE_FIRST_STAGE && stage < BQ_COMPARE_FIRST_STAGE + BQ_COMPARE_STAGE_COUNT;
++}
++
+ static bool bq_broker_known_stage(uint32_t stage)
+ {
+-    bool known = stage <= BQ_BROKER_THROUGHPUT_STAGE || bq_broker_zen5_stage(stage);
++    bool known = stage <= BQ_BROKER_THROUGHPUT_STAGE || bq_broker_zen5_stage(stage) || bq_broker_compare_stage(stage);
+     return known;
+ }
+ 
+@@ -189,7 +196,8 @@ static char const* bq_broker_stage_name(uint32_t stage)
+ {
+     char const* name = stage >= BQ_BROKER_BASE_GENERATE && stage <= BQ_BROKER_THROUGHPUT_STAGE ?
+                        bq_broker_stages[stage] :
+-                       bq_broker_zen5_stage(stage) ? bq_broker_zen5_stages[stage - BQ_BROKER_ZEN5_FIRST_STAGE] : NULL;
++                       bq_broker_zen5_stage(stage) ? bq_broker_zen5_stages[stage - BQ_BROKER_ZEN5_FIRST_STAGE] :
++                       bq_broker_compare_stage(stage) ? bq_broker_compare_stages[stage - BQ_COMPARE_FIRST_STAGE] : NULL;
+     return name;
+ }
+ 
+@@ -198,6 +206,7 @@ static bool bq_broker_service_stage(uint32_t stage)
+ {
+     bool service = stage <= BQ_BROKER_BASE_BUILD ||
+                    (bq_broker_zen5_stage(stage) && stage - BQ_BROKER_ZEN5_FIRST_STAGE < BQ_ZEN5_STAGE_ORACLE);
++    service = service || (bq_broker_compare_stage(stage) && stage - BQ_COMPARE_FIRST_STAGE < 2);
+     return service;
+ }
+ 
+@@ -241,11 +250,13 @@ static bool bq_broker_revision(char const value[65])
+ static bool bq_broker_request_recipe_valid(BqBrokerRequest const* request)
+ {
+     bool zen5 = request->recipe == BQ_BROKER_RECIPE_ZEN5;
+-    bool ok = request->runtime_max_usec == 0 && (request->recipe == BQ_BROKER_RECIPE_SMOKE || zen5);
++    bool compare = request->recipe == BQ_BROKER_RECIPE_COMPARE;
++    bool ok = request->runtime_max_usec == 0 && (request->recipe == BQ_BROKER_RECIPE_SMOKE || zen5 || compare);
++    if (ok && compare) ok = strlen(request->base) == 40 && strlen(request->candidate) == 40;
+     if (ok && request->stage == BQ_BROKER_OUTER)
+         ok = !zen5 || !strcmp(request->base, request->candidate);
+     else if (ok)
+-        ok = zen5 == bq_broker_zen5_stage(request->stage);
++        ok = zen5 == bq_broker_zen5_stage(request->stage) && compare == bq_broker_compare_stage(request->stage);
+     return ok;
+ }
+ 
+@@ -379,8 +390,12 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
+ {
+     BqBrokerPaths paths;
+     BqZen5StageCommand zen5;
++    BqCompareStageCommand compare;
+     bool ok = bq_broker_request_valid(request) && bq_broker_paths(request, &paths);
+     bool zen5_stage = ok && request->operation == BQ_BROKER_START && bq_broker_zen5_stage(request->stage);
++    bool compare_stage = ok && request->operation == BQ_BROKER_START && bq_broker_compare_stage(request->stage);
++    if (compare_stage) ok = bq_compare_stage_command(request->stage - BQ_COMPARE_FIRST_STAGE, paths.attempt,
++                                                    request->base, request->candidate, &compare);
+     if (zen5_stage) ok = bq_zen5_stage_command(request->stage - BQ_BROKER_ZEN5_FIRST_STAGE, paths.attempt, &zen5);
+     memset(command, 0, sizeof(*command));
+     command->valid = ok;
+@@ -438,7 +453,19 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
+         }
+         else
+         {
+-            if (zen5_stage)
++            if (compare_stage)
++            {
++                bq_broker_add_format(command, "--property=ReadOnlyPaths=%s %s %s/compare", paths.base_source,
++                                     paths.candidate_source, paths.attempt);
++                bq_broker_add_format(command, "--property=BindReadOnlyPaths=%s:%s", compare.source, compare.directory);
++                bq_broker_add_format(command, "--property=ReadWritePaths=%s", compare.writable);
++                bq_broker_add_format(command, "--working-directory=%s", compare.directory);
++                /* Candidate files are disposable diagnostics; original control
++                 * records are anonymous CLOEXEC collector streams. */
++                if (!compare.service)
++                    bq_broker_add(command, "--property=LimitFSIZE=67108864");
++            }
++            else if (zen5_stage)
+             {
+                 /* The zen5 stage reads the source and the trusted driver's
+                  * frozen binaries, plan and specs, and writes one path. */
+@@ -481,12 +508,17 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerStartGroup
+             bq_broker_add_format(command, "%" PRIu64, request->job);
+             bq_broker_add_format(command, "%" PRIu64, request->attempt);
+             bq_broker_add(command, request->recipe == BQ_BROKER_RECIPE_ZEN5 ? BQ_ZEN5_STAGE_RECIPE :
+-                                   "validate-buster-v1");
++                                   request->recipe == BQ_BROKER_RECIPE_COMPARE ? BQ_COMPARE_RECIPE : "validate-buster-v1");
+             bq_broker_add(command, BQ_BROKER_WORKSPACES);
+             bq_broker_add(command, request->base);
+             bq_broker_add(command, request->candidate);
+             bq_broker_add_format(command, "%s", paths.result);
+         }
++        else if (compare_stage)
++        {
++            for (unsigned index = 0; index < compare.count; index += 1)
++                bq_broker_add_format(command, "%s", compare.argv[index]);
++        }
+         else if (zen5_stage)
+         {
+             for (unsigned index = 0; index < zen5.count; index += 1) bq_broker_add_format(command, "%s", zen5.argv[index]);
+@@ -826,12 +858,17 @@ static int bq_broker_start_writable(BqBrokerRequest const* request, BqBrokerPath
+                                     size_t capacity)
+ {
+     BqZen5StageCommand zen5;
++    BqCompareStageCommand compare;
+     int result = 0;
+     if (request->stage == BQ_BROKER_CANDIDATE_GENERATE)
+         result = bq_broker_format(output, capacity, "%s", paths->candidate_staging) ? 1 : -1;
+     else if (bq_broker_zen5_stage(request->stage))
+         result = bq_zen5_stage_command(request->stage - BQ_BROKER_ZEN5_FIRST_STAGE, paths->attempt, &zen5) &&
+                  bq_broker_format(output, capacity, "%s", zen5.writable) ? 1 : -1;
++    else if (bq_broker_compare_stage(request->stage))
++        result = bq_compare_stage_command(request->stage - BQ_COMPARE_FIRST_STAGE, paths->attempt, request->base,
++                                          request->candidate, &compare) &&
++                 bq_broker_format(output, capacity, "%s", compare.writable) ? 1 : -1;
+     return result;
+ }
+ 
+@@ -1872,7 +1909,7 @@ static int bq_broker_client(BqBrokerRequest const* request)
+ static bool bq_broker_stage(char const* name, uint32_t* stage)
+ {
+     bool found = false;
+-    for (uint32_t index = 1; !found && index <= BQ_BROKER_ZEN5_LAST_STAGE; index += 1)
++    for (uint32_t index = 1; !found && index < BQ_COMPARE_FIRST_STAGE + BQ_COMPARE_STAGE_COUNT; index += 1)
+     {
+         if (bq_broker_stage_name(index) && !strcmp(name, bq_broker_stage_name(index)))
+         {
+@@ -1889,10 +1926,12 @@ static bool bq_broker_cli(int argc, char** argv, BqBrokerRequest* request)
+     request->magic = BQ_BROKER_MAGIC;
+     request->version = BQ_BROKER_VERSION;
+     bool ok = false;
+-    if (argc == 6 && (!strcmp(argv[1], "start-outer") || !strcmp(argv[1], BQ_ZEN5_STAGE_OUTER_VERB)))
++    if (argc == 6 && (!strcmp(argv[1], "start-outer") || !strcmp(argv[1], BQ_ZEN5_STAGE_OUTER_VERB) ||
++                      !strcmp(argv[1], BQ_COMPARE_OUTER_VERB)))
+     {
+         request->operation = BQ_BROKER_START;
+-        request->recipe = !strcmp(argv[1], BQ_ZEN5_STAGE_OUTER_VERB) ? BQ_BROKER_RECIPE_ZEN5 : BQ_BROKER_RECIPE_SMOKE;
++        request->recipe = !strcmp(argv[1], BQ_ZEN5_STAGE_OUTER_VERB) ? BQ_BROKER_RECIPE_ZEN5 :
++                          !strcmp(argv[1], BQ_COMPARE_OUTER_VERB) ? BQ_BROKER_RECIPE_COMPARE : BQ_BROKER_RECIPE_SMOKE;
+         ok = bq_broker_decimal(argv[2], &request->job) &&
+              bq_broker_decimal(argv[3], &request->attempt) &&
+              (strlen(argv[4]) == 40 || strlen(argv[4]) == 64) &&
+@@ -1915,7 +1954,8 @@ static bool bq_broker_cli(int argc, char** argv, BqBrokerRequest* request)
+         {
+             memcpy(request->base, argv[5], strlen(argv[5]));
+             memcpy(request->candidate, argv[6], strlen(argv[6]));
+-            request->recipe = bq_broker_zen5_stage(request->stage) ? BQ_BROKER_RECIPE_ZEN5 : BQ_BROKER_RECIPE_SMOKE;
++            request->recipe = bq_broker_zen5_stage(request->stage) ? BQ_BROKER_RECIPE_ZEN5 :
++                              bq_broker_compare_stage(request->stage) ? BQ_BROKER_RECIPE_COMPARE : BQ_BROKER_RECIPE_SMOKE;
+         }
+     }
+     else if (argc == 4 && !strcmp(argv[1], "signal"))
+diff --git a/tools/bench_service/worker_linux.c b/tools/bench_service/worker_linux.c
+index 5a527878c..f492c7e7b 100644
+--- a/tools/bench_service/worker_linux.c
++++ b/tools/bench_service/worker_linux.c
+@@ -1,5 +1,6 @@
+ #include "worker_linux.h"
+ #include "zen5_stage.h"
++#include "compiler_compare_stage.h"
+ 
+ #ifdef __linux__
+ #include <dirent.h>
+@@ -2670,9 +2671,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
+         base_length = bq_worker_join_text(base_line, sizeof(base_line), base_parts, BUSTER_ARRAY_LENGTH(base_parts));
+         candidate_length = bq_worker_join_text(candidate_line, sizeof(candidate_line), candidate_parts,
+                                                BUSTER_ARRAY_LENGTH(candidate_parts));
+-        char const* base_binary_parts[] = {"base-binary=", workspace_text, "/", workspace_name, "/base/build/Release/ide"};
++        char const* base_binary_parts[] = {"base-binary=", workspace_text, "/", workspace_name, bq_request_recipe(&job->request) == BQ_RECIPE_COMPILER_COMPARE ? "/compare/frozen/base/ide" : "/base/build/Release/ide"};
+         char const* candidate_binary_parts[] = {"candidate-binary=", workspace_text, "/", workspace_name,
+-                                                "/candidate/build/Release/ide"};
++                                                bq_request_recipe(&job->request) == BQ_RECIPE_COMPILER_COMPARE ? "/compare/frozen/candidate/ide" : "/candidate/build/Release/ide"};
+         base_binary_length = workspace_valid ? bq_worker_join_text(base_binary_line, sizeof(base_binary_line),
+                                                                     base_binary_parts, BUSTER_ARRAY_LENGTH(base_binary_parts)) : -1;
+         candidate_binary_length = workspace_valid ? bq_worker_join_text(candidate_binary_line, sizeof(candidate_binary_line),
+@@ -2755,6 +2756,20 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_validate(BqWorkerConfig const* conf
+                     bq_worker_result_line(text, "namespace-policy=private-workspace-post-run-identity") &&
+                     bq_worker_result_digest_line(text, "base-binary-sha256=", base_digest) &&
+                     bq_worker_result_digest_line(text, "candidate-binary-sha256=", candidate_digest);
++            if (lines && bq_request_recipe(&job->request) == BQ_RECIPE_COMPILER_COMPARE)
++            {
++                char control[SHA256_HEX_CAPACITY];
++                lines = bq_worker_result_line(text, "evidence=anonymous-cloexec-nondumpable-sealed-collector-v1") &&
++                        bq_worker_result_line(text, "build=fixed-clang-unity-release-headless-tests-v1") &&
++                        bq_worker_result_line(text, "layout=matched-bind-source-build-v1") &&
++                        bq_worker_result_line(text, "correctness=both-subject-tests-and-frozen-fixed-point") &&
++                        bq_worker_result_line(text, "guard=ordinary-throughput-v1") &&
++                        bq_worker_result_line(text, "retirement-admission=false") &&
++                        bq_worker_result_digest_line(text, "protected-complete-sha256=", control) &&
++                        bq_worker_result_digest_line(text, "protected-summary-sha256=", control) &&
++                        bq_worker_result_digest_line(text, "base-provenance-sha256=", control) &&
++                        bq_worker_result_digest_line(text, "candidate-provenance-sha256=", control);
++            }
+         }
+         error = lines ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+     }
+@@ -3266,13 +3281,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_failure_artifacts(BqJob const* job,
+             }
+             /* A failure names a stage of its own recipe (zen5: its phases). */
+             bool zen5 = bq_request_recipe(&job->request) == BQ_RECIPE_ZEN5_CALIBRATION;
++            bool compare = bq_request_recipe(&job->request) == BQ_RECIPE_COMPILER_COMPARE;
+             char const* validate_stages[] = {"stage=base-generate", "stage=base-build", "stage=candidate-generate",
+                                              "stage=candidate-build", "stage=throughput"};
+             char const* zen5_stages[] = {"stage=arguments", "stage=source", "stage=builds", "stage=oracle",
+                                          "stage=pmu", "stage=plan", "stage=captures"};
+             bool stage = bq_worker_result_line(manifest_body, "stage=prepare") ||
+                          bq_worker_result_line(manifest_body, "stage=worker");
+-            for (u32 index = 0; !zen5 && index < BUSTER_ARRAY_LENGTH(validate_stages); index += 1)
++            char const* compare_stages[] = {"stage=arguments", "stage=source", "stage=builds", "stage=correctness",
++                                            "stage=throughput", "stage=replay"};
++            for (u32 index = 0; compare && index < BUSTER_ARRAY_LENGTH(compare_stages); index += 1)
++                stage = stage || bq_worker_result_line(manifest_body, compare_stages[index]);
++            for (u32 index = 0; !zen5 && !compare && index < BUSTER_ARRAY_LENGTH(validate_stages); index += 1)
+                 stage = stage || bq_worker_result_line(manifest_body, validate_stages[index]);
+             for (u32 index = 0; zen5 && index < BUSTER_ARRAY_LENGTH(zen5_stages); index += 1)
+                 stage = stage || bq_worker_result_line(manifest_body, zen5_stages[index]);
+@@ -3638,7 +3658,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop_children(BqWorkerConfig const* config
+     /* Every typed stage unit the broker can start under this outer unit:
+      * the validation recipe's five and zen5_stage.h's thirteen. */
+     char const* stages[] = {"base-generate", "base-build", "candidate-generate",
+-                            "candidate-build", "throughput", BQ_ZEN5_STAGE_NAMES};
++                            "candidate-build", "throughput", BQ_ZEN5_STAGE_NAMES, BQ_COMPARE_STAGE_NAMES};
+     BqError error = BQ_OK;
+     for (u32 index = 0; error == BQ_OK && index < BUSTER_ARRAY_LENGTH(stages); index += 1)
+     {
+@@ -3920,7 +3940,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
+         if (!canonical || job_length <= 0 || (size_t)job_length >= sizeof(job_id) ||
+             token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) ||
+             (strcmp(finalization.recipe.name, "validate-buster-v1") &&
+-             strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE)) ||
++             strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE) &&
++             strcmp(finalization.recipe.name, BQ_COMPARE_RECIPE)) ||
+             !bq_worker_text(base_revision, base_revision_text, sizeof(base_revision_text)) ||
+             !bq_worker_text(candidate_revision, candidate_revision_text, sizeof(candidate_revision_text)))
+         {
+@@ -3933,8 +3954,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
+     if (error == BQ_OK && !recovering)
+     {
+         /* The broker's recipe selector picks the outer unit's recipe. */
+-        char const* verb = strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE) ? "start-outer" :
+-                           BQ_ZEN5_STAGE_OUTER_VERB;
++        char const* verb = !strcmp(finalization.recipe.name, BQ_ZEN5_STAGE_RECIPE) ? BQ_ZEN5_STAGE_OUTER_VERB :
++                           !strcmp(finalization.recipe.name, BQ_COMPARE_RECIPE) ? BQ_COMPARE_OUTER_VERB : "start-outer";
+         char const* arguments[] = {BQ_SYSTEMD_BROKER, verb, job_id, attempt_token,
+                                    base_revision_text, candidate_revision_text, NULL};
+         error = backend->start(backend, arguments, BUSTER_ARRAY_LENGTH(arguments) - 1);
+diff --git a/tools/bench_service/workspace.c b/tools/bench_service/workspace.c
+index 99645d6bf..092138bec 100644
+--- a/tools/bench_service/workspace.c
++++ b/tools/bench_service/workspace.c
+@@ -21,7 +21,7 @@
+ 
+ #define BQ_WORKSPACE_TRAVERSE_MODE 02710
+ #define BQ_WORKSPACE_PRIVATE_BUILD_MODE 02700
+-#define BQ_SOURCE_MANIFEST_CAP (64u * 1024u)
++#define BQ_SOURCE_MANIFEST_CAP (2u * 1024u * 1024u)
+ #define BQ_SOURCE_FILE_CAP (64u * 1024u * 1024u)
+ #define BQ_SOURCE_TOTAL_CAP (512u * 1024u * 1024u)
+ #define BQ_SOURCE_COUNT_CAP 4096u
+@@ -481,11 +481,11 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
+     int manifest_fd = source_root >= 0 ?
+                       openat(source_root, "source.manifest", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+     struct stat info;
+-    u8 manifest_bytes[BQ_SOURCE_MANIFEST_CAP];
++    u8* manifest_bytes = malloc(BQ_SOURCE_MANIFEST_CAP);
+     u32 manifest_size = 0;
+-    bool ok = source_root >= 0 && bq_owned_directory(source_root, false, true) && manifest_fd >= 0 &&
++    bool ok = manifest_bytes && source_root >= 0 && bq_owned_directory(source_root, false, true) && manifest_fd >= 0 &&
+               fstat(manifest_fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 && (info.st_mode & 0222) == 0 &&
+-              bq_read_file(manifest_fd, manifest_bytes, sizeof(manifest_bytes), &manifest_size);
++              bq_read_file(manifest_fd, manifest_bytes, BQ_SOURCE_MANIFEST_CAP, &manifest_size);
+     String8 manifest = {(char8*)manifest_bytes, manifest_size};
+     u64 offset = 0;
+     if (ok)
+@@ -547,6 +547,7 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
+     {
+         close(source_root);
+     }
++    free(manifest_bytes);
+     return ok;
+ }
+ 
+diff --git a/tools/bench_service/zen5_recipe.c b/tools/bench_service/zen5_recipe.c
+index 158c22257..23bcc33f1 100644
+--- a/tools/bench_service/zen5_recipe.c
++++ b/tools/bench_service/zen5_recipe.c
+@@ -382,7 +382,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_path(char* output, char const* paren
+ /* Run one child in its own process group. The exit is observed through a
+  * pidfd, so the wall interval is bounded by fork and wait4 with no polling
+  * quantum; a deadline kills the whole group. Exit status reports 128+signal. */
+-BUSTER_GLOBAL_LOCAL BenchServiceZen5Child bench_service_zen5_child(char* const* argv, char const* directory, int output,
++BUSTER_GLOBAL_LOCAL BenchServiceZen5Child bench_service_recipe_child_streams(char* const* argv, char const* directory, int output, int error_output,
+                                                                    u64 deadline_ns, u64 output_cap)
+ {
+     BenchServiceZen5Child child = {.status = -1};
+@@ -397,7 +397,7 @@ BUSTER_GLOBAL_LOCAL BenchServiceZen5Child bench_service_zen5_child(char* const*
+          * included; an overrun fails the child (SIGXFSZ or EFBIG). */
+         struct rlimit file_size = {(rlim_t)output_cap, (rlim_t)output_cap};
+         bool ready = setpgid(0, 0) == 0 && dup2(null_input, STDIN_FILENO) >= 0 && dup2(sink, STDOUT_FILENO) >= 0 &&
+-                     dup2(sink, STDERR_FILENO) >= 0 && (!directory || chdir(directory) == 0) &&
++                     dup2(error_output >= 0 ? error_output : sink, STDERR_FILENO) >= 0 && (!directory || chdir(directory) == 0) &&
+                      (!output_cap || setrlimit(RLIMIT_FSIZE, &file_size) == 0);
+         if (ready) execv(argv[0], argv);
+         _exit(125);
+@@ -441,6 +441,12 @@ BUSTER_GLOBAL_LOCAL BenchServiceZen5Child bench_service_zen5_child(char* const*
+     return child;
+ }
+ 
++BUSTER_GLOBAL_LOCAL BenchServiceZen5Child bench_service_zen5_child(char* const* argv, char const* directory, int output,
++                                                                   u64 deadline_ns, u64 output_cap)
++{
++    return bench_service_recipe_child_streams(argv, directory, output, output, deadline_ns, output_cap);
++}
++
+ /* Recipe stage `index` of zen5_stage.h. In production the recipe asks the
+  * systemd broker to start the typed transient unit, which builds the same
+  * argv from the shared contract; the self-test's direct mode runs that argv
+@@ -1931,7 +1937,8 @@ struct BenchServiceZen5BundlePath
+ 
+ /* BQ-BUNDLE-V1 over every non-control result file (bench_service_recipe
+  * bundle_index format), walked with an explicit bounded stack. */
+-BUSTER_GLOBAL_LOCAL bool bench_service_zen5_bundle(Arena* arena, BenchServiceZen5* recipe, char digest[SHA256_HEX_CAPACITY])
++BUSTER_GLOBAL_LOCAL bool bench_service_recipe_bundle_for(Arena* arena, int result_directory, char const* recipe_name,
++                                                      char digest[SHA256_HEX_CAPACITY])
+ {
+     BenchServiceRecipeBundleEntry* entries = arena_allocate(arena, BenchServiceRecipeBundleEntry,
+                                                             BENCH_SERVICE_RECIPE_BUNDLE_ENTRY_CAP);
+@@ -1939,14 +1946,18 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_bundle(Arena* arena, BenchServiceZen
+     u32 pending_count = 1, file_count = 0;
+     u64 total = 0;
+     pending[0].path[0] = 0;
+-    bool ok = bench_service_recipe_sync_tree(arena, recipe->result_directory);
++    char manifest_name[96], bundle_name[96], outcome_name[96];
++    snprintf(manifest_name, sizeof(manifest_name), "%s.manifest", recipe_name);
++    snprintf(bundle_name, sizeof(bundle_name), "%s.bundle", recipe_name);
++    snprintf(outcome_name, sizeof(outcome_name), "%s.outcome", recipe_name);
++    bool ok = strlen(recipe_name) <= 48 && bench_service_recipe_sync_tree(arena, result_directory);
+     while (ok && pending_count)
+     {
+         pending_count -= 1;
+         char relative[BENCH_SERVICE_RECIPE_BUNDLE_PATH_CAP + 1];
+         memcpy(relative, pending[pending_count].path, sizeof(relative));
+-        int directory = relative[0] ? openat(recipe->result_directory, relative, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) :
+-                                      bench_service_recipe_reopen_directory(recipe->result_directory);
++        int directory = relative[0] ? openat(result_directory, relative, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) :
++                                      bench_service_recipe_reopen_directory(result_directory);
+         DIR* stream = directory >= 0 ? fdopendir(directory) : NULL;
+         if (!stream && directory >= 0) close(directory);
+         ok = stream != NULL;
+@@ -1961,9 +1972,9 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_bundle(Arena* arena, BenchServiceZen
+                  bench_service_recipe_bundle_path(string_from_pointer(path)) &&
+                  fstatat(dirfd(stream), entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                  (info.st_uid == 0 || info.st_uid == geteuid()) && (info.st_mode & 022) == 0;
+-            bool control = !strcmp(path, BENCH_SERVICE_ZEN5_NAME ".manifest") ||
+-                           !strcmp(path, BENCH_SERVICE_ZEN5_NAME ".bundle") ||
+-                           !strcmp(path, BENCH_SERVICE_ZEN5_NAME ".outcome");
++            bool control = !strcmp(path, manifest_name) ||
++                           !strcmp(path, bundle_name) ||
++                           !strcmp(path, outcome_name);
+             if (ok && S_ISDIR(info.st_mode))
+             {
+                 ok = pending_count < 64;
+@@ -2007,7 +2018,7 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_bundle(Arena* arena, BenchServiceZen
+                                                        entries[index].path));
+     String8 body = ok ? string_join_arena(arena, string8_list_to_slice(arena, lines), false) : (String8){0};
+     ok = ok && body.length <= BENCH_SERVICE_RECIPE_BUNDLE_CAP &&
+-         bench_service_zen5_publish(recipe->result_directory, BENCH_SERVICE_ZEN5_NAME ".bundle", body);
++         bench_service_zen5_publish(result_directory, bundle_name, body);
+     if (ok)
+     {
+         Sha256 hash;
+@@ -2018,6 +2029,11 @@ BUSTER_GLOBAL_LOCAL bool bench_service_zen5_bundle(Arena* arena, BenchServiceZen
+     return ok;
+ }
+ 
++BUSTER_GLOBAL_LOCAL bool bench_service_zen5_bundle(Arena* arena, BenchServiceZen5* recipe, char digest[SHA256_HEX_CAPACITY])
++{
++    return bench_service_recipe_bundle_for(arena, recipe->result_directory, BENCH_SERVICE_ZEN5_NAME, digest);
++}
++
+ BUSTER_GLOBAL_LOCAL char const* bench_service_zen5_capture_status(BenchServiceZen5 const* recipe, u32 capture)
+ {
+     char const* status = !recipe->capture_sha256[capture][0] ? "missing" :
+diff --git a/tools/throughput/throughput.c b/tools/throughput/throughput.c
+index 7780ec1ff..7703a7a8a 100644
+--- a/tools/throughput/throughput.c
++++ b/tools/throughput/throughput.c
+@@ -25,6 +25,7 @@
+ #include <sys/file.h>
+ #endif
+ #include "qualification.h"
++#include "evidence.h"
+ #ifdef _WIN32
+ #pragma comment(lib, "psapi.lib")
+ #endif
+@@ -86,7 +87,7 @@ typedef struct TpConfig
+     unsigned flag_count;
+     unsigned workload_mask, mode_mask, pairs, warmups, timeout, seed, scale;
+     int cpu, pmu, require_pmu, guard, identical;
+-    int assembly, output_explicit, service_output;
++    int assembly, output_explicit, service_output, protected_evidence;
+ } TpConfig;
+ 
+ typedef struct TpWorkload
+@@ -228,6 +229,10 @@ static int tp_options(int argc, char** argv, TpConfig* config)
+         {
+             config->guard = 0;
+         }
++        else if (!strcmp(key, "--protected-evidence"))
++        {
++            config->protected_evidence = 1;
++        }
+         else if (!strcmp(key, "--service-output"))
+         {
+             config->service_output = 1;
+@@ -398,6 +403,12 @@ static int tp_options(int argc, char** argv, TpConfig* config)
+         }
+     }
+     if (!ok) tp_error("invalid options; run 'throughput help'");
++    if (config->protected_evidence)
++        ok = ok && !strcmp(config->command, "run") && !strcmp(config->profile, "ci") &&
++             config->workload_mask == TP_DEFAULT_WORKLOAD_MASK && config->mode_mask == TP_ALL_MODE_MASK &&
++             config->pairs == 20 && config->warmups == 2 && config->guard && !config->pmu &&
++             !config->allocation_baseline && !config->allocation_candidate && !config->flag_count &&
++             !config->assembly && config->self_host_root && config->self_host_generated && !config->service_output;
+     return ok;
+ }
+ 
+@@ -795,7 +806,7 @@ static int tp_metadata(TpConfig const* config, char const* root, char const* bas
+ {
+     char path[TP_PATH_CAP];
+     int ok = tp_path(path, root, "metadata.json");
+-    FILE* file = ok ? fopen(path, "wb") : NULL;
++    FILE* file = ok ? tp_evidence_open(path, "wb") : NULL;
+     ok = file != NULL;
+     if (ok)
+     {
+@@ -904,7 +915,7 @@ static int tp_metadata(TpConfig const* config, char const* root, char const* bas
+ #else
+     if (tp_path(path, root, "host.txt"))
+     {
+-        FILE* host = fopen(path, "wb");
++        FILE* host = tp_evidence_open(path, "wb");
+         if (host)
+         {
+ #ifdef _WIN32
+@@ -928,7 +939,7 @@ static int tp_completion(char const* root, unsigned jobs, unsigned pairs, int gu
+     static char const* const files[] = {"samples.csv", "telemetry.csv", "metadata.json", "jobs.tsv", "commands.jsonl", "capabilities.jsonl"};
+     char path[TP_PATH_CAP];
+     int ok = tp_path(path, root, "complete.txt");
+-    FILE* file = ok ? fopen(path, write_file ? "wb" : "rb") : NULL;
++    FILE* file = ok ? tp_evidence_open(path, write_file ? "wb" : "rb") : NULL;
+     ok = file != NULL;
+     if (ok)
+     {
+@@ -948,7 +959,7 @@ static int tp_completion(char const* root, unsigned jobs, unsigned pairs, int gu
+         {
+             uint64_t bytes, lines;
+             char hash[65];
+-            ok = tp_path(path, root, files[i]) && tp_hash_file(path, hash, &bytes, &lines);
++            ok = tp_path(path, root, files[i]) && tp_evidence_hash(path, hash, &bytes, &lines);
+             if (write_file && ok)
+             {
+                 fprintf(file, "%s %s\n", hash, files[i]);
+@@ -1002,7 +1013,7 @@ static int tp_load_samples(char const* root, char const* name, unsigned jobs, un
+ {
+     char path[TP_PATH_CAP];
+     int ok = tp_path(path, root, name);
+-    FILE* file = ok ? fopen(path, "rb") : NULL;
++    FILE* file = ok ? tp_evidence_open(path, "rb") : NULL;
+     ok = file != NULL;
+     if (ok)
+     {
+@@ -1125,7 +1136,7 @@ static int tp_remove_summaries(char const* root)
+         int removed = tp_path(path, root, tp_summary_names[i]);
+         if (removed)
+         {
+-            removed = remove(path) == 0 || errno == ENOENT;
++            removed = tp_evidence_remove(path);
+         }
+         if (!removed)
+         {
+@@ -1145,7 +1156,7 @@ static int tp_compare(char const* root)
+     /* A rejected replay must not leave an earlier verdict publishable.
+      * Only derived reports are removed; sealed evidence remains intact. */
+     int ok = tp_remove_summaries(root) && tp_path(path, root, "complete.txt");
+-    FILE* config = ok ? fopen(path, "rb") : NULL;
++    FILE* config = ok ? tp_evidence_open(path, "rb") : NULL;
+     ok = config != NULL;
+     if (config)
+     {
+@@ -1166,7 +1177,7 @@ static int tp_compare(char const* root)
+     if (ok) ok = tp_load_samples(root, "telemetry.csv", jobs, 3, 0, probes);
+     char names[TP_MAX_JOBS][128];
+     memset(names, 0, sizeof(names));
+-    FILE* manifest = ok && tp_path(path, root, "jobs.tsv") ? fopen(path, "rb") : NULL;
++    FILE* manifest = ok && tp_path(path, root, "jobs.tsv") ? tp_evidence_open(path, "rb") : NULL;
+     ok = ok && manifest != NULL;
+     if (manifest)
+     {
+@@ -1179,8 +1190,8 @@ static int tp_compare(char const* root)
+         if (fgetc(manifest) != EOF) ok = 0;
+         fclose(manifest);
+     }
+-    FILE* json = ok && tp_path(path, root, tp_summary_names[0]) ? fopen(path, "wb") : NULL;
+-    FILE* markdown = ok && tp_path(path, root, tp_summary_names[1]) ? fopen(path, "wb") : NULL;
++    FILE* json = ok && tp_path(path, root, tp_summary_names[0]) ? tp_evidence_open(path, "wb") : NULL;
++    FILE* markdown = ok && tp_path(path, root, tp_summary_names[1]) ? tp_evidence_open(path, "wb") : NULL;
+     ok = ok && json && markdown;
+     int regressions = 0, inconclusive = 0;
+     if (ok)
+@@ -1342,7 +1353,7 @@ static int tp_compare(char const* root)
+     if (!ok) tp_error("incomplete or incompatible result bundle; no performance verdict");
+     else
+     {
+-        fprintf(stdout, "THROUGHPUT_RESULT confirmed_regressions=%d inconclusive=%d guard=%u exit=%d\n", regressions, inconclusive, guard, result);
++        fprintf(tp_evidence.active ? stderr : stdout, "THROUGHPUT_RESULT confirmed_regressions=%d inconclusive=%d guard=%u exit=%d\n", regressions, inconclusive, guard, result);
+         if (getenv("GITHUB_ACTIONS") && inconclusive)
+             fprintf(stdout, "::warning title=Compiler throughput inconclusive::%d cases have insufficient evidence; inspect summary.md. No equivalence claim or automatic retry.\n", inconclusive);
+         if (getenv("GITHUB_ACTIONS") && regressions)
+@@ -1448,7 +1459,7 @@ static int tp_run(TpConfig config)
+         ok = tp_hash_file(immutable_compilers[i], compiler_hashes[i], &bytes, &lines);
+     }
+     if (ok) ok = tp_metadata(&config, root, baseline, candidate, jobs, job_count);
+-    FILE* manifest = ok && tp_path(path, root, "jobs.tsv") ? fopen(path, "wb") : NULL;
++    FILE* manifest = ok && tp_path(path, root, "jobs.tsv") ? tp_evidence_open(path, "wb") : NULL;
+     ok = ok && manifest != NULL;
+     if (manifest)
+     {
+@@ -1459,10 +1470,10 @@ static int tp_run(TpConfig config)
+         }
+         if (fclose(manifest) != 0) ok = 0;
+     }
+-    FILE* samples = ok && tp_path(path, root, "samples.csv") ? fopen(path, "wb") : NULL;
+-    FILE* commands = ok && tp_path(path, root, "commands.jsonl") ? fopen(path, "wb") : NULL;
+-    FILE* capabilities = ok && tp_path(path, root, "capabilities.jsonl") ? fopen(path, "wb") : NULL;
+-    FILE* telemetry = ok && tp_path(path, root, "telemetry.csv") ? fopen(path, "wb") : NULL;
++    FILE* samples = ok && tp_path(path, root, "samples.csv") ? tp_evidence_open(path, "wb") : NULL;
++    FILE* commands = ok && tp_path(path, root, "commands.jsonl") ? tp_evidence_open(path, "wb") : NULL;
++    FILE* capabilities = ok && tp_path(path, root, "capabilities.jsonl") ? tp_evidence_open(path, "wb") : NULL;
++    FILE* telemetry = ok && tp_path(path, root, "telemetry.csv") ? tp_evidence_open(path, "wb") : NULL;
+     ok = ok && samples && commands && capabilities && telemetry;
+     if (samples) fputs(TP_RAW_HEADER, samples);
+     if (telemetry) fputs(TP_RAW_HEADER, telemetry);
+@@ -1552,8 +1563,8 @@ static int tp_run(TpConfig config)
+                     if (ok) ok = tp_sample_csv(samples, round, pair, position, variant, job, &row);
+                 }
+             }
+-            fprintf(stdout, "THROUGHPUT_PROGRESS round=%u/%u pair=%u/%u valid=%d\n", round + 1, TP_ROUNDS, pair + 1, config.pairs, ok);
+-            fflush(stdout);
++            fprintf(config.protected_evidence ? stderr : stdout, "THROUGHPUT_PROGRESS round=%u/%u pair=%u/%u valid=%d\n", round + 1, TP_ROUNDS, pair + 1, config.pairs, ok);
++            fflush(config.protected_evidence ? stderr : stdout);
+         }
+     }
+     /* PMU and allocation perturbations are deliberately NOT timing samples.
+@@ -2010,6 +2021,7 @@ static void tp_help(void)
+           "Dedicated Linux run/qualify: --machine-id LABEL --lock-file ABSOLUTE_PATH --cpu N|auto.\n"
+           "A service may additionally pass its held lease with --lease-fd N; it requires --lock-file and is not inherited by compiler children.\n"
+           "The fixed Linux service uses --service-output to expose completed files to its trusted group reader.\n"
++          "--protected-evidence sends the fixed service run\'s sealed control streams to stdout (Linux).\n"
+           "qualify prints read-only observations to stdout; does not prove isolation or benchmark noise.\n"
+           "The cooperative lease covers run preparation through replay; prebuild this tool before measurement.\n\n"
+           "Exit: 0 no confirmed regression (inspect inconclusive warnings), 1 confirmed regression,\n"
+@@ -2088,7 +2100,15 @@ int main(int argc, char** argv)
+         }
+         else if (!strcmp(config.command, "run"))
+         {
+-            result = tp_run(config);
++            char protected_root[TP_PATH_CAP];
++            int protected_ready = !config.protected_evidence ||
++                                  (tp_absolute(config.output, protected_root) && tp_evidence_begin(protected_root));
++            result = protected_ready ? tp_run(config) : 2;
++            if (config.protected_evidence)
++            {
++                if (!tp_evidence_emit(result)) result = 2;
++                tp_evidence_close();
++            }
+ #ifdef __linux__
+             if (config.service_output && !tp_share_service_output(config.output))
+             {

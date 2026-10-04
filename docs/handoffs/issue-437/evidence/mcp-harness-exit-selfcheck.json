@@ -1,0 +1,5690 @@
+{
+  "binary": "/usr/bin/false",
+  "binary_sha256": "16ed3c6201c23f5f91bdfb589f2e9d6318d4984c0a423f8fdb5d2448486ed195",
+  "service_socket": "/tmp/bq-mcp-blackbox-7vcu2_5n/absent.sock",
+  "official_sources": [
+    "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+    "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+    "https://modelcontextprotocol.io/specification/2025-11-25/server/tools",
+    "https://modelcontextprotocol.io/specification/2025-11-25/basic"
+  ],
+  "runs": [
+    {
+      "name": "version/2025-11-25",
+      "input_sha256": "0e806788476977c327a9ee0de614d058a81d62dea0e9ce4fa56ced2be715b9be",
+      "input_bytes": 309,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.001322
+    },
+    {
+      "name": "version/2025-06-18",
+      "input_sha256": "8199355d3f243080afab131568b245dbfd14a69e791a9cd81b33391e9ec0fc84",
+      "input_bytes": 309,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000755
+    },
+    {
+      "name": "version/2099-01-01",
+      "input_sha256": "1f6b9df24c12d50a592e31650aadc7527b5267e6bf5aebdb2fdb0310b02cc667",
+      "input_bytes": 309,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000399
+    },
+    {
+      "name": "version/2024-11-05",
+      "input_sha256": "a299a41bef1dbb9d0070e71366d0f4aed96642bada4c2c63666622c0f8877f2a",
+      "input_bytes": 309,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00042
+    },
+    {
+      "name": "lifecycle/preinitialize_list",
+      "input_sha256": "7ece389525c550770388518f2bda93aee88646fb5627e0770670c06db6a3d087",
+      "input_bytes": 100,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000438
+    },
+    {
+      "name": "lifecycle/no_initialized",
+      "input_sha256": "f813a4ad74aec6fb3b84da1c4b1863667e8ad44a97c80d392f5262befadc4d81",
+      "input_bytes": 254,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000338
+    },
+    {
+      "name": "lifecycle/reinitialize",
+      "input_sha256": "32ab8a1b9c6a19f3e4be3b6c4e4e85c3388241ec17bf4a93a10cf1cf5b21af6c",
+      "input_bytes": 461,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000355
+    },
+    {
+      "name": "lifecycle/invalid_initialized_array",
+      "input_sha256": "3cd32e519a1f15f6643a0790e15ede01d4c3387e9083b4a752345fab51dd1ec6",
+      "input_bytes": 280,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000388
+    },
+    {
+      "name": "lifecycle/invalid_initialized_string",
+      "input_sha256": "536a85cc05d807473cb6da4fef9fd29ed1b86212986d0a967be9d117947d26f5",
+      "input_bytes": 283,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00036
+    },
+    {
+      "name": "lifecycle/invalid_initialized_number",
+      "input_sha256": "bdeb92c776e946433e568301a905f29306920e72a3636399c7fad7bf8de8f20f",
+      "input_bytes": 279,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000343
+    },
+    {
+      "name": "lifecycle/invalid_initialized_meta_array",
+      "input_sha256": "dc1419132c651a99c3428f32d776b04ab53dada932cabea2992030919efdd464",
+      "input_bytes": 290,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000658
+    },
+    {
+      "name": "lifecycle/invalid_initialized_meta_token_null",
+      "input_sha256": "f52ef84b61b065fca424e573101b454088b45d40b70140eac5a7a1ecaa62bcac",
+      "input_bytes": 310,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000472
+    },
+    {
+      "name": "params/ping/list",
+      "input_sha256": "91e0d2dab07f39da3008391740b4eec13e5025af7ee070f48acfc0795d0e6ef1",
+      "input_bytes": 349,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00042
+    },
+    {
+      "name": "params/ping/int",
+      "input_sha256": "1724d4246ab2cc98d871995e5104d42728d00b1b048dfb2f665ac0d3d6afc4e8",
+      "input_bytes": 348,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000394
+    },
+    {
+      "name": "params/ping/str",
+      "input_sha256": "3c96f76bf34ac7ceb145e5ddf8511f19e9138e0a5d475710424a135285b57993",
+      "input_bytes": 352,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000486
+    },
+    {
+      "name": "params/ping/bool",
+      "input_sha256": "9b022cbdf88e40832288d59e6b21a7f3ca2a5219408aa4759c49cc50dc355a2f",
+      "input_bytes": 351,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00039
+    },
+    {
+      "name": "params/ping/dict",
+      "input_sha256": "24850fe5bcf4d1b00a223662fef74f8980f12e8257662cb8e3777dafe47bcfe6",
+      "input_bytes": 359,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000397
+    },
+    {
+      "name": "params/ping/dict",
+      "input_sha256": "457e745604e39951285c72a1e8d32a6b11acae1c63027b512336b358d1c2b901",
+      "input_bytes": 379,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000397
+    },
+    {
+      "name": "params/ping/dict",
+      "input_sha256": "7bb267781945760d9bab38f567b2eeb62472872ee834e98c27bedb95ddbfc5a6",
+      "input_bytes": 379,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000526
+    },
+    {
+      "name": "params/ping/dict",
+      "input_sha256": "b336cb96e0f041097747df9fa29587ffd7ce5a49bf6f2e91fab5a1d85e801249",
+      "input_bytes": 377,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000451
+    },
+    {
+      "name": "method/unknown",
+      "input_sha256": "0d334be3fefe8efb0c5b97618a24d9667236e97a1b2db2379232658af42d56e3",
+      "input_bytes": 343,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000514
+    },
+    {
+      "name": "tools/list_unknown_cursor",
+      "input_sha256": "41847eb776149f36f8fa3c2417463cd96f9ca41ba49b7e167678c4dab5ad4453",
+      "input_bytes": 370,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000345
+    },
+    {
+      "name": "tools/list_meta",
+      "input_sha256": "596fad7f0e74cfc8dcb5f83c22dcbac5efdefbd2d07c40b92c8c1e5859a7da36",
+      "input_bytes": 382,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000332
+    },
+    {
+      "name": "params/null/ping",
+      "input_sha256": "a1d0b0d1f450af8fd00b8b288137e95d4f4f94aa517bd3d959956bf521876e35",
+      "input_bytes": 349,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000334
+    },
+    {
+      "name": "params/null/tools/list",
+      "input_sha256": "83dccddadc2e53798407dd72ad46400a6d27117fb6f1e58c6616a813633c4cd4",
+      "input_bytes": 355,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000334
+    },
+    {
+      "name": "initialize/meta_invalid/None",
+      "input_sha256": "7559e7193a93a58ec699845ff8ba7b00aea52692cf5fb67251119f635781417f",
+      "input_bytes": 232,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000691
+    },
+    {
+      "name": "initialize/meta_invalid/[]",
+      "input_sha256": "24a2617ba05fa9a9f8abb5babb7e6323b30fe97a5d855beafb3e0b3e39c43c78",
+      "input_bytes": 230,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000389
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': None}",
+      "input_sha256": "743a76c7f3069a1f63f01604a16782d685a081c8ffa8d726c08d686936af80b8",
+      "input_bytes": 250,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000368
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': True}",
+      "input_sha256": "4614a7849d683e5f370bc8d76e36331d5fc3ed2ad0388a7dfa81adae0002997b",
+      "input_bytes": 250,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000327
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': []}",
+      "input_sha256": "b185243c86f14a24cd3b1bdb86b89ed33324acde8a37e7909bf3f1bbe8fcad56",
+      "input_bytes": 248,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000327
+    },
+    {
+      "name": "id/numeric/0",
+      "input_sha256": "8e8376738b43e1ad59855228e61ffb493ffccaef8fc26c2634bb0c32dd6b33fc",
+      "input_bytes": 335,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000328
+    },
+    {
+      "name": "id/numeric/1",
+      "input_sha256": "f8f5f0b7800fa710c7812e42ed4f3a72c57bbbcb6746be565dde62e8022fd266",
+      "input_bytes": 335,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000322
+    },
+    {
+      "name": "id/numeric/-1",
+      "input_sha256": "074861f02cf9a77c9d31f7bb6dc64ec93d62559535407272ad3ec7cecf802bfe",
+      "input_bytes": 336,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000336
+    },
+    {
+      "name": "id/numeric/9007199254740991",
+      "input_sha256": "dea7c6f1bd1d7029cd07adf1df8d462c022490e8e1e32de07692cf91a9097fb5",
+      "input_bytes": 350,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000341
+    },
+    {
+      "name": "id/numeric/-9007199254740991",
+      "input_sha256": "918e9cb1802342183d6456f4105b829f09218a6ea1cd2c97cbe46e5f887d8a0e",
+      "input_bytes": 351,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000354
+    },
+    {
+      "name": "id/reject/9007199254740992",
+      "input_sha256": "48374874c162338919560a4192f8e65b460f0d4ee4e6b50ede6e0851e0307d7f",
+      "input_bytes": 350,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000392
+    },
+    {
+      "name": "id/reject/-9007199254740992",
+      "input_sha256": "06644fefd972b45b19ed2bc1bfd87076a89c82827a51597a5d40f63be64d6673",
+      "input_bytes": 351,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000319
+    },
+    {
+      "name": "id/reject/18446744073709551615",
+      "input_sha256": "58081f74aa85e0ea0e9c4d214d7af37de5d8fcfaf66c98b77f8c2666d70847f2",
+      "input_bytes": 354,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000336
+    },
+    {
+      "name": "id/reject/18446744073709551616",
+      "input_sha256": "6e8d3bee443c71e6ac4acf6a1148c0d8b12f3e4fd0c1cb7719b5ff2fed0e915c",
+      "input_bytes": 354,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000378
+    },
+    {
+      "name": "id/reject/1.25",
+      "input_sha256": "5988901ddbc5cc3388a819a1b08ed841f189d9b523453869f2478c80b077bec4",
+      "input_bytes": 338,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000374
+    },
+    {
+      "name": "id/reject/None",
+      "input_sha256": "e296609d25026e665560348a6fe5fbf5fc71107e1079b06126057412967b2021",
+      "input_bytes": 338,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00037
+    },
+    {
+      "name": "id/reject/True",
+      "input_sha256": "792199f93c386ad17787035f0e406164e6e2deed8ef7a415e00d08a4874166c4",
+      "input_bytes": 338,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000441
+    },
+    {
+      "name": "id/reject/{}",
+      "input_sha256": "c851b929b42788688f562f726a0d9e4072176a83634c3802225d72910de71604",
+      "input_bytes": 336,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000408
+    },
+    {
+      "name": "id/reject/[]",
+      "input_sha256": "a5412393928c6b6ac527677bf00bd69d356d0b0dd6c906b272b4e2e2d8e89ad1",
+      "input_bytes": 336,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000381
+    },
+    {
+      "name": "id/string/e3b0c44298",
+      "input_sha256": "fefadee120f2b25ded58ec90d2e977436fa68c3d27e61c8a735538b2f81c67e7",
+      "input_bytes": 336,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000354
+    },
+    {
+      "name": "id/string/c543ece816",
+      "input_sha256": "3e4884d7f5194040c85e19debd5f0bd52e6353a1f5e118e541fb54facf060188",
+      "input_bytes": 341,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000333
+    },
+    {
+      "name": "id/string/85e62acd75",
+      "input_sha256": "32fda5729b924b3ed0481b4c382db5877f15b952929bf4a16cfb28354af517d7",
+      "input_bytes": 592,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000391
+    },
+    {
+      "name": "id/string/e42dd264fd",
+      "input_sha256": "922b4b5276a3c2db27a4050cf4d703b7c2613ede4f259b90d8bb4f5050acccf3",
+      "input_bytes": 592,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000464
+    },
+    {
+      "name": "id/string/cf09b6562e",
+      "input_sha256": "571daf100e489881dabd9f9d74886372f25e0655c99e9ed11cec4e0ccd9530a7",
+      "input_bytes": 352,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000657
+    },
+    {
+      "name": "id/string/b2cfe03dfa",
+      "input_sha256": "269830f56f7fd8d401a1a1a6b3b8f9f211628dff8a33ed89c877585f83ac51a7",
+      "input_bytes": 346,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000414
+    },
+    {
+      "name": "id/string/2cdb26265b",
+      "input_sha256": "579f727e74757bc4a9862ad4b9761cf322f7bd93d341142e73abcbad9a36725c",
+      "input_bytes": 356,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000716
+    },
+    {
+      "name": "id/string_reject/257",
+      "input_sha256": "35876d2a4e75ae6722382c88505d99569a1f55d0bf4091192fc6f4ddf0bbf33d",
+      "input_bytes": 593,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000732
+    },
+    {
+      "name": "id/string_reject/258",
+      "input_sha256": "da82986efb7350f2ec0f3df0024df3ef977b15c28ee088ec6cbacda27af39f2c",
+      "input_bytes": 594,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000582
+    },
+    {
+      "name": "tools/discovery",
+      "input_sha256": "bf417f783045904dbde99ca9066b51a57091cd08f22e455b845791aa82420012",
+      "input_bytes": 288,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000671
+    },
+    {
+      "name": "tool/bench_capabilities/absent_socket",
+      "input_sha256": "c6fb222fdf559222186f0d3ea7c1fbfcc9e4971132b96c9072cccaef0d9428d0",
+      "input_bytes": 395,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000575
+    },
+    {
+      "name": "tool/bench_submit/absent_socket",
+      "input_sha256": "8f06085698da568beaff4bfbe43182cb69fc8886ca4473ca64ccc9c05cb95b46",
+      "input_bytes": 581,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000407
+    },
+    {
+      "name": "tool/bench_status/absent_socket",
+      "input_sha256": "a7d963292f200b4e752e10f0e5db8a67c29cd4108e62c12089835b7a9a4a4f00",
+      "input_bytes": 420,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000367
+    },
+    {
+      "name": "tool/bench_result/absent_socket",
+      "input_sha256": "f0bf650ee0998509461b131c8dd922429e4b2c73e033c0e6d1dda884573f3fdf",
+      "input_bytes": 420,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00041
+    },
+    {
+      "name": "tool/bench_cancel/absent_socket",
+      "input_sha256": "0f6b9d7659fe713e3724f81e13e489a91840448a3e95d2b48a45581c5205e3f2",
+      "input_bytes": 420,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000348
+    },
+    {
+      "name": "tool/bench_logs/absent_socket",
+      "input_sha256": "97064dc8d9093a691c8bb18b90ed6c5d05c0e97bb4d24a79abeb18d6a0ad94f5",
+      "input_bytes": 450,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000399
+    },
+    {
+      "name": "tool/capabilities_no_arguments",
+      "input_sha256": "e6e971923e070e6c2921c6a1027433462e0972d0171836ba15f6594547288f32",
+      "input_bytes": 380,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000378
+    },
+    {
+      "name": "tool/meta_valid",
+      "input_sha256": "e3dea9f2a237e59f77cb54b3bd9dfccde1793ddfc89bff1c4dc743582f2508cb",
+      "input_bytes": 425,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000717
+    },
+    {
+      "name": "tool/meta_invalid",
+      "input_sha256": "2ff73bd3e86050d3d36916754db43f7230483c78b521f2a6d63a8355368e2ac4",
+      "input_bytes": 405,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000371
+    },
+    {
+      "name": "tool/meta_invalid/[]",
+      "input_sha256": "585afe742ba0d400d91c93dc398d0edea7ee675e902cb49baf46b10595e08212",
+      "input_bytes": 406,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000359
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': None}",
+      "input_sha256": "45444828c0661676b3a1c5b20b40d87bf1e1130abb48057f8ea09eb69864c1e0",
+      "input_bytes": 426,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000505
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': True}",
+      "input_sha256": "9adbe018e1d951c1e5eb241a1ee98709a7a691d1f44002daef61a7d476043eea",
+      "input_bytes": 426,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000358
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': []}",
+      "input_sha256": "9c0e68f27885396a3453804111c8c012d7431e12ae4374ac922764d09e56f36e",
+      "input_bytes": 424,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000351
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_extra",
+      "input_sha256": "4307b61517e0bedf703a81779fb682fbc4f4a44bc17ebe619478e026d26cf5fb",
+      "input_bytes": 404,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000351
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_array",
+      "input_sha256": "4a3b6129bfbcd907d23e4144c1253614e9cb1ebdf1a7f1a58db35041e2787d95",
+      "input_bytes": 395,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000339
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_string",
+      "input_sha256": "7e6e448f365d8cf8aabd7645cbc32ffd64185014232158fe9af504a7964fd314",
+      "input_bytes": 398,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000365
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_null",
+      "input_sha256": "e253a6ff574d09fc32ba63eaa1ef7f86b2129b8a30abc64e8db0a667cd6c3dfc",
+      "input_bytes": 397,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00034
+    },
+    {
+      "name": "tool/bench_submit/invalid_extra",
+      "input_sha256": "0c371a3da679e0941400baf14f10b312b750b9d8a879fec98a4e5bf7cae18a4b",
+      "input_bytes": 591,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000348
+    },
+    {
+      "name": "tool/bench_submit/invalid_array",
+      "input_sha256": "7f20de83c0e18cc2690cb2013201fcd33f01e3b30ba487bfe07a9c4caf5d5d92",
+      "input_bytes": 389,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000334
+    },
+    {
+      "name": "tool/bench_submit/invalid_string",
+      "input_sha256": "2751701b157caf50566612d12374446c58f3e6697b2b0cbd5efcc84cabf1a3d7",
+      "input_bytes": 392,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000341
+    },
+    {
+      "name": "tool/bench_submit/invalid_null",
+      "input_sha256": "87bc9b1bbaf4b1c51744d6608e3d839b1b9a073b8eb568481026799670f8fe4b",
+      "input_bytes": 391,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00037
+    },
+    {
+      "name": "tool/bench_status/invalid_extra",
+      "input_sha256": "2405bf0993241f26134af3029a33d12131ce43fcba3e6fbaa088c8ba77560073",
+      "input_bytes": 411,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000402
+    },
+    {
+      "name": "tool/bench_status/invalid_array",
+      "input_sha256": "f414a00f1e44d3041e75759cf3af0ce1695b575d6048eebcd8cf9cb122ab2ff0",
+      "input_bytes": 389,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000663
+    },
+    {
+      "name": "tool/bench_status/invalid_string",
+      "input_sha256": "62ffea50844c90031653a6c6b963a8460b18051d40835c8207db241efbde87d4",
+      "input_bytes": 392,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000382
+    },
+    {
+      "name": "tool/bench_status/invalid_null",
+      "input_sha256": "cf621a734c7e9298cf4034ff1933d1f85390645cc99b7d8a12a055fa37006b73",
+      "input_bytes": 391,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00063
+    },
+    {
+      "name": "tool/bench_result/invalid_extra",
+      "input_sha256": "a46bdc30185a775b7bba82887dd8a09e561ee0bb8087770a2a139d27a23a0b6e",
+      "input_bytes": 411,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000356
+    },
+    {
+      "name": "tool/bench_result/invalid_array",
+      "input_sha256": "83fba6ceef9bfa6d84d5ceb16c669701be858f8f89b0349b305451f244e79890",
+      "input_bytes": 389,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000348
+    },
+    {
+      "name": "tool/bench_result/invalid_string",
+      "input_sha256": "679cdbe49f982dce9a4b2ba97764ba9f2126fc7feef88dd5474fd098406f76d0",
+      "input_bytes": 392,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000361
+    },
+    {
+      "name": "tool/bench_result/invalid_null",
+      "input_sha256": "08ab098e5cd07a879a2ea8b88affe69233c8df32df286816f888100751567643",
+      "input_bytes": 391,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000348
+    },
+    {
+      "name": "tool/bench_cancel/invalid_extra",
+      "input_sha256": "ea4d90ffc27f7b4481888668f9ebf22a265bff3104ec9f71d870cc5b7b3a31fc",
+      "input_bytes": 411,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000679
+    },
+    {
+      "name": "tool/bench_cancel/invalid_array",
+      "input_sha256": "7333d7c55f84e9dc937e948f2f7f688d32dda86cbf6526ff36326bd50b747666",
+      "input_bytes": 389,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000362
+    },
+    {
+      "name": "tool/bench_cancel/invalid_string",
+      "input_sha256": "e51ed8d4b09e9a0b9eb5b24133393c0a50b2970c42cc0a7b5f665a3ca4610b8b",
+      "input_bytes": 392,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000391
+    },
+    {
+      "name": "tool/bench_cancel/invalid_null",
+      "input_sha256": "1e530437d6111e03b4bcf9025a31e413223903c4959eef5dd30f25a9c4322ca1",
+      "input_bytes": 391,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000672
+    },
+    {
+      "name": "tool/bench_logs/invalid_extra",
+      "input_sha256": "c973aebc4f2f1146116bf90a92e87ac6218464379ca95cd69d04165dbd3763a3",
+      "input_bytes": 409,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000388
+    },
+    {
+      "name": "tool/bench_logs/invalid_array",
+      "input_sha256": "76f92441f3f9924b99613dc475a78cf50aea4a79fdf69a28761b1e4b58c3c8df",
+      "input_bytes": 387,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000588
+    },
+    {
+      "name": "tool/bench_logs/invalid_string",
+      "input_sha256": "fed4fecb42b9dd3f9a01bb4427d1366f06cf7993e2317dcbdad85e91ff11d452",
+      "input_bytes": 390,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000645
+    },
+    {
+      "name": "tool/bench_logs/invalid_null",
+      "input_sha256": "eac55dfb251364f2de82beb8019d7d79c834dca3b5a7a1d55dbfbdb07755cbb8",
+      "input_bytes": 389,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000481
+    },
+    {
+      "name": "tool/job_id_reject/'0'",
+      "input_sha256": "ff67d96d83ed0d6009308975fffe2c21ee15bbde9eae4257a686e5cc1c6207d0",
+      "input_bytes": 401,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00066
+    },
+    {
+      "name": "tool/job_id_reject/'00'",
+      "input_sha256": "729231582058a25605def4f92a176508f8d2b05a73b33ec392ef8287ce7bcb15",
+      "input_bytes": 402,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000535
+    },
+    {
+      "name": "tool/job_id_reject/'01'",
+      "input_sha256": "6325b5c095c85887ee93c5b2e89347826b4ba815adf40902ac040647787f8f21",
+      "input_bytes": 402,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000549
+    },
+    {
+      "name": "tool/job_id_reject/'-1'",
+      "input_sha256": "d7fc33df69c86261f0161b7b5dcd26e1f31673be981b223ba59c05c1180d1e9a",
+      "input_bytes": 402,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000561
+    },
+    {
+      "name": "tool/job_id_reject/'+1'",
+      "input_sha256": "7ae3edaf14f6d33c080c104dc04d2b0ea99031708dd919709b70115f285d1e9f",
+      "input_bytes": 402,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000511
+    },
+    {
+      "name": "tool/job_id_reject/'1.0'",
+      "input_sha256": "ab728c49c400cd53699e43b8555302d3e5f5ec42a877a6d92874cd90ecce5eb2",
+      "input_bytes": 403,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000736
+    },
+    {
+      "name": "tool/job_id_reject/'1e0'",
+      "input_sha256": "1218d6954d0f4c7f655ed5e6f94e2878bfd619ed5fd231cf1c03164c6a9f06ba",
+      "input_bytes": 403,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000447
+    },
+    {
+      "name": "tool/job_id_reject/''",
+      "input_sha256": "b20eaea9224111da309e96b7c44156d018248d5d2bb5754ef7fece7bc2ae808b",
+      "input_bytes": 400,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000739
+    },
+    {
+      "name": "tool/job_id_reject/'18446744073709551616'",
+      "input_sha256": "20484a72d5c637751a43bc1b142f287dc547d9a678d9d38ebd29dc09aa07e50a",
+      "input_bytes": 420,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000444
+    },
+    {
+      "name": "tool/job_id_reject/'999999999999999999999'",
+      "input_sha256": "4db0699ec2ab289d158ee92fcdcc62f55b343402ee5bb1e3524874e9f4f87cb7",
+      "input_bytes": 421,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000395
+    },
+    {
+      "name": "tool/job_id_reject/1",
+      "input_sha256": "b9e5ac8746055b7ba1ddc0565ab80f05e3b4f1abb1a0826a044d6270987b2e3e",
+      "input_bytes": 399,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000467
+    },
+    {
+      "name": "tool/job_id_reject/None",
+      "input_sha256": "a2243e2058011b9f42ff75d1ee345de828e5a9b7770fb03392251beee091e0c8",
+      "input_bytes": 402,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000379
+    },
+    {
+      "name": "tool/job_id_reject/True",
+      "input_sha256": "f338d8eaac6d7230e56423b3f706c4a3c37c77c3f2a40aada613e81dd799d8fe",
+      "input_bytes": 402,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000372
+    },
+    {
+      "name": "tool/cursor_valid/0",
+      "input_sha256": "c382bf8232086117cbf46076d4c016d661da2085584bb7510f36e17eb18f49d9",
+      "input_bytes": 412,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000558
+    },
+    {
+      "name": "tool/cursor_valid/18446744073709551615",
+      "input_sha256": "1d7b99c6a444f691d9dc05e4fec4f94de8b5a6569ab2bbba694d948935b960d5",
+      "input_bytes": 431,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000447
+    },
+    {
+      "name": "tool/cursor_reject/'00'",
+      "input_sha256": "c54fd3f089242ed7a66290d6f8855556d3aacc81f189169249b2c55b7df1dbd9",
+      "input_bytes": 413,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000431
+    },
+    {
+      "name": "tool/cursor_reject/'-1'",
+      "input_sha256": "393146b14679cf6c5f8c57abe2c453243af6fc08dfcac069c44ae2642277de37",
+      "input_bytes": 413,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000524
+    },
+    {
+      "name": "tool/cursor_reject/'18446744073709551616'",
+      "input_sha256": "e39fcf4d1b5d3964763cc6d5c00a2d1bcbb4e27af82dc8946269bab1adc4139f",
+      "input_bytes": 431,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000527
+    },
+    {
+      "name": "tool/cursor_reject/0",
+      "input_sha256": "bd875365c0602a4275e3297eae2efc6c811b76b0a6b55531b0445275297ee4e7",
+      "input_bytes": 410,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000488
+    },
+    {
+      "name": "tool/submit_reject/recipe/d4010cac",
+      "input_sha256": "530466fa2935bce3532c257182ad0e05fecbd9eae558eec15b700c3b7bba5831",
+      "input_bytes": 571,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000471
+    },
+    {
+      "name": "tool/submit_reject/baseline_sha/f0a2fb80",
+      "input_sha256": "55e161a61ec1699c222ef7195365703a07cd47005ab52a9337e5b30ef76720f7",
+      "input_bytes": 581,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000659
+    },
+    {
+      "name": "tool/submit_reject/candidate_sha/f2493aea",
+      "input_sha256": "7833f93c3f3f0b9a3214c6850e395e77ff4cadbb661ee719fff01f76b58d61c1",
+      "input_bytes": 580,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000518
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/062c297b",
+      "input_sha256": "1fa07a5d8f60901336097b3c23c4da479820f125040d3334d053c9a94569a679",
+      "input_bytes": 565,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000521
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/e3b0c442",
+      "input_sha256": "338f64a8a2209d3a1a2003afc0f3a80e9e2f670c1610d4dc023c2220d6f2643b",
+      "input_bytes": 556,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000475
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/9537c5fd",
+      "input_sha256": "372d2e8d8efd58a754125c3054e85a7c8ed994fb8c82fd2f3a5da28c92a779ce",
+      "input_bytes": 621,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000557
+    },
+    {
+      "name": "tool/submit_sha256",
+      "input_sha256": "9c4939ba3ec355e3aa969caf6f49a642f5d648dbfaaa9cc8094eca9a44c0a4bb",
+      "input_bytes": 629,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.0006
+    },
+    {
+      "name": "notifications/ignored",
+      "input_sha256": "b99d61eb907bbae0e67e1719c708d6ad89e7adc2d66e0a5f6e2f7b6fc8eafc24",
+      "input_bytes": 1348,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00068
+    },
+    {
+      "name": "parse/malformed/0",
+      "input_sha256": "ad142195c2f75d7d4d08f0e97efbfe5335a0822955f1ecc0a62b616c07e907df",
+      "input_bytes": 295,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000673
+    },
+    {
+      "name": "parse/malformed/1",
+      "input_sha256": "ff37f9b797cbeb7d33f10a4d3ec60410db1fd2a054ddfbc4d59b7f6e0043d08a",
+      "input_bytes": 296,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00079
+    },
+    {
+      "name": "parse/malformed/2",
+      "input_sha256": "c34c57a74a478550e8b550038376536d9e1e619d008bcee0d85d464d1af65ba1",
+      "input_bytes": 296,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.001144
+    },
+    {
+      "name": "parse/malformed/3",
+      "input_sha256": "b2be358ab4576f20cfd5da4dba77bb5214ea3dbaba251966a9eb63bc806ec776",
+      "input_bytes": 296,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000907
+    },
+    {
+      "name": "parse/malformed/4",
+      "input_sha256": "66577554df7c90ddd57ccb27a85cf94ea8948134c67976c33c8806176de608a7",
+      "input_bytes": 300,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000781
+    },
+    {
+      "name": "parse/malformed/5",
+      "input_sha256": "d4b9ed7302b7f45d63c90272bd7c0c83e70b1c56c69560d817a48aa48bc25bae",
+      "input_bytes": 300,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000505
+    },
+    {
+      "name": "parse/malformed/6",
+      "input_sha256": "48c7215c6c0bf9c44f80be0ed3d3433a67f2f1b05f1a76671f0b002a54982987",
+      "input_bytes": 299,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000438
+    },
+    {
+      "name": "parse/malformed/7",
+      "input_sha256": "d75886a945ecf54c8d12b54e72632daf5f02e3f7fa29568effb486fe20df2fcb",
+      "input_bytes": 336,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000493
+    },
+    {
+      "name": "parse/malformed/8",
+      "input_sha256": "ea0ca0a61c9096668521e3e3d19edcc7a099b4dcdd5900c9268ebbe9b31de4bf",
+      "input_bytes": 303,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000466
+    },
+    {
+      "name": "parse/malformed/9",
+      "input_sha256": "c9323457d3e8aaeafeb21c0c8d6356e008b9ed21626c06e3616ec0765fa7f1b1",
+      "input_bytes": 299,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000413
+    },
+    {
+      "name": "parse/malformed/10",
+      "input_sha256": "4a34b1b7732a2ded6361a3d216ac12256b0c9c3fb011e74aa173c7f11213fc20",
+      "input_bytes": 302,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000407
+    },
+    {
+      "name": "parse/malformed/11",
+      "input_sha256": "e14a0dbf9ffda2d95b53a6b5fd5124014a27901c5fe324f9d958783321b22df1",
+      "input_bytes": 303,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000425
+    },
+    {
+      "name": "parse/malformed/12",
+      "input_sha256": "8aed1260e539aaa2529a84bb8f734948fa5dcf082fbe5ad20632086312389e9b",
+      "input_bytes": 303,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00041
+    },
+    {
+      "name": "parse/malformed/13",
+      "input_sha256": "031499e4231965c624a34c54cdeda7842de08ef4f18c9c2bc7c095f0226566f3",
+      "input_bytes": 303,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000581
+    },
+    {
+      "name": "parse/malformed/14",
+      "input_sha256": "bf73b494ffc9570ba0590dfbbf89398d4e4e7921780f26690a5620f201d16a31",
+      "input_bytes": 303,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000439
+    },
+    {
+      "name": "parse/malformed/15",
+      "input_sha256": "ddbbc14a97f29bfb55e5388e15c88c86165574c7033259b83d7c5bd45484ae16",
+      "input_bytes": 304,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000387
+    },
+    {
+      "name": "parse/malformed/16",
+      "input_sha256": "487eb887af8469f4ea6b721c1727c478cbcbf8abb9db1f1d1d01e7c68c4f721e",
+      "input_bytes": 305,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000392
+    },
+    {
+      "name": "parse/malformed/17",
+      "input_sha256": "cf11073783d2eef4975b981eaef78e7a17090b477f7fa9ad7f68d81728b25592",
+      "input_bytes": 308,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000403
+    },
+    {
+      "name": "parse/malformed/18",
+      "input_sha256": "24ebd9b51a1497b9a1ee6daac0de8e4389e887fd903f9b0ae8ca19346b692e12",
+      "input_bytes": 309,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000428
+    },
+    {
+      "name": "parse/malformed/19",
+      "input_sha256": "fb8fcb38101b0bbc16356c44cacb440a12ef2a1f4a4efacf4d1580f2c088eadc",
+      "input_bytes": 309,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000417
+    },
+    {
+      "name": "parse/malformed/20",
+      "input_sha256": "b552f8927d06d7e6351c378f873dee584776b587cf59f52fbbf34fcb58f8975e",
+      "input_bytes": 315,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000589
+    },
+    {
+      "name": "parse/malformed/21",
+      "input_sha256": "5f4ad4d9f13766ce485e75eb77c3fd07c8effc3a811355f5f7ad8b515d8fa361",
+      "input_bytes": 306,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000437
+    },
+    {
+      "name": "parse/malformed/22",
+      "input_sha256": "fbd234824e89ee1cd223af1b140b60c5a4f80939339a57950f1462de4ad3e613",
+      "input_bytes": 305,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000378
+    },
+    {
+      "name": "parse/malformed/23",
+      "input_sha256": "5ceb324a1f35c6c9317a481019157ed3c3e0e538c1ff136260cdb69bb667adbd",
+      "input_bytes": 306,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000363
+    },
+    {
+      "name": "parse/malformed/24",
+      "input_sha256": "30a5adf4e8603a68314b5dc8c75de8a9305db2cd2c2261ad053ae0d99bc1d5dd",
+      "input_bytes": 307,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00035
+    },
+    {
+      "name": "parse/malformed/25",
+      "input_sha256": "322a2cc90819ffb66417cbe0041f1ef1e5f5dc9be5b4b68b488f8bbaf97b928b",
+      "input_bytes": 304,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000344
+    },
+    {
+      "name": "parse/malformed/26",
+      "input_sha256": "1fdb768ae731e1cf60218e63f8d435d301536c8059126ba3370a48d14fbd39a8",
+      "input_bytes": 308,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000347
+    },
+    {
+      "name": "parse/malformed/27",
+      "input_sha256": "6d1653b1c666cf2f7432e4ab6dbf1209bce5a877978cc8036a928e5142a1c758",
+      "input_bytes": 313,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000353
+    },
+    {
+      "name": "parse/nonobject_or_invalid/None",
+      "input_sha256": "35e884c6b13cbc2ea2c0e0ebbef537aed2a6e79d621c0dfc2c46dc23e1ae8e99",
+      "input_bytes": 299,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000364
+    },
+    {
+      "name": "parse/nonobject_or_invalid/True",
+      "input_sha256": "4dce932a5e97f9667d3d196d2bf808a188aa30d49ec4e8039989c4fa2744ff64",
+      "input_bytes": 299,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000654
+    },
+    {
+      "name": "parse/nonobject_or_invalid/5",
+      "input_sha256": "c2dda66464f6f2bd9f847cdf575052158a9c47df5ea81570c0c8ce4fa4a1375b",
+      "input_bytes": 296,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000434
+    },
+    {
+      "name": "parse/nonobject_or_invalid/'string'",
+      "input_sha256": "e05e3fff4285fe9da53621b59ada883af98d484e233e378ae14e7ff884fcd85a",
+      "input_bytes": 303,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000423
+    },
+    {
+      "name": "parse/nonobject_or_invalid/[]",
+      "input_sha256": "7ee782cd15bfa186e1c665a340cd77591839527f916e00198b21f698d3b15849",
+      "input_bytes": 297,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000467
+    },
+    {
+      "name": "parse/nonobject_or_invalid/{}",
+      "input_sha256": "10844d2d6d69004c8268fd220cffd5fa9feafb14124802867d33355649ccb1e0",
+      "input_bytes": 297,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000391
+    },
+    {
+      "name": "parse/nonobject_or_invalid/[{'jsonrpc': '2.0', 'id':",
+      "input_sha256": "1e5f983571981945ef5cb2eb363f08a6a7f624cebddf5b3cda83da37cbb1b87c",
+      "input_bytes": 337,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000456
+    },
+    {
+      "name": "parse/depth/1",
+      "input_sha256": "196fe5ae857cd8ee6545141c81b60facabe3fb90aad2ddb0e3af5d04a2e8ac0a",
+      "input_bytes": 348,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000379
+    },
+    {
+      "name": "parse/depth/20",
+      "input_sha256": "bb90ef32e80be8b6cfdb9770321d0aee2474d8def90c666707fd8368e50e1828",
+      "input_bytes": 386,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00057
+    },
+    {
+      "name": "parse/depth/31",
+      "input_sha256": "421ac96335e013fd94ac498f7573566d6242b11065f987cb2f9fdb6e9eef4fb0",
+      "input_bytes": 408,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000392
+    },
+    {
+      "name": "parse/depth/32",
+      "input_sha256": "4440e59f5e999044f3b6f7f5ddf8c723e3ad57aebc65e062e73418ce2e6edfaf",
+      "input_bytes": 410,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000409
+    },
+    {
+      "name": "parse/depth/33",
+      "input_sha256": "e3b6d22597356c46bf534888a189c9c488d0385044b995c0ff4303dff6097fdc",
+      "input_bytes": 412,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000357
+    },
+    {
+      "name": "parse/depth/64",
+      "input_sha256": "ae7bf3fd286bdd81d2c7b21e485fc5f004daf2bf448262381e53fb0ff3bdc83e",
+      "input_bytes": 474,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000377
+    },
+    {
+      "name": "parse/depth/256",
+      "input_sha256": "1adb063280669e5804588f9b113ba664699e0aa4bd9ade1fe4044d6cdf84101e",
+      "input_bytes": 858,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000392
+    },
+    {
+      "name": "parse/exact_depth/32",
+      "input_sha256": "b39ac2207f1e416f3bb9e75ff44469f6438474cd520999f1b4b2b42dce2a197d",
+      "input_bytes": 317,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000375
+    },
+    {
+      "name": "parse/exact_depth/33",
+      "input_sha256": "c0aac93d41a5b529fd6d8114d7fc3e556f300fb55a7148cf1ba4990d2c9d0083",
+      "input_bytes": 319,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.0004
+    },
+    {
+      "name": "parse/complex_unicode",
+      "input_sha256": "ebb2303792f3df2c266aa8cc94d17f530e8fd6a0ea5b3bb8b51bc5da2fbea29f",
+      "input_bytes": 287,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000422
+    },
+    {
+      "name": "parse/escaped_id",
+      "input_sha256": "2a78b3e5bd2b1bf76baf4670761fe335d44ee6cd900741d4d118853f8d56ce33",
+      "input_bytes": 317,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000348
+    },
+    {
+      "name": "parse/token_count/100",
+      "input_sha256": "b782420b10b0fed55d3229402d3795977c3b624af71d6201d8bc1c0d1f5f3134",
+      "input_bytes": 1311,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000607
+    },
+    {
+      "name": "parse/token_count/248",
+      "input_sha256": "ab21c8a2a65b743889cd57ada8c6ddd5ff5247d4d4423a883a24023ee7f17b51",
+      "input_bytes": 3087,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000511
+    },
+    {
+      "name": "parse/token_count/256",
+      "input_sha256": "53237f9dcc093bd759a40390367b108978be014fc2e0a0c513c66af93badf1d4",
+      "input_bytes": 3183,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000361
+    },
+    {
+      "name": "parse/token_count/512",
+      "input_sha256": "e879bd380fbfb9d2ee2fc461c0fdcb91ed8dd7dc09e4e2e3296d8f4edf749621",
+      "input_bytes": 6255,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000369
+    },
+    {
+      "name": "parse/token_count/1024",
+      "input_sha256": "99ca15e12f97a5906ffe65c28c0a13cb8ae21fcc97f2a6811599029b71068f6b",
+      "input_bytes": 12423,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000384
+    },
+    {
+      "name": "parse/exact_tokens/512",
+      "input_sha256": "84ec2764171dc50cbe1fef2c77fb22dd5de58855e232d687d00ed6785aad82af",
+      "input_bytes": 2704,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000454
+    },
+    {
+      "name": "parse/exact_tokens/513",
+      "input_sha256": "f2687ef6c3bd8b68fcfd27e25f6d17c0f18a920963aa393899b0303c5d61d97b",
+      "input_bytes": 2709,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000374
+    },
+    {
+      "name": "frame/exact_bytes/16383",
+      "input_sha256": "4bcf069ee6ccac8d4faf39136ed246acea12ac5a7055c8edc75d21772eb26a61",
+      "input_bytes": 16678,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000447
+    },
+    {
+      "name": "frame/exact_bytes/16384",
+      "input_sha256": "eef035a17b08b4459c3e202f4850da75035af9f270020461f75268ef89df17de",
+      "input_bytes": 16679,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000567
+    },
+    {
+      "name": "frame/oversized/16385/True",
+      "input_sha256": "039acfa721c287054636248b872c11de11309b0caaa8252f4a643b7483353793",
+      "input_bytes": 16440,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000354
+    },
+    {
+      "name": "frame/oversized/16385/False",
+      "input_sha256": "39061532d423f2d385027b9d40fc07e2bedf7bf3151e8f8bdd5ff005cd5136d1",
+      "input_bytes": 16385,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000359
+    },
+    {
+      "name": "frame/oversized/65536/True",
+      "input_sha256": "6a2a9b21e5086662a387c28e52afdb7607bb2a8edf9c1516d1fbe0812b46025a",
+      "input_bytes": 65591,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000401
+    },
+    {
+      "name": "frame/clean_eof",
+      "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "input_bytes": 0,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000382
+    },
+    {
+      "name": "frame/unterminated/a94ce230",
+      "input_sha256": "a94ce230590595554baa02bed4ba48a4e38457a3520821f06fd2b09c6b7e3137",
+      "input_bytes": 40,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000373
+    },
+    {
+      "name": "frame/unterminated/021fb596",
+      "input_sha256": "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
+      "input_bytes": 1,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000385
+    },
+    {
+      "name": "frame/reconnect/0",
+      "input_sha256": "3a29084e65e974173ad61fa85e9afa59b1040c1cb3f4624f48f32aaea54d5ca5",
+      "input_bytes": 262,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000366
+    },
+    {
+      "name": "frame/reconnect/1",
+      "input_sha256": "6fca9d1973424707b7cf86d93597d510099178e5da6a0663e3cebd6d15c2a8e4",
+      "input_bytes": 262,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000619
+    },
+    {
+      "name": "frame/reconnect/2",
+      "input_sha256": "b43c77a19f1d15be37a3262a1afc3450e7912448340ba1a69a23e95001dcd2b2",
+      "input_bytes": 262,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000381
+    },
+    {
+      "name": "fuzz/syntax/0",
+      "input_sha256": "ca08e5429a30f7c1b36fbec404a674e34274c901cdaa8717d9f96c1d54e253c1",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000382
+    },
+    {
+      "name": "fuzz/syntax/1",
+      "input_sha256": "13b65887188e66a4ae274f130c843f8d0451e733bcebe379865e61c32a3f12cd",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000673
+    },
+    {
+      "name": "fuzz/syntax/2",
+      "input_sha256": "999dd1947dc7a024ef3ba130893153c518a7b19f34f6bc6113b5991d527ba00d",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000418
+    },
+    {
+      "name": "fuzz/syntax/3",
+      "input_sha256": "e78937d09676480d2bcedea1324397f505758383cc9a7b0bf03a08cf1f8a2527",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000377
+    },
+    {
+      "name": "fuzz/syntax/4",
+      "input_sha256": "035586bb1b761691fb11bf42a66d262333f42be1b7073af58ac464b36975edb9",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000378
+    },
+    {
+      "name": "fuzz/syntax/5",
+      "input_sha256": "567a3409c12749a65272a7f00f12f3d3a5f2195b51caf62c083b2e0e9b52f35a",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000361
+    },
+    {
+      "name": "fuzz/syntax/6",
+      "input_sha256": "e325983f8b63679118adfdbeb8bd46bd6323bfacae11a9946750d3e58c847198",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000351
+    },
+    {
+      "name": "fuzz/syntax/7",
+      "input_sha256": "0df3a441e92076a95da357a67bfcfa47c8d707499da27db89888ac553b891715",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000374
+    },
+    {
+      "name": "fuzz/syntax/8",
+      "input_sha256": "627a2bbcdc07d1405b1b8cbf6763b49d64e5672ceb53ab79cc1e492b550d2202",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000355
+    },
+    {
+      "name": "fuzz/syntax/9",
+      "input_sha256": "c8c4d0ea517c8fd19c61004b11f7031f6cdaa77d321437f9533f54435eb1d4ed",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000595
+    },
+    {
+      "name": "fuzz/syntax/10",
+      "input_sha256": "9f2dc9b474e49b489e5fe991ec2cb80f6dcc4e1a723b1bb0c67fe9fbfd8f2a11",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000362
+    },
+    {
+      "name": "fuzz/syntax/11",
+      "input_sha256": "6557064e6532fada00b99f4860a38864624395a970522ca4650ca13cfd21e8b3",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000507
+    },
+    {
+      "name": "fuzz/syntax/12",
+      "input_sha256": "5b521a5bb846aff2979a1ebd407221278b326d2d070c892942cc94221ab4c7f0",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000381
+    },
+    {
+      "name": "fuzz/syntax/13",
+      "input_sha256": "01b6e5b8224e9528a6d20771595028098a45b2bb9a633de48fb7140454981bbb",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000369
+    },
+    {
+      "name": "fuzz/syntax/14",
+      "input_sha256": "2bc538f3630debdbd5c5a7617b63664ab571d8cbd403e989fa342d803a607ad7",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000536
+    },
+    {
+      "name": "fuzz/syntax/15",
+      "input_sha256": "bd45427ce701c9c97726b34fed4b47004142b67eb82c1a01a9d7d01afa006fed",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000402
+    },
+    {
+      "name": "fuzz/syntax/16",
+      "input_sha256": "34ffe1f1fab17702c03e77440e4b4d55acf423cac2447703c15280353dc19f70",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000397
+    },
+    {
+      "name": "fuzz/syntax/17",
+      "input_sha256": "80efee6a64b52123f0852d6bc4a268596abbff93d9289b3b65807fd704fe7718",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000418
+    },
+    {
+      "name": "fuzz/syntax/18",
+      "input_sha256": "67341da8869ba2d79d7934d8d80e3ffaaa35433a35a87c94b3e8ddc159ece33d",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000395
+    },
+    {
+      "name": "fuzz/syntax/19",
+      "input_sha256": "82a449941ef7eb7eb3ea72dd20b40a57e5816bf612cc0876b3013f178dab6e99",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000373
+    },
+    {
+      "name": "fuzz/syntax/20",
+      "input_sha256": "d0dd242925a2cbf0b92e9aae6c733fd0370b173f09c978a4251f34697d87e31a",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000361
+    },
+    {
+      "name": "fuzz/syntax/21",
+      "input_sha256": "803b716daab084b0c8767c336384ba68bb5a747e75bf195f987e6674fcfce4a7",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000387
+    },
+    {
+      "name": "fuzz/syntax/22",
+      "input_sha256": "0b19ba4f30cd469ef7dbcf610733db28e34075c54d11e6ff64a10ebb4b29cb93",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000404
+    },
+    {
+      "name": "fuzz/syntax/23",
+      "input_sha256": "6eebb3b4d97c0549a2ea27c9dd4adad900b191db7f5160887dc25f9574ee5793",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000727
+    },
+    {
+      "name": "fuzz/syntax/24",
+      "input_sha256": "0d6b951912da7bb2651f14a81b2b1f1ba13c70b9420aa3045e575b10dce2f816",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000404
+    },
+    {
+      "name": "fuzz/syntax/25",
+      "input_sha256": "d07e3549d1503ea5e569657a2d28bfc4a15020666411baf3a3270e20d95468a0",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000388
+    },
+    {
+      "name": "fuzz/syntax/26",
+      "input_sha256": "c31ba03fe225c902dce4f886690a2e65f9b745286ba8ba1826d26539d29317ef",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000683
+    },
+    {
+      "name": "fuzz/syntax/27",
+      "input_sha256": "5c2b839f1b58b16bae4dd0cd3a53a1fa759de8a0251163c4043cd27959efa9e8",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000474
+    },
+    {
+      "name": "fuzz/syntax/28",
+      "input_sha256": "e7c3645433f96440c3282f99de33b1f8a6cdc4353c2a6f73fe43454c709e0b24",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000683
+    },
+    {
+      "name": "fuzz/syntax/29",
+      "input_sha256": "f67902e9636660978e739bace0473d2288d712652c18dbeafed8e27d1f0fd758",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000473
+    },
+    {
+      "name": "fuzz/syntax/30",
+      "input_sha256": "fb95e9a21a62a05a13fbe4803dee2541a5e1c34cbca02e36f54bec78ebca7287",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000403
+    },
+    {
+      "name": "fuzz/syntax/31",
+      "input_sha256": "5a1dd99b285e98457f7e3a11e762265bdfb08509e782a6a253116a500a817c5b",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000518
+    },
+    {
+      "name": "fuzz/syntax/32",
+      "input_sha256": "c83ee976a9d49eaad0caf2d1950b39200ee039ef62ddc4c9cfb2cbbc7437a066",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00052
+    },
+    {
+      "name": "fuzz/syntax/33",
+      "input_sha256": "bebe2aa486bff76b49a16dfef8e5ba7e57a128d4f91492fc468e23cbf33abc38",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000488
+    },
+    {
+      "name": "fuzz/syntax/34",
+      "input_sha256": "6fe19fc0de1607143be2ac58b2eab644fb4c3da890ff94e42baff9f0607f9cf1",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000458
+    },
+    {
+      "name": "fuzz/syntax/35",
+      "input_sha256": "37733ae8f8f1c3f780a5d31bbd4dc37c7c5cfe57c5297abe1aa6de33755890e6",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000459
+    },
+    {
+      "name": "fuzz/syntax/36",
+      "input_sha256": "e9fc55d71c434a8b3fe8ced5509b5822264231cf3c8cac020b5df5eef607ab42",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.00042
+    },
+    {
+      "name": "fuzz/syntax/37",
+      "input_sha256": "b641faaf73112b056e725b1dc643249a0153b4e22b8332256f5087fe4dde769f",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.0004
+    },
+    {
+      "name": "fuzz/syntax/38",
+      "input_sha256": "7a58c2820eeb5a93ac003c08526282f4b548b91a6bfec1022ea30c614631a1be",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000383
+    },
+    {
+      "name": "fuzz/syntax/39",
+      "input_sha256": "8d7b5836af204ca264f9e75f8dd80188c84d8ff2e5ee6f4b9f1f02ae65469fb7",
+      "input_bytes": 373,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000359
+    },
+    {
+      "name": "fuzz/syntax/40",
+      "input_sha256": "69840265ff96efa88b33a111af149e14980b61b4275055abf2e29371970528f0",
+      "input_bytes": 374,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000367
+    },
+    {
+      "name": "fuzz/syntax/41",
+      "input_sha256": "b7aa1dafddbcd456d711a0256c0de82c91e0d4547d66862c157b6d5b5b719f81",
+      "input_bytes": 375,
+      "stdout_bytes": 0,
+      "responses": [],
+      "exit_code": 1,
+      "stderr": "",
+      "elapsed_seconds": 0.000346
+    }
+  ],
+  "checks": [
+    {
+      "name": "version/2025-11-25/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "version/2025-11-25/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "version/2025-11-25/negotiated",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "version/2025-06-18/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "version/2025-06-18/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "version/2025-06-18/negotiated",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "version/2099-01-01/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "version/2099-01-01/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "version/2099-01-01/negotiated",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "version/2024-11-05/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "version/2024-11-05/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "version/2024-11-05/negotiated",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "lifecycle/preinitialize_list/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "lifecycle/preinitialize_list/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "lifecycle/preinitialize_list/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "lifecycle/no_initialized/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "lifecycle/no_initialized/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "lifecycle/no_initialized/blocked",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "lifecycle/reinitialize/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "lifecycle/reinitialize/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "lifecycle/reinitialize/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "lifecycle/invalid_initialized_array/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "lifecycle/invalid_initialized_array/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "lifecycle/invalid_initialized_array/does_not_advance",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "lifecycle/invalid_initialized_string/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "lifecycle/invalid_initialized_string/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "lifecycle/invalid_initialized_string/does_not_advance",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "lifecycle/invalid_initialized_number/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "lifecycle/invalid_initialized_number/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "lifecycle/invalid_initialized_number/does_not_advance",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "lifecycle/invalid_initialized_meta_array/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "lifecycle/invalid_initialized_meta_array/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "lifecycle/invalid_initialized_meta_array/does_not_advance",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "lifecycle/invalid_initialized_meta_token_null/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "lifecycle/invalid_initialized_meta_token_null/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "lifecycle/invalid_initialized_meta_token_null/does_not_advance",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "params/ping/list/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "params/ping/list/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "params/ping/list/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "params/ping/int/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "params/ping/int/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "params/ping/int/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "params/ping/str/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "params/ping/str/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "params/ping/str/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "params/ping/bool/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "params/ping/bool/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "params/ping/bool/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "params/ping/dict/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "params/ping/dict/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "params/ping/dict/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "params/ping/dict/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "params/ping/dict/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "params/ping/dict/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "params/ping/dict/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "params/ping/dict/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "params/ping/dict/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "params/ping/dict/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "params/ping/dict/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "params/ping/dict/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "method/unknown/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "method/unknown/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "method/unknown/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tools/list_unknown_cursor/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tools/list_unknown_cursor/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tools/list_unknown_cursor/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tools/list_meta/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tools/list_meta/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tools/list_meta/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "params/null/ping/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "params/null/ping/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "params/null/ping/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "params/null/tools/list/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "params/null/tools/list/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "params/null/tools/list/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "initialize/meta_invalid/None/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "initialize/meta_invalid/None/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "initialize/meta_invalid/None/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "initialize/meta_invalid/[]/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "initialize/meta_invalid/[]/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "initialize/meta_invalid/[]/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': None}/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': None}/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': None}/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': True}/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': True}/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': True}/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': []}/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': []}/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "initialize/meta_invalid/{'progressToken': []}/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/numeric/0/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/numeric/0/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/numeric/0/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/numeric/1/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/numeric/1/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/numeric/1/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/numeric/-1/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/numeric/-1/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/numeric/-1/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/numeric/9007199254740991/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/numeric/9007199254740991/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/numeric/9007199254740991/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/numeric/-9007199254740991/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/numeric/-9007199254740991/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/numeric/-9007199254740991/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/reject/9007199254740992/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/reject/9007199254740992/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/reject/9007199254740992/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/reject/-9007199254740992/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/reject/-9007199254740992/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/reject/-9007199254740992/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/reject/18446744073709551615/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/reject/18446744073709551615/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/reject/18446744073709551615/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/reject/18446744073709551616/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/reject/18446744073709551616/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/reject/18446744073709551616/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/reject/1.25/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/reject/1.25/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/reject/1.25/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/reject/None/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/reject/None/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/reject/None/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/reject/True/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/reject/True/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/reject/True/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/reject/{}/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/reject/{}/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/reject/{}/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/reject/[]/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/reject/[]/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/reject/[]/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/string/e3b0c44298/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/string/e3b0c44298/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/string/e3b0c44298/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/string/c543ece816/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/string/c543ece816/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/string/c543ece816/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/string/85e62acd75/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/string/85e62acd75/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/string/85e62acd75/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/string/e42dd264fd/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/string/e42dd264fd/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/string/e42dd264fd/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/string/cf09b6562e/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/string/cf09b6562e/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/string/cf09b6562e/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/string/b2cfe03dfa/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/string/b2cfe03dfa/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/string/b2cfe03dfa/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/string/2cdb26265b/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/string/2cdb26265b/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/string/2cdb26265b/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/string_reject/257/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/string_reject/257/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/string_reject/257/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "id/string_reject/258/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "id/string_reject/258/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "id/string_reject/258/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tools/discovery/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tools/discovery/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tools/discovery/names",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "tools/discovery/schemas",
+      "passed": false,
+      "detail": {}
+    },
+    {
+      "name": "schema/bench_capabilities/valid",
+      "passed": true,
+      "detail": {}
+    },
+    {
+      "name": "tool/bench_capabilities/absent_socket/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_capabilities/absent_socket/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_capabilities/absent_socket/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "schema/bench_submit/valid",
+      "passed": true,
+      "detail": {
+        "idempotency_key": "blackbox-on-absent-socket",
+        "recipe": "validate-buster-v1",
+        "baseline_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "candidate_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "name": "tool/bench_submit/absent_socket/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_submit/absent_socket/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_submit/absent_socket/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "schema/bench_status/valid",
+      "passed": true,
+      "detail": {
+        "job_id": "18446744073709551615"
+      }
+    },
+    {
+      "name": "tool/bench_status/absent_socket/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_status/absent_socket/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_status/absent_socket/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "schema/bench_result/valid",
+      "passed": true,
+      "detail": {
+        "job_id": "18446744073709551615"
+      }
+    },
+    {
+      "name": "tool/bench_result/absent_socket/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_result/absent_socket/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_result/absent_socket/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "schema/bench_cancel/valid",
+      "passed": true,
+      "detail": {
+        "job_id": "18446744073709551615"
+      }
+    },
+    {
+      "name": "tool/bench_cancel/absent_socket/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_cancel/absent_socket/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_cancel/absent_socket/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "schema/bench_logs/valid",
+      "passed": true,
+      "detail": {
+        "job_id": "18446744073709551615",
+        "cursor": "18446744073709551615"
+      }
+    },
+    {
+      "name": "tool/bench_logs/absent_socket/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_logs/absent_socket/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_logs/absent_socket/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/capabilities_no_arguments/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/capabilities_no_arguments/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/capabilities_no_arguments/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/meta_valid/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/meta_valid/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/meta_valid/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/meta_invalid/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/meta_invalid/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/meta_invalid/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/meta_invalid/[]/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/meta_invalid/[]/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/meta_invalid/[]/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': None}/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': None}/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': None}/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': True}/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': True}/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': True}/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': []}/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': []}/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/meta_invalid/{'progressToken': []}/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_extra/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_extra/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_extra/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_array/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_array/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_array/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_string/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_string/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_string/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_null/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_null/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_capabilities/invalid_null/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_submit/invalid_extra/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_submit/invalid_extra/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_submit/invalid_extra/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_submit/invalid_array/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_submit/invalid_array/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_submit/invalid_array/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_submit/invalid_string/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_submit/invalid_string/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_submit/invalid_string/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_submit/invalid_null/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_submit/invalid_null/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_submit/invalid_null/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_status/invalid_extra/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_status/invalid_extra/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_status/invalid_extra/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_status/invalid_array/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_status/invalid_array/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_status/invalid_array/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_status/invalid_string/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_status/invalid_string/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_status/invalid_string/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_status/invalid_null/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_status/invalid_null/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_status/invalid_null/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_result/invalid_extra/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_result/invalid_extra/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_result/invalid_extra/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_result/invalid_array/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_result/invalid_array/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_result/invalid_array/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_result/invalid_string/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_result/invalid_string/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_result/invalid_string/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_result/invalid_null/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_result/invalid_null/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_result/invalid_null/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_cancel/invalid_extra/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_cancel/invalid_extra/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_cancel/invalid_extra/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_cancel/invalid_array/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_cancel/invalid_array/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_cancel/invalid_array/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_cancel/invalid_string/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_cancel/invalid_string/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_cancel/invalid_string/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_cancel/invalid_null/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_cancel/invalid_null/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_cancel/invalid_null/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_logs/invalid_extra/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_logs/invalid_extra/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_logs/invalid_extra/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_logs/invalid_array/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_logs/invalid_array/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_logs/invalid_array/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_logs/invalid_string/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_logs/invalid_string/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_logs/invalid_string/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/bench_logs/invalid_null/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/bench_logs/invalid_null/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/bench_logs/invalid_null/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/'0'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/'0'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/'0'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/'00'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/'00'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/'00'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/'01'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/'01'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/'01'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/'-1'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/'-1'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/'-1'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/'+1'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/'+1'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/'+1'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/'1.0'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/'1.0'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/'1.0'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/'1e0'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/'1e0'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/'1e0'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/''/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/''/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/''/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/'18446744073709551616'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/'18446744073709551616'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/'18446744073709551616'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/'999999999999999999999'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/'999999999999999999999'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/'999999999999999999999'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/1/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/1/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/1/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/None/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/None/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/None/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/job_id_reject/True/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/job_id_reject/True/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/job_id_reject/True/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/cursor_valid/0/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/cursor_valid/0/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/cursor_valid/0/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/cursor_valid/18446744073709551615/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/cursor_valid/18446744073709551615/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/cursor_valid/18446744073709551615/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/cursor_reject/'00'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/cursor_reject/'00'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/cursor_reject/'00'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/cursor_reject/'-1'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/cursor_reject/'-1'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/cursor_reject/'-1'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/cursor_reject/'18446744073709551616'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/cursor_reject/'18446744073709551616'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/cursor_reject/'18446744073709551616'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/cursor_reject/0/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/cursor_reject/0/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/cursor_reject/0/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/submit_reject/recipe/d4010cac/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/submit_reject/recipe/d4010cac/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/submit_reject/recipe/d4010cac/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/submit_reject/baseline_sha/f0a2fb80/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/submit_reject/baseline_sha/f0a2fb80/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/submit_reject/baseline_sha/f0a2fb80/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/submit_reject/candidate_sha/f2493aea/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/submit_reject/candidate_sha/f2493aea/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/submit_reject/candidate_sha/f2493aea/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/062c297b/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/062c297b/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/062c297b/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/e3b0c442/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/e3b0c442/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/e3b0c442/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/9537c5fd/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/9537c5fd/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/submit_reject/idempotency_key/9537c5fd/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "tool/submit_sha256/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "tool/submit_sha256/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "tool/submit_sha256/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "notifications/ignored/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "notifications/ignored/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "notifications/no_responses",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "notifications/no_socket_created",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/0/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/0/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/0/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/1/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/1/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/1/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/2/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/2/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/2/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/3/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/3/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/3/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/4/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/4/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/4/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/5/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/5/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/5/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/6/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/6/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/6/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/7/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/7/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/7/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/8/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/8/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/8/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/9/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/9/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/9/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/10/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/10/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/10/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/11/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/11/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/11/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/12/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/12/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/12/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/13/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/13/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/13/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/14/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/14/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/14/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/15/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/15/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/15/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/16/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/16/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/16/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/17/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/17/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/17/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/18/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/18/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/18/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/19/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/19/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/19/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/20/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/20/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/20/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/21/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/21/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/21/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/22/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/22/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/22/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/23/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/23/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/23/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/24/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/24/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/24/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/25/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/25/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/25/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/26/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/26/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/26/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/malformed/27/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/malformed/27/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/malformed/27/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/nonobject_or_invalid/None/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/nonobject_or_invalid/None/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/nonobject_or_invalid/None/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/nonobject_or_invalid/True/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/nonobject_or_invalid/True/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/nonobject_or_invalid/True/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/nonobject_or_invalid/5/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/nonobject_or_invalid/5/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/nonobject_or_invalid/5/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/nonobject_or_invalid/'string'/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/nonobject_or_invalid/'string'/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/nonobject_or_invalid/'string'/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/nonobject_or_invalid/[]/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/nonobject_or_invalid/[]/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/nonobject_or_invalid/[]/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/nonobject_or_invalid/{}/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/nonobject_or_invalid/{}/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/nonobject_or_invalid/{}/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/nonobject_or_invalid/[{'jsonrpc': '2.0', 'id':/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/nonobject_or_invalid/[{'jsonrpc': '2.0', 'id':/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/nonobject_or_invalid/[{'jsonrpc': '2.0', 'id':/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/depth/1/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/depth/1/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/depth/1/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/depth/20/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/depth/20/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/depth/20/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/depth/31/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/depth/31/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/depth/31/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/depth/32/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/depth/32/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/depth/32/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/depth/33/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/depth/33/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/depth/33/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/depth/64/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/depth/64/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/depth/64/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/depth/256/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/depth/256/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/depth/256/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/exact_depth/32/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/exact_depth/32/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/exact_depth/32/limit",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "parse/exact_depth/33/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/exact_depth/33/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/exact_depth/33/limit",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "parse/complex_unicode/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/complex_unicode/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/complex_unicode/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "parse/escaped_id/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/escaped_id/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/escaped_id/roundtrip",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "parse/token_count/100/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/token_count/100/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/token_count/100/survived",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "parse/token_count/248/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/token_count/248/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/token_count/248/survived",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "parse/token_count/256/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/token_count/256/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/token_count/256/survived",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "parse/token_count/512/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/token_count/512/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/token_count/512/survived",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "parse/token_count/1024/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/token_count/1024/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/token_count/1024/survived",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "parse/exact_tokens/512/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/exact_tokens/512/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/exact_tokens/512/limit",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "parse/exact_tokens/513/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "parse/exact_tokens/513/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "parse/exact_tokens/513/limit",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "frame/exact_bytes/16383/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/exact_bytes/16383/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "frame/exact_bytes/16383/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "frame/exact_bytes/16384/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/exact_bytes/16384/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "frame/exact_bytes/16384/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "frame/oversized/16385/True/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/oversized/16385/True/exit",
+      "passed": true,
+      "detail": 1
+    },
+    {
+      "name": "frame/oversized/16385/True/single_error",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "frame/oversized/16385/False/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/oversized/16385/False/exit",
+      "passed": true,
+      "detail": 1
+    },
+    {
+      "name": "frame/oversized/16385/False/single_error",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "frame/oversized/65536/True/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/oversized/65536/True/exit",
+      "passed": true,
+      "detail": 1
+    },
+    {
+      "name": "frame/oversized/65536/True/single_error",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "frame/clean_eof/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/clean_eof/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "frame/clean_eof/quiet",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/unterminated/a94ce230/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/unterminated/a94ce230/exit",
+      "passed": true,
+      "detail": 1
+    },
+    {
+      "name": "frame/unterminated/error",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "frame/unterminated/021fb596/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/unterminated/021fb596/exit",
+      "passed": true,
+      "detail": 1
+    },
+    {
+      "name": "frame/unterminated/error",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "frame/reconnect/0/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/reconnect/0/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "frame/reconnect/0/fresh_lifecycle",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "frame/reconnect/1/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/reconnect/1/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "frame/reconnect/1/fresh_lifecycle",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "frame/reconnect/2/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "frame/reconnect/2/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "frame/reconnect/2/fresh_lifecycle",
+      "passed": false,
+      "detail": []
+    },
+    {
+      "name": "fuzz/syntax/0/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/0/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/0/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/1/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/1/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/1/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/2/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/2/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/2/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/3/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/3/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/3/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/4/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/4/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/4/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/5/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/5/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/5/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/6/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/6/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/6/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/7/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/7/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/7/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/8/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/8/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/8/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/9/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/9/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/9/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/10/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/10/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/10/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/11/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/11/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/11/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/12/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/12/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/12/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/13/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/13/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/13/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/14/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/14/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/14/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/15/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/15/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/15/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/16/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/16/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/16/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/17/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/17/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/17/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/18/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/18/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/18/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/19/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/19/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/19/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/20/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/20/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/20/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/21/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/21/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/21/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/22/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/22/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/22/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/23/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/23/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/23/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/24/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/24/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/24/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/25/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/25/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/25/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/26/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/26/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/26/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/27/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/27/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/27/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/28/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/28/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/28/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/29/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/29/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/29/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/30/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/30/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/30/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/31/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/31/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/31/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/32/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/32/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/32/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/33/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/33/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/33/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/34/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/34/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/34/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/35/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/35/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/35/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/36/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/36/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/36/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/37/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/37/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/37/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/38/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/38/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/38/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/39/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/39/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/39/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/40/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/40/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/40/response_count",
+      "passed": false,
+      "detail": 0
+    },
+    {
+      "name": "fuzz/syntax/41/stdout",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "fuzz/syntax/41/exit",
+      "passed": false,
+      "detail": 1
+    },
+    {
+      "name": "fuzz/syntax/41/response_count",
+      "passed": false,
+      "detail": 0
+    }
+  ],
+  "observations": [
+    {
+      "name": "schema_runtime_domain",
+      "details": [
+        {
+          "field": "job_id",
+          "schema_valid_but_out_of_uint64_range": "18446744073709551616"
+        },
+        {
+          "field": "job_id",
+          "schema_valid_but_out_of_uint64_range": "99999999999999999999"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "runs": 224,
+    "checks": 680,
+    "passed": 237,
+    "failed": 443
+  }
+}

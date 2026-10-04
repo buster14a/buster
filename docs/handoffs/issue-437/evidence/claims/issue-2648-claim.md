@@ -1,0 +1,7 @@
+Implementation claim: this session owns the first native-program slice on `codex/2648-native-program-execution`, from inspected main `1d4898682304cc7e50ed4a112d08dd39ef257bce`.
+
+Scope: actual bounded authenticated upload and immutable materialization of a user-authored static Linux x86-64 executable, one fixed native execution recipe, candidate-account execution through the existing contained worker, typed outcome and sealed export/replay. No compiler revision, repository branch or workflow dispatch is required per submitted experiment. Preserve journal compatibility, the host singleton/inherited lease, root-owned recipe authority, finite budgets and verified descendant cleanup. Dynamic runtime closure, optional toolchain preparation and paired runtime/compiler measurement will remain explicitly unavailable until their own implementation is validated.
+
+The MCP adapter remains separately owned by this session on `codex/437-native-mcp-client`; merge order for shared source is serialized. #1190/#1216 and #423 own adjacent fixed compiler and real-source timing contracts, respectively. No overlapping implementation claim was found on #2648 at this checkpoint.
+
+Source work proceeds without host changes. Live acceptance requires the reviewed installed native recipe and narrow direct-client authorization; full #437 also requires the independent off-host control-plane/quiet-phase implementation and real ChatGPT write-capable receipts. No benchmark or host qualification result is claimed.

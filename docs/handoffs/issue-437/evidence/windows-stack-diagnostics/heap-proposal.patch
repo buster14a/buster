@@ -1,0 +1,88 @@
+--- a/tools/bench_service/tests.c
++++ b/tools/bench_service/tests.c
+@@ -238,37 +238,51 @@
+     BQ_CHECK(bq_public_response_valid(&typed, &fixed));
+     char* capabilities[] = {"capabilities"};
+     BQ_CHECK(bq_client_arguments(1, capabilities, true, &typed, &operation));
+-    BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
+-    BQ_CHECK(bq_dispatch(&queue, typed.bytes, typed.size, &fixed) == BQ_OK &&
++    BqQueue* queue = calloc(1, sizeof(*queue));
++    BQ_CHECK(queue != NULL);
++    if (queue)
++    {
++        queue->directory_fd = -1;
++        queue->lock_fd = -1;
++        queue->journal_fd = -1;
++    BQ_CHECK(bq_dispatch(queue, typed.bytes, typed.size, &fixed) == BQ_OK &&
+              bq_public_response_valid(&typed, &fixed));
+     fixed.bytes[BQ_CONTROL_HEADER + 4] = 0x1b;
+     BQ_CHECK(!bq_public_response_valid(&typed, &fixed));
+     bq_packet(&fixed, BQ_OP_CAPABILITIES | 0x80000000u, 1, body, 4);
+     BQ_CHECK(!bq_public_response_valid(&typed, &fixed));
++    }
++    free(queue);
+ }
+ 
+ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
+ {
+-    BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
++    BqQueue* queue = calloc(1, sizeof(*queue));
++    BQ_CHECK(queue != NULL);
++    if (queue)
++    {
++        queue->directory_fd = -1;
++        queue->lock_fd = -1;
++        queue->journal_fd = -1;
+     BqPacket request, response;
+     BQ_CHECK(sizeof(bq_capabilities_v2) - 1 <= BQ_CONTROL_BODY - 4);
+     bq_packet(&request, BQ_OP_CAPABILITIES, UINT64_MAX, NULL, 0);
+-    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_OK);
++    BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_OK);
+     BQ_CHECK(response.size <= BQ_CONTROL_CAP && bq_u64(response.bytes + 16) == UINT64_MAX);
+     for (u32 prefix = 0; prefix < request.size; prefix += 1)
+     {
+-        BQ_CHECK(bq_dispatch(&queue, request.bytes, prefix, &response) == BQ_BAD_REQUEST);
+-    }
+-    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size + 1, &response) == BQ_BAD_REQUEST);
++        BQ_CHECK(bq_dispatch(queue, request.bytes, prefix, &response) == BQ_BAD_REQUEST);
++    }
++    BQ_CHECK(bq_dispatch(queue, request.bytes, request.size + 1, &response) == BQ_BAD_REQUEST);
+     bq_put32(request.bytes + 4, BQ_CONTROL_SCHEMA + 1);
+-    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
++    BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
+     bq_put32(request.bytes + 4, BQ_CONTROL_SCHEMA);
+     bq_put32(request.bytes + 12, BQ_CONTROL_BODY + 1);
+-    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
++    BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_BAD_REQUEST);
+     bq_packet(&request, BQ_OP_CAPABILITIES, 0, NULL, BQ_CONTROL_BODY + 1);
+     BQ_CHECK(request.size == 0);
+     bq_packet_schema(&request, 1, BQ_OP_CAPABILITIES, 42, NULL, 0);
+-    BQ_CHECK(bq_dispatch(&queue, request.bytes, request.size, &response) == BQ_OK && bq_u32(response.bytes + 4) == 1 &&
++    BQ_CHECK(bq_dispatch(queue, request.bytes, request.size, &response) == BQ_OK && bq_u32(response.bytes + 4) == 1 &&
+              response.size == BQ_CONTROL_HEADER + 4 + sizeof(bq_capabilities_v1) - 1);
+     BqRequest valid = bq_test_request(1, false);
+     for (u32 size = 0; size < valid.size; size += 1)
+@@ -402,12 +416,12 @@
+                  !memcmp(expected, actual, SHA256_HEX_CAPACITY));
+     }
+ #ifdef _WIN32
+-    BQ_CHECK(bq_open(&queue, ".") == BQ_UNSUPPORTED);
++    BQ_CHECK(bq_open(queue, ".") == BQ_UNSUPPORTED);
+ #endif
+ #ifndef __linux__
+     BqWorkerConfig worker = {0};
+     u64 worker_id = UINT64_MAX;
+-    BQ_CHECK(bq_worker_run(&queue, &worker, &worker_id) == BQ_UNSUPPORTED && worker_id == 0);
++    BQ_CHECK(bq_worker_run(queue, &worker, &worker_id) == BQ_UNSUPPORTED && worker_id == 0);
+     BQ_CHECK(bq_worker_unit(S8("/unsupported"), S8("1"), S8("2"), S8("validate-buster-v1"), S8("/workspace"),
+                              S8("1111111111111111111111111111111111111111"),
+                              S8("2222222222222222222222222222222222222222"), S8("/workspace/result")) == BQ_UNSUPPORTED);
+@@ -424,6 +438,8 @@
+     BQ_CHECK(bq_worker_copy_field(field, sizeof(field), "abc") == 3 && !strcmp(field, "abc"));
+     BQ_CHECK(bq_worker_copy_field(field, sizeof(field), "abcd") == -1 && !field[0]);
+ #endif
++    }
++    free(queue);
+ }
+ 
+ #ifndef _WIN32

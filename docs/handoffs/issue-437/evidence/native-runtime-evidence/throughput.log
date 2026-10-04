@@ -1,0 +1,94 @@
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: incomplete or incompatible result bundle; no performance verdict
+throughput: workload fixture/fast changed work or emitted nondeterministic output; comparison refused
+throughput: incomplete or incompatible result bundle; no performance verdict
+throughput: workload fixture/fast changed work or emitted nondeterministic output; comparison refused
+throughput: incomplete or incompatible result bundle; no performance verdict
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: incomplete or incompatible result bundle; no performance verdict
+throughput: incomplete or incompatible result bundle; no performance verdict
+throughput: incomplete or incompatible result bundle; no performance verdict
+throughput: cannot remove stale or invalid summary summary.json in /home/david/Documents/Codex/2026-10-04/solve-https-github-com-buster14a-buster-2/work/native-program-execution/build/throughput-tool-tests/blocked-summary
+throughput: cannot remove stale or invalid summary summary.json in /home/david/Documents/Codex/2026-10-04/solve-https-github-com-buster14a-buster-2/work/native-program-execution/build/throughput-tool-tests/blocked-summary
+throughput: cannot remove stale or invalid summary summary.json in /home/david/Documents/Codex/2026-10-04/solve-https-github-com-buster14a-buster-2/work/native-program-execution/build/throughput-tool-tests/blocked-summary
+throughput: incomplete or incompatible result bundle; no performance verdict
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: malformed, duplicated, missing, or invalid samples; comparison refused
+throughput: invalid value for --flag: -fno-register-allocator
+throughput: invalid options; run 'throughput help'
+throughput: invalid value for --flag: -S
+throughput: invalid options; run 'throughput help'
+throughput: invalid value for --flag: -c
+throughput: invalid options; run 'throughput help'
+throughput: invalid value for --flag: -E
+throughput: invalid options; run 'throughput help'
+throughput: invalid value for --artifact: executable
+throughput: invalid options; run 'throughput help'
+throughput: missing value after --artifact
+throughput: invalid options; run 'throughput help'
+throughput: custom workload selection requires --no-guard; the predeclared CI corpus is unchanged
+throughput: invalid options; run 'throughput help'
+throughput: invalid value for --workload: 
+throughput: invalid options; run 'throughput help'
+throughput: invalid value for --workload: macro
+throughput: invalid options; run 'throughput help'
+throughput: missing value after --workload
+throughput: invalid options; run 'throughput help'
+throughput: dedicated run/qualify requires --machine-id LABEL (1-127 bytes), --lock-file ABSOLUTE_PATH and --cpu N|auto
+throughput: invalid options; run 'throughput help'
+throughput: dedicated run/qualify requires --machine-id LABEL (1-127 bytes), --lock-file ABSOLUTE_PATH and --cpu N|auto
+throughput: invalid options; run 'throughput help'
+throughput: dedicated run/qualify requires --machine-id LABEL (1-127 bytes), --lock-file ABSOLUTE_PATH and --cpu N|auto
+throughput: invalid options; run 'throughput help'
+throughput: dedicated run/qualify requires --machine-id LABEL (1-127 bytes), --lock-file ABSOLUTE_PATH and --cpu N|auto
+throughput: invalid options; run 'throughput help'
+throughput: dedicated run/qualify requires --machine-id LABEL (1-127 bytes), --lock-file ABSOLUTE_PATH and --cpu N|auto
+throughput: invalid options; run 'throughput help'
+throughput: invalid value for --lease-fd: closed
+throughput: invalid options; run 'throughput help'
+throughput: invalid value for --lease-fd: 2
+throughput: invalid options; run 'throughput help'
+throughput: dedicated run/qualify requires --machine-id LABEL (1-127 bytes), --lock-file ABSOLUTE_PATH and --cpu N|auto
+throughput: invalid options; run 'throughput help'
+throughput: run incomplete; partial logs retained; no performance verdict
+throughput: dedicated host admission failed (unsupported platform, busy/invalid lock or unavailable CPU): Resource temporarily unavailable
+throughput: run incomplete; partial logs retained; no performance verdict
+throughput: incomplete or incompatible result bundle; no performance verdict
+throughput: sample failed-compiler failed: exit=7 signal=0 timeout=0 launch_error=0 launch_stage=none; see /home/david/Documents/Codex/2026-10-04/solve-https-github-com-buster14a-buster-2/work/native-program-execution/build/throughput-tool-tests/compiler-controls/failed-compiler.log
+throughput: sample missing-artifact did not produce a nonempty artifact
+throughput: missing, malformed or incomplete source metrics: /home/david/Documents/Codex/2026-10-04/solve-https-github-com-buster14a-buster-2/work/native-program-execution/build/throughput-tool-tests/compiler-controls/missing-artifact.metrics
+throughput: admit-workload requires DESCRIPTOR, source/compiler/oracle evidence, output, qualification id and all closure manifests
+throughput: invalid options; run 'throughput help'
+throughput: missing, malformed or incomplete source metrics: /home/david/Documents/Codex/2026-10-04/solve-https-github-com-buster14a-buster-2/work/native-program-execution/build/throughput-tool-tests/test.metrics
+throughput: missing, malformed or incomplete source metrics: /home/david/Documents/Codex/2026-10-04/solve-https-github-com-buster14a-buster-2/work/native-program-execution/build/throughput-tool-tests/test.metrics
+throughput: missing, malformed or incomplete source metrics: /home/david/Documents/Codex/2026-10-04/solve-https-github-com-buster14a-buster-2/work/native-program-execution/build/throughput-tool-tests/test.metrics
+THROUGHPUT_SELF_TEST assertions=30 failures=0
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=0 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=1 inconclusive=0 guard=1 exit=1
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=1 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=1 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=1 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=1 inconclusive=0 guard=1 exit=1
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=0 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=0 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=0 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=0 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=0 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=0 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=0 guard=1 exit=0
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=0 guard=1 exit=0
+THROUGHPUT_ADMISSION_STACK status=selected mode=throughput-low-stack
+THROUGHPUT_RESULT confirmed_regressions=0 inconclusive=0 guard=0 exit=0
+PROCESS_DIAGNOSTICS minor=152 major=0 voluntary=2 involuntary=1
+PROCESS_RSS large_bytes=107319296 small_bytes=6602752
+THROUGHPUT_GROUP_POSTCONDITION mode=0 raw_error=0 selected_error=0 redundant_error=0 wrong_group_error=1 other_error=13 pid=720827 group=720827 timed_out=0
+THROUGHPUT_GROUP_POSTCONDITION mode=1 raw_error=1 selected_error=0 redundant_error=0 wrong_group_error=1 other_error=13 pid=720828 group=720828 timed_out=0
+THROUGHPUT_LAUNCH_ERRORS cases=4 repetitions=4 valid_exit125=distinct
+THROUGHPUT_RECORD_BYTES process=208 row=328 job=4272 max_jobs=34 run_heap=167552 replay_heap=11553472
+THROUGHPUT_INTEGRATION_TEST assertions=122930 failures=0

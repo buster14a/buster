@@ -1,0 +1,330 @@
+{
+  "note": "Historical source/test receipts. See README.md for published checkpoint heads and coverage limits. No executable build products or credentials included.",
+  "files": [
+    {
+      "path": "evidence/benchpress-receipt.txt",
+      "bytes": 258,
+      "sha256": "ccfc49c2dc4fce25892ac7f0ce4436ef5e9aa0eb017bd175f006fe812119bab5"
+    },
+    {
+      "path": "evidence/claims/issue-1190-source-claim.md",
+      "bytes": 2330,
+      "sha256": "39819c78cdb0f2f2f2ded081d89193d4e12111a0879038ee362d67370d3ac1bb"
+    },
+    {
+      "path": "evidence/claims/issue-2648-claim.md",
+      "bytes": 1504,
+      "sha256": "41a7fda842ac3b445cd5f4341777ee760dc915dcf1293037a8e7f9a80e721a3e"
+    },
+    {
+      "path": "evidence/claims/issue-2648-metrics-claim.md",
+      "bytes": 1714,
+      "sha256": "eb31a4f8ec36c0256f860009cff1a7bffa12004bdc35b9350297bebab731ff08"
+    },
+    {
+      "path": "evidence/claims/issue-437-claim.md",
+      "bytes": 1550,
+      "sha256": "912cceac990289a7027fe5d871a44f45a5a53c8447e1861da93a39cae5a3ca45"
+    },
+    {
+      "path": "evidence/claims/issue-437-integration-claim.md",
+      "bytes": 1757,
+      "sha256": "fe922d671d9e8cf93eed7f0a4453c31fddede345603a34252aa53a1e5f589db7"
+    },
+    {
+      "path": "evidence/claims/issue-437-offhost-claim.md",
+      "bytes": 1688,
+      "sha256": "8f0fd1a11660a3267715fe4a8688c20ecfa0c698ebe732abad749693799df8ea"
+    },
+    {
+      "path": "evidence/compiler-compare-broker-tests.log",
+      "bytes": 10308,
+      "sha256": "9a4054602773bd45b67285b4791b724881bca9fc52b0f086366221f7592b96a3"
+    },
+    {
+      "path": "evidence/compiler-compare-checkpoint-source-size-before-ack.log",
+      "bytes": 4409,
+      "sha256": "9ce92588feeb3a87fdaabeb890eddf043ada307e2fe29958bbd76559fc0d238a"
+    },
+    {
+      "path": "evidence/compiler-compare-checkpoint-source-size-final.log",
+      "bytes": 4234,
+      "sha256": "f972f9ab2fbe7428c4eebcb4d6c2c6033c84245b6754668a2adfcd00c5d08b94"
+    },
+    {
+      "path": "evidence/compiler-compare-checkpoint-source-size-write-baseline.log",
+      "bytes": 2771,
+      "sha256": "718c2fa505fcf5a967c9a460370d7f9b91b2efd936a14599e108450c742797f9"
+    },
+    {
+      "path": "evidence/compiler-compare-checkpoint.json",
+      "bytes": 730,
+      "sha256": "5449189db0d1ae96ce81b239a710cb96a48463e295c752734a21e9b8a304cd57"
+    },
+    {
+      "path": "evidence/compiler-compare-native-tests.log",
+      "bytes": 17503,
+      "sha256": "8f8f3ed55cfa5f2225d57e49486a217804020fc8173fc312cc058cb124c1e970"
+    },
+    {
+      "path": "evidence/compiler-compare-throughput-tests.log",
+      "bytes": 8058,
+      "sha256": "2d88c48ffaf38ca481b02baef56bfdd9d13ddb5cb11a7b1fb730ddda812c3d59"
+    },
+    {
+      "path": "evidence/compiler-compare-wip-inventory.json",
+      "bytes": 2896,
+      "sha256": "02cf0f6d5037f1a7832934ffa9558ed13e88cd3bf02eb9085c7b36127a9bb0ba"
+    },
+    {
+      "path": "evidence/compiler-compare-wip.patch",
+      "bytes": 52932,
+      "sha256": "3613e92ff81d8af3756b9bfd315e706bb54ff5aaf4cae72f90ddc135f40daa84"
+    },
+    {
+      "path": "evidence/handoff-snapshot/issue-2648.json",
+      "bytes": 13692,
+      "sha256": "55b1efbe3edb230a6a39c6a0164798d6ea60df23b807aa41f99db18e4c32b045"
+    },
+    {
+      "path": "evidence/handoff-snapshot/issue-437.json",
+      "bytes": 76670,
+      "sha256": "1c909435760b562431360c0491b330761d654d16c96e6773209cc6f00e66ba2c"
+    },
+    {
+      "path": "evidence/handoff-snapshot/native-pr-policy-failure.log",
+      "bytes": 4373,
+      "sha256": "068c6257b7fc496f9b8022967f098101c7bac7c0e40bb3e8d34afde7895cd946"
+    },
+    {
+      "path": "evidence/handoff-snapshot/parent-source-size.log",
+      "bytes": 4067,
+      "sha256": "7e16a4e12ab680d4e7f235433ec0d0a592be953dab21c4d16ae5cb894bd6a6fc"
+    },
+    {
+      "path": "evidence/handoff-snapshot/pr-2649.json",
+      "bytes": 17784,
+      "sha256": "c73a8fd4f9387e188538e50379ac42d94dbedc942022e655068c68f71351925d"
+    },
+    {
+      "path": "evidence/handoff-snapshot/pr-2650.json",
+      "bytes": 17895,
+      "sha256": "e5570712d5031bc2e98d98348dbea7f6e78b13c3e52a0d06ac940fe43f6613f2"
+    },
+    {
+      "path": "evidence/handoff-snapshot/pr-summary.json",
+      "bytes": 1153,
+      "sha256": "181b0732780320ed9fa9dbbebfdf477d6b1bc36437b8c58c04388dff7610dc88"
+    },
+    {
+      "path": "evidence/mcp-blackbox-invalid-socket-path-results.json",
+      "bytes": 537470,
+      "sha256": "6a4a455fb2db6f57875be4d27a7067a8b4c2e7c9a69cadc8430e577529878354"
+    },
+    {
+      "path": "evidence/mcp-final-blackbox-results.json",
+      "bytes": 537453,
+      "sha256": "220df4a7e47c90533bb8a6bbd713fe22114454929531116505c9ec51e34f6076"
+    },
+    {
+      "path": "evidence/mcp-final-blackbox-stale-binary.json",
+      "bytes": 348783,
+      "sha256": "6bc4c81b1baac1b9e38d809a451d8804e32d551eec992c515f68ae5c09d70d60"
+    },
+    {
+      "path": "evidence/mcp-harness-exit-selfcheck.json",
+      "bytes": 137803,
+      "sha256": "6b24c9accb68395cec49c46d5b97b7cb7ac69745a089fad5e8833e071d30d443"
+    },
+    {
+      "path": "evidence/mcp-implementation/mcp-capabilities.log",
+      "bytes": 476,
+      "sha256": "cc77fcfe9c9b4e34dc1ffba86502535429678abba190671ab44b4a819580038f"
+    },
+    {
+      "path": "evidence/mcp-implementation/mcp-native-test.log",
+      "bytes": 17503,
+      "sha256": "e9e642ceaa1a500ba88ec69478647983f74a356bffea86a257ae353073a5e604"
+    },
+    {
+      "path": "evidence/mcp-implementation/mcp-sanitized-test.log",
+      "bytes": 17503,
+      "sha256": "c4b824e3545cea29a59ae1daf345ef79fb4b6838d101484212f804fa30796d29"
+    },
+    {
+      "path": "evidence/mcp-native-upload-capabilities.log",
+      "bytes": 494,
+      "sha256": "3f9f19ce722c877aef7c50a50319f57fd397ce668cb24dbbb78e9943173c2988"
+    },
+    {
+      "path": "evidence/mcp-native-upload-sanitized-test.log",
+      "bytes": 17503,
+      "sha256": "df28c8924cb166668d5e486b5b971e565ce46348f39004994d59667248c2c834"
+    },
+    {
+      "path": "evidence/mcp-native-upload-socket-test.log",
+      "bytes": 17503,
+      "sha256": "cfcdb3614b05b835d820d2f5b3106fabca0e9ead8c3dd3aa9ab4ac1075d3092b"
+    },
+    {
+      "path": "evidence/mcp-native-upload-source-size-write.log",
+      "bytes": 2771,
+      "sha256": "ce1671eb5fb3895a03d645d4eff5f62a61312b1ac0dfeb8cc38a46759455c614"
+    },
+    {
+      "path": "evidence/mcp-stack-fix-normal.log",
+      "bytes": 17503,
+      "sha256": "c4574053ad0dd102c04f5a573e0482adba55be7ef090f8bf6861f80f07267b48"
+    },
+    {
+      "path": "evidence/mcp-stack-fix-sanitize.log",
+      "bytes": 17503,
+      "sha256": "967f3e94a5791b628b68644c0099896a8214727b62c78e7998a56ad0f04eb5b7"
+    },
+    {
+      "path": "evidence/mcp-stack-fix-source-size.log",
+      "bytes": 3314,
+      "sha256": "69efedf41aec9aa30b49c027bc72a3b79c60e183ebbcdc48c137a2c9d8cbb505"
+    },
+    {
+      "path": "evidence/mcp_blackbox.py",
+      "bytes": 20492,
+      "sha256": "232461f9933d89f65046eed80dbf40250d04ee3debeacd9a0bb722217362d0f4"
+    },
+    {
+      "path": "evidence/native-program-evidence/broker.log",
+      "bytes": 10308,
+      "sha256": "f54a2d89cc1e38b8fa972d14004d421d230e0fa3c3197594aac99b8a51720c42"
+    },
+    {
+      "path": "evidence/native-program-evidence/capabilities.log",
+      "bytes": 494,
+      "sha256": "3f9f19ce722c877aef7c50a50319f57fd397ce668cb24dbbb78e9943173c2988"
+    },
+    {
+      "path": "evidence/native-program-evidence/normal.log",
+      "bytes": 17503,
+      "sha256": "339eae3ab6b2020b40278273ace7708ac9d206305a1bdffd40504a4d3f046aed"
+    },
+    {
+      "path": "evidence/native-program-evidence/sanitize.log",
+      "bytes": 17503,
+      "sha256": "1b5e75eac95c2629e2fe6e03a7af051d59a12652bbb69992feaa01e2edb96537"
+    },
+    {
+      "path": "evidence/native-program-evidence/source-size.log",
+      "bytes": 4007,
+      "sha256": "b89a264ea29379531983c3d515125dcde8635998c9d6bf1ce263258e14d42fec"
+    },
+    {
+      "path": "evidence/native-program-final-blackbox-results.json",
+      "bytes": 287975,
+      "sha256": "84c056bf8d63fa5fdd79ac457ac368e322f44b18f5efa1066239602e5c4cc236"
+    },
+    {
+      "path": "evidence/native-program-final-review.json",
+      "bytes": 1716,
+      "sha256": "d1f6503df12a6d644001c15e1e49273420e89d70de8f0d24ce0524d92d001ebc"
+    },
+    {
+      "path": "evidence/native-runtime-evidence/broker.log",
+      "bytes": 10308,
+      "sha256": "2fefe4631a1cab9630813bd3fcee7039b21d96a3f1dec19935eb055d1e33bf9b"
+    },
+    {
+      "path": "evidence/native-runtime-evidence/capabilities.log",
+      "bytes": 488,
+      "sha256": "61eaa8c77c47730fcdf568e789f1bab1fa430adc5e02f1f30ede4e7274a45346"
+    },
+    {
+      "path": "evidence/native-runtime-evidence/evidence.json",
+      "bytes": 1295,
+      "sha256": "f1844ffe2f8e38916fd6d76bc55180a14ac06217a2e51ad617233a03543cab8c"
+    },
+    {
+      "path": "evidence/native-runtime-evidence/normal.log",
+      "bytes": 17503,
+      "sha256": "910d55c650fd054c082e77618a59b59d8302b4b6f176a5e82aa07da3d3eb7586"
+    },
+    {
+      "path": "evidence/native-runtime-evidence/sanitize.log",
+      "bytes": 17503,
+      "sha256": "fa4229bb73bd2766622457fe629fa8b2a68d68456c2a3811b2ebf1745cefcba4"
+    },
+    {
+      "path": "evidence/native-runtime-evidence/source-size.log",
+      "bytes": 4254,
+      "sha256": "0cd572e481e5a43f1e177cec85b35e2347b3941f17cd82b3412d6bd345832f88"
+    },
+    {
+      "path": "evidence/native-runtime-evidence/throughput.log",
+      "bytes": 8122,
+      "sha256": "863cfdf7cdf04e69da9fc4c1a9edc111d86f422383c99df8206c08cbb569d79c"
+    },
+    {
+      "path": "evidence/native_program_blackbox.py",
+      "bytes": 20259,
+      "sha256": "2f607e83384501455d6dda9c0170159a445aa28c462efeab29148bbafa033a84"
+    },
+    {
+      "path": "evidence/offhost-evidence/earlier-custodian-normal.log",
+      "bytes": 17730,
+      "sha256": "719da09ea72ab25621ed281ad538a0c6a112c92a0b14d4ac04c179525d2a4712"
+    },
+    {
+      "path": "evidence/offhost-evidence/earlier-sanitized.log",
+      "bytes": 17616,
+      "sha256": "f330a964682071e3738a5e8dd16e847a9344ef40b7b7138969b7c3a54356affd"
+    },
+    {
+      "path": "evidence/offhost-evidence/final-normal.log",
+      "bytes": 17730,
+      "sha256": "4966cc4c76eede559a3c7a456044632668671a02b260068eef6b1055c07f83a7"
+    },
+    {
+      "path": "evidence/offhost-evidence/source-size-before-ack.log",
+      "bytes": 4348,
+      "sha256": "14e9b50bbcf5444492af200ca9dad720db0ed6c61e448022ee0f670753dbe199"
+    },
+    {
+      "path": "evidence/offhost-evidence/source-size-write-baseline.log",
+      "bytes": 2771,
+      "sha256": "b34a4c36c9b511d550cfeff207b24ad7f52635d54ca01ad0031eb1348cd89877"
+    },
+    {
+      "path": "evidence/windows-stack-diagnostics/diagnosis.json",
+      "bytes": 2766,
+      "sha256": "72b13b751087e6967070894578ff6deb9c0e247bb9ec7f4cf14d30e4877a6bda"
+    },
+    {
+      "path": "evidence/windows-stack-diagnostics/heap-proposal.patch",
+      "bytes": 4467,
+      "sha256": "2c3766e7456c16525de9c715164330dcf7e4e9301cb9aef62bbb3f888e278828"
+    },
+    {
+      "path": "evidence/windows-stack-diagnostics/root-fix-stack-replay.json",
+      "bytes": 454,
+      "sha256": "14ddf04982d1030465de24860810607560f71db4cce54fa0da1d1f841ff5f6a3"
+    },
+    {
+      "path": "evidence/windows-stack-diagnostics/stack-limit-replay.json",
+      "bytes": 1336,
+      "sha256": "ba5e0b6913e01a92779cfe106f16b06e370688364994ce22a38061343b274ffb"
+    },
+    {
+      "path": "agent-notes/compiler-compare.md",
+      "bytes": 11730,
+      "sha256": "6713d98731e89ef0f856142842cb3c04f31f9d62321ca789a1f93253ab0b368e"
+    },
+    {
+      "path": "agent-notes/native-runtime.md",
+      "bytes": 4919,
+      "sha256": "54c09795062adcd974da15004b4c289b4839ff1ac11e10b3c551536efa8f5806"
+    },
+    {
+      "path": "agent-notes/offhost-control.md",
+      "bytes": 7252,
+      "sha256": "ae50c40cb051333e63f4c7a0c392a5cc794222ee84a48203b77d1b13ac1d2617"
+    }
+  ]
+}

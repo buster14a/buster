@@ -1,0 +1,19 @@
+{
+  "branch": "codex/437-compiler-compare",
+  "base": "f4d14d1a6eaf0fcab36ee002d7f458963402a9c0",
+  "source_checkpoint": "03345bfc84a3c99fa029d9365c7ec730dacb840c",
+  "source_size_acknowledgment": "ee63d4d78608120f68339852a70cec350ff0ee6e",
+  "source_exactly_matches_precommit_wip_inventory": true,
+  "working_tree_clean": true,
+  "implementation_status": "incomplete WIP; not ready for admission or deployment",
+  "new_source_changes_during_checkpoint": false,
+  "source_size": {
+    "build_growth_bytes": 62342,
+    "limit_bytes": 32768,
+    "verdict": "acknowledged",
+    "final_exit_code": 0,
+    "final_log": "compiler-compare-checkpoint-source-size-final.log"
+  },
+  "pushed": false,
+  "publication_owner": "parent agent"
+}

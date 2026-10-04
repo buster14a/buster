@@ -1,0 +1,24 @@
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	﻿2026-10-04T19:44:43.0007952Z ##[group]Run python3 -B tools/bench_service/workflow_policy_test.py
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.0008277Z ^[[36;1mpython3 -B tools/bench_service/workflow_policy_test.py^[[0m
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.0008525Z ^[[36;1mpython3 -B tools/bench_service/dispatch_recipe_test.py^[[0m
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.0008797Z ^[[36;1mpython3 -B tools/bench_service/zen5_profile_test.py^[[0m
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.0009066Z ^[[36;1mpython3 -B tools/bench_service/deploy/verify_github_actor_policy_test.py^[[0m
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.0009362Z ^[[36;1mpython3 -B tools/bench_service/deploy/verify_github_admission_test.py^[[0m
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.0009650Z ^[[36;1mpython3 -B tools/bench_service/deploy/verify_github_queue_test.py^[[0m
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.0061735Z shell: /usr/bin/bash -e {0}
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.0061915Z ##[endgroup]
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.0360099Z WORKFLOW_POLICY_PASS fixed gateway is the sole 9700X Actions path
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1278179Z ....F
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1278690Z ======================================================================
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1282548Z FAIL: test_served_recipes_are_accepted_by_the_real_capabilities (__main__.InstalledCapabilityTest.test_served_recipes_are_accepted_by_the_real_capabilities)
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1284288Z ----------------------------------------------------------------------
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1284681Z Traceback (most recent call last):
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1285394Z   File "/home/runner/work/buster/buster/tools/bench_service/dispatch_recipe_test.py", line 162, in test_served_recipes_are_accepted_by_the_real_capabilities
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1286266Z     self.assertIn("service-recipes=validate-buster-v1,zen5-calibration-v1 ", capabilities)
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1289346Z AssertionError: 'service-recipes=validate-buster-v1,zen5-calibration-v1 ' not found in 'schema=2 journal=4 legacy-journal=1 executor=supervisor pending=8 jobs=512\nlocal-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1,zen5-calibration-v1,native-execute-v1 blocked-recipes=native-retirement-performance-v1\nvalidity=not-evaluated materialization=read-only workspace=per-attempt\nworker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic export=1 transport=unix-seqpacket authentication=peer-uid-gid\n'
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1291267Z 
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1291827Z ----------------------------------------------------------------------
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1292195Z Ran 5 tests in 0.055s
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1292339Z 
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1292444Z FAILED (failures=1)
+Benchmark service workflow policy	Prove exclusive fixed-gateway dispatch	2026-10-04T19:44:43.1400643Z ##[error]Process completed with exit code 1.
