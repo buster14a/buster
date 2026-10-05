@@ -293,6 +293,11 @@ struct ObjectSymbol
     // UNKNOWN is retained for object formats that do not encode this property
     // on an undefined symbol. This occupies the former reserved byte.
     u8 thread_local_state;
+    // A defined local label an assembler did not type: the ELF writers state
+    // STT_NOTYPE for it, as GNU as does, so a disassembler does not split a
+    // function there. `kind` is unchanged and still what every other
+    // consumer reads; Mach-O and COFF have no such state and ignore this.
+    bool untyped;
 };
 
 typedef struct ObjectRelocation ObjectRelocation;

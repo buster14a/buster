@@ -4163,6 +4163,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
             .global = symbol.global,
             .weak = symbol.weak,
             .hidden = symbol.hidden,
+            .untyped = symbol.untyped,
         };
     }
     for (u32 index = 0; index < unit.relocation_count; index += 1)

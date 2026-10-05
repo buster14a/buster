@@ -1600,7 +1600,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffe
             object_assembly_append_assembly_symbol(buffer, target, symbol->name);
             object_assembly_append_string(buffer, S8("\n"));
         }
-        if (object_assembly_is_gnu_type_target(target))
+        if (object_assembly_is_gnu_type_target(target) && !symbol->untyped)
         {
             object_assembly_append_string(buffer, S8("\t.type "));
             object_assembly_append_assembly_symbol(buffer, target, symbol->name);
@@ -12848,7 +12848,8 @@ struct ObjectElfPlan
 BUSTER_GLOBAL_LOCAL u8 object_elf64_symbol_type(ObjectSymbol const* source, bool is_defined, bool is_thread_local)
 {
     bool untyped = !is_defined && source->kind == OBJECT_SYMBOL_DATA && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
-    return is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1;
+    bool labeled = is_defined && source->untyped;
+    return is_thread_local ? 6 : labeled ? 0 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_elf64_section_is_thread_local(ObjectSection const* section)

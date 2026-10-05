@@ -23,6 +23,7 @@
 // compiler_driver_test_quoted_assembly_round_trip covers printed string/call symbols.
 // compiler_driver_test_compiler_listing_round_trip covers movabs and GCC/Clang listings.
 // compiler_driver_test_aarch64_assembly_round_trip reassembles AArch64 -S listings.
+// compiler_driver_test_assembly_private_labels checks ELF .L drops and NOTYPE labels.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
 // the optional independent Clang cross-assembly observer.
 // compiler_driver_test_bare_dwarf_sections checks flag-less DWARF source names
@@ -4597,6 +4598,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_statements(Unit
     scratch_end(temporary);
     return result;
 }
+// The st_info type nibble the ELF64 symbol table of `bytes` states for `name`,
+// or -1 when the table has no such symbol; -2 when the file is malformed.
+BUSTER_GLOBAL_LOCAL s32 compiler_driver_test_elf_symbol_type(ByteSlice bytes, String8 name)
+{
+    s32 result = -1;
+    u64 section_offset = 0;
+    u32 section_count = 0;
+    bool valid = bytes.length >= 64 && bytes.pointer[4] == 2;
+    if (valid)
+    {
+        for (u32 byte = 0; byte < 8; byte += 1) section_offset |= (u64)bytes.pointer[0x28 + byte] << (byte * 8);
+        section_count = (u32)bytes.pointer[0x3c] | ((u32)bytes.pointer[0x3d] << 8);
+        valid = section_offset + (u64)section_count * 64 <= bytes.length;
+    }
+    for (u32 section = 0; valid && section < section_count; section += 1)
+    {
+        u8 const* header = bytes.pointer + section_offset + (u64)section * 64;
+        u32 type = (u32)header[4] | ((u32)header[5] << 8) | ((u32)header[6] << 16) | ((u32)header[7] << 24);
+        if (type == 2)
+        {
+            u64 offset = 0, size = 0;
+            u32 link = (u32)header[0x28] | ((u32)header[0x29] << 8);
+            for (u32 byte = 0; byte < 8; byte += 1)
+            {
+                offset |= (u64)header[0x18 + byte] << (byte * 8);
+                size |= (u64)header[0x20 + byte] << (byte * 8);
+            }
+            valid = link < section_count && offset + size <= bytes.length;
+            u64 strings = 0, strings_size = 0;
+            if (valid)
+            {
+                u8 const* string_header = bytes.pointer + section_offset + (u64)link * 64;
+                for (u32 byte = 0; byte < 8; byte += 1)
+                {
+                    strings |= (u64)string_header[0x18 + byte] << (byte * 8);
+                    strings_size |= (u64)string_header[0x20 + byte] << (byte * 8);
+                }
+                valid = strings + strings_size <= bytes.length;
+            }
+            for (u64 entry = 0; valid && entry + 24 <= size; entry += 24)
+            {
+                u8 const* symbol = bytes.pointer + offset + entry;
+                u32 name_offset = (u32)symbol[0] | ((u32)symbol[1] << 8) | ((u32)symbol[2] << 16) | ((u32)symbol[3] << 24);
+                if (name_offset < strings_size && name_offset + name.length < strings_size + 1 &&
+                    !memcmp(bytes.pointer + strings + name_offset, name.pointer, name.length) &&
+                    bytes.pointer[strings + name_offset + name.length] == 0)
+                {
+                    result = symbol[4] & 0xf;
+                }
+            }
+        }
+    }
+    return valid ? result : -2;
+}
+
+// GitHub #2686: assembling `.L` temporaries writes no symbol for them, and a
+// plain local label is STT_NOTYPE, on both ELF targets. A `.type` function
+// stays STT_FUNC, as does an exported label without `.type`; a `.L` name that
+// a relocation still needs stays.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_private_labels(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+    String8 sources[] = {
+        S8(".text\nf:\n  jmp .Lx\n.Lx:\n  ret\n.Lunused:\n  ret\n.globl entry\nentry:\n  ret\n"
+           ".type typed,@function\ntyped:\n  ret\n  leaq .Lstring(%rip), %rax\n.section .rodata\n.Lstring: .byte 65\n"),
+        S8(".text\nf:\n  b .Lx\n.Lx:\n  ret\n.Lunused:\n  ret\n.globl entry\nentry:\n  ret\n"
+           ".type typed,%function\ntyped:\n  ret\n.data\n  .quad .Lstring\n"
+           ".section .rodata\n.Lstring: .byte 65\n"),
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        String8 input = buster_test_temporary_path(arena, S8("assembly-private-labels"), S8(".s"));
+        String8 output = buster_test_temporary_path(arena, S8("assembly-private-labels"), S8(".o"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[target]))))
+        {
+            String8 command[] = {S8("-target"), targets[target], S8("-c"), input, S8("-o"), output};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+            {
+                ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, bytes.length != 0);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8(".Lx")) == -1);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8(".Lunused")) == -1);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8(".Lstring")) >= 0);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8("f")) == 0);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8("entry")) == 2);
+                BUSTER_TEST(arguments, compiler_driver_test_elf_symbol_type(bytes, S8("typed")) == 2);
+            }
+        }
+        os_file_delete(input);
+        os_file_delete(output);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // The pristine atomic-pair source must assemble as one unit. The literals
 // cover both functions, including the retry branch at byte 40 back to byte 0.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_control_labels(UnitTestArguments* arguments)
@@ -20117,6 +20219,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_compiler_listing_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_assembly_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_control_labels);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_private_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_pointer_addresses);

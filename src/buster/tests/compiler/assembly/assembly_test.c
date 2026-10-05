@@ -3255,6 +3255,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_gnu_compatible_spellings(UnitTe
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL AssemblyUnitSymbol const* assembly_test_unit_find_symbol(AssemblyUnitResult const* unit, String8 name)
+{
+    AssemblyUnitSymbol const* result = 0;
+    for (u32 index = 0; index < unit->symbol_count && !result; index += 1)
+    {
+        if (string_equal(unit->symbols[index].name, name)) result = unit->symbols + index;
+    }
+    return result;
+}
+
+// GNU as and llvm-mc drop `.L` temporaries from an ELF symbol table (`L` on
+// Mach-O) unless a relocation still needs one, and write a plain local label
+// STT_NOTYPE rather than STT_FUNC (GitHub #2686). The same fixtures run on
+// both instruction sets: a folded and an unreferenced `.L` label leave, a
+// `.L` label named by a section-crossing relocation or `.globl` stays, and
+// only an exported label without `.type` is still a function.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_private_labels(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 sources[] = {
+        S8(".text\nf:\n  jmp .Lx\n.Lx:\n  jmp 1f\n1:\n  ret\n.Lunused:\n  ret\n"
+           ".globl kept_global\n.type kept_global,@function\nkept_global:\n  ret\n"
+           ".globl exported\nexported:\n  ret\n"
+           ".type typed_local,@function\ntyped_local:\n  ret\n"
+           ".globl .Lglobal\n.Lglobal:\n  ret\n"
+           "  leaq .Lstring(%rip), %rax\n  ret\n"
+           ".section .rodata\n.Lstring:\n  .byte 65\n.Lstray:\n  .byte 66\n"),
+        S8(".text\nf:\n  b .Lx\n.Lx:\n  b 1f\n1:\n  ret\n.Lunused:\n  ret\n"
+           ".globl kept_global\n.type kept_global,%function\nkept_global:\n  ret\n"
+           ".globl exported\nexported:\n  ret\n"
+           ".type typed_local,%function\ntyped_local:\n  ret\n"
+           ".globl .Lglobal\n.Lglobal:\n  ret\n"
+           ".data\n  .quad .Lstring\n"
+           ".section .rodata\n.Lstring:\n  .byte 65\n.Lstray:\n  .byte 66\n"),
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, sources[target], (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, !unit.diagnostic_count);
+        if (!unit.diagnostic_count)
+        {
+            AssemblyUnitSymbol const* plain = assembly_test_unit_find_symbol(&unit, S8("f"));
+            AssemblyUnitSymbol const* exported = assembly_test_unit_find_symbol(&unit, S8("exported"));
+            AssemblyUnitSymbol const* global = assembly_test_unit_find_symbol(&unit, S8("kept_global"));
+            AssemblyUnitSymbol const* typed = assembly_test_unit_find_symbol(&unit, S8("typed_local"));
+            AssemblyUnitSymbol const* needed = assembly_test_unit_find_symbol(&unit, S8(".Lstring"));
+            AssemblyUnitSymbol const* exported_private = assembly_test_unit_find_symbol(&unit, S8(".Lglobal"));
+            BUSTER_TEST(arguments, !assembly_test_unit_find_symbol(&unit, S8(".Lx")));
+            BUSTER_TEST(arguments, !assembly_test_unit_find_symbol(&unit, S8(".Lunused")));
+            BUSTER_TEST(arguments, !assembly_test_unit_find_symbol(&unit, S8(".Lstray")));
+            // The relocation that names `.Lstring` keeps it; so does `.globl`.
+            BUSTER_TEST(arguments, needed && needed->defined && !needed->global);
+            BUSTER_TEST(arguments, exported_private && exported_private->global);
+            // A plain local label is untyped; `.type` and export keep FUNC.
+            BUSTER_TEST(arguments, plain && plain->untyped && !plain->typed && !plain->global);
+            BUSTER_TEST(arguments, typed && typed->function && typed->typed && !typed->untyped);
+            BUSTER_TEST(arguments, global && global->function && global->typed && !global->untyped);
+            BUSTER_TEST(arguments, exported && exported->function && !exported->typed && !exported->untyped);
+        }
+    }
+
+    // Other object formats: Mach-O drops the private `L` prefix, COFF drops
+    // only the generated numeric names and keeps a spelled `.L` label.
+    Target macho = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS};
+    AssemblyUnitResult mach = assembly_unit_encode(arguments->arena, S8(".text\n_f:\n  b Lx\nLx:\n  b 1f\n1:\n  ret\n"),
+                                                   (AssemblyEncodeOptions){.target = macho});
+    BUSTER_TEST(arguments, !mach.diagnostic_count && assembly_test_unit_find_symbol(&mach, S8("_f")) &&
+                           !assembly_test_unit_find_symbol(&mach, S8("Lx")) && mach.symbol_count == 1);
+    Target coff = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS};
+    AssemblyUnitResult windows = assembly_unit_encode(arguments->arena, S8(".text\nf:\n  jmp .Lx\n.Lx:\n  jmp 1f\n1:\n  ret\n"),
+                                                      (AssemblyEncodeOptions){.target = coff});
+    BUSTER_TEST(arguments, !windows.diagnostic_count && assembly_test_unit_find_symbol(&windows, S8("f")) &&
+                           assembly_test_unit_find_symbol(&windows, S8(".Lx")) && windows.symbol_count == 2);
+    return result;
+}
+
 // `.file`, `.ident` and `.addrsig*` are dropped; `.local`+`.comm` and `.lcomm`
 // reserve private `.bss`; `.set` aliases a symbol that may be defined later.
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_compiler_directives(UnitTestArguments* arguments)
@@ -3945,6 +4025,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_private_labels);
     UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
     result.succeeded_test_count += suffix_aliases.succeeded_test_count;
     result.test_count += suffix_aliases.test_count;

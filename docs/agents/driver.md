@@ -622,7 +622,21 @@ Three things that layer owns rather than the instruction layer. Local numeric
 labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
 following or preceding definition in source order, and those names leave the
 symbol table again once every reference to one is folded, the way GNU as drops
-its own `.L` locals. A repeat or lock prefix alone on a line joins the
+its own `.L` locals. User-written private names follow the same rule per object
+format: on ELF targets a local `.L` label, and on Mach-O a local `L` label, is
+dropped from the symbol table unless a relocation still names it (a literal
+pool or rodata address reached from another section keeps its symbol, where GNU
+as would reference the section symbol plus an addend; the object model cannot
+express that, so the symbol stays, typed `NOTYPE`). `.globl`, weak and
+undefined names are never dropped. COFF has no verified private prefix, so only
+the generated numeric names leave a COFF object and a spelled `.L` label stays.
+A plain local label in an executable section is `STT_NOTYPE` on ELF, as GNU as
+writes it, so disassemblers do not split a function at it; `.type name,@function`
+(or `%function`) gives `STT_FUNC`. An exported (`.globl` or weak) label in an
+executable section stays `STT_FUNC` without `.type`: the linker's entry-point
+and call checks key on the function kind, and the object reader only infers a
+function from an untyped exported label on AArch64. Buster's own `-S` output
+spells `.type` for every function symbol, so it is unaffected. A repeat or lock prefix alone on a line joins the
 instruction on the next one. A same-section PC-relative reference is written
 into the bytes only when its symbol's identity cannot change at link time.
 Weak symbols, including hidden weak definitions, retain references for strong

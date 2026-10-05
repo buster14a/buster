@@ -652,6 +652,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_symbol(AssemblyUnitBuilder* bui
         bool function = string_ends_with_sequence(parts[1], S8("function")) || string_ends_with_sequence(parts[1], S8("STT_FUNC"));
         bool object = string_ends_with_sequence(parts[1], S8("object")) || string_ends_with_sequence(parts[1], S8("STT_OBJECT"));
         record->function = function;
+        record->typed = function || object;
         return function || object;
     }
     if (string_equal(directive, S8(".size")))
@@ -1933,28 +1934,46 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
     for (u32 index = 0; index < builder->result.symbol_count; index += 1)
     {
         builder->result.symbols[index].global = builder->result.symbols[index].global || !builder->result.symbols[index].defined;
-        // A label in an executable section is a function entry unless a
-        // `.type` said otherwise: it is what a disassembler needs to know
-        // where code starts, and the object model has no third kind.
-        builder->result.symbols[index].function =
-            builder->result.symbols[index].function ||
-            (builder->result.symbols[index].defined &&
-             builder->result.sections[builder->result.symbols[index].section].kind == ASSEMBLY_UNIT_SECTION_TEXT);
+        // A defined global or weak label in an executable section is an entry
+        // point the linker and a caller treat as a function unless a `.type`
+        // said otherwise; the object model has no third kind for it. A local
+        // label is not: GNU as writes it STT_NOTYPE, and typing it FUNC makes
+        // a disassembler split the enclosing function there. Its `function`
+        // flag still follows the section, which is what consumers of the
+        // unit read, and `untyped` tells the ELF writer to state NOTYPE.
+        AssemblyUnitSymbol* record = builder->result.symbols + index;
+        bool in_text = record->defined && builder->result.sections[record->section].kind == ASSEMBLY_UNIT_SECTION_TEXT;
+        record->function = record->function || in_text;
+        record->untyped = in_text && !record->typed && !record->global && !record->weak;
     }
-    // The generated names for `1:`/`1f` are assembler bookkeeping. Every
-    // reference to one has just been resolved in place, so they leave the
-    // symbol table the way GNU as drops its own `.L` locals -- a tool reading
-    // the object should see the file's names and nothing else.
-    u32* remapped = arena_allocate(builder->arena, u32, builder->result.symbol_count ? builder->result.symbol_count : 1);
+    // The generated names for `1:`/`1f` are assembler bookkeeping, and so is
+    // every `.L` name on an ELF target (GNU as and llvm-mc both treat `.L` as
+    // the private prefix) and every `L` name on a Mach-O target. Every
+    // PC-relative reference to one that could be folded has just been
+    // resolved in place, so a local such name no relocation still names
+    // leaves the symbol table -- a tool reading the object should see the
+    // file's names and nothing else. A relocation that remains (a literal
+    // pool address or a rodata string reached from another section) needs
+    // the symbol, so that name stays; GNU as would point the relocation at
+    // the section symbol with an addend, which the object model cannot say.
+    // COFF has no verified private prefix here, so only the generated names
+    // leave it.
+    bool macho_private = builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
+    u32 symbol_slots = builder->result.symbol_count ? builder->result.symbol_count : 1;
+    u32* remapped = arena_allocate(builder->arena, u32, symbol_slots);
+    bool* referenced = arena_allocate_zeroed(builder->arena, bool, symbol_slots);
+    for (u32 index = 0; index < builder->result.relocation_count; index += 1)
+    {
+        referenced[builder->result.relocations[index].symbol] = true;
+    }
     u32 surviving = 0;
     for (u32 index = 0; index < builder->result.symbol_count; index += 1)
     {
         AssemblyUnitSymbol symbol = builder->result.symbols[index];
-        bool generated = symbol.defined && !symbol.global && string_starts_with_sequence(symbol.name, S8(".Lnum."));
-        for (u32 relocation = 0; relocation < builder->result.relocation_count && generated; relocation += 1)
-        {
-            generated = builder->result.relocations[relocation].symbol != index;
-        }
+        bool generated = symbol.defined && !symbol.global && !symbol.weak && !referenced[index] &&
+                         (string_starts_with_sequence(symbol.name, S8(".Lnum.")) ||
+                          (elf && string_starts_with_sequence(symbol.name, S8(".L"))) ||
+                          (macho_private && string_starts_with_sequence(symbol.name, S8("L"))));
         remapped[index] = generated ? UINT32_MAX : surviving;
         builder->result.symbols[surviving] = symbol;
         surviving += !generated;
