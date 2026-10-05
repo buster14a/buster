@@ -112,8 +112,9 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusOutcomeControl const x86_completion_censu
     {10447, UINT64_C(0x44495e911d41bbdc), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
      BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
      BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
-    // Unknown MOVSD forms remain rejected; the MOVQ Intel spelling is
-    // exact while its AT&T spelling retains its invalid-operands control.
+    // Unknown MOVSD forms remain rejected. The MOVQ store is exact in both
+    // dialects since AT&T `movq` with an XMM operand names the MOVQ transfer
+    // rather than a suffixed general-purpose MOV (#2663).
     {10115, UINT64_C(0xc1d09809729f02cb), BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
      BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
      BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION,
@@ -123,9 +124,9 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusOutcomeControl const x86_completion_censu
      BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION,
      BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION},
     {10581, UINT64_C(0x3283c18154507cf1), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
-     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
      BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
-     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
     // Full metadata authority makes the opposite-dialect store forms exact in
     // both source syntaxes.
     {10089, UINT64_C(0xc7b0bcf068f01edf), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
@@ -2802,10 +2803,20 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     // maps to the sse2 feature. The AT&T share is the larger one because the
     // implicit byte-width of an unsuffixed memory operand is an AT&T-only
     // question. Nothing moved down.
-    BUSTER_TEST(arguments, source.intel_exact_count == 5769 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 226 && source.intel_unresolved_count == 3805 &&
-                             source.intel_byte_mismatch_count == 779 && source.intel_relocation_mismatch_count == 0 &&
-                             source.intel_policy_rejected_count == 542 && source.intel_different_encoding_count == 17);
+    // 2026-10-05 (#2662/#2663): 174 Intel and 100 AT&T rows left the
+    // unresolved bucket and nothing moved down. ENDBR32/ENDBR64 left
+    // policy-rejected for exact. One-operand shift/rotate spellings now carry
+    // GNU's implicit count 1, and two-operand SHLD/SHRD their implicit %cl:
+    // the legacy ONE rows became exact (or alias-equivalent for the SHL /6
+    // twin), while the CL and APX ONE/CL rows this census spells the same way
+    // (`SHL al` for the CL row, `RCL al` for the EVEX-promoted row) moved to
+    // byte-mismatch: the source names count 1 or the shorter legacy row, as
+    // in GNU as, not the canonical row's bytes. AT&T MOVQ with an XMM operand
+    // now reaches the MOVQ transfer, so its rows match the Intel side.
+    BUSTER_TEST(arguments, source.intel_exact_count == 5803 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 246 && source.intel_unresolved_count == 3631 &&
+                             source.intel_byte_mismatch_count == 899 && source.intel_relocation_mismatch_count == 0 &&
+                             source.intel_policy_rejected_count == 540 && source.intel_different_encoding_count == 17);
     // The legacy migration changes exactly 175 rows relative to the scalar
     // parent: 122 Intel and 54 AT&T invalid-operands witnesses become encodable,
     // with no formerly exact row losing exactness. Pin the complete changed
@@ -2956,12 +2967,12 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         {10420, UINT64_C(0x459319443976a607), legacy_exact, legacy_exact, legacy_none, legacy_none, 3, 3},
         {10435, UINT64_C(0x03cad5bb22a97d45), legacy_exact, legacy_rejected, legacy_none, legacy_invalid, 5, 0},
         {10447, UINT64_C(0x44495e911d41bbdc), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
-        {10574, UINT64_C(0x7bd465046ab10c4f), legacy_exact, legacy_rejected, legacy_none, legacy_invalid, 5, 0},
-        {10575, UINT64_C(0x3698d9bff62c4360), legacy_exact, legacy_rejected, legacy_none, legacy_invalid, 5, 0},
-        {10576, UINT64_C(0xe13abb4f5f73fa1d), legacy_exact, legacy_rejected, legacy_none, legacy_invalid, 4, 0},
-        {10577, UINT64_C(0x3a472fc5e55e6d73), legacy_mismatch, legacy_rejected, legacy_none, legacy_invalid, 4, 0},
-        {10579, UINT64_C(0x6f5996bd42f71bd2), legacy_alias, legacy_rejected, legacy_none, legacy_invalid, 4, 0},
-        {10581, UINT64_C(0x3283c18154507cf1), legacy_exact, legacy_rejected, legacy_none, legacy_invalid, 4, 0},
+        {10574, UINT64_C(0x7bd465046ab10c4f), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {10575, UINT64_C(0x3698d9bff62c4360), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
+        {10576, UINT64_C(0xe13abb4f5f73fa1d), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
+        {10577, UINT64_C(0x3a472fc5e55e6d73), legacy_mismatch, legacy_mismatch, legacy_none, legacy_none, 4, 4},
+        {10579, UINT64_C(0x6f5996bd42f71bd2), legacy_alias, legacy_alias, legacy_none, legacy_none, 4, 4},
+        {10581, UINT64_C(0x3283c18154507cf1), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
         {10583, UINT64_C(0xab5885e9e9a994ff), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
         {10585, UINT64_C(0xc2300086301733a6), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
         {10590, UINT64_C(0xfe79ea52bbf1d368), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
@@ -3161,28 +3172,28 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS &&
                                  record.att_byte_count == 0);
     }
-    BUSTER_TEST(arguments, source.att_exact_count == 5816 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 42 && source.att_unresolved_count == 3669 &&
-                             source.att_byte_mismatch_count == 1054 && source.att_relocation_mismatch_count == 0 &&
-                             source.att_policy_rejected_count == 551 && source.att_different_encoding_count == 17);
+    BUSTER_TEST(arguments, source.att_exact_count == 5840 && source.att_normalized_relocation_count == 26 &&
+                             source.att_alias_equivalent_count == 45 && source.att_unresolved_count == 3569 &&
+                             source.att_byte_mismatch_count == 1127 && source.att_relocation_mismatch_count == 0 &&
+                             source.att_policy_rejected_count == 549 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6819 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3110 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6993 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 2938 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 542);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6955 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 540);
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 7055 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1915 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 4 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1085 &&
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 987 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 551);
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 549);
     // Every baseline POLICY_FEATURE row must become byte-exact when the
     // target explicitly enables the complete x86 feature vocabulary.  This
     // is a proof of source reachability under an enabled target, not a change

@@ -327,6 +327,10 @@ if [[ -z $adb_path ]]; then
     echo "error: adb was not found after the Android build; cannot install/run tests" >&2
     exit 1
 fi
+if [[ ${BUSTER_CI_CONDITIONS_EVIDENCE:-0} == 1 ]]; then
+    python3 tools/ci_checks_tools.py --tool adb --executable "$adb_path" \
+        --output "${RUNNER_TEMP:?}/buster-ci/selected-adb.json"
+fi
 
 android_package=${BUSTER_ANDROID_PACKAGE:-dev.buster.ide}
 android_activity=${BUSTER_ANDROID_ACTIVITY:-${android_package}/android.app.NativeActivity}

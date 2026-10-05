@@ -43,6 +43,15 @@ PROPOSED_SUPPORT_CONTRACT_SHA256 = "a5bf7cb23b97874b7f4ff61f2bf0672892b4185a8504
 # #1808 successor: the #1007 declaration with only the tests/ci_tools_test.py
 # byte/hash row updated; corpus and target axes are unchanged.
 MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256 = "434ef9a356cd11e7af0b37907172becf173a6855c98a6168f640ce769f0bcf61"
+# #1835 successor: only the dependency-only bootstrap wrapper test row changes.
+BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256 = "6d975980cc6df4945334fc2846dac8e03a1480a6c65e516db37be8adbccf1106"
+# #1836 successor: #1835 plus archiving the retired bridge under tests/retired/.
+RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256 = "5834270ef2b01798b25547751fd91631295a84ccb23116bf1502d8bae0c0b115"
+# #2203 successor: #1836 with only the aligned-typedef validation fixture row updated.
+ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256 = "7d4e4ed4fc74ff57eb3005550457751cc8841f113277c116d67fb1358da09d51"
+# #2428 successors: the exact mobile dependency row, alone or with #2203.
+MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "f17dbde795c3afc99f4b3cfd59087d4a63721218dab5018e7e77e090228b3741"
+ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -603,7 +612,12 @@ def validate_profile(manifest, inputs, row_count):
         assert manifest.get("support_contract_sha256") in (
             FULL_SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256,
             APPLE_CI_SUPPORT_CONTRACT_SHA256, PROPOSED_SUPPORT_CONTRACT_SHA256,
-            MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256)
+            MAIN_CI_REUSE_SUPPORT_CONTRACT_SHA256,
+            BOOTSTRAP_WORKFLOW_SUPPORT_CONTRACT_SHA256,
+            RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
+            ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
+            MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+            ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256)
         assert manifest.get("inputs") == "559"
         assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
         assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""
