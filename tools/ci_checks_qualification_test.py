@@ -70,7 +70,7 @@ class QualificationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def run_fixture(self, variant="combined-overlap", reuse=False, cohort_name=qualification.LEGACY_COHORT):
-        names = list(github.combination_jobs("split" if variant == "split-overlap" else "combined"))
+        names = list(qualification.cohort_jobs(variant))
         if reuse:
             names.append(github.MAIN_REUSE_JOB)
         origin = datetime(2026, 10, 1, tzinfo=timezone.utc)

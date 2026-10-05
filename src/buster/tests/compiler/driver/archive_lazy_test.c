@@ -257,6 +257,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_default_roots(Un
             ObjectFile member = compiler_driver_archive_test_object(arena, target, &provider, 1, 77);
             BUSTER_TEST(arguments, file_write(explicit_archive, compiler_driver_archive_test_bytes(arena, &member, 1, 1)));
             String8 shared = string_format_z(arena, S8("{S8}/libbuster1285_marker.so"), roots[0]);
+            // These independent ELF header bytes identify a foreign
+            // machine before export discovery. It must not suppress either
+            // the archive beside it or a later root's archive (issue 1285).
+            u8 alien_header[64] = {0x7f, 'E', 'L', 'F', 2, 1, 1};
+            compiler_driver_archive_test_integer(alien_header + 16, 3, 2, false);
+            compiler_driver_archive_test_integer(alien_header + 18, cpu ? 62 : 183, 2, false);
+            compiler_driver_archive_test_integer(alien_header + 20, 1, 4, false);
+            compiler_driver_archive_test_integer(alien_header + 52, 64, 2, false);
+            BUSTER_TEST(arguments, file_write(shared, (ByteSlice)BUSTER_ARRAY_TO_SLICE(alien_header)));
+            CompilerDriverResult compatible = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input,
+                                                                                        S8("-lbuster1285_marker"), (String8){0}, output);
+            checked = compiler_driver_archive_test_default_result(arguments, compatible, 31, ordered.native_link.executable);
+            result.test_count += checked.test_count;
+            result.succeeded_test_count += checked.succeeded_test_count;
+            BUSTER_TEST(arguments, os_file_delete(archive_paths[0]));
+            CompilerDriverResult later = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input,
+                                                                                   S8("-lbuster1285_marker"), (String8){0}, output);
+            checked = compiler_driver_archive_test_default_result(arguments, later, 32, (ByteSlice){0});
+            result.test_count += checked.test_count;
+            result.succeeded_test_count += checked.succeeded_test_count;
+            member.sections[OBJECT_SECTION_DATA].data.pointer[0] = 31;
+            BUSTER_TEST(arguments, file_write(archive_paths[0], compiler_driver_archive_test_bytes(arena, &member, 1, 1)));
+            String8 explicit_shared = string_format_z(arena, S8("{S8}/libbuster1285_marker.so"), explicit_root);
+            BUSTER_TEST(arguments, file_write(explicit_shared, (ByteSlice)BUSTER_ARRAY_TO_SLICE(alien_header)));
+            CompilerDriverResult explicit_compatible = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input,
+                                                                                                 S8("-lbuster1285_marker"), explicit_root, output);
+            checked = compiler_driver_archive_test_default_result(arguments, explicit_compatible, 77, (ByteSlice){0});
+            result.test_count += checked.test_count;
+            result.succeeded_test_count += checked.succeeded_test_count;
+            BUSTER_TEST(arguments, os_file_delete(explicit_shared));
             ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(S8("existing output"));
             BUSTER_TEST(arguments, file_write(shared, BUSTER_SLICE_TO_BYTE_SLICE(S8("unreadable shared object"))));
             CompilerDriverResult explicit = compiler_driver_archive_test_default_link(arena, targets[cpu], sysroot, input,
@@ -561,4 +591,3 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_unused_size_relo
     }
     return result;
 }
-
