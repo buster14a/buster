@@ -1,0 +1,1 @@
+Guest Linux page cache, dentries and inode cache evicted with sync; drop_caches=3 before every observation. Reset excluded from timer. Hypervisor/storage caches uncontrolled; this is guest-cold, not physical-cold. No cold warmups. Nine randomized pairs per cell.
