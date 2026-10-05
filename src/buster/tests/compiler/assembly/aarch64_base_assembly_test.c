@@ -382,6 +382,21 @@ UnitTestResult aarch64_base_assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("umov w0, v1.d[0]"),
         S8_INITIALIZER("stlxr w0, x0, [x1]"),
         S8_INITIALIZER("ldr x0, [x1, #010]"),
+        // Arrangements and lane indices take only architectural unsigned
+        // decimal spellings: no sign, radix, leading zero or wrapping count.
+        S8_INITIALIZER("mov v0.16b, v1.-16b"),
+        S8_INITIALIZER("mov v0.16b, v1.+16b"),
+        S8_INITIALIZER("mov v0.16b, v1.0x10b"),
+        S8_INITIALIZER("mov v0.16b, v1.016b"),
+        S8_INITIALIZER("mov v0.16b, v1.2305843009213693968b"),
+        S8_INITIALIZER("mvn v0.16b, v1.32b"),
+        S8_INITIALIZER("umov w0, v1.s[-1]"),
+        S8_INITIALIZER("umov w0, v1.s[4]"),
+        S8_INITIALIZER("umov w0, v1.s[0x1]"),
+        S8_INITIALIZER("ld1 { v0.s }[-1], [x1]"),
+        S8_INITIALIZER("ld1 { v0.s }[0x1], [x1]"),
+        S8_INITIALIZER("ld1 { v0.-4s }, [x1]"),
+        S8_INITIALIZER("ext v0.16b, v1.16b, v2.-16b, #1"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
     {
@@ -427,6 +442,17 @@ UnitTestResult aarch64_base_assembly_tests(UnitTestArguments* arguments)
     // unknown, and an explicit feature subtraction is reported by name.
     u32 word = 0;
     BUSTER_TEST(arguments, a64_base_assemble(baseline, S8("ldxp"), S8("x0, x1, [x2]"), &word) == A64_BASE_ASSEMBLY_UNKNOWN_MNEMONIC);
+    static String8 const malformed_arrangements[] = {
+        S8_INITIALIZER("v0.16b, v1.-16b"),
+        S8_INITIALIZER("v0.16b, v1.2305843009213693968b"),
+        S8_INITIALIZER("v0.-16b, v1.16b"),
+        S8_INITIALIZER("w0, v1.s[-1]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed_arrangements); index += 1)
+    {
+        BUSTER_TEST_RAW(arguments, a64_base_assemble(baseline, S8("mov"), malformed_arrangements[index], &word) == A64_BASE_ASSEMBLY_INVALID_OPERANDS,
+                        malformed_arrangements[index]);
+    }
     BUSTER_TEST(arguments, a64_base_assemble(baseline, S8("STP"), S8("X29, X30, [SP, #-16]!"), &word) == A64_BASE_ASSEMBLY_OK &&
                                word == UINT32_C(0xa9bf7bfd));
     Target no_fp = baseline;

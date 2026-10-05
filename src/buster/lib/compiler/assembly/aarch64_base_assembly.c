@@ -786,6 +786,43 @@ BUSTER_GLOBAL_LOCAL u8 a64_base_element_bits(char8 suffix)
     return lower == 'b' ? 8 : lower == 'h' ? 16 : lower == 's' ? 32 : lower == 'd' ? 64 : lower == 'q' ? 128 : 0;
 }
 
+// Unsigned decimal digits only: no sign, `#`, radix prefix or leading zero,
+// and at most three digits so no accumulation can overflow.
+BUSTER_GLOBAL_LOCAL bool a64_base_decimal(String8 text, u32 maximum, u32* value)
+{
+    bool valid = text.length != 0 && text.length <= 3 && (text.length == 1 || text.pointer[0] != '0');
+    u32 result = 0;
+    for (u64 index = 0; valid && index < text.length; index += 1)
+    {
+        valid = a64_base_digit(text.pointer[index]);
+        result = result * 10u + (u32)(text.pointer[index] - '0');
+    }
+    valid = valid && result <= maximum;
+    if (valid)
+    {
+        *value = result;
+    }
+    return valid;
+}
+
+// `<lanes><T>` totalling 64 or 128 bits (8B, 16B, 4H, 8H, 2S, 4S, 1D, 2D),
+// or the element-only `<T>` (lanes 0) when `element_only` is allowed.
+BUSTER_GLOBAL_LOCAL bool a64_base_arrangement(String8 text, bool element_only, u8* bits, u8* lanes)
+{
+    u8 element = text.length ? a64_base_element_bits(text.pointer[text.length - 1]) : 0;
+    u32 count = 0;
+    bool valid = element != 0 && element != 128 &&
+                 (text.length == 1 ? element_only
+                                   : a64_base_decimal(string_slice(text, 0, text.length - 1), 16, &count) &&
+                                         (count * element == 64 || count * element == 128));
+    if (valid)
+    {
+        *bits = element;
+        *lanes = (u8)count;
+    }
+    return valid;
+}
+
 // FPR (`s3`), vector (`v3.4s`) or element (`v3.s[1]`).
 BUSTER_GLOBAL_LOCAL bool a64_base_simd_parse(String8 text, A64BaseOperand* operand)
 {
@@ -818,12 +855,11 @@ BUSTER_GLOBAL_LOCAL bool a64_base_simd_parse(String8 text, A64BaseOperand* opera
         }
         if (valid && bracket < suffix.length)
         {
-            u64 index = 0;
-            bool negative = false;
-            valid = bracket == 1 && suffix.pointer[suffix.length - 1] == ']' &&
-                    a64_base_integer_parse(string_slice(suffix, 2, suffix.length - 1), &index, &negative) && !negative;
-            u8 bits = valid ? a64_base_element_bits(suffix.pointer[0]) : 0;
-            valid = valid && bits != 0 && bits != 128 && index < 128u / bits;
+            u32 index = 0;
+            u8 bits = 0;
+            u8 lanes = 0;
+            valid = bracket == 1 && suffix.pointer[suffix.length - 1] == ']' && a64_base_arrangement(string_slice(suffix, 0, 1), true, &bits, &lanes) &&
+                    a64_base_decimal(string_slice(suffix, 2, suffix.length - 1), 128u / bits - 1u, &index);
             if (valid)
             {
                 operand->kind = A64_BASE_OPERAND_ELEMENT;
@@ -832,15 +868,13 @@ BUSTER_GLOBAL_LOCAL bool a64_base_simd_parse(String8 text, A64BaseOperand* opera
         }
         else if (valid)
         {
-            u64 lanes = 0;
-            bool negative = false;
-            valid = suffix.length >= 2 && a64_base_integer_parse(string_slice(suffix, 0, suffix.length - 1), &lanes, &negative);
-            u8 bits = valid ? a64_base_element_bits(suffix.pointer[suffix.length - 1]) : 0;
-            valid = valid && bits != 0 && bits != 128 && (lanes * bits == 64 || lanes * bits == 128);
+            u8 bits = 0;
+            u8 lanes = 0;
+            valid = a64_base_arrangement(suffix, false, &bits, &lanes);
             if (valid)
             {
                 operand->kind = A64_BASE_OPERAND_VECTOR;
-                operand->reg = (A64BaseRegister){.bits = bits, .number = number, .lanes = (u8)lanes};
+                operand->reg = (A64BaseRegister){.bits = bits, .number = number, .lanes = lanes};
             }
         }
     }
@@ -953,28 +987,23 @@ BUSTER_GLOBAL_LOCAL bool a64_base_list_parse(String8 text, A64BaseOperand* opera
             u8 number = 0;
             valid = member.length > 3 && a64_base_lower(member.pointer[0]) == 'v' && dot + 1 < member.length &&
                     a64_base_register_number(string_slice(member, 1, dot), &number);
-            String8 arrangement = valid ? string_slice(member, dot + 1, member.length) : (String8){0};
-            u8 bits = valid ? a64_base_element_bits(arrangement.pointer[arrangement.length - 1]) : 0;
-            u64 lanes = 0;
-            bool negative = false;
-            valid = valid && bits != 0 && bits != 128 &&
-                    (arrangement.length == 1 || (a64_base_integer_parse(string_slice(arrangement, 0, arrangement.length - 1), &lanes, &negative) &&
-                                                 (lanes * bits == 64 || lanes * bits == 128)));
+            u8 bits = 0;
+            u8 lanes = 0;
+            valid = valid && a64_base_arrangement(string_slice(member, dot + 1, member.length), true, &bits, &lanes);
             if (valid && count == 0)
             {
-                first = (A64BaseRegister){.bits = bits, .number = number, .lanes = (u8)lanes};
+                first = (A64BaseRegister){.bits = bits, .number = number, .lanes = lanes};
             }
             valid = valid && count < 4 && bits == first.bits && lanes == first.lanes && number == (first.number + count) % 32u;
             count += 1;
             start = index + 1;
         }
     }
-    u64 lane = 0;
+    u32 lane = 0;
     if (valid && suffix.length)
     {
-        bool negative = false;
         valid = first.lanes == 0 && suffix.length >= 3 && suffix.pointer[0] == '[' && suffix.pointer[suffix.length - 1] == ']' &&
-                a64_base_integer_parse(string_slice(suffix, 1, suffix.length - 1), &lane, &negative) && !negative && lane < 128u / first.bits;
+                a64_base_decimal(string_slice(suffix, 1, suffix.length - 1), 128u / first.bits - 1u, &lane);
     }
     else if (valid)
     {

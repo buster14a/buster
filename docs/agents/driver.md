@@ -556,8 +556,17 @@ Not in this vocabulary, and still refused unless another owner accepts them:
 `tools/aarch64_assembler_census.py` assembles every constant instruction line
 Clang emits for the `tests/*.c` fixtures with both Buster and llvm-mc and
 compares the disassembly. LLVM is a test-time oracle only. The script fails
-on any encoding difference, and on any refusal whose mnemonic is not in its
-documented-unsupported list.
+closed:
+- on any encoding difference;
+- on any refusal that matches none of its documented-unsupported operand
+  shapes;
+- on an observer failure;
+- on an empty or uncompared corpus.
+
+It reports fixtures Clang cannot compile. `tools/aarch64_assembler_census_test.py`
+pins this behavior with stub tools. Arrangement suffixes and lane indices
+accept only unsigned decimal architectural spellings: `v1.-16b`, `v1.0x10b` and
+`v1.s[0x1]` are operand diagnostics.
 
 Integer data expressions retain `.` as the current field's section-relative
 address, including each separate operand in a comma-separated directive.

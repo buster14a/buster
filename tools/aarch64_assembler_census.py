@@ -13,10 +13,13 @@ llvm-mc. Both objects are disassembled by llvm-objdump and the instruction
 text is compared, so equivalent encodings compare equal.
 
 LLVM is a test-time oracle only; nothing in the compiler depends on it.
-The script prints a summary table and exits nonzero when Buster encodes any
-line differently from llvm-mc, or when a refused line's mnemonic is outside
-the documented-unsupported set below (`--allow-refusals` disables the latter
-for exploratory runs).
+The script prints a summary table and fails closed. It exits nonzero when:
+- Buster encodes any line differently from llvm-mc;
+- a refused line does not match a documented-unsupported operand shape below
+  (`--allow-refusals` disables only this check, for exploratory runs);
+- an observer fails (llvm-objdump errors or disassembles nothing);
+- the corpus is empty, no fixture compiled, or no line was compared.
+Fixtures Clang cannot compile are reported, never silently dropped.
 """
 from __future__ import annotations
 
@@ -30,10 +33,13 @@ import subprocess
 import sys
 import tempfile
 
-# Mnemonics whose remaining refusals are documented in docs/agents/driver.md
-# ("AArch64 base instruction vocabulary"); `fmla` is refused only in its
-# by-element form. Keep this list in sync with that section.
-DOCUMENTED_UNSUPPORTED = frozenset({"fmla"})
+# Operand shapes whose refusal is documented in docs/agents/driver.md
+# ("AArch64 base instruction vocabulary"). Keep this list in sync with that
+# section; a refusal matching none of these fails the census.
+DOCUMENTED_UNSUPPORTED = (
+    # By-element floating-point multiply-accumulate.
+    re.compile(r"^fml[as]\s+v\d+\.\d+[hsd],\s*v\d+\.\d+[hsd],\s*v\d+\.[hsd]\[\d+\]$", re.IGNORECASE),
+)
 
 SKIP_PATTERNS = (
     re.compile(r"\.L"),
@@ -44,7 +50,6 @@ SKIP_PATTERNS = (
 )
 DIRECTIVE = re.compile(r"^\s*\.")
 LABEL = re.compile(r"^\s*[A-Za-z_.$][\w.$]*:")
-SYMBOL_OPERAND = re.compile(r"(^|[\s,\[])[A-Za-z_$][\w$]*(\+|$|\])")
 REGISTER_LIKE = re.compile(
     r"^([wx]([12]?[0-9]|3[01])|w?sp|[wx]zr|[bhsdqv]([12]?[0-9]|3[01])(\.[0-9]*[bhsd])?(\[[0-9]+\])?|"
     r"lsl|lsr|asr|ror|[us]xt[bhwx]|msl|eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al|nv|"
@@ -71,8 +76,16 @@ def instruction_lines(listing: str):
         yield "\t" + re.sub(r"\s+", " ", text, count=1).replace(" ", "\t", 1)
 
 
+def documented_refusal(line: str) -> bool:
+    text = re.sub(r"\s+", " ", line.strip())
+    return any(pattern.match(text) for pattern in DOCUMENTED_UNSUPPORTED)
+
+
 def fixture_corpus(fixtures: Path, clang: str):
+    """Return (lines, listings compiled, failed compilations)."""
     lines = set()
+    compiled = 0
+    failed = []
     sources = sorted(path for path in fixtures.glob("*.c") if "#include <" not in path.read_text(errors="replace"))
     with tempfile.TemporaryDirectory() as directory:
         for source in sources:
@@ -81,11 +94,16 @@ def fixture_corpus(fixtures: Path, clang: str):
                 result = subprocess.run(
                     [clang, "--target=aarch64-linux-gnu", "-ffreestanding", "-w", level, "-S", str(source), "-o", str(output)],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
                 )
                 if result.returncode == 0:
+                    compiled += 1
                     lines.update(instruction_lines(output.read_text(errors="replace")))
-    return sorted(lines)
+                else:
+                    reason = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"exit {result.returncode}"
+                    failed.append(f"{source} {level}\t{reason}")
+    return sorted(lines), compiled, failed
 
 
 def disassemble(objdump: str, path: Path):
@@ -123,6 +141,9 @@ def check_line(arguments, line: str):
             return line, "refused", message
         expected = disassemble(arguments.llvm_objdump, llvm_object)
         actual = disassemble(arguments.llvm_objdump, buster_object)
+        if not expected or not actual:
+            # A failed or empty observation proves nothing either way.
+            return line, "observer-failed", f"llvm={expected} buster={actual}"
         if expected != actual:
             return line, "different", f"llvm={expected} buster={actual}"
         return line, "same", ""
@@ -141,7 +162,7 @@ def main(argv=None) -> int:
     parser.add_argument("--allow-refusals", action="store_true")
     arguments = parser.parse_args(argv)
 
-    lines = fixture_corpus(Path(arguments.fixtures), arguments.clang)
+    lines, compiled, compile_failures = fixture_corpus(Path(arguments.fixtures), arguments.clang)
     if arguments.max_lines:
         lines = lines[: arguments.max_lines]
     outcomes = collections.Counter()
@@ -154,8 +175,9 @@ def main(argv=None) -> int:
             if outcome == "refused":
                 refusals[detail][line.split()[0]] += 1
 
+    print(f"listings: {compiled} compiled, {len(compile_failures)} failed")
     print(f"lines: {len(lines)}")
-    for outcome in ("same", "different", "refused", "oracle-refused"):
+    for outcome in ("same", "different", "refused", "observer-failed", "oracle-refused"):
         print(f"{outcome}: {outcomes[outcome]}")
     for message, mnemonics in sorted(refusals.items(), key=lambda item: -sum(item[1].values())):
         top = ", ".join(f"{name} {count}" for name, count in mnemonics.most_common(12))
@@ -163,14 +185,31 @@ def main(argv=None) -> int:
     if arguments.report:
         report = Path(arguments.report)
         report.mkdir(parents=True, exist_ok=True)
-        for outcome in ("different", "refused"):
+        for outcome in ("different", "refused", "observer-failed"):
             (report / f"{outcome}.txt").write_text("\n".join(sorted(rows[outcome])) + ("\n" if rows[outcome] else ""))
+        (report / "compile-failed.txt").write_text("\n".join(compile_failures) + ("\n" if compile_failures else ""))
 
-    undocumented = [
-        row for row in rows["refused"] if row.split()[0].lower() not in DOCUMENTED_UNSUPPORTED
-    ]
-    failed = outcomes["different"] != 0 or (undocumented and not arguments.allow_refusals)
-    return 1 if failed else 0
+    undocumented = [row for row in rows["refused"] if not documented_refusal(row.split("\t", 1)[0])]
+    for row in undocumented:
+        print(f"undocumented refusal: {row}")
+    for row in compile_failures:
+        print(f"fixture did not compile: {row}")
+    problems = []
+    if not compiled:
+        problems.append("no fixture compiled")
+    if not lines:
+        problems.append("empty corpus")
+    if not outcomes["same"] and not outcomes["different"]:
+        problems.append("no line was compared")
+    if outcomes["different"]:
+        problems.append("encoding differences")
+    if outcomes["observer-failed"]:
+        problems.append("observer failures")
+    if undocumented and not arguments.allow_refusals:
+        problems.append("undocumented refusals")
+    for problem in problems:
+        print(f"census failure: {problem}")
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":
