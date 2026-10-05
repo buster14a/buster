@@ -66,7 +66,7 @@ itself. Running the adapter or an SSH-per-call proxy on the 9700X is a functiona
 client smoke test, not qualified off-host service acceptance.
 
 Before enabling external clients, install the durable off-host control/worker
-protocol and document its principal mapping, reconnect/reconciliation policy,
+protocol as described in [OFFHOST_CONTROL.md](OFFHOST_CONTROL.md) and document its principal mapping, reconnect/reconciliation policy,
 cache freshness and exceptional cancellation path. Run the 100-submit /
 1,000-read quiet-phase fixture and retain the worker traffic trace. Do not move
 the queue files between hosts or run a second writer against shared storage.
