@@ -29,6 +29,16 @@ fixture as well as compiling both architectures.
 
 ## Machine instruction selection and scheduling
 
+- Debug-location seed storage starts with a small arena-backed array and grows
+  with actual emitted ranges in machine emission. Never
+  reserve the product of lexical locals and CFG blocks or machine rows.
+  Growth checks aligned remaining arena capacity before allocating, retains
+  all earlier records, and reports `CODEGEN_ERROR_CAPACITY` without advancing
+  the arena when the actual records cannot fit. Spare doubling capacity may
+  be reduced to fit; an existing seed error must survive final publication.
+  `codegen_test_debug_seed_capacity` checks fixed and growing storage, exact
+  remaining capacity, alignment and count-overflow refusals; the registered
+  block-local source cases compile with debug information in a bounded arena.
 - X86 inline assembly admits `vzeroupper` and `popcnt`/`lzcnt`
   with unsuffixed and AT&T `w`/`l`/`q` spellings through the shared checked
   assembler. Template authors retain responsibility for declared clobbers and
@@ -49,7 +59,6 @@ fixture as well as compiling both architectures.
   aggregate-comma regression covers three-byte structs, thirteen-byte unions
   and twenty-four-byte indirect values, preserving tail bytes and expression
   side effects across every native allocator spelling and frontend form.
-
 - System V indirect variadic calls keep the vector-register count in AL
   through the call instruction. MIR allocators reserve caller-saved R10 for
   the indirect callee while staging arguments, including under the NONE

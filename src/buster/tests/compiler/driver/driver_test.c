@@ -29723,6 +29723,27 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             };
             CompilerDriverResult fixture = compiler_driver_execute_invocation(
                 fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, fixture_arguments_slice));
+            if (fixture.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                arguments->show(arguments, S8("MACHINE_REWRITE_FAILURE_V1 fixture_index={u64} allocator_index={u64} "
+                    "source={S8} allocator={S8} error={u32} codegen_error={u32} object_error={u32} diagnostics={u32} message={S8}\n"),
+                    fixture_index, allocator_index, c_machine_rewrite_names[fixture_index], c_lz4_regression_allocators[allocator_index],
+                    (u32)fixture.error, (u32)fixture.codegen_error, (u32)fixture.object_error, fixture.diagnostic_count, fixture.diagnostic);
+                for (u32 diagnostic_index = 0; diagnostic_index < fixture.diagnostic_count; diagnostic_index += 1)
+                {
+                    CompilerDiagnostic* diagnostic = fixture.diagnostics + diagnostic_index;
+                    arguments->show(arguments, S8("MACHINE_REWRITE_DIAGNOSTIC_V1 index={u32} code={S8} path={S8} message={S8}\n"),
+                        diagnostic_index, diagnostic->code, diagnostic->primary.path, diagnostic->message);
+                    if (diagnostic->backend)
+                    {
+                        CompilerDiagnosticBackend* backend = diagnostic->backend;
+                        arguments->show(arguments, S8("MACHINE_REWRITE_BACKEND_V1 function={S8} function_id={u32} instruction_id={u32} "
+                            "opcode={S8} opcode_id={u32} error_id={u32} operation={S8} reason={S8}\n"),
+                            backend->function, backend->function_id, backend->instruction_id, backend->opcode,
+                            backend->opcode_id, backend->error_id, backend->operation, backend->reason);
+                    }
+                }
+            }
             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
             if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
             {
