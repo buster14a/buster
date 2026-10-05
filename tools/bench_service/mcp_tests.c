@@ -1,6 +1,7 @@
 /* MCP regressions use the production parser, adapter and authenticated socket.
  * bq_test_mcp_protocol covers lifecycle/schema/bounds without a live service;
  * bq_test_mcp_artifacts checks typed sealed-export receipt/slice retrieval;
+ * bq_test_mcp_shared_stdio replays tunnel probes sharing one adapter process;
  * bq_test_mcp_receipts checks reply integrity and private-path suppression;
  * bq_test_mcp_socket uses a disposable real queue daemon with no worker config.
  * It never starts a recipe, manager unit, remote connection or benchmark.
@@ -44,6 +45,78 @@ BUSTER_GLOBAL_LOCAL bool bq_test_mcp_result(BqMcpBuffer const* output, BqMcpJson
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL void bq_test_mcp_shared_stdio(char const* missing)
+{
+    char const* second_initialize =
+        "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"second-client\",\"version\":\"2\"}}}";
+    BqMcpSession session = {0};
+    BqMcpBuffer output;
+    bq_mcp_message(&session, missing, string_from_pointer(bq_test_mcp_initialize), &output);
+    BQ_CHECK(!output.failed && session.phase == 1 && bq_test_mcp_contains(&output, "\"id\":1") &&
+             !bq_test_mcp_contains(&output, "\"error\""));
+    for (u32 phase = 1; phase <= 2; phase += 1)
+    {
+        bq_mcp_message(&session, missing, string_from_pointer(second_initialize), &output);
+        BQ_CHECK(!output.failed && session.phase == phase && bq_test_mcp_contains(&output, "\"id\":0") &&
+                 bq_test_mcp_contains(&output, "\"protocolVersion\":\"2025-06-18\"") &&
+                 !bq_test_mcp_contains(&output, "\"error\""));
+        bq_mcp_message(&session, missing, S8("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}"), &output);
+        BQ_CHECK(phase == 1 ? bq_test_mcp_contains(&output, "-32002") :
+                 bq_test_mcp_contains(&output, "bench_program_finish") && !bq_test_mcp_contains(&output, "\"error\""));
+        if (phase == 1)
+        {
+            bq_mcp_message(&session, missing, string_from_pointer(bq_test_mcp_initialized), &output);
+            BQ_CHECK(!output.failed && !output.count && session.phase == 2);
+        }
+    }
+
+    char const* invalid_params[] = {
+        "{}",
+        "{\"protocolVersion\":null,\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}",
+        "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":[],\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}",
+        "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"\",\"version\":\"1\"}}",
+        "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"\"}}",
+        "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"},\"_meta\":[]}"};
+    for (u32 phase = 0; phase <= 2; phase += 1)
+    {
+        for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(invalid_params); i += 1)
+        {
+            BqMcpSession invalid = {.phase = phase};
+            char message[512];
+            snprintf(message, sizeof(message), "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":%s}", invalid_params[i]);
+            bq_mcp_message(&invalid, missing, string_from_pointer(message), &output);
+            BQ_CHECK(!output.failed && invalid.phase == phase && bq_test_mcp_contains(&output, "-32602") &&
+                     bq_test_mcp_contains(&output, "\"id\":0"));
+        }
+    }
+
+    FILE* input = tmpfile();
+    FILE* reply = tmpfile();
+    BQ_CHECK(input && reply);
+    if (input && reply)
+    {
+        fprintf(input, "%s\n%s\n%s\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+                bq_test_mcp_initialize, second_initialize, bq_test_mcp_initialized);
+        rewind(input);
+        BQ_CHECK(bq_mcp_run(missing, input, reply) == BQ_OK);
+        rewind(reply);
+        char line[BQ_MCP_OUTPUT_CAP + 1u];
+        u32 lines = 0;
+        while (fgets(line, sizeof(line), reply))
+        {
+            BqMcpJson json;
+            BQ_CHECK(bq_mcp_json_parse(&json, string_from_pointer(line)) && !strstr(line, "\"error\""));
+            if (lines == 0) BQ_CHECK(strstr(line, "\"id\":1") && strstr(line, "2025-11-25"));
+            else if (lines == 1) BQ_CHECK(strstr(line, "\"id\":0") && strstr(line, "2025-06-18"));
+            else BQ_CHECK(lines == 2 && strstr(line, "\"id\":2") && strstr(line, "bench_program_finish"));
+            lines += 1;
+        }
+        BQ_CHECK(lines == 3);
+    }
+    if (input) fclose(input);
+    if (reply) fclose(reply);
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_mcp_protocol(void)
 {
     char const* missing = "/tmp/buster-mcp-no-service.sock";
@@ -84,6 +157,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_protocol(void)
     BQ_CHECK(!bq_mcp_json_parse(&json, string_from_pointer(token_overflow)));
     BQ_CHECK(!bq_mcp_json_parse(&json, (String8){NULL, BQ_MCP_MESSAGE_CAP + 1u}));
 
+    bq_test_mcp_shared_stdio(missing);
     BqMcpSession session = {0};
     BqMcpBuffer output;
     bq_mcp_message(&session, missing, S8("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"), &output);
@@ -92,7 +166,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_mcp_protocol(void)
     BQ_CHECK(bq_test_mcp_contains(&output, "\"result\":{}") && !session.phase);
     bq_test_mcp_ready(&session, missing);
     bq_mcp_message(&session, missing, string_from_pointer(bq_test_mcp_initialize), &output);
-    BQ_CHECK(bq_test_mcp_contains(&output, "-32602") && session.phase == 2);
+    BQ_CHECK(!output.failed && !bq_test_mcp_contains(&output, "\"error\"") && session.phase == 2);
     bq_mcp_message(&session, missing, S8("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}"), &output);
     BQ_CHECK(!output.failed && bq_mcp_json_parse(&json, (String8){(char8*)output.bytes, output.count}));
     u32 result = bq_mcp_member(&json, 0, S8("result"));
