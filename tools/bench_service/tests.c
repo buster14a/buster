@@ -354,6 +354,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec_packets(BqQueue* queue)
     char const* rules[] = {
         "tools/bench_service/profiles/validate-buster-v1.recipe text eol=lf",
         "tools/bench_service/profiles/native-retirement-performance-v1.blocked text eol=lf",
+        "tools/bench_service/profiles/native-execute-v1.recipe text eol=lf",
+        "tools/bench_service/profiles/native-runtime-v1.recipe text eol=lf",
     };
     bool rules_found[BUSTER_ARRAY_LENGTH(rules)] = {0};
     for (u32 start = 0; attributes_complete && start < attributes_size;)
@@ -372,8 +374,14 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec_packets(BqQueue* queue)
         }
         start = end < attributes_size ? end + 1 : end;
     }
-    BQ_CHECK(attributes_complete && rules_found[0] && rules_found[1]);
-    BqRecipe recipes[] = {BQ_RECIPE_VALIDATE_BUSTER, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED};
+    BQ_CHECK(attributes_complete);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rules); index += 1) BQ_CHECK(rules_found[index]);
+    /* A host installs these files; materialization compares them byte for
+     * byte with the compiled profile, so a served recipe without its file
+     * can be submitted but never run. */
+    BqRecipe recipes[] = {BQ_RECIPE_VALIDATE_BUSTER, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED,
+                          BQ_RECIPE_NATIVE_EXECUTE, BQ_RECIPE_NATIVE_RUNTIME};
+    char const* commands[] = {"bench_service_recipe", "", "native-driver", "native-runtime-driver"};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(recipes); index += 1)
     {
         BqRecipeFiles files;
@@ -386,8 +394,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec_packets(BqQueue* queue)
         size_t count = profile && bytes ? fread(bytes, 1, (size_t)expected.length + 1, profile) : 0;
         BQ_CHECK(described && expected.length > 0 && profile && bytes && count == expected.length &&
                  !memcmp(bytes, expected.pointer, expected.length) &&
-                 (recipes[index] == BQ_RECIPE_VALIDATE_BUSTER ? !strcmp(files.command, "bench_service_recipe") :
-                                                               !files.command[0]));
+                 !strcmp(files.command, commands[index]));
         free(bytes);
         if (profile) fclose(profile);
     }

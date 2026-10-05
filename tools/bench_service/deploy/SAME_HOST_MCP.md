@@ -65,6 +65,19 @@ sudo and unit policy names, as [SYSTEMD_BROKER.md](SYSTEMD_BROKER.md) requires
 for any service refresh. The build driver and throughput harness are not
 changed by the native recipes.
 
+## Recipe profiles
+
+Materialization compares each served recipe's installed profile byte for byte
+with the copy compiled into the service. Install, from the same revision,
+into `/opt/buster-bench/installed/recipes` with the existing owner and mode:
+
+- `tools/bench_service/profiles/native-execute-v1.recipe`
+- `tools/bench_service/profiles/native-runtime-v1.recipe`
+
+alongside the profiles already there. Without them the capabilities reply
+still lists both recipes and a submission is accepted, but the job fails at
+materialization as a recipe mismatch.
+
 ## The journal upgrade is one-way
 
 The new service reads the existing journal and writes new records at journal
