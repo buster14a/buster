@@ -1254,6 +1254,9 @@ struct CTypeParseMachine
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
+    // Constexpr initializers keep NORMAL's type-name grammar, but reject
+    // signed arithmetic overflow before a cast can hide its wrapped bits.
+    bool reject_signed_constant_overflow;
     bool result_valid;
     bool result_nonplace_projection;
     bool failed;
