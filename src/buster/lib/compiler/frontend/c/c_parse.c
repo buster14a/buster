@@ -1893,7 +1893,8 @@ BUSTER_C_SHARED void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u
    emulation, which Clang reproduces for `*-windows-gnu`, differs for empty
    records, `__attribute__((packed))` records with bit-fields, and a union's
    zero-width bit-field. Buster's Windows targets are the MSVC ABI (they
-   predefine _MSC_VER). */
+   predefine _MSC_VER), and target_parse_triple rejects the MinGW spellings
+   rather than aliasing them to it (#1492). */
 
 // Clang's MicrosoftRecordLayoutBuilder for every Windows environment, and its
 // AArch64 targets' unnamed and zero-width bit-field alignment everywhere but
