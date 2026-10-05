@@ -1,0 +1,14 @@
+self-base-ledger=0
+self-base-plain=0
+self-probe-ledger=0
+self-probe-plain=0
+self-base-syntaxonly=0
+self-base-callgrind=0
+self-probe-callgrind=0
+sqlite-base-ledger=0
+sqlite-base-plain=0
+sqlite-probe-ledger=0
+sqlite-probe-plain=0
+sqlite-base-syntaxonly=0
+sqlite-base-callgrind=0
+sqlite-probe-callgrind=0
