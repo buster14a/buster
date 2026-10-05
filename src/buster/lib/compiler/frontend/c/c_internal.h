@@ -171,6 +171,10 @@ BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 // the entity that ends before the operand. `*cursor` starts at zero.
 BUSTER_C_EXTERN bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
                                                u32* count_out);
+// A final member expression uses its declaring aggregate's placement
+// alignment; every lookup and layout query operates on a protected model.
+BUSTER_C_EXTERN bool c_semantic_alignof_member(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                u32 start, u32 end, u32* alignment);
 BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
 // The GNU layout attributes the frontend implements, as the parser spells
 // them. `__has_attribute` answers from these same predicates so the query
@@ -1052,6 +1056,7 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_PARAMETERS,
     C_TYPE_PARSE_STAGE_PARAMETER_RESULT,
     C_TYPE_PARSE_STAGE_FINISH,
+    C_TYPE_PARSE_STAGE_POSTFIX,
 } CTypeParseFrameStage;
 
 struct CTypeMutation
@@ -1254,6 +1259,9 @@ struct CTypeParseMachine
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
+    // Constexpr initializers keep NORMAL's type-name grammar, but reject
+    // signed arithmetic overflow before a cast can hide its wrapped bits.
+    bool reject_signed_constant_overflow;
     bool result_valid;
     bool result_nonplace_projection;
     bool failed;
