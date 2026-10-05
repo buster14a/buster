@@ -50023,7 +50023,8 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
         }
         CIrConstantValue converted = {0};
         if (c_ir_constant_cast(builder, &value, global->type, &converted) &&
-            (converted.kind == C_IR_CONSTANT_INTEGER || converted.kind == C_IR_CONSTANT_FLOAT))
+            (converted.kind == C_IR_CONSTANT_INTEGER || converted.kind == C_IR_CONSTANT_FLOAT ||
+             (converted.kind == C_IR_CONSTANT_POINTER && c_ir_constant_type_is_integer(type))))
         {
             if (type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && c_ir_binary128_static_target(builder->target, type))
             {
