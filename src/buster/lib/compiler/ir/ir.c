@@ -6058,8 +6058,9 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
               instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)) ||
             (vector_element && vector_element->kind == IR_TYPE_FLOAT && instruction->unary_operation == IR_UNARY_VECTOR_FLOAT_NEGATE);
         if (!type || instruction->operand_count != 1 ||
-            function->values[instruction->operands[0].value].canonical_type.value != instruction->canonical_type.value || !valid_operation ||
-            instruction->result.value == IR_ID_UNDERLYING_INVALID)
+            function->values[instruction->operands[0].value].canonical_type.value != instruction->canonical_type.value ||
+            function->values[instruction->operands[0].value].category != IR_VALUE_VALUE || !valid_operation ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE)
         {
             error = IR_VALIDATION_OPERATION;
         }
