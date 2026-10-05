@@ -28,5 +28,3 @@ docs/native-retirement-support-v1.tsv text eol=lf
 tools/bench_service/profiles/validate-buster-v1.recipe text eol=lf
 # Byte-pinned non-executable retirement admission declaration.
 tools/bench_service/profiles/native-retirement-performance-v1.blocked text eol=lf
-tools/bench_service/profiles/native-execute-v1.recipe text eol=lf
-tools/bench_service/profiles/native-runtime-v1.recipe text eol=lf
