@@ -27682,7 +27682,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_prepared_control_index_command_line[] = {
         S8("-o"),
         c_prepared_control_index_path,
-        S8("tests/basic_c_prepared_control_index.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/prepared_control_index.c"),
     };
     CompilerDriverResult c_prepared_control_index = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prepared_control_index_command_line)));
