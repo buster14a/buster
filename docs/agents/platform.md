@@ -107,11 +107,17 @@ UTF-16 NUL code units.
 Children inherit only standard streams selected by the caller. Captured pipe
 ends are first moved above descriptors 0-2, so a parent with closed standard
 streams cannot make `dup2` alias a pipe end that is subsequently closed. Linux
-uses a close-from spawn action, Apple uses `POSIX_SPAWN_CLOEXEC_DEFAULT` plus
+uses a close-from spawn action under glibc, other Linux libcs close an
+enumerated `/proc/self/fd` snapshot (a failed `readdir` fails the spawn rather
+than yielding a partial set), Apple uses `POSIX_SPAWN_CLOEXEC_DEFAULT` plus
 explicit standard-stream inheritance, and Windows passes only duplicated
 standard handles and captured pipe ends through
 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. Parent pipe ends are non-inheritable and
-all temporary duplicates are closed after `CreateProcessW`.
+all temporary duplicates are closed after `CreateProcessW`. A snapshot cannot
+be atomic with a concurrent open, so every first-party POSIX descriptor is
+created close-on-exec (`O_CLOEXEC`, `pipe2`, `F_DUPFD_CLOEXEC`); the standard
+streams reach the child through `dup2` file actions, which clear the flag on
+the target.
 
 GPU tool execution opts into captured-PATH lookup for the tool itself, then
 passes a fixed SDK/locale/temporary-directory environment allowlist rather than
