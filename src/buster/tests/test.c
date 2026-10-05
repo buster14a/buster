@@ -15,6 +15,9 @@
 // boundaries are written live around deterministic lane replay, and
 // test_parallel_crash_child_self_test covers abrupt lane exit without changing
 // registered assertion or TEST_MODULE_TIMING totals.
+// Deliberate harness failures preserve their diagnostics and accounting while
+// suppressing only their debugger stop; test_debugger_failure_self_test checks
+// that ordinary argument-bearing and argument-free failures still stop.
 // A descriptor marked table_audit runs only
 // on the canonical tree per platform (BUSTER_TEST_TABLE_AUDITS, default
 // on) — reserve that flag for results that are a pure function of the
@@ -24,6 +27,8 @@
 // BUSTER_TEST_MODULE_GROUP=driver|rest selects complementary process groups
 // (test_module_group_resolve), preserving audit ownership and table indices.
 // Its inventory value queries the table without running any registered module.
+// test_native_host_profile records the same binary's usable native features
+// and compiled SIMD tiers only for that independent inventory query.
 // CI_UNIT_MODULE_V1 inventories and the post-cleanup CI_UNIT_BATCH_V1 bind
 // selected timing rows to the complete registered suite for the parent.
 
@@ -35,6 +40,7 @@
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/time.h>
+#include <buster/lib/simd.h>
 #include <buster/lib/system_headers.h>
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/lib/x86_64.h>
@@ -86,6 +92,7 @@
 #include <buster/tests/compiler/frontend/c/record_layout_test.h>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.h>
 #include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.h>
+#include <buster/tests/compiler/assembly/aarch64_base_assembly_test.h>
 #include <buster/tests/compiler/assembly/aarch64_control_semantics_test.h>
 #include <buster/tests/compiler/assembly/aarch64_system_registers_test.h>
 #include <buster/tests/compiler/assembly/aarch64_semantics_test.h>
@@ -105,6 +112,7 @@
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.h>
 #include <buster/tests/compiler/diagnostic_test.h>
 #include <buster/tests/compiler/ir/ir_test.h>
+#include <buster/tests/compiler/ir/ir_oracle_test.h>
 #include <buster/tests/compiler/ir/vector_contract_test.h>
 #include <buster/tests/compiler/llvm/bitcode_test.h>
 #include <buster/tests/compiler/codegen/machine_select_test.h>
@@ -149,6 +157,7 @@
 #include <buster/tests/compiler/frontend/c/record_layout_test.c>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.c>
 #include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.c>
+#include <buster/tests/compiler/assembly/aarch64_base_assembly_test.c>
 #include <buster/tests/compiler/assembly/aarch64_control_semantics_test.c>
 #include <buster/tests/compiler/assembly/aarch64_system_registers_test.c>
 #include <buster/tests/compiler/assembly/aarch64_semantics_test.c>
@@ -168,6 +177,7 @@
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.c>
 #include <buster/tests/compiler/diagnostic_test.c>
 #include <buster/tests/compiler/ir/ir_test.c>
+#include <buster/tests/compiler/ir/ir_oracle_test.c>
 #include <buster/tests/compiler/ir/vector_contract_test.c>
 #include <buster/tests/compiler/llvm/bitcode_test.c>
 #include <buster/tests/compiler/codegen/machine_select_test.c>
@@ -191,6 +201,17 @@
 #endif
 
 #endif
+
+BUSTER_GLOBAL_LOCAL bool buster_test_debugger_stop_requested(UnitTestArguments* arguments, bool debugger_present)
+{
+    bool result = debugger_present;
+#if BUSTER_INCLUDE_TESTS
+    result = result && (!arguments || !arguments->suppress_debugger_break);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
 
 #if BUSTER_INCLUDE_TESTS
 typedef struct TestDescriptor TestDescriptor;
@@ -393,7 +414,7 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
         for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(result.marks); slot += 1)
         {
             Arena* observed = test_arena_observed(context, arena, slot);
-            high_waters[slot] = observed ? observed->test_high_water : 0;
+            high_waters[slot] = observed ? observed->high_water : 0;
         }
         arguments->show(arguments, S8("TEST_FIXTURE_START_V1 kind={S8} module={S8} fixture={S8} index={u64}\n"),
                         module ? S8("module") : S8("fixture"), arguments->memory_module, name, result.index);
@@ -402,7 +423,7 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
             Arena* observed = test_arena_observed(context, arena, slot);
             if (observed)
             {
-                observed->test_high_water = high_waters[slot];
+                observed->high_water = high_waters[slot];
             }
         }
     }
@@ -411,8 +432,8 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
         Arena* observed = test_arena_observed(context, arena, slot);
         if (observed)
         {
-            result.marks[slot] = (TestArenaMark){.arena = observed, .start = observed->position, .previous_high_water = observed->test_high_water};
-            observed->test_high_water = observed->position;
+            result.marks[slot] = (TestArenaMark){.arena = observed, .start = observed->position, .previous_high_water = observed->high_water};
+            observed->high_water = observed->position;
         }
     }
     if (module)
@@ -457,7 +478,7 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
         if (mark.arena)
         {
             ends[slot] = mark.arena->position;
-            peaks[slot] = BUSTER_MAX(mark.arena->test_high_water, ends[slot]);
+            peaks[slot] = BUSTER_MAX(mark.arena->high_water, ends[slot]);
             BUSTER_VALIDATE(ends[slot] >= mark.start);
         }
     }
@@ -517,7 +538,7 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
         TestArenaMark mark = scope.marks[slot];
         if (mark.arena)
         {
-            mark.arena->test_high_water = BUSTER_MAX(mark.previous_high_water, peaks[slot]);
+            mark.arena->high_water = BUSTER_MAX(mark.previous_high_water, peaks[slot]);
         }
     }
     // Last, so the watched position stays on this scope until it has closed.
@@ -851,6 +872,7 @@ typedef enum TestId
     TEST_ID_METAMORPHIC,
     TEST_ID_AARCH64_ENCODING,
     TEST_ID_AARCH64_EXACT_BRIDGE,
+    TEST_ID_AARCH64_BASE_ASSEMBLY,
     TEST_ID_AARCH64_CONTROL_SEMANTICS,
     TEST_ID_AARCH64_SYSTEM_REGISTERS,
     TEST_ID_AARCH64_SEMANTICS,
@@ -871,6 +893,8 @@ typedef enum TestId
     TEST_ID_X86_64_COMPLETION_CENSUS,
 #endif
     TEST_ID_IR,
+    TEST_ID_IR_ORACLE,
+    TEST_ID_IR_ORACLE_NATIVE,
     TEST_ID_VECTOR_CONTRACT,
     TEST_ID_LLVM_BITCODE,
     TEST_ID_MACHINE_SELECTION,
@@ -916,6 +940,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_C_RECORD_LAYOUT] = {S8_INITIALIZER("record_layout_tests"), &record_layout_tests, true},
     [TEST_ID_AARCH64_ENCODING] = {S8_INITIALIZER("aarch64_encoding_tests"), &aarch64_encoding_tests},
     [TEST_ID_AARCH64_EXACT_BRIDGE] = {S8_INITIALIZER("aarch64_exact_bridge_tests"), &aarch64_exact_bridge_tests},
+    [TEST_ID_AARCH64_BASE_ASSEMBLY] = {S8_INITIALIZER("aarch64_base_assembly_tests"), &aarch64_base_assembly_tests},
     [TEST_ID_AARCH64_CONTROL_SEMANTICS] = {S8_INITIALIZER("aarch64_control_semantics_tests"), &aarch64_control_semantics_tests},
     [TEST_ID_AARCH64_SYSTEM_REGISTERS] = {S8_INITIALIZER("aarch64_system_registers_tests"), &aarch64_system_registers_tests},
     [TEST_ID_AARCH64_SEMANTICS] = {S8_INITIALIZER("aarch64_semantics_tests"), &aarch64_semantics_tests},
@@ -937,6 +962,10 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
                                           TEST_DESCRIPTOR_PARALLEL_NONE, true},
 #endif
     [TEST_ID_IR] = {S8_INITIALIZER("ir_tests"), &ir_tests},
+    [TEST_ID_IR_ORACLE] = {S8_INITIALIZER("ir_oracle_tests"), &ir_oracle_tests, true},
+    // This re-exec payload uses only in-memory mappings. Its timeout child is
+    // killed before final cleanup, so leave unused temporary roots unallocated.
+    [TEST_ID_IR_ORACLE_NATIVE] = {S8_INITIALIZER("ir_oracle_native_tests"), &ir_oracle_native_tests, false},
     [TEST_ID_VECTOR_CONTRACT] = {S8_INITIALIZER("vector_contract_tests"), &vector_contract_tests},
     [TEST_ID_LLVM_BITCODE] = {S8_INITIALIZER("llvm_bitcode_tests"), &llvm_bitcode_tests},
     [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
@@ -1219,6 +1248,32 @@ BUSTER_GLOBAL_LOCAL bool test_module_group_union_valid(TestDescriptor* original,
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void test_native_host_profile(UnitTestArguments* arguments)
+{
+    BUSTER_CT_CHECK(TARGET_CPU_FEATURE_WORD_COUNT == 4);
+#if BUSTER_CPU_ARCH_X86_64
+    String8 architecture = S8("x86_64");
+    TargetCpuFeatures features = cpu_detect_features_x86_64();
+    String8 feature_source = S8("cpuid-xcr0");
+#else
+    TargetCpuFeatures features = target_native.cpu_features;
+    String8 feature_source = target_native.cpu_features_explicit ? S8("target-native") : S8("unavailable");
+#if BUSTER_CPU_ARCH_AARCH64
+    String8 architecture = S8("aarch64");
+#else
+    String8 architecture = cpu_arch_to_string_os(target_native.cpu_arch);
+#endif
+#endif
+    // Storage bit n represents TargetCpuFeature ordinal n+1 (NONE has no bit).
+    // Word n contains storage bits 64*n through 64*n+63. x86 probing includes
+    // the OS/XCR0 usability gates;
+    // other architectures report the explicit native target's feature oracle.
+    arguments->show(arguments,
+        S8("CI_UNIT_HOST_V1 architecture={S8} feature_source={S8} feature_word_count=4 word0={u64} word1={u64} word2={u64} word3={u64} simd_512_base={u32} simd_512={u32}\n"),
+        architecture, feature_source, features.words[0], features.words[1], features.words[2], features.words[3],
+        (u32)BUSTER_SIMD_512_BASE, (u32)BUSTER_SIMD_512);
+}
+
 BUSTER_GLOBAL_LOCAL void test_module_group_inventory(UnitTestArguments* arguments, TestDescriptor* selected)
 {
     for (u64 index = 0; index < TEST_ID_COUNT; index += 1)
@@ -1342,6 +1397,22 @@ BUSTER_GLOBAL_LOCAL bool test_parallel_gang_report_self_test(void)
     return passed;
 }
 
+// The debugger-presence input is explicit so these positive and negative
+// controls run without attaching a debugger or deliberately stopping CI.
+BUSTER_GLOBAL_LOCAL bool test_debugger_failure_self_test(void)
+{
+    UnitTestArguments arguments = {0};
+    bool passed = !arguments.suppress_debugger_break &&
+                  !buster_test_debugger_stop_requested(0, false) && !buster_test_debugger_stop_requested(&arguments, false) &&
+                  buster_test_debugger_stop_requested(0, true) && buster_test_debugger_stop_requested(&arguments, true);
+    arguments.suppress_debugger_break = true;
+    passed = passed && !buster_test_debugger_stop_requested(&arguments, false) && !buster_test_debugger_stop_requested(&arguments, true) &&
+             buster_test_debugger_stop_requested(0, true);
+    arguments.suppress_debugger_break = false;
+    passed = passed && buster_test_debugger_stop_requested(&arguments, true);
+    return passed;
+}
+
 // Harness regression: keep accounting out of the registered assertion totals.
 // Failure output is deliberately buffered, rewound, overwritten, then inspected.
 BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
@@ -1362,7 +1433,7 @@ BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
     arena_set_position(arena, inner.marks[0].start);
     memset(arena_allocate(arena, u8, 9), 0xa5, 9);
     buster_test_arena_end(&arguments.base, inner, true);
-    bool passed = arena->position == 67 && arena->test_high_water == 131144 && memcmp(live, "abc", 3) == 0;
+    bool passed = arena->position == 67 && arena->high_water == 131144 && memcmp(live, "abc", 3) == 0;
     u8* zeroed = arena_allocate_zeroed(arena, u8, 9);
     for (u32 index = 0; index < 9; index += 1)
     {
@@ -1386,10 +1457,13 @@ BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
 
     TestArenaScope failed = buster_test_arena_begin(&arguments.base, arena, S8("failed"), false);
     String8 diagnostic = string_format(arena, S8("fixture diagnostic survives rewind"));
+    arguments.base.suppress_debugger_break = true;
     BUSTER_TEST_RAW(&arguments.base, false, diagnostic);
+    arguments.base.suppress_debugger_break = false;
     buster_test_arena_end(&arguments.base, failed, true);
     memset(arena_allocate(arena, u8, 256), 0xa5, 256);
-    passed = passed && result.test_count == 1 && result.succeeded_test_count == 0;
+    passed = passed && result.test_count == 1 && result.succeeded_test_count == 0 &&
+             buster_test_debugger_stop_requested(&arguments.base, true);
     String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
     passed = passed && string_first_sequence(text, S8("fixture diagnostic survives rewind failed at")) != BUSTER_STRING_NO_MATCH;
     passed = passed && string_first_sequence(text, S8("start=67 end=76 retained_bytes=9 high_water=131144 peak_bytes=131077 after=67 live_bytes=0 rewind=1")) != BUSTER_STRING_NO_MATCH;
@@ -1437,7 +1511,9 @@ BUSTER_GLOBAL_LOCAL bool test_fixture_timing_self_test(void)
     passed = passed && arena->position == first.marks[0].start;
     TestArenaScope second = buster_test_arena_begin(&arguments.base, arena, S8("repeated"), false);
     String8 diagnostic = string_format(arena, S8("timed failure survives rewind"));
+    arguments.base.suppress_debugger_break = true;
     BUSTER_TEST_RAW(&arguments.base, false, diagnostic);
+    arguments.base.suppress_debugger_break = false;
     // A scope snapshots enablement; changing the next scope's policy must not
     // lose an already-started interval or expose an uninitialized timestamp.
     arguments.base.fixture_timing_report = false;
@@ -1446,7 +1522,8 @@ BUSTER_GLOBAL_LOCAL bool test_fixture_timing_self_test(void)
     memset(arena_allocate(arena, u8, 256), 0xa5, 256);
     String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
     passed = passed && module.timing && first.timing && second.timing && first.index == 0 && second.index == 1 &&
-             arguments.base.memory_fixture_index == 2 && result.test_count == 1 && result.succeeded_test_count == 0;
+             arguments.base.memory_fixture_index == 2 && result.test_count == 1 && result.succeeded_test_count == 0 &&
+             buster_test_debugger_stop_requested(&arguments.base, true);
     passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_TIMING_V1 kind=fixture module=timing_self_test fixture=repeated index=0 duration_ns=")) != BUSTER_STRING_NO_MATCH;
     passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_TIMING_V1 kind=fixture module=timing_self_test fixture=repeated index=1 duration_ns=")) != BUSTER_STRING_NO_MATCH;
     passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_TIMING_V1 kind=module module=timing_self_test fixture=body index=0 duration_ns=")) != BUSTER_STRING_NO_MATCH;
@@ -1552,7 +1629,10 @@ BUSTER_GLOBAL_LOCAL bool test_require_self_test(void)
     String8 missing_path = string_format_z(arena, S8("tests/buster-require-missing-fixture-{u64}"), os_get_current_process_id());
     ByteSlice missing_fixture = file_read(arena, missing_path, (FileReadOptions){0});
     bool failed_dependent_called = false;
-    if (BUSTER_REQUIRE(&arguments.base, missing_fixture.pointer != 0))
+    arguments.base.suppress_debugger_break = true;
+    bool fixture_available = BUSTER_REQUIRE(&arguments.base, missing_fixture.pointer != 0);
+    arguments.base.suppress_debugger_break = false;
+    if (fixture_available)
     {
         failed_dependent_called = true;
         BUSTER_TEST(&arguments.base, missing_fixture.pointer[0] == 0);
@@ -1566,6 +1646,7 @@ BUSTER_GLOBAL_LOCAL bool test_require_self_test(void)
     }
     String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
     bool passed = !failed_dependent_called && successful_dependent_called && result.test_count == 3 && result.succeeded_test_count == 2 &&
+                  buster_test_debugger_stop_requested(&arguments.base, true) &&
                   string_first_sequence(text, S8("missing_fixture.pointer != 0 failed at")) != BUSTER_STRING_NO_MATCH;
     passed = arena_destroy(arena, 1) && passed;
     passed = arena_destroy(output, 1) && passed;
@@ -1655,7 +1736,7 @@ void buster_test_error(u32 line, String8 function, String8 file_path, String8 fo
     string_print(S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
     scratch_end(scratch);
 
-    if (is_debugger_present())
+    if (buster_test_debugger_stop_requested(0, is_debugger_present()))
     {
         os_fail();
     }
@@ -1672,7 +1753,7 @@ void buster_test_error_arguments(UnitTestArguments* arguments, u32 line, String8
     arguments->show(arguments, S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
     scratch_end(scratch);
 
-    if (is_debugger_present())
+    if (buster_test_debugger_stop_requested(arguments, is_debugger_present()))
     {
         os_fail();
     }
@@ -2399,6 +2480,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
+    BUSTER_VALIDATE(test_debugger_failure_self_test());
     BUSTER_VALIDATE(test_arena_self_test());
     BUSTER_VALIDATE(test_require_self_test());
     BUSTER_CHECK(test_fixture_timing_self_test());
@@ -2434,6 +2516,10 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
                             module_group_name);
         }
         test_module_group_inventory(arguments, descriptors);
+        if (module_group == TEST_MODULE_GROUP_INVENTORY)
+        {
+            test_native_host_profile(arguments);
+        }
     }
     else if (arguments->module_selection.length)
     {

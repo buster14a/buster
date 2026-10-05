@@ -1,0 +1,22 @@
+{
+  "capabilities": {
+    "metrics_out": true,
+    "metrics_out_measured": true,
+    "source_metrics": true,
+    "wrapper_rss_bytes": 34766848
+  },
+  "collection": {
+    "metrics_out": true
+  },
+  "config": {
+    "command": "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-matched/baseline-ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o OUT",
+    "cpu": 2,
+    "fresh_copy": true,
+    "ide": "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_reviews/2478-prefix-matched/baseline-ide",
+    "perf": "perf",
+    "repo_root": "/home/david/Documents/Codex/2026-10-05/fi/work/frontend_ready/review-2478",
+    "role": "baseline"
+  },
+  "steps": {},
+  "version": 1
+}
