@@ -1644,16 +1644,29 @@ BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttri
 
 /* `error` is an ordinary identifier even inside an attribute list -- the
    operand of `cleanup(error)` is one -- so the marker counts only where an
-   attribute name stands, after the list's '(' or '[', a ',' or the `::` of
-   `gnu::error`, and only with the string-literal argument the attribute
-   requires. */
-BUSTER_C_INTERNAL bool c_ir_attribute_error_marker_at(CPreprocessResult preprocess, u32 index, u32 end)
+   attribute name stands and only with the string-literal argument the
+   attribute requires. In a GNU `__attribute__` list the name follows the
+   list's '(' or a ','. In a C23 `[[...]]` list only the GNU namespace means
+   it: `gnu::error` or `__gnu__::error`, whose `::` lexes as two ':' tokens.
+   An unscoped `[[error(...)]]` or another vendor's `vendor::error` is an
+   attribute GCC does not know and ignores, so it is not this one. */
+BUSTER_C_INTERNAL bool c_ir_attribute_error_marker_at(CPreprocessResult preprocess, u32 index, u32 end, bool bracketed)
 {
     CToken const* tokens = preprocess.tokens;
-    bool named = index > 0 && (c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-                               c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_LEFT_BRACKET) ||
-                               c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COMMA) ||
-                               c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COLON));
+    bool named = false;
+    if (bracketed)
+    {
+        String8 scope = index >= 3 && tokens[index - 3].kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, tokens[index - 3])
+                                                                                    : (String8){0};
+        named = index >= 3 && c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COLON) &&
+                c_token_is_punctuator(&tokens[index - 2], C_PUNCTUATOR_COLON) &&
+                (string_equal(scope, S8("gnu")) || string_equal(scope, S8("__gnu__")));
+    }
+    else
+    {
+        named = index > 0 && (c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                              c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COMMA));
+    }
     return named && index + 2 < end && c_token_is_punctuator(&tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            tokens[index + 2].kind == C_TOKEN_STRING_LITERAL;
 }
@@ -1673,6 +1686,7 @@ BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u
         CToken token = preprocess.tokens[index];
         u32 list_start = UINT32_MAX;
         u32 list_end = UINT32_MAX;
+        bool bracketed = false;
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             String8 spelling = c_token_spelling(preprocess.spelling_base, token);
@@ -1718,13 +1732,14 @@ BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u
             }
             list_start = index + 2;
             list_end = scan < end ? scan : end;
+            bracketed = true;
             index = list_end;
         }
         for (u32 marker_index = list_start; marker_index < list_end && result == UINT32_MAX; marker_index += 1)
         {
             bool matches = preprocess.tokens[marker_index].kind == C_TOKEN_IDENTIFIER &&
                            c_ir_attribute_marker_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[marker_index]), marker) &&
-                           (marker != C_IR_ATTRIBUTE_MARKER_ERROR || c_ir_attribute_error_marker_at(preprocess, marker_index, list_end));
+                           (marker != C_IR_ATTRIBUTE_MARKER_ERROR || c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed));
             result = matches ? marker_index : UINT32_MAX;
         }
         index += 1;

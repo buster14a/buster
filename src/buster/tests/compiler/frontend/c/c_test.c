@@ -18171,8 +18171,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_object(UnitTestArguments* argu
 // is the CFG the body builds: a call in `if (0)`, `while (0)` or the dead arm
 // of a constant conditional is never reached and is accepted, as GCC accepts
 // it. Redeclarations join the attribute; a pointer to the function, a
-// function merely named `error`, the `cleanup(error)` operand and the
-// unrelated `warning` attribute are not diagnosed.
+// function merely named `error`, the `cleanup(error)` operand, the
+// unrelated `warning` attribute, and a C23 `[[error(...)]]` outside the GNU
+// namespace (`vendor::error`, or unscoped) are not diagnosed.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_error_attribute_calls(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18189,6 +18190,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_error_attribute_calls(UnitTestArgument
         {S8("void f(void);\nvoid f(void) __attribute__((error(\"late\")));\nvoid t(void) { f(); }\n"), S8("error: late (attribute at error-attribute.c:2:29)"), 3, 16},
         {S8("void f(void) __attribute__((error(\"early\")));\nvoid f(void);\nvoid t(void) { f(); }\n"), S8("error: early"), 3, 16},
         {S8("[[gnu::error(\"c23\")]] void f(void);\nvoid t(void) { f(); }\n"), S8("error: c23"), 2, 16},
+        {S8("[[__gnu__::error(\"reserved scope\")]] void f(void);\nvoid t(void) { f(); }\n"), S8("error: reserved scope"), 2, 16},
         {S8("void f(void) __attribute__((__error__(\"res\" \"erved\")));\nvoid t(void) { f(); }\n"), S8("error: reserved"), 2, 16},
         {S8("void f(void) __attribute__((error(\"m\")));\nvoid t(int x) { if (x) f(); }\n"), S8("error: m"), 2, 24},
         {S8("int f(int) __attribute__((error(\"expr\")));\nint t(int x) { return x + f(x); }\n"), S8("error: expr"), 2, 27},
@@ -18200,6 +18202,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_error_attribute_calls(UnitTestArgument
         {S8("void error(const char*);\nvoid t(void) { error(\"x\"); }\n"), S8(""), 0, 0},
         {S8("void error(int*);\nvoid t(void) { int x __attribute__((cleanup(error))) = 0; (void)x; }\n"), S8(""), 0, 0},
         {S8("void f(void) __attribute__((warning(\"w\")));\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[vendor::error(\"m\")]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[error(\"m\")]] void f(void);\nvoid t(void) { f(); }\n"), S8(""), 0, 0},
+        {S8("[[gnu::error(\"m\")]] void f(void);\nvoid t(void) { if (0) f(); }\n"), S8(""), 0, 0},
         {S8("void f(void) __attribute__((error(\"m\")));\nstatic void unused(void) { f(); }\nvoid t(void) {}\n"), S8(""), 0, 0},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)

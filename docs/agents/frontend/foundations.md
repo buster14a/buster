@@ -808,7 +808,9 @@ without facts for identical bitcode and diagnostics.
   every allocator.
 - **GNU `__attribute__((error("message")))` rejects a reachable direct call**
   (GitHub #1951). `CIrSignature.error_attribute_token_plus_one` records the
-  attribute (`error`, `__error__`, or `[[gnu::error(...)]]`) and is joined
+  attribute (`error`, `__error__`, `[[gnu::error(...)]]` or
+  `[[__gnu__::error(...)]]`; another namespace or an unscoped `[[error]]` is
+  not it) and is joined
   across the entity's declarations the way `noreturn` is. Each direct call
   records its block, and `c_ir_check_error_attribute_calls` runs after
   `c_ir_lower_body`, before SSA completion. It walks the body CFG from the
