@@ -2015,6 +2015,10 @@ struct MachineFastPrepass
     u32* last_use;
     u8* escapes;
     u32* next_call;
+    // One advisory physical register per virtual register, or 0xFF: the
+    // fixed register (or forced scratch) of the value's first constrained
+    // use, when that use sits close after the definition in the same block.
+    u8* register_hints;
     // One compact SoA word per instruction. Six four-bit lane masks record
     // physical, virtual, block, use, define, and use-define operands after
     // the prepass has classified the row once. Two high state bits separate
