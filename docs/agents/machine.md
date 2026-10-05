@@ -39,6 +39,14 @@ fixture as well as compiling both architectures.
   `codegen_test_debug_seed_capacity` checks fixed and growing storage, exact
   remaining capacity, alignment and count-overflow refusals; the registered
   block-local source cases compile with debug information in a bounded arena.
+- X86 inline assembly admits `vzeroupper` and `popcnt`/`lzcnt`
+  with unsuffixed and AT&T `w`/`l`/`q` spellings through the shared checked
+  assembler. Template authors retain responsibility for declared clobbers and
+  runtime CPU checks. `machine_test_inline_assembly_counters` pins independent instruction
+  bytes, both frontend forms, all allocators, and Linux/Windows/macOS objects.
+  Rejected neighbours cover byte-width bit counts, mismatched operand widths,
+  and extra operands on `vzeroupper`, with no partial bytes.
+  Matching native hosts execute optional instructions only when supported.
 - Selection retains a canonical-block-to-MIR-entry projection when expansion
   or entry-first layout changes block IDs. Parameter-edge splitting composes
   that projection through its block renumbering before reclaiming scratch,
