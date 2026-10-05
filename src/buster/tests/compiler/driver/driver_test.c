@@ -16069,7 +16069,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
             BUSTER_TEST(arguments, invocation.error == (refused ? COMPILER_DRIVER_ERROR_ARGUMENT : COMPILER_DRIVER_ERROR_NONE));
             if (refused)
             {
-                String8 option = case_index == 5 ? model_cases[case_index].second : model_cases[case_index].first;
+                String8 option = case_index == 5 || case_index == 7 ? model_cases[case_index].second : model_cases[case_index].first;
                 BUSTER_STRING_TEST(arguments, invocation.diagnostic,
                     string_format(temporary.arena, S8("unsupported option: {S8} on AArch64 ELF"), option));
             }
