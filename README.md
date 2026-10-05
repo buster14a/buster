@@ -12,6 +12,7 @@ products: retained source and standalone tools have explicit integration limits.
 
 | Question | Start here |
 |---|---|
+| How is the project website published? | [GitHub Pages integration and local preview](docs/github-pages.md) |
 | What is in the monorepo? | [Projects and components](PROJECTS.md) |
 | What can the compiler do? | [Compiler and toolchain](docs/projects/compiler.md) |
 | How do I build and test? | [Build guide](docs/agents/build.md) and [tests/CI](docs/agents/testing.md) |

@@ -61,9 +61,10 @@ class FakeAPI:
     def __init__(self):
         self.current = run(CURRENT_ID, "push", "main", NOW - timedelta(minutes=1))
         self.source = run(SOURCE_ID, "merge_group", BRANCH, NOW - timedelta(minutes=2))
-        self.jobs = [job(name, SOURCE_ID) for name in inventory.COMBINATION_JOBS]
+        self.jobs = [job(name, SOURCE_ID) for name in inventory.combination_jobs()]
         for index, record in enumerate(self.jobs):
             record["id"] = 1000 + index
+        self.checks = []
         self.artifacts = []
         for index, (_, prefix, _) in enumerate(reuse.SOURCE_COVERAGE):
             self.artifacts.append({
@@ -93,7 +94,21 @@ class FakeAPI:
             record["id"] = 2000 + index
         self.movement = False
 
+    def add_reconciled_metadata(self, status="in_progress", conclusion=None):
+        for index, (name, prefix) in enumerate(inventory.RECONCILED_CHECK_MARKERS.items()):
+            identity = 3000 + index
+            row = {"id": identity, "name": name, "run_id": SOURCE_ID, "run_attempt": 1,
+                   "head_sha": SHA, "status": status, "conclusion": conclusion,
+                   "steps": [], "runner_id": None}
+            self.jobs.append(copy.deepcopy(row))
+            self.main_jobs.append(dict(row, run_id=CURRENT_ID))
+            self.checks.append({"id": identity, "name": name, "head_sha": SHA,
+                                "app": {"id": 15368}, "external_id": prefix + SHA,
+                                "status": status, "conclusion": conclusion})
+
     def get(self, path, **query):
+        if path == f"commits/{SHA}/check-runs" and query == {"filter": "all", "per_page": 100, "page": 1}:
+            return {"total_count": len(self.checks), "check_runs": copy.deepcopy(self.checks)}
         if path == f"actions/runs/{CURRENT_ID}":
             return copy.deepcopy(self.current)
         if path == f"actions/runs/{SOURCE_ID}":
@@ -128,22 +143,144 @@ class MainCIReuseTests(unittest.TestCase):
     def admit(self):
         return reuse.verify_source(self.api, SHA, CURRENT_ID, BLOB, NOW)
 
+    def test_reconciled_metadata_is_proved_and_retained_in_both_reuse_readers(self):
+        for status, conclusion in (("in_progress", None), ("completed", "success"),
+                                   ("completed", "failure"), ("completed", "cancelled")):
+            with self.subTest(status=status, conclusion=conclusion):
+                self.api = FakeAPI()
+                self.api.add_reconciled_metadata(status, conclusion)
+                source_evidence, main_evidence = {}, {}
+                receipt = reuse.verify_source(self.api, SHA, CURRENT_ID, BLOB, NOW,
+                                              diagnostics=source_evidence)
+                current = reuse.verify_current_jobs(self.api, SHA, CURRENT_ID, diagnostics=main_evidence)
+                self.assertEqual(len(receipt["source_jobs"]), 25)
+                self.assertEqual(len(current), 19)
+                self.assertEqual([row["job"] for row in source_evidence["source_reconciled_checks"]],
+                                 self.api.jobs[-2:])
+                self.assertEqual([row["job"] for row in main_evidence["current_reconciled_checks"]],
+                                 self.api.main_jobs[-2:])
+                self.assertTrue(all(row["check"]["external_id"].endswith(SHA) for row in
+                                    source_evidence["source_reconciled_checks"] +
+                                    main_evidence["current_reconciled_checks"]))
+
+    def test_metadata_verdict_change_does_not_change_workload_reuse_receipt(self):
+        self.api.add_reconciled_metadata()
+        first = self.admit()
+        for row in self.api.jobs[-2:] + self.api.main_jobs[-2:] + self.api.checks:
+            row.update(status="completed", conclusion="success")
+        second = self.admit()
+        self.assertEqual(first, second)
+        self.assertEqual(reuse.receipt_digest(first), reuse.receipt_digest(second))
+
+    def test_unproved_metadata_fails_both_readers(self):
+        changes = (("id", 9999), ("name", "Unknown metadata"), ("head_sha", "d" * 40),
+                   ("app", {"id": 1}), ("external_id", "not-reviewed"))
+        for field, value in changes:
+            for source in (True, False):
+                with self.subTest(field=field, source=source):
+                    self.api = FakeAPI()
+                    self.api.add_reconciled_metadata()
+                    self.api.checks[0][field] = value
+                    with self.assertRaises(AdmissionError):
+                        if source:
+                            self.admit()
+                        else:
+                            reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+        for source in (True, False):
+            self.api = FakeAPI()
+            self.api.add_reconciled_metadata()
+            self.api.checks = []
+            with self.assertRaises(AdmissionError):
+                if source:
+                    self.admit()
+                else:
+                    reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+
+    def test_duplicate_metadata_and_missing_workloads_still_fail_both_readers(self):
+        for source in (True, False):
+            for defect in ("duplicate-job", "duplicate-check", "missing-workload", "unknown-workload"):
+                with self.subTest(source=source, defect=defect):
+                    self.api = FakeAPI()
+                    self.api.add_reconciled_metadata()
+                    rows = self.api.jobs if source else self.api.main_jobs
+                    if defect == "duplicate-job":
+                        rows.append(copy.deepcopy(rows[-2]))
+                    elif defect == "duplicate-check":
+                        self.api.checks.append(dict(self.api.checks[0], id=9999))
+                    elif defect == "missing-workload":
+                        rows.pop(0)
+                    else:
+                        rows.append(dict(rows[0], name="Unknown workload", id=9999))
+                    with self.assertRaises(AdmissionError):
+                        if source:
+                            self.admit()
+                        else:
+                            reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+
+    def test_unrelated_duplicate_or_malformed_check_ids_fail_both_reuse_readers(self):
+        for source in (True, False):
+            for identity in (None, True, "9998", {"bad": 1}, 0, -1, "duplicate"):
+                with self.subTest(source=source, identity=identity):
+                    self.api = FakeAPI()
+                    self.api.add_reconciled_metadata()
+                    if identity == "duplicate":
+                        self.api.checks += [{"id": 9998, "name": "Other first"},
+                                            {"id": 9998, "name": "Other second"}]
+                    else:
+                        self.api.checks.append({"id": identity, "name": "Other"})
+                    with self.assertRaises(AdmissionError):
+                        if source:
+                            self.admit()
+                        else:
+                            reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
+
+    def test_complete_check_proof_uses_strict_pagination(self):
+        api = GitHub(reuse.REPOSITORY, "unused")
+        cases = (({"total_count": 2, "check_runs": []},),
+                 ({"total_count": 200, "check_runs": [{}] * 100},
+                  {"total_count": 150, "check_runs": [{}] * 50}),
+                 ({"total_count": 101, "check_runs": [{}] * 100},
+                  {"total_count": 101, "check_runs": []}),
+                 ({"total_count": True, "check_runs": []},),
+                 ({"total_count": 1001, "check_runs": []},),
+                 ({"total_count": 2, "check_runs": [{}]},))
+        for pages in cases:
+            with self.subTest(pages=pages):
+                with mock.patch.object(api, "get", side_effect=pages):
+                    with self.assertRaises(AdmissionError):
+                        reuse.reconciled_check_inventory(api, SHA)
+        with mock.patch.object(api, "get", side_effect=[
+                {"total_count": 101, "check_runs": [{}] * 100},
+                {"total_count": 101, "check_runs": [{}]}]) as read:
+            self.assertEqual(len(reuse.reconciled_check_inventory(api, SHA)), 101)
+            self.assertEqual(read.call_count, 2)
+        with mock.patch.object(api, "get", side_effect=OSError("check evidence unavailable")):
+            with self.assertRaises(OSError):
+                reuse.reconciled_check_inventory(api, SHA)
+
+    def test_reuse_token_has_only_read_permission_for_check_proof(self):
+        text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
+        block = text.split("\n  reuse:\n", 1)[1].split("\n  test:\n", 1)[0]
+        permission = block.split("    permissions:\n", 1)[1].split("    runs-on:", 1)[0]
+        self.assertIn("      checks: read\n", permission)
+        self.assertNotIn("write", permission)
+
     def test_exact_commit_source_and_main_specific_jobs(self):
         receipt = self.admit()
-        self.assertEqual(len(receipt["source_jobs"]), 19)
-        self.assertEqual(len(receipt["source_artifacts"]), 19)
+        self.assertEqual(len(receipt["source_jobs"]), 25)
+        self.assertEqual(len(receipt["source_artifacts"]), 25)
         self.assertEqual(receipt["source_run_id"], SOURCE_ID)
-        self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 13)
+        self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 19)
         self.assertRegex(reuse.receipt_digest(receipt), r"[0-9a-f]{64}\Z")
 
-    def test_dispatch_split_layout_cannot_change_the_main_reuse_inventory(self):
-        self.assertEqual(inventory.combination_jobs(), inventory.COMBINATION_JOBS)
-        self.assertEqual(len(inventory.combination_jobs()), 21)
+    def test_current_split_reuse_rejects_the_historical_combined_inventory(self):
+        self.assertEqual(inventory.combination_jobs(), inventory.SPLIT_COMBINATION_JOBS)
+        self.assertEqual(len(inventory.combination_jobs()), 27)
         self.assertEqual(len(inventory.combination_jobs("split")), 27)
-        self.assertEqual(len(reuse.RETAINED_NAMES), 13)
-        self.assertIn("Windows x86-64 checks", reuse.RETAINED_NAMES)
-        self.assertNotIn("Windows x86-64 sanitized-debug", reuse.RETAINED_NAMES)
-        self.api.jobs = [job(name, SOURCE_ID) for name in inventory.combination_jobs("split")]
+        self.assertEqual(len(reuse.RETAINED_NAMES), 19)
+        self.assertNotIn("Windows x86-64 checks", reuse.RETAINED_NAMES)
+        self.assertIn("Windows x86-64 sanitized-debug", reuse.RETAINED_NAMES)
+        self.api.jobs = [job(name, SOURCE_ID) for name in inventory.combination_jobs("combined")]
         with self.assertRaises(AdmissionError):
             self.admit()
 
@@ -233,9 +370,25 @@ class MainCIReuseTests(unittest.TestCase):
     def test_all_desktop_source_coverage_and_artifacts_are_required(self):
         for name, prefix, mandatory in reuse.DESKTOP:
             with self.subTest(name=name):
+                for mutation in ("missing", "duplicate", "failure", "cancelled", "skipped"):
+                    self.api = FakeAPI()
+                    source = next(j for j in self.api.jobs if j['name'] == name)
+                    if mutation == "missing":
+                        self.api.jobs.remove(source)
+                    elif mutation == "duplicate":
+                        self.api.jobs.append(dict(copy.deepcopy(source), id=9999))
+                    else:
+                        source['conclusion'] = mutation
+                    with self.subTest(mutation=mutation), self.assertRaises(AdmissionError):
+                        self.admit()
                 self.api = FakeAPI()
                 source = next(j for j in self.api.jobs if j['name'] == name)
                 source['steps'] = [s for s in source['steps'] if s['name'] != mandatory]
+                with self.assertRaises(AdmissionError):
+                    self.admit()
+                self.api = FakeAPI()
+                artifact = next(a for a in self.api.artifacts if a['name'] == f'{prefix}-{SOURCE_ID}-1')
+                self.api.artifacts.append(dict(copy.deepcopy(artifact), id=9999))
                 with self.assertRaises(AdmissionError):
                     self.admit()
                 self.api = FakeAPI()
@@ -266,7 +419,7 @@ class MainCIReuseTests(unittest.TestCase):
         for name in reuse.CACHE_STEPS:
             block = desktop.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             self.assertNotIn("needs.reuse.outputs.reuse != 'true'", block)
-        self.assertEqual(reuse.DESKTOP_NAMES, set(inventory.COMBINATION_PLATFORMS))
+        self.assertEqual(reuse.DESKTOP_NAMES, set(inventory.SPLIT_COMBINATION_PLATFORMS))
 
     def test_analyzer_requires_complete_source_controls_and_main_receipt(self):
         for step_name in reuse.ANALYZER_STEPS:
@@ -334,7 +487,7 @@ class MainCIReuseTests(unittest.TestCase):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         self.assertEqual(reuse.REUSED_NAMES,
                          set(inventory.NATIVE + inventory.MOBILE + inventory.UEFI))
-        self.assertEqual(len(reuse.RETAINED_NAMES), 13)
+        self.assertEqual(len(reuse.RETAINED_NAMES), 19)
         for key in ("native", "mobile", "uefi"):
             header = re.split(r"\n  [a-z][a-z_]*:\n", text.split(f"\n  {key}:\n", 1)[1], maxsplit=1)[0]
             self.assertIn("needs: reuse", header)
@@ -439,7 +592,7 @@ class MainCIReuseFinishTests(unittest.TestCase):
         code, report, outputs, _ = self.invoke("finish", handoff)
         self.assertEqual(code, 0)
         self.assertEqual(report["status"], "verified")
-        self.assertEqual(len(report["receipt"]["main_jobs"]), 13)
+        self.assertEqual(len(report["receipt"]["main_jobs"]), 19)
         self.assertEqual(outputs, {})
 
     def test_transient_empty_listing_is_recollected_after_direct_lookup(self):
@@ -611,14 +764,15 @@ class MainCIReuseFinishTests(unittest.TestCase):
             self.assert_refused(self.invoke("finish", handoff), "final-source-recheck")
 
     def test_decision_without_proof_falls_back_and_retains_diagnostics(self):
-        with self.list_sequence([[]]):
+        with self.list_sequence([[], [], []]):
             code, report, outputs, _ = self.invoke("decide")
         self.assertEqual(code, 0)
         self.assertEqual(outputs, {"reuse": "false"})
         self.assertEqual(report["status"], "unavailable")
         self.assertNotIn("receipt", report)
         self.assertEqual(report["error"]["code"], "missing-source")
-        self.sleeps.assert_not_called()
+        self.assertEqual(len(report["diagnostics"]["discovery"]), 3)
+        self.assertEqual(self.sleeps.call_args_list, [mock.call(1), mock.call(2)])
 
     def test_exception_token_is_redacted_from_diagnostic_and_log(self):
         handoff = self.decide()
@@ -633,7 +787,7 @@ class MainCIReuseFinishTests(unittest.TestCase):
         self.unexpanded_jobs()
         code, report, _, _ = self.invoke("finish", handoff)
         self.assertEqual(code, 0)
-        self.assertEqual(len(report["receipt"]["main_jobs"]), 13)
+        self.assertEqual(len(report["receipt"]["main_jobs"]), 19)
         skipped = report["diagnostics"]["skipped_jobs"]
         self.assertEqual([row["job_id"] for row in skipped], [4000, 4001, 4002])
         self.assertTrue(all(row["conclusion"] == "skipped" for row in skipped))
@@ -667,6 +821,145 @@ class MainCIReuseFinishTests(unittest.TestCase):
             self.api.main_jobs[-2][field] = value
             with self.subTest(field=field):
                 self.assert_refused(self.invoke("finish", handoff), "main-jobs")
+
+
+    def assert_fallback(self, result):
+        code, report, outputs, text = result
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(outputs, {"reuse": "false"})
+        self.assertNotIn("receipt", report)
+        self.assertNotIn("Main CI reuse verified", text)
+
+    def test_decision_recollection_preserves_the_full_proof(self):
+        # Replay the previous one-read policy and the new policy on the same
+        # absent-then-complete observation. This is not a hosted timing claim.
+        with mock.patch.object(reuse, "DISCOVERY_DELAYS", ()), self.list_sequence([[]]):
+            self.assert_fallback(self.invoke("decide"))
+        self.sleeps.assert_not_called()
+        with self.list_sequence([[], [self.api.source]]):
+            code, report, outputs, _ = self.invoke("decide")
+        self.assertEqual(code, 0)
+        self.assertEqual(outputs["reuse"], "true")
+        self.assertEqual(report["status"], "verified")
+        self.assertEqual(len(report["receipt"]["source_jobs"]), 25)
+        self.assertEqual(len(report["receipt"]["source_artifacts"]), 25)
+        self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
+        self.sleeps.assert_called_once_with(1)
+
+    def test_decision_recovers_only_inconclusive_discovery_reads(self):
+        errors = (AdmissionError("API response is truncated or changed during pagination"),
+                  reuse.APIReadError(reuse.DISCOVERY_PATH, 429, 4),
+                  reuse.APIReadError(reuse.DISCOVERY_PATH, 503, 4),
+                  reuse.APIReadError(reuse.DISCOVERY_PATH, None, 4))
+        for error in errors:
+            self.sleeps.reset_mock()
+            with self.subTest(error=str(error)), self.list_sequence([error, [self.api.source]]):
+                code, report, outputs, _ = self.invoke("decide")
+            self.assertEqual(code, 0)
+            self.assertEqual(outputs["reuse"], "true")
+            self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
+            self.sleeps.assert_called_once_with(1)
+
+    def test_decision_definite_rejections_do_not_retry(self):
+        cases = ([self.api.source, self.api.source], [None], {},
+                 [dict(self.api.source, head_sha="d" * 40)],
+                 [dict(self.api.source, conclusion="failure")],
+                 [dict(self.api.source, conclusion="cancelled")],
+                 [dict(self.api.source, status="in_progress")],
+                 [dict(self.api.source, run_attempt=2)],
+                 AdmissionError("API pagination limit reached; refusing partial evidence"),
+                 reuse.APIReadError(reuse.DISCOVERY_PATH, 403, 1),
+                 reuse.APIReadError(reuse.DISCOVERY_PATH, 404, 1))
+        for rows in cases:
+            with self.subTest(rows=rows), self.list_sequence([rows]):
+                self.assert_fallback(self.invoke("decide"))
+        self.sleeps.assert_not_called()
+
+    def test_decision_recollection_cannot_admit_late_stale_or_changed_source(self):
+        for field, value in (("updated_at", NOW.isoformat()),
+                             ("updated_at", (NOW - timedelta(hours=3)).isoformat()),
+                             ("head_sha", "d" * 40), ("workflow_id", 99),
+                             ("conclusion", "cancelled"), ("run_attempt", 2)):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            self.api.source[field] = value
+            with self.subTest(field=field, value=value), self.list_sequence([[], [self.api.source]]):
+                self.assert_fallback(self.invoke("decide"))
+            self.sleeps.assert_called_once_with(1)
+
+    def test_decision_run_movement_during_backoff_refuses_positive_outputs(self):
+        for field, value in (("head_sha", "d" * 40), ("run_attempt", 2),
+                             ("event", "workflow_dispatch")):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            self.sleeps.side_effect = lambda delay: self.api.current.update({field: value})
+            with self.subTest(field=field), self.list_sequence([[], [self.api.source]]):
+                self.assert_fallback(self.invoke("decide"))
+            self.sleeps.assert_called_once_with(1)
+        self.sleeps.side_effect = None
+
+    def test_decision_recovered_listing_does_not_retry_missing_coverage(self):
+        for missing in ("job", "step", "artifact", "workflow"):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            if missing == "job":
+                self.api.jobs.pop()
+            elif missing == "step":
+                native = next(row for row in self.api.jobs if row["name"] == "Linux x86-64 native")
+                native["steps"] = [row for row in native["steps"] if
+                                   row["name"] != "Native configuration differential matrix"]
+            elif missing == "artifact":
+                self.api.artifacts.pop()
+            else:
+                original = self.api.get
+                def get(path, **query):
+                    value = original(path, **query)
+                    if path == "contents/" + reuse.WORKFLOW_PATH:
+                        value["sha"] = "d" * 40
+                    return value
+                self.api.get = get
+            with self.subTest(missing=missing), self.list_sequence([[], [self.api.source]]):
+                self.assert_fallback(self.invoke("decide"))
+            self.sleeps.assert_called_once_with(1)
+
+    def test_decision_exhausted_wrapped_reads_fall_back_with_http_diagnostic(self):
+        errors = [reuse.APIReadError(reuse.DISCOVERY_PATH, 503, 4) for _ in range(3)]
+        with self.list_sequence(errors):
+            result = self.invoke("decide")
+        self.assert_fallback(result)
+        self.assertEqual(result[1]["error"]["http_status"], 503)
+        self.assertEqual(len(result[1]["diagnostics"]["discovery"]), 3)
+        self.assertEqual(self.sleeps.call_args_list, [mock.call(1), mock.call(2)])
+
+    def test_production_reader_wrapping_is_recollected_in_both_phases(self):
+        # Exercise GitHub.pages -> get -> github_read_json -> APIReadError,
+        # rather than substituting a raw HTTP error that production wraps.
+        for phase in ("decide", "finish"):
+            self.api = FakeAPI()
+            self.sleeps.reset_mock()
+            handoff = self.decide() if phase == "finish" else None
+            real = GitHub(reuse.REPOSITORY, "fixture-secret")
+            original = self.api.pages
+            def pages(path, field, **query):
+                if path == reuse.DISCOVERY_PATH:
+                    return real.pages(path, field, **query)
+                return original(path, field, **query)
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps(
+                {"total_count": 1, "workflow_runs": [self.api.source]}).encode()
+            errors = [urllib.error.HTTPError("https://api.github.com/fixture", 503,
+                                             "Unavailable", {}, None) for _ in range(4)]
+            with self.subTest(phase=phase), mock.patch.object(self.api, "pages", side_effect=pages), \
+                    mock.patch("urllib.request.urlopen", side_effect=errors + [response]) as transport:
+                code, report, outputs, text = self.invoke(phase, handoff)
+            self.assertEqual(code, 0, text)
+            self.assertEqual(report["status"], "verified")
+            self.assertEqual(transport.call_count, 5)
+            self.assertEqual(report["diagnostics"]["discovery"][0]["error"]["http_status"], 503)
+            self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
+            self.assertEqual(self.sleeps.call_args_list,
+                             [mock.call(1), mock.call(2), mock.call(4), mock.call(1)])
 
 
 if __name__ == "__main__":

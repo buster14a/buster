@@ -31,6 +31,15 @@ struct StringEqualCensus
 };
 BUSTER_F_DECL StringEqualCensus string_equal_census(void);
 #endif
+// The formatting family uses {type} placeholders. {{ emits one literal {;
+// }} emits one literal }, and a single } also remains literal. Placeholder
+// types are S8, S16, []S8, SOsL, CharOs, char8, u8/u16/u32/u64/u128,
+// s8/s16/s32/s64/s128, and EOs. Integer modifiers follow a colon: d/x/X/o/b,
+// no_prefix, digit_group, and width=[0,N] or width=[ ,N], comma-separated;
+// N is a positive decimal width or x for natural integer-width extension.
+// Invalid formats fail the process; malformed or unknown placeholders use
+// fixed diagnostics without re-entering the formatter. string_format_z adds
+// a trailing zero outside the returned length.
 BUSTER_F_DECL void string_print(String8 format, ...);
 BUSTER_F_DECL String8 string_format(Arena* arena, String8 format, ...);
 BUSTER_F_DECL bool string_ends_with_sequence(String8 string, String8 ending);

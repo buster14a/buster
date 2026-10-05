@@ -1,0 +1,13 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index bc565e18f..19a3e6db4 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -28904,7 +28904,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
+     if (validate_lowering_constraints && !result.diagnostic_count)
+     {
+         c_parse_index_scope_children(&result, arena);
+-        c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);
++        /* RESEARCH PROBE: separate validation pass removed; never production. */
+     }
+     result.analysis_complete = true;
+     // The literal memo stays published: lowering reads the recorded bytes

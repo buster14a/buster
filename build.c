@@ -22,6 +22,7 @@
 //   tools/matrix_phase.c                       optional desktop phase observation
 //   matrix_superbuild_*                          the test_all_combinations
 //                                                superbuild scheduler
+//   tools/binary_coverage.c                      exact ELF inventory; execution unmeasured
 //   matrix_coverage_*                            authoritative desktop
 //                                                expected/detected/executed
 //                                                coverage and lane policy
@@ -36,6 +37,8 @@
 //   uefi_boot_*                                 pinned firmware boot gate
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
+//   compatibility_spawn_self_test              harness environment/script contracts
+//   test_cpython_reference_action              opt-in Clang-only harness replay
 //   process_arguments, main                      command dispatch
 
 #define BUSTER_UNITY_BUILD 1
@@ -112,6 +115,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST,
     BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST,
     BUILD_COMMAND_LUA_STAGING_SELF_TEST,
+    BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST,
     BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST,
     BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_METADATA,
@@ -142,6 +146,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
+    BUILD_COMMAND_BINARY_COVERAGE_INVENTORY,
     BUILD_COMMAND_MATRIX_PHASE_RUN,
     BUILD_COMMAND_TEST_UNITS_PARTITIONED,
     BUILD_COMMAND_COUNT,
@@ -819,6 +824,7 @@ struct TestCpythonOptions
 {
     String8 source_directory;
     String8 config;
+    bool reference_only;
 };
 
 #define CPYTHON_COMPATIBILITY_TAG "v3.13.9"
@@ -2171,6 +2177,7 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_cache_fingerprint(String8 cache, 
         S8("BUSTER_INSTRUMENT"),
         S8("BUSTER_LINK_LIBC"),
         S8("BUSTER_LTO"),
+        S8("BUSTER_NATIVE_TARGET"),
         S8("BUSTER_SANITIZE"),
         S8("BUSTER_SINGLE_THREADED"),
         S8("BUSTER_TIME_TRACE"),
@@ -11144,6 +11151,16 @@ BUSTER_GLOBAL_LOCAL bool zlib_write_corpus(Arena* arena, String8 path)
     return file_write(path, (ByteSlice){.pointer = bytes, .length = corpus_size});
 }
 
+BUSTER_GLOBAL_LOCAL ZlibCommandResult zlib_configure_command(Arena* arena, String8 working_directory, SliceString8 environment_keys,
+                                                          SliceString8 environment_values)
+{
+    // The process layer resolves executable paths before spawning. Passing the
+    // script as a shell argument preserves its in-tree $0 on shebang hosts.
+    String8 arguments[] = {S8("/bin/sh"), S8("./configure"), S8("--static")};
+    return zlib_command_env(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), working_directory, false,
+                            environment_keys, environment_values);
+}
+
 BUSTER_GLOBAL_LOCAL bool zlib_configure_make(Arena* arena, String8 source_directory, String8 output_directory, String8 git, String8 ide)
 {
     String8 archive = path_join(arena, output_directory, S8("upstream.tar"));
@@ -11187,8 +11204,7 @@ BUSTER_GLOBAL_LOCAL bool zlib_configure_make(Arena* arena, String8 source_direct
     // directory; the ordinary upstream `./configure && make` gate should
     // exercise the driver's native build path, not manufacture an
     // out-of-tree-only forced-include requirement.
-    String8 configure_arguments[] = {S8("./configure"), S8("--static")};
-    if (zlib_command_env(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(configure_arguments), configure_directory, false, environment, values).result != PROCESS_RESULT_SUCCESS)
+    if (zlib_configure_command(arena, configure_directory, environment, values).result != PROCESS_RESULT_SUCCESS)
     {
         return false;
     }
@@ -21345,30 +21361,199 @@ struct CpythonCommandResult
 BUSTER_GLOBAL_LOCAL CpythonCommandResult cpython_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture,
                                                           SliceString8 environment_keys, SliceString8 environment_values, u64 timeout_us)
 {
+    CpythonCommandResult result = {.result = PROCESS_RESULT_FAILED};
+    SliceString8 effective_keys = environment_keys;
+    SliceString8 effective_values = environment_values;
+    ProcessSpawnFailure validation_failure;
+    bool admitted = os_process_spawn_inputs_valid(arguments, environment_keys, environment_values,
+                                                 (ProcessSpawnOptions){.use_process_environment = environment_keys.length == 0}, &validation_failure);
+    if (admitted && environment_keys.length)
+    {
+        // Keep the captured environment, replacing every inherited occurrence
+        // of an override. Explicit keys and full inheritance are separate OS
+        // policies; the harness supplies the merged snapshot as a complete one.
+        SliceString8 inherited_keys = program_state->input.environment_keys;
+        SliceString8 inherited_values = program_state->input.environment_values;
+        admitted = inherited_keys.length == inherited_values.length &&
+                   (!inherited_keys.length || (inherited_keys.pointer && inherited_values.pointer)) &&
+                   environment_keys.length <= UINT64_MAX / sizeof(String8) &&
+                   inherited_keys.length <= UINT64_MAX / sizeof(String8) - environment_keys.length;
+        if (admitted)
+        {
+            u64 capacity = inherited_keys.length + environment_keys.length;
+            String8* keys = arena_allocate(arena, String8, capacity);
+            String8* values = arena_allocate(arena, String8, capacity);
+            u64 count = 0;
+            for (u64 index = 0; index < inherited_keys.length; index += 1)
+            {
+                bool overridden = false;
+                for (u64 override_index = 0; !overridden && override_index < environment_keys.length; override_index += 1)
+                {
+#if BUSTER_WINDOWS
+                    overridden = os_windows_environment_name_equal(inherited_keys.pointer[index], environment_keys.pointer[override_index]);
+#else
+                    overridden = string_equal(inherited_keys.pointer[index], environment_keys.pointer[override_index]);
+#endif
+                }
+                if (!overridden)
+                {
+                    keys[count] = inherited_keys.pointer[index];
+                    values[count++] = inherited_values.pointer[index];
+                }
+            }
+            for (u64 index = 0; index < environment_keys.length; index += 1)
+            {
+                keys[count] = environment_keys.pointer[index];
+                values[count++] = environment_values.pointer[index];
+            }
+            effective_keys = (SliceString8){.pointer = keys, .length = count};
+            effective_values = (SliceString8){.pointer = values, .length = count};
+        }
+    }
     ProcessRun run = {
         .arguments = arguments,
-        .environment_keys = environment_keys,
-        .environment_values = environment_values,
+        .environment_keys = effective_keys,
+        .environment_values = effective_values,
         .working_directory = working_directory,
         .spawn_options =
             {
                 .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
-                .use_process_environment = 1,
+                .use_process_environment = environment_keys.length == 0,
             },
     };
     command_print(arguments);
-    run.spawn = process_run_spawn(arena, &run);
-    if (!run.spawn.handle)
+    if (admitted)
+    {
+        run.spawn = process_run_spawn(arena, &run);
+    }
+    if (run.spawn.handle)
+    {
+        ProcessWaitResult wait = timeout_us ? os_process_wait_deadline(arena, run.spawn, timeout_us) : os_process_wait_sync(arena, run.spawn);
+        result = (CpythonCommandResult){
+            .result = wait.result,
+            .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+            .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+        };
+    }
+    else
     {
         string_print(S8("error: test_cpython could not start the command above\n"));
-        return (CpythonCommandResult){.result = PROCESS_RESULT_FAILED};
     }
-    ProcessWaitResult wait = timeout_us ? os_process_wait_deadline(arena, run.spawn, timeout_us) : os_process_wait_sync(arena, run.spawn);
-    return (CpythonCommandResult){
-        .result = wait.result,
-        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
-        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult compatibility_spawn_self_test(Arena* arena)
+{
+    enum
+    {
+        COMPATIBILITY_SPAWN_SELF_TEST_TIMEOUT_US = 5000000,
     };
+    bool passed = false;
+#if BUSTER_LINUX || BUSTER_MACOS
+    String8 directory = {0};
+    bool owned = summary_self_test_claim_directory(arena, S8("compatibility-spawn"), &directory);
+    if (owned)
+    {
+        String8 inherited_path = os_get_environment_variable(S8("PATH"));
+        String8 inheritance_arguments[] = {
+            S8("/bin/sh"), S8("-c"),
+            S8("test \"$PATH\" = \"$1\" && printf 'inheritance-ok\\n'"),
+            S8("environment-probe"), inherited_path,
+        };
+        CpythonCommandResult inherited = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inheritance_arguments), directory, true,
+                                                        (SliceString8){0}, (SliceString8){0}, COMPATIBILITY_SPAWN_SELF_TEST_TIMEOUT_US);
+        bool inheritance_ok = inherited.result == PROCESS_RESULT_SUCCESS && !inherited.error.length &&
+                              string_equal(inherited.output, S8("inheritance-ok\n"));
+
+        // Replace only the captured key/value snapshot, then restore it even
+        // after a failed child. The raw inherited environment is unchanged.
+        SliceString8 saved_keys = program_state->input.environment_keys;
+        SliceString8 saved_values = program_state->input.environment_values;
+        String8 snapshot_keys[] = {S8("PATH"), S8("PYTHONHASHSEED"), S8("TZ"), S8("BUSTER_HARNESS_SENTINEL"), S8("BUSTER_HARNESS_EMPTY")};
+        String8 snapshot_values[] = {S8("/buster-harness-path"), S8("91"), S8("America/New_York"), S8("retained"), S8("")};
+        program_state->input.environment_keys = (SliceString8)BUSTER_ARRAY_TO_SLICE(snapshot_keys);
+        program_state->input.environment_values = (SliceString8)BUSTER_ARRAY_TO_SLICE(snapshot_values);
+        String8 override_keys[] = {S8("PYTHONHASHSEED"), S8("TZ"), S8("BUSTER_HARNESS_NEW")};
+        String8 override_values[] = {S8("0"), S8("UTC"), S8("added")};
+        String8 override_arguments[] = {
+            S8("/bin/sh"), S8("-c"),
+            S8("test \"$PYTHONHASHSEED\" = 0 && test \"$TZ\" = UTC && "
+               "test \"$BUSTER_HARNESS_SENTINEL\" = retained && test \"$PATH\" = /buster-harness-path && "
+               "test \"$BUSTER_HARNESS_NEW\" = added && test \"${BUSTER_HARNESS_EMPTY+present}\" = present && "
+               "test -z \"$BUSTER_HARNESS_EMPTY\" && printf 'overrides-ok\\n'"),
+        };
+        SliceString8 keys = (SliceString8)BUSTER_ARRAY_TO_SLICE(override_keys);
+        SliceString8 values = (SliceString8)BUSTER_ARRAY_TO_SLICE(override_values);
+        CpythonCommandResult overridden = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(override_arguments), directory, true,
+                                                         keys, values, COMPATIBILITY_SPAWN_SELF_TEST_TIMEOUT_US);
+        bool overrides_ok = overridden.result == PROCESS_RESULT_SUCCESS && !overridden.error.length &&
+                            string_equal(overridden.output, S8("overrides-ok\n"));
+        CpythonCommandResult mismatched = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(override_arguments), directory, true,
+                                                         keys, (SliceString8){.pointer = override_values, .length = values.length - 1}, COMPATIBILITY_SPAWN_SELF_TEST_TIMEOUT_US);
+        char8 embedded_nul[] = {'x', 0, 'y'};
+        String8 invalid_values[] = {string_from_pointer_length(embedded_nul, sizeof(embedded_nul)), S8("UTC"), S8("added")};
+        CpythonCommandResult invalid = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(override_arguments), directory, true,
+                                                      keys, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_values), COMPATIBILITY_SPAWN_SELF_TEST_TIMEOUT_US);
+        String8 invalid_keys[] = {{.length = 3}, S8("TZ"), S8("BUSTER_HARNESS_NEW")};
+        CpythonCommandResult null_key = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(override_arguments), directory, true,
+                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_keys), values, COMPATIBILITY_SPAWN_SELF_TEST_TIMEOUT_US);
+        ProcessSpawnResult contradictory = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(override_arguments), keys, values,
+                                                            (ProcessSpawnOptions){.use_process_environment = 1});
+        if (contradictory.handle)
+        {
+            ProcessWaitResult unexpected = os_process_wait_deadline(arena, contradictory, COMPATIBILITY_SPAWN_SELF_TEST_TIMEOUT_US);
+            BUSTER_UNUSED(unexpected);
+        }
+        program_state->input.environment_keys = saved_keys;
+        program_state->input.environment_values = saved_values;
+        bool invalid_environment_ok = mismatched.result == PROCESS_RESULT_FAILED && invalid.result == PROCESS_RESULT_FAILED &&
+                                      null_key.result == PROCESS_RESULT_FAILED &&
+                                      !contradictory.handle && contradictory.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT;
+
+        String8 script_path = path_join(arena, directory, S8("configure"));
+        String8 observed_path = path_join(arena, directory, S8("configure-observed.txt"));
+        String8 script = S8("#!/bin/sh\n"
+                            "test \"$#\" -eq 1 && test \"$1\" = --static || exit 10\n"
+                            "printf '%s\\n%s\\n' \"$0\" \"$1\" > configure-observed.txt\n");
+        bool script_written = file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
+        bool legacy_script_ok = true;
+        String8 legacy_script_status = S8("not-applicable");
+#if BUSTER_LINUX
+        // Confirm the historical shebang failure separately: normal zero exit,
+        // exact argument retained, but an absolute $0 instead of ./configure.
+        legacy_script_ok = script_written && chmod(script_path.pointer, 0700) == 0;
+        if (legacy_script_ok)
+        {
+            String8 legacy_arguments[] = {S8("./configure"), S8("--static")};
+            ZlibCommandResult legacy = zlib_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(legacy_arguments), directory, true);
+            ByteSlice bytes = file_read(arena, observed_path, (FileReadOptions){.map_required = 0});
+            String8 observed = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+            legacy_script_ok = legacy.result == PROCESS_RESULT_SUCCESS && !legacy.error.length && observed.pointer &&
+                               observed.length && observed.pointer[0] == '/' && string_ends_with_sequence(observed, S8("\n--static\n"));
+        }
+        legacy_script_status = legacy_script_ok ? S8("pass") : S8("fail");
+#endif
+        bool script_ok = false;
+        if (script_written)
+        {
+            ZlibCommandResult configured = zlib_configure_command(arena, directory, (SliceString8){0}, (SliceString8){0});
+            ByteSlice bytes = file_read(arena, observed_path, (FileReadOptions){.map_required = 0});
+            String8 observed = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+            script_ok = configured.result == PROCESS_RESULT_SUCCESS && string_equal(observed, S8("./configure\n--static\n"));
+        }
+        passed = inheritance_ok && overrides_ok && invalid_environment_ok && script_ok && legacy_script_ok;
+        string_print(S8("COMPATIBILITY_SPAWN_SELF_TEST inheritance={S8} overrides={S8} invalid_environment={S8} script0={S8} legacy_script0={S8}\n"),
+                     inheritance_ok ? S8("pass") : S8("fail"), overrides_ok ? S8("pass") : S8("fail"),
+                     invalid_environment_ok ? S8("pass") : S8("fail"), script_ok ? S8("pass") : S8("fail"),
+                     legacy_script_status);
+        remove_path_recursive(arena, directory);
+    }
+#else
+    BUSTER_UNUSED(arena);
+    string_print(S8("COMPATIBILITY_SPAWN_SELF_TEST status=unsupported-platform\n"));
+#endif
+    string_print(S8("COMPATIBILITY_SPAWN_SELF_TEST status={S8}\n"), passed ? S8("pass") : S8("fail"));
+    return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
 BUSTER_GLOBAL_LOCAL bool cpython_git_verify(Arena* arena, String8 source_directory)
@@ -21951,13 +22136,57 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     return buster_only ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
 }
 
+BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_reference_action(Arena* arena, void* data)
+{
+    TestCpythonOptions options = *(TestCpythonOptions*)data;
+    bool passed = false;
+#if BUSTER_LINUX || BUSTER_MACOS
+    if (options.source_directory.length)
+    {
+        String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+        String8 clang = executable_resolve_in_path(arena, S8("clang"));
+        String8 output_directory = {0};
+        bool ready = clang.length && cpython_git_verify(arena, source_directory) &&
+                     summary_self_test_claim_directory(arena, S8("cpython-reference"), &output_directory);
+        if (ready)
+        {
+            output_directory = os_path_absolute(arena, output_directory, true);
+            String8 workload_path = path_join(arena, output_directory, S8("workload.py"));
+            String8 clang_tree = path_join(arena, output_directory, S8("clang"));
+            string_print(S8("CPYTHON_REFERENCE_ONLY tag={S8} source={S8} clang={S8} output={S8}\n"),
+                         S8(CPYTHON_COMPATIBILITY_TAG), source_directory, clang, output_directory);
+            ready = cpython_set_stack_limit(CPYTHON_STACK_LIMIT_BYTES) &&
+                    file_write(workload_path, BUSTER_SLICE_TO_BYTE_SLICE(cpython_workload_source())) &&
+                    cpython_configure_and_build(arena, source_directory, clang_tree, clang, clang, S8("clang"), (String8){0}, false, 0);
+            if (ready)
+            {
+                String8 output = {0};
+                passed = cpython_run_workload(arena, clang_tree, workload_path, &output) && output.length &&
+                         file_write(path_join(arena, output_directory, S8("reference-workload.stdout")), BUSTER_SLICE_TO_BYTE_SLICE(output));
+                string_print(S8("CPYTHON_REFERENCE_ONLY workload_bytes={u64}\n"), output.length);
+            }
+        }
+    }
+    else
+    {
+        string_print(S8("usage: ./build.sh test_cpython --reference-only /path/to/cpython-{S8}\n"), S8(CPYTHON_COMPATIBILITY_TAG));
+    }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(options);
+    string_print(S8("CPYTHON_REFERENCE_ONLY status=unsupported-platform\n"));
+#endif
+    string_print(S8("CPYTHON_REFERENCE_ONLY status={S8} buster_validation=unrun suite=unrun\n"), passed ? S8("pass") : S8("fail"));
+    return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
 BUSTER_GLOBAL_LOCAL void test_cpython_action_add(Arena* arena, TestCpythonOptions options)
 {
     BuildStep* step = step_add(arena);
     ProcessRun* run = run_add(arena, step);
     TestCpythonOptions* options_copy = arena_allocate(arena, TestCpythonOptions, 1);
     *options_copy = options;
-    *run = (ProcessRun){.callback = test_cpython_action, .callback_data = options_copy};
+    *run = (ProcessRun){.callback = options.reference_only ? test_cpython_reference_action : test_cpython_action, .callback_data = options_copy};
 }
 
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
@@ -22930,6 +23159,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
+        case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         {
             result = true;
@@ -22958,6 +23188,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
         {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_BINARY_COVERAGE_INVENTORY, .owns_arguments = true},
         {.command = BUILD_COMMAND_BUILD, .owns_arguments = false},
         {.command = BUILD_COMMAND_GENERATE, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_ALL_COMBINATIONS, .owns_arguments = false},
@@ -24879,6 +25110,8 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena);
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Arena* arena, SliceString8 arguments);
 
+#include "tools/binary_coverage.c"
+
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     String8 shard = matrix_coverage_shard_current();
@@ -24955,7 +25188,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         {
             return PROCESS_RESULT_FAILED;
         }
-        ProcessResult focused_test_result = musl_directory_self_test(arena);
+        ProcessResult focused_test_result = binary_coverage_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        if (focused_test_result == PROCESS_RESULT_SUCCESS)
+        {
+            // Inventory the running delivery driver, not a source-coverage substitute.
+            // The report remains incomplete: no instruction/edge/MC/DC collector.
+            String8 inventory_arguments[] = {S8("/proc/self/exe")};
+            focused_test_result = binary_coverage_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inventory_arguments));
+        }
+#endif
+        if (focused_test_result == PROCESS_RESULT_SUCCESS)
+        {
+            focused_test_result = musl_directory_self_test(arena);
+        }
 #if BUSTER_LINUX || BUSTER_APPLE
         if (focused_test_result == PROCESS_RESULT_SUCCESS)
         {
@@ -40586,6 +40832,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST] = S8_INITIALIZER("test_timing_summary_self_test"),
         [BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST] = S8_INITIALIZER("musl_directory_self_test"),
         [BUILD_COMMAND_LUA_STAGING_SELF_TEST] = S8_INITIALIZER("lua_staging_self_test"),
+        [BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST] = S8_INITIALIZER("compatibility_spawn_self_test"),
         [BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST] = S8_INITIALIZER("compiler_discovery_self_test"),
         [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_METADATA] = S8_INITIALIZER("import_arm_a64_metadata"),
@@ -40616,6 +40863,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
+        [BUILD_COMMAND_BINARY_COVERAGE_INVENTORY] = S8_INITIALIZER("binary_coverage_inventory"),
         [BUILD_COMMAND_MATRIX_PHASE_RUN] = S8_INITIALIZER("matrix_phase_run"),
         [BUILD_COMMAND_TEST_UNITS_PARTITIONED] = S8_INITIALIZER("test_units_partitioned"),
     };
@@ -40714,6 +40962,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY: result = binary_coverage_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_GPU_TOOLCHAINS: result = gpu_tools_main(arena, owned_arguments); break;
             default: BUSTER_UNREACHABLE(); break;
         }
@@ -40904,6 +41153,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             else if (command == BUILD_COMMAND_TEST_MUSL && !test_musl_options.source_directory.length && !string_starts_with_sequence(argument, S8("--")))
             {
                 test_musl_options.source_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_CPYTHON && string_equal(argument, S8("--reference-only")))
+            {
+                test_cpython_options.reference_only = true;
                 argument_i += 1;
             }
             // The second positional path is the optional libc-test checkout.
@@ -41788,6 +42042,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             result = lua_staging_self_test(arena);
         }
         break;
+        case BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST:
+        {
+            result = compatibility_spawn_self_test(arena);
+        }
+        break;
         case BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA:
         {
             if (!assembly_import_options.xed_datafiles_set || !assembly_import_options.aarch64_json_set)
@@ -41917,6 +42176,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
+        case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
