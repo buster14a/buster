@@ -26,10 +26,12 @@
 //   assembly_unit_instruction              the assembly_encode call
 //   assembly_unit_statement                target comments/separators and positions
 //   assembly_unit_aarch64_control_fixup     checked final-label control fixups
+//   assembly_unit_resolve_aliases          `.set` aliases once labels are known
 //   assembly_unit_parse, assembly_unit_encode
 //
 // Anything the vocabulary does not cover is refused with a diagnostic naming
-// the directive and its line; nothing is silently dropped.
+// the directive and its line. Only directives that carry no bytes the linked
+// program uses (`.cfi_*`, `.file`, `.ident`, `.addrsig*`) are dropped.
 
 #include <buster/lib/compiler/assembly/assembly_unit_internal.h>
 #include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
@@ -69,6 +71,18 @@ struct AssemblyUnitSourceCursor
     u32 line;
 };
 
+// `.set name, symbol±n` waits until every label is known: GCC writes it
+// ahead of the label it names.
+typedef struct AssemblyUnitAlias AssemblyUnitAlias;
+struct AssemblyUnitAlias
+{
+    String8 expression;
+    u32 symbol;
+    u32 line;
+    u32 column;
+    u32 section;
+};
+
 typedef struct AssemblyUnitBuilder AssemblyUnitBuilder;
 typedef struct AssemblyUnitInteger AssemblyUnitInteger;
 struct AssemblyUnitInteger
@@ -96,8 +110,13 @@ struct AssemblyUnitBuilder
     u32* relocation_lines;
     u32* relocation_columns;
     AssemblyUnitInteger* integers;
+    AssemblyUnitAlias* aliases;
+    // `.local` marks, indexed by symbol, consumed by `.comm`.
+    bool* symbol_local;
     u32 integer_count;
     u32 integer_capacity;
+    u32 alias_count;
+    u32 alias_capacity;
     u32 piece_count;
     u32 piece_capacity;
     u32 numeric_label_count;
@@ -941,6 +960,145 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_ascii(AssemblyUnitBuilder* buil
     return assembly_unit_append(builder, bytes, length);
 }
 
+// `.comm name, size[, alignment]` after `.local name`, and `.lcomm`, reserve
+// a private zero-filled object in `.bss`. A global `.comm` is an ELF common
+// symbol, which this unit does not produce; it is refused by name.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_common(AssemblyUnitBuilder* builder, String8 directive, String8 operands)
+{
+    String8 parts[3] = {0};
+    u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
+    s64 size = 0;
+    s64 alignment = 1;
+    bool valid = part_count != UINT32_MAX && part_count >= 2 && parts[0].length &&
+                 assembly_unit_evaluate_absolute(builder, parts[1], &size) && size >= 0 &&
+                 (part_count < 3 || (assembly_unit_evaluate_absolute(builder, parts[2], &alignment) && alignment > 0 &&
+                                     alignment <= (1 << 20) && !(alignment & (alignment - 1))));
+    u32 symbol = valid ? assembly_unit_symbol_intern(builder, assembly_unit_unquote(assembly_unit_word(parts[0], 0))) : UINT32_MAX;
+    valid = symbol != UINT32_MAX;
+    if (valid && string_equal(directive, S8(".comm")) && (!builder->symbol_local[symbol] || builder->result.symbols[symbol].global))
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                 S8("a global '.comm' common symbol is unsupported; declare it '.local' or compile with -fno-common"));
+        valid = false;
+    }
+    if (valid && builder->result.symbols[symbol].defined)
+    {
+        assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_DUPLICATE_SYMBOL, S8("'{S8}' is defined more than once"),
+                                        builder->result.symbols[symbol].name);
+        valid = false;
+    }
+    u32 previous_section = builder->current_section;
+    u32 section = valid ? assembly_unit_section_select(builder, S8(".bss"), ASSEMBLY_UNIT_SECTION_ZERO) : UINT32_MAX;
+    valid = valid && section != UINT32_MAX;
+    if (valid)
+    {
+        AssemblyUnitSection* record = builder->result.sections + section;
+        if ((u64)alignment > record->alignment) record->alignment = (u32)alignment;
+        u64 offset = builder->section_offsets[section];
+        u64 padding = ((u64)alignment - (offset & ((u64)alignment - 1))) & ((u64)alignment - 1);
+        builder->current_section = section;
+        valid = assembly_unit_append(builder, 0, padding);
+        AssemblyUnitSymbol* defined = builder->result.symbols + symbol;
+        defined->defined = valid;
+        defined->section = section;
+        defined->value = builder->section_offsets[section];
+        defined->size = (u64)size;
+        valid = valid && assembly_unit_append(builder, 0, (u64)size);
+        builder->current_section = previous_section;
+    }
+    return valid;
+}
+
+// `.set`/`.equ name, expression`. A `.`-relative value is fixed here; one
+// naming a symbol is resolved once parsing has defined every label. A value
+// with no symbol would be an absolute symbol, which is refused by name.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_set(AssemblyUnitBuilder* builder, String8 operands)
+{
+    String8 parts[2] = {0};
+    u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
+    bool valid = part_count == 2 && parts[0].length && parts[1].length && assembly_unit_section_current(builder);
+    u32 symbol = valid ? assembly_unit_symbol_intern(builder, assembly_unit_unquote(assembly_unit_word(parts[0], 0))) : UINT32_MAX;
+    AssemblyUnitValue value = {0};
+    valid = symbol != UINT32_MAX && !builder->result.symbols[symbol].defined &&
+            assembly_unit_evaluate(builder, parts[1], builder->section_offsets[builder->current_section], &value) &&
+            !value.has_subtract_symbol;
+    if (valid && !value.has_symbol)
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                 S8("'.set' of an absolute value is unsupported; only 'symbol' or 'symbol+constant' aliases are"));
+        valid = false;
+    }
+    if (valid && value.location)
+    {
+        AssemblyUnitSymbol* defined = builder->result.symbols + symbol;
+        defined->defined = true;
+        defined->section = builder->current_section;
+        defined->value = (u64)value.constant;
+    }
+    else if (valid)
+    {
+        valid = builder->alias_count < builder->alias_capacity;
+        if (valid)
+        {
+            builder->aliases[builder->alias_count++] = (AssemblyUnitAlias){
+                .expression = parts[1], .symbol = symbol, .line = builder->line, .column = builder->column,
+                .section = builder->current_section,
+            };
+        }
+    }
+    return valid;
+}
+
+// Each pass defines every alias whose target is already defined, so a chain
+// settles in at most alias_count passes; anything left names no definition.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_resolve_aliases(AssemblyUnitBuilder* builder)
+{
+    u32 resolved = 0;
+    bool progress = true;
+    bool valid = true;
+    while (progress && resolved < builder->alias_count && valid)
+    {
+        progress = false;
+        for (u32 index = 0; index < builder->alias_count && valid; index += 1)
+        {
+            AssemblyUnitAlias alias = builder->aliases[index];
+            AssemblyUnitSymbol* defined = builder->result.symbols + alias.symbol;
+            AssemblyUnitValue value = {0};
+            builder->current_section = alias.section;
+            builder->line = alias.line;
+            builder->column = alias.column;
+            if (defined->defined || !assembly_unit_evaluate(builder, alias.expression, 0, &value)) continue;
+            AssemblyUnitSymbol target = builder->result.symbols[value.symbol];
+            if (target.defined)
+            {
+                valid = alias.symbol != value.symbol && (value.constant >= 0 || (u64)-value.constant <= target.value);
+                defined->defined = valid;
+                defined->section = target.section;
+                defined->value = target.value + (u64)value.constant;
+                defined->function = defined->function || target.function;
+                resolved += 1;
+                progress = true;
+            }
+        }
+    }
+    for (u32 index = 0; index < builder->alias_count && valid; index += 1)
+    {
+        AssemblyUnitAlias alias = builder->aliases[index];
+        if (!builder->result.symbols[alias.symbol].defined)
+        {
+            builder->line = alias.line;
+            builder->column = alias.column;
+            valid = false;
+        }
+    }
+    if (!valid)
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                 S8("'.set' must name a symbol defined in this file"));
+    }
+    return valid;
+}
+
 // One directive line. `recognized` stays false for a spelling no arm claims,
 // which the caller reports by name; a recognized directive that returns false
 // is a recognized directive with an operand form this vocabulary does not
@@ -955,6 +1113,35 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
     if (string_starts_with_sequence(directive, S8(".cfi_")))
     {
         return true;
+    }
+    // Source-file names, producer identification and Clang's address-
+    // significance table carry no section bytes the linked program uses;
+    // they are accepted and dropped like call frame information.
+    if (string_equal(directive, S8(".file")) || string_equal(directive, S8(".ident")) || string_equal(directive, S8(".addrsig")) ||
+        string_equal(directive, S8(".addrsig_sym")))
+    {
+        return true;
+    }
+    if (string_equal(directive, S8(".local")))
+    {
+        String8 parts[ASSEMBLY_UNIT_OPERAND_CAPACITY] = {0};
+        u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
+        bool valid = part_count != UINT32_MAX && part_count && operands.length;
+        for (u32 index = 0; index < part_count && valid; index += 1)
+        {
+            u32 symbol = assembly_unit_symbol_intern(builder, assembly_unit_unquote(assembly_unit_word(parts[index], 0)));
+            valid = symbol != UINT32_MAX && parts[index].length && !builder->result.symbols[symbol].global;
+            if (valid) builder->symbol_local[symbol] = true;
+        }
+        return valid;
+    }
+    if (string_equal(directive, S8(".comm")) || string_equal(directive, S8(".lcomm")))
+    {
+        return assembly_unit_directive_common(builder, directive, operands);
+    }
+    if (string_equal(directive, S8(".set")) || string_equal(directive, S8(".equ")))
+    {
+        return assembly_unit_directive_set(builder, operands);
     }
     if (string_equal(directive, S8(".text")) || string_equal(directive, S8(".data")) || string_equal(directive, S8(".bss")) ||
         string_equal(directive, S8(".rodata")))
@@ -1838,10 +2025,13 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     builder.relocation_columns = arena_allocate(arena, u32, builder.relocation_capacity);
     builder.pieces = arena_allocate(arena, AssemblyUnitPiece, builder.piece_capacity);
     builder.numeric_labels = arena_allocate(arena, AssemblyUnitNumericLabel, builder.numeric_label_capacity);
+    builder.alias_capacity = statement_count;
+    builder.aliases = arena_allocate(arena, AssemblyUnitAlias, builder.alias_capacity);
+    builder.symbol_local = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
 
     assembly_unit_collect_numeric_labels(&builder, blanked);
     assembly_unit_parse(&builder, blanked);
-    if (!builder.result.diagnostic_count)
+    if (!builder.result.diagnostic_count && assembly_unit_resolve_aliases(&builder))
     {
         assembly_unit_materialize(&builder);
     }

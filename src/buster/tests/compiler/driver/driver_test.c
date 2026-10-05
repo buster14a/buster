@@ -19,6 +19,7 @@
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
 // compiler_driver_test_wasm_switch_images checks typed selector/key equality.
 // compiler_driver_test_quoted_assembly_round_trip covers printed string/call symbols.
+// compiler_driver_test_compiler_listing_round_trip covers movabs and GCC/Clang listings.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
 // the optional independent Clang cross-assembly observer.
 // compiler_driver_test_bare_dwarf_sections checks flag-less DWARF source names
@@ -4200,6 +4201,205 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_quoted_assembly_round_tr
     os_file_delete(listing);
     os_file_delete(object);
     os_file_delete(helper_object);
+    os_file_delete(executable);
+    scratch_end(temporary);
+    return result;
+}
+
+// Compiler-emitted assembly assembles, links and runs (#2663): Buster's own
+// -S output with 64-bit constants (movabs) and byte-immediate inline assembly
+// (#2662) under every allocator, and a
+// GCC-style and a Clang-style listing written here, each of which exits 0
+// only when every compiler spelling it uses encoded correctly.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_compiler_listing_round_trip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("compiler-listing-source"), S8(".c"));
+    String8 listing = buster_test_temporary_path(arena, S8("compiler-listing"), S8(".s"));
+    String8 object = buster_test_temporary_path(arena, S8("compiler-listing"), S8(".o"));
+    String8 executable = buster_test_temporary_path(arena, S8("compiler-listing-run"), S8(".out"));
+    String8 const listings[] = {
+        S8(
+            "\t.file\t\"listing.c\"\n"
+            "\t.text\n"
+            "\t.local\tcounter\n"
+            "\t.comm\tcounter,16,16\n"
+            "\t.globl\ttable\n"
+            "\t.data\n"
+            "\t.align 8\n"
+            "\t.type\ttable, @object\n"
+            "\t.size\ttable, 16\n"
+            "table:\n"
+            "\t.quad\t7\n"
+            "\t.quad\t40\n"
+            "\t.set\ttable_second,table+8\n"
+            "\t.text\n"
+            "\t.p2align 4\n"
+            "\t.type\thelper, @function\n"
+            "helper:\n"
+            "\tendbr64\n"
+            "\tleaq\t(%rdi,%rdi), %rax\n"
+            "\tretq\n"
+            "\t.size\thelper, .-helper\n"
+            "\t.globl\tmain\n"
+            "\t.type\tmain, @function\n"
+            "main:\n"
+            ".LFB0:\n"
+            "\t.cfi_startproc\n"
+            "\tendbr64\n"
+            "\tsubq\t$8, %rsp\n"
+            "\t.cfi_def_cfa_offset 16\n"
+            "\tmovabsq\t$81985529216486895, %rax\n"
+            "\tmovabs\t$0x123456789abcdef, %rdx\n"
+            "\tcmpq\t%rdx, %rax\n"
+            "\tjne\t.L2\n"
+            "\tmovq\t8+table(%rip), %rcx\n"
+            "\tmovq\ttable_second(%rip), %rdx\n"
+            "\tcmpq\t%rcx, %rdx\n"
+            "\tjne\t.L2\n"
+            "\tshrq\t%rcx\n"
+            "\tcmpq\t$20, %rcx\n"
+            "\tjne\t.L2\n"
+            "\tmovq\t$8, %rsi\n"
+            "\trep bsfq\t%rsi, %rsi\n"
+            "\tcmpq\t$3, %rsi\n"
+            "\tjne\t.L2\n"
+            "\tmovl\t$5, %eax\n"
+            "\txchgl\tcounter+8(%rip), %eax\n"
+            "\ttestl\t%eax, %eax\n"
+            "\tjne\t.L2\n"
+            "\tcmpl\t$5, counter+8(%rip)\n"
+            "\tjne\t.L2\n"
+            "\tmovq\t%rcx, %xmm0\n"
+            "\tmovq\t%xmm0, counter(%rip)\n"
+            "\tmovq\t%xmm0, %rdi\n"
+            "\tcallq\thelper\n"
+            "\tcmpq\t$40, %rax\n"
+            "\tjne\t.L2\n"
+            "\tmovq\t$-1, %rdx\n"
+            "\tmovq\t$3, %rax\n"
+            "\tmovl\t$1, %ecx\n"
+            "\tshldq\t%rdx, %rax\n"
+            "\tcmpq\t$7, %rax\n"
+            "\tjne\t.L2\n"
+            "\tmovb\t$0xff, %al\n"
+            "\tandb\t$0xf0, %al\n"
+            "\txorb\t$0x80, %al\n"
+            "\tcmpb\t$0x70, %al\n"
+            "\tjne\t.L2\n"
+            "\txorl\t%eax, %eax\n"
+            "\taddq\t$8, %rsp\n"
+            "\tretq\n"
+            ".L2:\n"
+            "\tmovl\t$1, %eax\n"
+            "\taddq\t$8, %rsp\n"
+            "\tretq\n"
+            "\t.cfi_endproc\n"
+            ".LFE0:\n"
+            "\t.size\tmain, .-main\n"
+            "\t.ident\t\"GCC: (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0\"\n"
+            "\t.section\t.note.GNU-stack,\"\",@progbits\n"
+        ),
+        S8(
+            "\t.text\n"
+            "\t.file\t\"listing.c\"\n"
+            "\t.globl\tmain                            # -- Begin function main\n"
+            "\t.p2align\t4, 0x90\n"
+            "\t.type\tmain,@function\n"
+            "main:                                   # @main\n"
+            "\t.cfi_startproc\n"
+            "# %bb.0:\n"
+            "\tpushq\t%rbp\n"
+            "\t.cfi_def_cfa_offset 16\n"
+            "\tmovq\t%rsp, %rbp\n"
+            "\tmovabsq\t$-81985529216486896, %rax       # imm = 0xFEDCBA9876543210\n"
+            "\tmovq\t%rax, value(%rip)\n"
+            "\tcallq\tcheck\n"
+            "\tpopq\t%rbp\n"
+            "\tretq\n"
+            ".Lfunc_end0:\n"
+            "\t.size\tmain, .Lfunc_end0-main\n"
+            "\t.cfi_endproc\n"
+            "                                        # -- End function\n"
+            "\t.p2align\t4, 0x90\n"
+            "\t.type\tcheck,@function\n"
+            "check:\n"
+            "\tmovq\tvalue(%rip), %rcx\n"
+            "\tshrq\t%rcx\n"
+            "\tmovabsq\t$9182379272246532360, %rdx\n"
+            "\txorl\t%eax, %eax\n"
+            "\tcmpq\t%rdx, %rcx\n"
+            "\tsetne\t%al\n"
+            "\tretq\n"
+            ".Lfunc_end1:\n"
+            "\t.size\tcheck, .Lfunc_end1-check\n"
+            "\t.type\tvalue,@object                   # @value\n"
+            "\t.local\tvalue\n"
+            "\t.comm\tvalue,8,8\n"
+            "\t.ident\t\"Ubuntu clang version 18.1.3 (1ubuntu1)\"\n"
+            "\t.section\t\".note.GNU-stack\",\"\",@progbits\n"
+            "\t.addrsig\n"
+            "\t.addrsig_sym check\n"
+            "\t.addrsig_sym value\n"
+        ),
+    };
+    bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(
+        S8("static unsigned long long mix(unsigned long long v) { return (v ^ 0x9e3779b97f4a7c15ULL) * 0xff51afd7ed558ccdULL; }\n"
+           "int main(void) { long long minimum = -0x7fffffffffffffffLL - 1; unsigned char v = 0x5a; unsigned char w = 0;\n"
+           "__asm__ volatile(\"andb $0xf0, %0\\n\\txorb $0x80, %0\" : \"+r\"(v)); __asm__ volatile(\"movb $0xff, %0\" : \"=r\"(w));\n"
+           "return mix(0x123456789abcdefULL) == 0x0b65f739aa123d32ULL && minimum < 0 && v == 0xd0 && w == 0xff ? 0 : 1; }\n")));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 cell = 0; cell < BUSTER_ARRAY_LENGTH(modes) + BUSTER_ARRAY_LENGTH(listings); cell += 1)
+        {
+            bool printed_ok = true;
+            if (cell < BUSTER_ARRAY_LENGTH(modes))
+            {
+                String8 allocator = string_format(arena, S8("-fregister-allocator={S8}"), modes[cell]);
+                String8 print_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-g0"), allocator, S8("-S"), source, S8("-o"), listing};
+                CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+                    compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print_command)));
+                printed_ok = printed.error == COMPILER_DRIVER_ERROR_NONE;
+                BUSTER_TEST_RAW(arguments, printed_ok, printed.diagnostic);
+                if (printed_ok)
+                {
+                    String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
+                    BUSTER_TEST(arguments, string_first_sequence(assembly, S8("movabs")) != BUSTER_STRING_NO_MATCH);
+                }
+            }
+            else
+            {
+                printed_ok = file_write(listing, BUSTER_SLICE_TO_BYTE_SLICE(listings[cell - BUSTER_ARRAY_LENGTH(modes)]));
+                BUSTER_TEST(arguments, printed_ok);
+            }
+            if (printed_ok)
+            {
+                String8 assemble_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-c"), listing, S8("-o"), object};
+                CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                    compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble_command)));
+                BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, assembled.diagnostic);
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+                if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+                {
+                    String8 link_command[] = {S8("-g0"), object, S8("-o"), executable};
+                    CompilerDriverResult linked = compiler_driver_execute_invocation(arena,
+                        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                    BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                    if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable));
+                    }
+                }
+#endif
+            }
+        }
+    }
+    os_file_delete(source);
+    os_file_delete(listing);
+    os_file_delete(object);
     os_file_delete(executable);
     scratch_end(temporary);
     return result;
@@ -19041,6 +19241,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bare_dwarf_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_compiler_listing_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_control_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);

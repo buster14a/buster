@@ -432,11 +432,36 @@ relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
-`.att_syntax prefix`; and the `.cfi_*` family, accepted and dropped because it
-describes unwinding rather than bytes. Anything else -- a directive the table
+`.att_syntax prefix`; `.local` with `.comm name, size[, alignment]`, and
+`.lcomm`, which reserve a private zero-filled object in `.bss`; `.set`/`.equ`
+of `symbol` or `symbol±constant` (or a `.`-relative value), resolved once every
+label is known, so GCC may write it ahead of the label it names; and, accepted
+and dropped because they carry no bytes the linked program uses, the `.cfi_*`
+family, `.file`, `.ident`, and Clang's `.addrsig`/`.addrsig_sym`. A global
+`.comm` (an ELF common symbol, as `-fcommon` produces) and a `.set` of an
+absolute value are refused by name. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
+
+The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
+listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
+register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and
+`endbr64` on every target, since they are hint NOPs without IBT (other CET rows
+still require `shstk`); a one-operand shift or rotate (count 1); two-operand
+`shld`/`shrd` (count `%cl`); `xchg` with its memory operand in either position;
+`rep bsf`/`rep bsr`, GCC's spelling of the TZCNT/LZCNT bytes, on every target;
+AT&T `movq` between a general register or memory and an XMM/MMX register; and
+a constant before the symbol in a displacement (`8+w(%rip)`). An unsigned
+immediate field as wide as its operand takes either interpretation, so
+`movb $0xff`, `andb $0xf0`, `xorb $-1` and `mov rax, -2147483649` assemble, and
+an all-ones 64-bit literal is the sign-extended -1. Deliberate differences from
+GNU as: values outside -2^(w-1)..2^w-1 and negative shift counts are diagnosed
+rather than wrapped, and a `movabs` value that fits a sign-extended imm32
+takes the shorter `mov` row. The `moffs` forms of `movabs`, `ret`/`retq` with
+an immediate, multi-byte `nop` with operands, and the short accumulator ALU
+forms (`and al, imm8` encodes as `80 /4 ib`, a byte longer than GNU's `24 ib`)
+are tracked separately.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`
 and their dot-delimited suffixes, exact `.init`/`.fini`, and the existing
