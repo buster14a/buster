@@ -163,7 +163,8 @@ BUSTER_GLOBAL_LOCAL bool record_layout_test_witness_holds(Arena* arena, Target t
 // Microsoft (it opens an int unit after the char), so a target on the wrong
 // rule cannot pass. Each size is Clang 18.1.3's for the same triple, or for
 // the one in the comment above it. Beyond the corpus's targets this covers
-// MinGW, UEFI, freestanding AArch64, Wasm and bpf.
+// UEFI, freestanding AArch64, Wasm and bpf. MinGW triples are rejected by
+// target_parse_triple (#1492), so no row pins a MinGW layout.
 BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_rule_selection(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -176,7 +177,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_rule_selection(UnitTestArg
     RecordLayoutRuleCase cases[] = {
         {S8("x86_64-pc-windows-msvc"), S8("8")},
         {S8("aarch64-pc-windows-msvc"), S8("8")},
-        {S8("x86_64-w64-mingw32"), S8("8")},
         {S8("aarch64-unknown-linux-gnu"), S8("4")},
         {S8("aarch64-linux-android"), S8("4")},
         {S8("aarch64-unknown-uefi"), S8("4")},

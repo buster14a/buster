@@ -1,0 +1,102 @@
+Host: AMD Ryzen 9 7940HS (Zen 4, 8c/16t), Linux 7.2.9-1-cachyos, btrfs home (zstd), tmpfs /tmp, THP active.
+Shared desktop: two other agent sessions were building and editing the same checkout concurrently; all
+compilers below were built from a pristine detached worktree at 94976eccad9c31776cf264a33dcda960dd8ed51a
+(~/buster-lab/src-pinned) with Clang 23.1.1, `generate --no-include-tests`, Release (-O3 -g, frame pointers).
+Every timing is a diagnostic observation on a shared, non-isolated desktop. Instruction counts are the robust
+quantity (perf stat instructions:u spread 0.00%).
+
+== Stage-1 self-host (W1): cc -Isrc -Ibuild-dvperf/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o <exe>
+ide-pinned-perf (tests off):   21,512,707,724 instructions; 9.98 G cycles (+-2.4%); task-clock 2,345 ms (+-3.1%, contended run);
+                               quiet run earlier in the session: 2,059 ms task-clock, 9.29 G cycles, IPC 2.31, 74.0 M branch misses
+ide (tests on, local default): 22,699,115,608 instructions; 2,249 ms (BUSTER_IR_TRANSFORM_CHECKS adds two module validations = 5.2% instructions)
+Input: 33,764,457 lexed bytes (400 lexes of 364 files; 53,952 bytes re-read), 3,384,362 lexed tokens, 3,762,000 preprocessed tokens,
+       26,543,874 spelling bytes (37,029,876 retained), 141,694 macro expansions, 3,925 #defines, 13.2 MB literal bytes (39% of code bytes)
+Output: 5,657 functions, 1,627,306 IR rows before FAST / 1,425,857 after, 1,400,665 -> 1,199,216 values, 1,971,400 machine rows,
+        1,824,010 encoded instructions, 16,096,400 code bytes, 41,270,216-byte link image
+Allocator (FAST): spills 222,559 reloads 203,606 copies 195,322 rematerializations 54,993 (676,480 edit rows = 37% of encoded instructions)
+
+Stop points (rusage of the child, taskset -c 5, quiet period):
+  -E            wall 209.6 ms  user 146.7  sys 49.4  peak RSS 589,884 KiB
+  -fsyntax-only wall 707.7 ms  user 649.5  sys 52.7  peak RSS 590,184 KiB
+  -c -g0        wall 1957.0 ms user 1854.0 sys 72.4  peak RSS 906,420 KiB   (object 32,930,432 B)
+  -c -g         wall 2098.1 ms user 1972.2 sys 84.2  peak RSS 1,024,312 KiB (object 46,970,400 B)
+  link -g       wall 2075-2124 ms user 1954-2003 sys 68-86  peak RSS 1,071,672-1,071,884 KiB
+Cold page cache (posix_fadvise DONTNEED on the 368 opened files + compiler + libs, 115 MB; evicted only part, inblock 47,808 x 512 B):
+  cold wall 2,227 / 2,237 ms vs warm 2,203 ms in the same minute (majflt 364). Cold-start I/O penalty <= ~1.5% on NVMe here.
+Include resolution: 3,645 failed openat (ENOENT) for 400 includes (strace), ~9 probes per include.
+
+== Phase shares, perf record -F 4999 --call-graph fp, inclusive (cycles, user), pinned-self 11,375 samples / pinned sqlite -g 5,119 samples
+                                             self-host   sqlite3.c -g
+  c_preprocess                                   4.94        7.92
+  c_parse_ast                                    2.18        2.20
+  c_analyze_semantics_core                      24.93       23.86
+    c_parse_validate_lowering_constraints       19.30       17.47
+    c_parse_bind_function_body                   2.62        2.75
+  c_lower_to_ir_reserved_run                    29.20       29.58
+    c_ir_lower_dispatch_run                     17.94       21.14
+    c_ir_ssa_finish                              6.62        4.14
+    c_ir_global_initializer                      2.07        0.52
+  ir_prepare_canonical_module                    8.27        9.03
+    ir_validate_canonical_module                 2.26        2.40
+    ir_function_publish_cfg                      2.42        2.78
+    ir_fast_function (+ ir_rewrite_compact)      ~2.6 (+1.06)  (+1.25)
+    ir_promote_function                          0.97        0.55
+  codegen_generate_canonical_module_with_trace  27.70       25.24
+    machine_predicate_placement_build           11.35        7.53
+    machine_select_canonical_function_x86_64     6.93        n/a
+    machine_encode_x86_64_into                   4.23        2.80
+    codegen_record_machine_locations (-g)        3.29        4.01
+    codegen_record_machine_line_marks (-g)       0.67        1.00
+    debug_model_build + dwarf_build_model (-g)   1.52        1.50
+  object_from_canonical_codegen_module           1.75        1.70
+  link_native_executable                         0.57        -
+  machine_x86_64_exact_prewarm                   ~0.17       0.75
+
+== Work ledger (ide-pinned-census, byte-identical output to ide-pinned-perf), self-host
+  rederive.type_query_roots 2,057,570 (cache hits 268,175; literal 1,112,362; uncached 677,033 re-walking 3,983,493 tokens = 1.06x the token stream)
+  rederive.type_machine_runs 859,898; initializer_walks 6,310 over 2,595,382 tokens (69% of the stream), 582,551 elements
+  snapshot.query_checkpoint_bytes 330,392,104 + frame_bytes 600,193,200 copied; rollbacks 100,533 of 677,033
+  population.layout_rows_seeded 3,103,931 (144 MB scratch) for 141 solves; lookup.symbol_interns 898,033 (9.5 MB hashed)
+  literal.string_decode_bytes 13,586,781; number_conversions 672,417
+  machine.rows 1,971,400 virtual_registers 940,283 blocks 187,803 placement_edits 824,976 liveness_word_updates 18,976,373
+  machine.encoded_bytes 16,054,163 debug_location_rows 199,841; output.link_image_bytes 41,270,216
+  arena requests: preprocess 1.23 GB, semantic 9.83 GB, lower 63.1 GB, codegen 3.47 GB (requested, mostly rewound scratch)
+  Touched pages (4 KiB minor faults, from the hosted no-THP ledger of the prior session at this revision, run 37194571306):
+    preprocess 94,127 (368 MB) semantic 42,404 (166 MB) lower 89,539 (350 MB) prepare 7,217 codegen 28,589 (112 MB)
+    object 20,563 (80 MB) output 13,341 (52 MB) prewarm 2,362 startup 450 -> 304,021 faults, ~1.19 GB first-touched for a 34 MB input
+
+== IR construction census (ir_construction.*), self-host
+  value_appends 2,135,630; instruction_appends 1,657,260; before SSA 1,615,762 rows / 1,746,321 values; after 1,627,136 / 1,400,064
+  ssa_remap_value_rows 4,170,386; ssa_remap_instruction_rows 1,610,066; ssa_finish_slot_probes 3,449,652; ssa_simplify_incoming_visits 2,157,793
+  initial_instruction_slots 6,373,108 and initial_value_slots 6,373,108 reserved for 1.63 M final rows (3.9x)
+  validation: 1,625,928 instructions, 1,399,390 values checked once in production (preparation_fast_input_validations=1); publication 11,318 function passes
+  commit checks at construction: 1,655,862 rows, 1,603,866 operands (validity already established row by row)
+
+== DV_SSA_CENSUS (probe build ide-pinned-census-ssaprobe; outputs byte-identical to the production compiler on sqlite3.c -g0)
+  self-host: functions=5364 created_construction=146825 created_finish=353727 memory_owned=6777 preds0=617
+             sealed_pred1_removed=107312 sealed_pred1_kept=0 sealed_multi_removed=14700 sealed_multi_kept=9826
+             unsealed_pred1_*=0 unsealed_multi_removed=3019 unsealed_multi_kept=5191 unsealed_late_predecessor_rows=8556
+  sqlite3.c: functions=2556 created_construction=44976 created_finish=35604 memory_owned=6754 preds0=706
+             sealed_pred1_removed=27558 sealed_multi_removed=7068 sealed_multi_kept=1566 unsealed_multi_removed=739 unsealed_multi_kept=1290
+  lvm.c:     created_construction=526 created_finish=165 sealed_pred1_removed=385 sealed_multi_removed=66 sealed_multi_kept=31
+
+== Other shapes (ide-pinned-perf unless stated; instructions from perf stat -r 3; wall/RSS from rusage)
+  ide help                               791,591 instr      0.8 ms
+  cc -fsyntax-only empty.c             1,351,088 instr      2.9 ms   25,760 KiB
+  cc -c empty.c                       65,960,937 instr     15.3 ms  52,492 KiB (user 2.6 sys 6.8; x86 table prewarm + arena reservation)
+  cc -c -g headers.c (20 glibc hdrs) 161,836,501 instr     28.3 ms  89,064 KiB (-E 56.5 M, -fsyntax-only 87.5 M)
+  sqlite3.c -E                       591,875,726 instr     79.0 ms 152,920 KiB
+  sqlite3.c -fsyntax-only          1,671,086,776 instr    176.2 ms 152,832 KiB
+  sqlite3.c -c -g0                 4,052,161,169 instr    438-450 ms 258,644 KiB  .text 2,039,847
+  sqlite3.c -c -g                  4,401,169,899 instr    489.5 ms 306,024 KiB
+  shell.c -c -g0                   1,236,195,654 instr    118 ms
+  tcc 0.9.28rc sqlite3.c -c          531,641,746 instr     57 ms    13,020 KiB  .text 1,377,406
+  clang 23 -O0 sqlite3.c -c                            665-671 ms 186,084 KiB  .text 1,113,473
+  Lua 5.4.8, 33 files, -c -g, one process each, serial, output on btrfs: 846 ms wall (user 394, sys 196); max RSS 130,796 KiB
+  same, output on tmpfs:                                      611 ms wall (user 407, sys 196)   -> fsync ~7-8 ms per object
+  same, one process with 33 inputs (-c):                      554-606 ms wall (user 266-278, sys 87-89), RSS 347 MB
+  same, 33 processes xargs -P 8:                              200 ms wall
+  same, -fcompile-jobs=8 compile+link:                        165 ms wall, RSS 689 MB
+  tcc, 33 files, serial, tmpfs:                               157 ms wall (user 95, sys 60), RSS 5.6 MB
+  lapi.c alone: buster btrfs 29-33 ms / tmpfs 22 ms (user 15-17, sys 5-9); clang -O0 -g 48-49 ms; tcc 5.6-6.1 ms
+  strace lapi.c: 736 openat (579 ENOENT), 181 mmap (72.5 GB reserved), fsync(3) then rename of the staging file

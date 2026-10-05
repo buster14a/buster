@@ -1,0 +1,34 @@
+pinned_head=4a294d0c31bc262a64665b092c708f10fe24e445
+pinned_tree=4af0bfb4a2f1fe51ef16ca6f09d17cba59001fcb
+probe_head=4a294d0c31bc262a64665b092c708f10fe24e445
+probe_diffstat= src/buster/lib/compiler/frontend/c/c_parse.c | 2 +-  1 file changed, 1 insertion(+), 1 deletion(-)
+clang=Ubuntu clang version 21.1.8 (6ubuntu1)
+valgrind=valgrind-3.26.0
+kernel=7.0.0-1012-azure
+nproc=4
+cpu=AMD EPYC 9V74 80-Core Processor
+mem_kb=16366704
+pairs=8
+sqlite_root=/home/runner/work/buster/buster/external/sqlite-amalgamation-3530400
+== building subjects ==
+b52c485054cc3d915a6cfc6be33a1798a0e60cf3016d8c0636c50cb09d6971c9  /home/runner/work/_temp/out/base/ide-ledger
+2ea85afa13cd44344197bce098d49f5919d6dafbefe2c3671e2d405441cb3259  /home/runner/work/_temp/out/base/ide-plain
+eac6958e8a3e855dd32adc5165d882db5cb76af82fad067d050388b33fcb5d49  /home/runner/work/_temp/out/probe/ide-ledger
+072b9d1b5586abbf46b6a93463c0f67a528ce25d40c4e2b515653b0da537d9fb  /home/runner/work/_temp/out/probe/ide-plain
+== self / base: ledger run ==
+== self / base: plain run ==
+== self / probe: ledger run ==
+== self / probe: plain run ==
+== self: syntax-only ledger (base) ==
+== self / base: callgrind ==
+== self / probe: callgrind ==
+== self: wall-time pairs ==
+== sqlite / base: ledger run ==
+== sqlite / base: plain run ==
+== sqlite / probe: ledger run ==
+== sqlite / probe: plain run ==
+== sqlite: syntax-only ledger (base) ==
+== sqlite / base: callgrind ==
+== sqlite / probe: callgrind ==
+== sqlite: wall-time pairs ==
+PROBE_DONE
