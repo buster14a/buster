@@ -46968,6 +46968,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 
                     .type = pointer_type,
                     .symbol = builder->entity_symbols[entity_id.value],
                     .kind = C_IR_CONSTANT_POINTER,
+                    .function_designator = true,
                 };
                 return result->symbol.value != IR_ID_UNDERLYING_INVALID;
             }
@@ -48089,6 +48090,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CCo
                 value->type = pointer_type;
                 value->kind = C_IR_CONSTANT_POINTER;
             }
+        }
+        else if (value->function_designator && value->kind == C_IR_CONSTANT_POINTER && value->symbol.value != IR_ID_UNDERLYING_INVALID &&
+                 !value->addend)
+        {
+            // A function designator has already decayed to its address, and
+            // `&f` names that same address.
+            success = true;
         }
     }
     else if (operation == C_CONDITIONAL_LOGICAL_NOT)
@@ -49252,6 +49260,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, 
             }
             if (success)
             {
+                selected.function_designator = false;
                 values[(*value_count)++] = selected;
             }
         }
@@ -49259,6 +49268,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, 
     else if (c_conditional_is_unary(operation.operation))
     {
         success = *value_count && c_ir_constant_apply_unary(builder, operation.operation, operation.cast_type, &values[*value_count - 1]);
+        if (success)
+        {
+            values[*value_count - 1].function_designator = false;
+        }
     }
     else if (*value_count >= 2)
     {
@@ -49268,6 +49281,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, 
         success = c_ir_constant_apply_binary(builder, operation.operation, &left, &right, &result);
         if (success)
         {
+            result.function_designator = false;
             values[(*value_count)++] = result;
         }
     }

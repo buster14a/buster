@@ -1312,6 +1312,10 @@ struct CIrConstantValue
     u64 integer_high;
     f64 floating;
     CIrConstantValueKind kind;
+    // Set only on the value a function identifier folds to, which is already
+    // its decayed pointer. Unary `&` accepts exactly that value, so `&f` is
+    // `f`; every operator result clears it, keeping `&(rvalue)` refused.
+    bool function_designator;
 };
 
 BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
