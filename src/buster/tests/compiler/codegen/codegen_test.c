@@ -2187,8 +2187,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_verify_invariants(UnitTestArgume
 }
 
 // The refused suffix is deliberately supplied after an ordinary call and a
-// valid inline row. Those references must not become live in replacement
-// canonical code, even though no C spelling is known to reach this boundary.
+// valid inline row. Those references must not become live on refusal,
+// even though no C spelling is known to reach this boundary.
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_relocation_publication(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};

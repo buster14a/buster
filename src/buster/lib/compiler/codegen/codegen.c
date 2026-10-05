@@ -3585,7 +3585,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocat
 
 // Publishes the encoded function's call and inline-assembly references as one
 // transaction. Refused inline rows cannot expose the already appended calls
-// or valid inline prefix to the canonical code that replaces this encoding.
+// or valid inline prefix; the caller refuses the complete MIR-only module.
 bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* result, u32 relocation_capacity,
                                          MachineFunction const* function, MachineEncodeResult const* encoded,
                                          u32 code_base, Target target)
