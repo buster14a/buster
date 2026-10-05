@@ -1485,5 +1485,370 @@ class CheckedInDependencyTests(unittest.TestCase):
 
 
 
+class CurrentNativeReaderTests(unittest.TestCase):
+    """Exercise raw observations and cross-profile boundaries without a producer."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "current-shard"
+        self.root.mkdir()
+        self.row = {
+            "row": "0", "group": "0", "fixture": "tests/unit.c",
+            "target": "x86_64-unknown-linux-gnu", "target_abi": "systemv-x86_64",
+            "cpu": "baseline", "cpu_features": "sse2", "allocator": "fast",
+            "frontend_lowering": "local-backed-canonical", "PIC": "0",
+            "selected": "1", "fixture_recipe": "compiler-default",
+            "compile_obligation": contract.SUPPORTED_OBJECT_OBLIGATION,
+            "link_obligation": "semantic-gate-509", "execution_obligation": "semantic-gate-509",
+            "diagnostic_obligation": "none", "argv_evidence": "groups/0/fast.argv"}
+        self.compiler = {"revision": "a" * 40, "source_tree": "b" * 40,
+                         "binary_sha256": "c" * 64, "build_receipt_sha256": "d" * 64,
+                         "backend": "current-native"}
+        self.closure = "e" * 64
+        self.manifest = {"cpu": "baseline"}
+        base = str(self.root)
+        self.argv = [base + "/candidate-ide.exe", "cc", "-c", "-g0", "-v", "-fwrapv",
+                     "-fno-strict-aliasing", "-funsigned-char", "-target", self.row["target"],
+                     "-mcpu=baseline", "-fno-pic", "-fno-frontend-ssa", "-fregister-allocator=fast",
+                     "-fverify-codegen", "-fno-machine-fallback", "-nostdinc", "-isystem",
+                     base + "/dependencies/resource-include", "-I" + base + "/inputs/tests",
+                     base + "/inputs/tests/unit.c", "-o", base + "/groups/0/fast.o",
+                     "-fcodegen-fallback-census"]
+        self.identity = {field: self.row[field] for field in ("group", *contract.IDENTITY_FIELDS)}
+        self.record = {"identity": self.identity, "compiler": self.compiler,
+                       "closure_sha256": self.closure, "skip": None,
+                       "argv": self.artifact("groups/0/fast.argv", self.nul(self.argv)),
+                       "process": None, "object": None, "preprocessing": None,
+                       "functions": "1", "expected_reference_functions": "1"}
+        self.record["process"] = self.process("compile", self.telemetry(), self.record["argv"])
+        obj = bytearray(64)
+        obj[:7] = b"\x7fELF\x02\x01\x01"
+        obj[16:20] = b"\x01\0\x3e\0"
+        self.record["object"] = self.artifact("groups/0/fast.o", bytes(obj))
+        pp_argv = self.artifact("groups/0/fast-preprocess.argv",
+                               self.nul(contract.current_native_preprocess_argv(self.argv)))
+        self.record["preprocessing"] = {"argv": pp_argv,
+                                       "process": self.process("preprocess", b"int unit(void){return 0;}\n", pp_argv)}
+
+    @staticmethod
+    def nul(argv):
+        return ("\0".join(argv) + "\0").encode()
+
+    def artifact(self, name, raw):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        return {"path": name, "bytes": str(len(raw)), "sha256": sha(raw)}
+
+    def process(self, name, stdout, argv, status="0"):
+        value = {"kind": "0", "status": status,
+                 "stdout": self.artifact(name + ".stdout", stdout),
+                 "stderr": self.artifact(name + ".stderr", b""),
+                 "invocation_sha256": contract.canonical_digest(
+                     {"identity": self.identity, "compiler": self.compiler,
+                      "closure_sha256": self.closure, "argv_sha256": argv["sha256"]})}
+        return self.artifact(name + ".process.json", json.dumps(value).encode())
+
+    def telemetry(self):
+        return (
+            b"TARGET cpu=baseline features=sse2\n"
+            b"CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=fast\n"
+            b"CODEGEN cpu=baseline vector_bits=128 functions=1 instructions=1 values=1 "
+            b"stack_value_bytes=0 stack_frame_bytes=0 max_stack_frame_bytes=0 code_bytes=1 "
+            b"forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 "
+            b"vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=0\n"
+            b"CODEGEN_FALLBACK_CENSUS version=1 records=0\n")
+
+    def validate_record(self, record=None):
+        return contract.current_native_record(
+            self.root, self.manifest, self.row, record or self.record, self.compiler, self.closure,
+            {"tests/unit.c": ()}, frozenset(), None)
+
+    def test_valid_raw_observation_and_preprocessing(self):
+        result = self.validate_record()
+        self.assertEqual(result, (1, 26, sha(b"int unit(void){return 0;}\n")))
+        projected = contract.current_native_preprocess_argv(self.argv)
+        self.assertIn("-E", projected)
+        self.assertIn("-target", projected)
+        self.assertIn("-fno-frontend-ssa", projected)
+        self.assertNotIn("-o", projected)
+        self.assertNotIn("-fverify-codegen", projected)
+        self.assertNotIn("-fcodegen-fallback-census", projected)
+
+    def test_malformed_or_partial_raw_telemetry_fails_closed(self):
+        raw = self.telemetry()
+        mutations = [
+            raw.replace(b"version=1 ir=", b"version=2 ir="),
+            raw.replace(b"ir=1", b"ir=0"),
+            raw.replace(b"mir=1", b"mir=0"),
+            raw.replace(b"scheduled=0", b"scheduled=2"),
+            raw.replace(b"functions=1 instructions=", b"functions=01 instructions="),
+            raw.replace(b"functions=1 instructions=", b"functions=-1 instructions="),
+            raw.replace(b"functions=1 instructions=", b"functions=4294967296 instructions="),
+            raw.replace(b"allocator=fast", b"allocator=quality"),
+            raw.replace(b"features=sse2", b"features=avx"),
+            raw.replace(b"fallback_functions=0", b"fallback_functions=1"),
+            raw.replace(b"records=0", b"records=1"),
+            raw + b"CODEGEN_FALLBACK_FUNCTION version=1\n",
+            raw + b"TARGET cpu=baseline features=sse2\n",
+            raw.replace(b"ir=1 mir=", b"ir=1 ir=1 mir="),
+            raw.replace(b"records=0\n", b"records=0 extra=1\n"),
+            raw.replace(b"CODEGEN_VERIFY version=1 ", b"CODEGEN_VERIFY version=1\v"),
+        ]
+        for altered in mutations:
+            with self.subTest(altered=altered), self.assertRaises((AssertionError, UnicodeError)):
+                contract.current_native_telemetry(altered, self.row)
+
+    def test_reference_none_is_mir_alias_with_zero_fallback(self):
+        row = dict(self.row, allocator="none")
+        raw = self.telemetry().replace(b"allocator=fast", b"allocator=none")
+        raw = raw.replace(b"CODEGEN_FALLBACK_CENSUS version=1 records=0\n", b"")
+        self.assertEqual(contract.current_native_telemetry(raw, row), 1)
+        with self.assertRaises(AssertionError):
+            contract.current_native_telemetry(raw.replace(b"mir=1", b"mir=0"), row)
+        with self.assertRaises(AssertionError):
+            contract.current_native_telemetry(raw.replace(b"fallback_functions=0", b"fallback_functions=1"), row)
+
+    def test_failed_process_and_missing_object_cannot_use_success_telemetry(self):
+        failed = copy.deepcopy(self.record)
+        failed["process"] = self.process("failed", self.telemetry(), self.record["argv"], status="1")
+        with self.assertRaisesRegex(AssertionError, "process failed"):
+            self.validate_record(failed)
+        (self.root / self.record["object"]["path"]).unlink()
+        with self.assertRaises(AssertionError):
+            self.validate_record()
+
+    def test_wrong_target_object_is_rejected(self):
+        obj = bytearray((self.root / self.record["object"]["path"]).read_bytes())
+        obj[18:20] = b"\xb7\0"
+        altered = copy.deepcopy(self.record)
+        altered["object"] = self.artifact("groups/0/fast.o", bytes(obj))
+        with self.assertRaises(AssertionError):
+            self.validate_record(altered)
+
+    def test_raw_bytes_provenance_argv_and_group_are_authenticated(self):
+        mutations = [
+            ("compiler", dict(self.compiler, revision="f" * 40)),
+            ("closure_sha256", "f" * 64),
+            ("identity", dict(self.identity, PIC="1")),
+            ("identity", dict(self.identity, frontend_lowering="direct-ssa")),
+            ("identity", dict(self.identity, group="1")),
+            ("identity", dict(self.identity, target="aarch64-unknown-linux-gnu")),
+            ("functions", "2"),
+            ("skip", {"applicability": "platform-inapplicable", "reason": "fake"}),
+        ]
+        for field, value in mutations:
+            altered = copy.deepcopy(self.record)
+            altered[field] = value
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                self.validate_record(altered)
+        (self.root / "compile.stdout").write_bytes(self.telemetry() + b"changed")
+        with self.assertRaises(AssertionError):
+            self.validate_record()
+
+    def test_record_invocation_and_preprocessing_argv_cannot_be_swapped(self):
+        process = json.loads((self.root / "compile.process.json").read_text())
+        process["invocation_sha256"] = "f" * 64
+        altered = copy.deepcopy(self.record)
+        altered["process"] = self.artifact("altered-process.json", json.dumps(process).encode())
+        with self.assertRaisesRegex(AssertionError, "invocation"):
+            self.validate_record(altered)
+        altered = copy.deepcopy(self.record)
+        altered["preprocessing"]["argv"] = self.artifact(
+            "altered-preprocess.argv", self.nul(contract.current_native_preprocess_argv(self.argv) + ["-DWRONG=1"]))
+        with self.assertRaises(AssertionError):
+            self.validate_record(altered)
+
+    def test_canonical_paths_json_and_numeric_types_fail_closed(self):
+        with self.assertRaisesRegex(AssertionError, "duplicate JSON"):
+            contract.current_native_json(b'{"group":"0","group":"1"}')
+        for descriptor in (
+            {"path": "../outside", "bytes": "0", "sha256": "f" * 64},
+            {"path": "compile.stdout", "bytes": True, "sha256": "f" * 64},
+            {"path": "compile.stdout", "bytes": "01", "sha256": "f" * 64},
+        ):
+            with self.subTest(descriptor=descriptor), self.assertRaises(AssertionError):
+                contract.current_native_artifact(self.root, descriptor)
+        outside = Path(self.temporary.name) / "outside"
+        outside.mkdir()
+        (outside / "raw").write_bytes(b"untrusted")
+        (self.root / "linked").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(AssertionError, "symlink"):
+            contract.current_native_artifact(
+                self.root, {"path": "linked/raw", "bytes": "9", "sha256": sha(b"untrusted")})
+
+    @staticmethod
+    def reports():
+        reports = []
+        for shard in range(4):
+            reports.append({
+                "manifest": {"shard_index": str(shard), "shard_count": "4"},
+                "profile": contract.CURRENT_NATIVE_PROFILE, "schema": contract.CURRENT_NATIVE_SCHEMA,
+                "candidate": {"revision": "a" * 40}, "reference": {"revision": contract.CURRENT_NATIVE_REFERENCE_REVISION},
+                "closure_sha256": "b" * 64, "rows_sha256": "c" * 64,
+                "gap_ledger_sha256": "d" * 64, "applicability_ledger_sha256": "e" * 64,
+                "selected_rows": [row for group in range(shard, contract.CURRENT_NATIVE_GROUP_COUNT, 4)
+                                  for row in (group * 2, group * 2 + 1)],
+                "reference_groups": list(range(shard, contract.CURRENT_NATIVE_GROUP_COUNT, 4)),
+                "nonexecuted_rows": 780, "records_sha256": "f" * 64})
+        return reports
+
+    def test_complete_population_and_missing_duplicate_modes_groups_shards(self):
+        self.assertEqual(sum(len(report["selected_rows"]) for report in self.reports()), 39456)
+        self.assertEqual(sum(len(report["reference_groups"]) for report in self.reports()), 19728)
+        contract.partition_current_native(self.reports())
+        mutations = []
+        missing_mode = self.reports()
+        missing_mode[0]["selected_rows"].pop()
+        mutations.append(missing_mode)
+        missing_reference = self.reports()
+        missing_reference[1]["reference_groups"].pop()
+        mutations.append(missing_reference)
+        duplicate = self.reports()
+        duplicate[0]["selected_rows"][0] = duplicate[0]["selected_rows"][1]
+        mutations.append(duplicate)
+        swapped = self.reports()
+        swapped[1]["candidate"]["revision"] = "f" * 40
+        mutations.append(swapped)
+        archive = self.reports()
+        archive[0]["profile"] = "full-census"
+        mutations.append(archive)
+        mutations.append(self.reports()[:3])
+        for reports in mutations:
+            with self.subTest(reports=len(reports)), self.assertRaises(AssertionError):
+                contract.partition_current_native(reports)
+
+    def test_old_profile_and_performance_cannot_accept_current_report(self):
+        with self.assertRaisesRegex(AssertionError, "unknown census profile"):
+            contract.validate_profile({"profile": contract.CURRENT_NATIVE_PROFILE}, {}, 39456)
+        import native_retirement_performance_binding as performance
+        with self.assertRaisesRegex(ValueError, "full-census"):
+            performance._validator_projection({"profile": contract.CURRENT_NATIVE_PROFILE}, 39456)
+
+    def test_current_report_is_unconditionally_nonaccepting(self):
+        from unittest.mock import patch
+        with patch.object(contract, "validate_current_native", side_effect=self.reports()):
+            report = contract.validate_current_shards([self.root] * 4, self.root / "report.json", {})
+        self.assertTrue(report["evidence_checks_passed"])
+        self.assertIs(report["acceptance_authorized"], False)
+        self.assertIs(report["retirement_accepted"], False)
+        self.assertEqual(report["provenance_trust"], "caller-bound-hosted-receipt")
+        self.assertEqual(report["candidate_modes"], ["fast", "quality"])
+
+
+    def test_count_reference_preprocessing_and_copied_expectation_are_independent(self):
+        reference = (1, 26, sha(b"int unit(void){return 0;}\n"))
+        contract.current_native_compare(reference, reference, "1")
+        for actual, expected in (((2, reference[1], reference[2]), "1"),
+                                 (reference, "2"),
+                                 ((1, 27, reference[2]), "1"),
+                                 ((1, 26, "f" * 64), "1"),
+                                 (None, "1")):
+            with self.subTest(actual=actual, expected=expected), self.assertRaises(AssertionError):
+                contract.current_native_compare(reference, actual, expected)
+        # An unrelated successful object cannot replace a failed count oracle.
+        with self.assertRaisesRegex(AssertionError, "missing executed count reference"):
+            contract.current_native_compare(None, reference, "1")
+
+    def test_authenticated_skips_cannot_be_selected_by_producer_labels(self):
+        skipped = copy.deepcopy(self.record)
+        skipped["skip"] = {"applicability": "retained-control",
+                           "reason": contract.NON_OBJECT_CONTROL_OBLIGATION}
+        for field in ("argv", "process", "object", "preprocessing"):
+            skipped[field] = None
+        skipped["functions"] = skipped["expected_reference_functions"] = "0"
+        arguments = (self.root, self.manifest, self.row, skipped, self.compiler, self.closure,
+                     {"tests/unit.c": ()}, frozenset())
+        self.assertIsNone(contract.current_native_record(
+            *arguments, ("retained-control", contract.NON_OBJECT_CONTROL_OBLIGATION)))
+        with self.assertRaises(AssertionError):
+            contract.current_native_record(*arguments, None)
+        skipped["skip"]["reason"] = "producer-gap"
+        with self.assertRaises(AssertionError):
+            contract.current_native_record(
+                *arguments, ("retained-control", contract.NON_OBJECT_CONTROL_OBLIGATION))
+
+    def build_receipt(self, revision, tree, backend="current-native", name="candidate"):
+        receipt = {
+            "schema": "buster-current-native-hosted-build-v1", "repository": "buster14a/buster",
+            "provider": "github-actions", "revision": revision, "source_tree": tree, "dirty": False,
+            "binary": self.artifact(name + "-ide.exe", b"compiler"),
+            "builder": self.artifact("builder.txt", b"hosted Clang identity"),
+            "build_argv": ["clang", "unity.c", "-o", name + "-ide.exe"],
+            "build_log": self.artifact("build.log", b"hosted build log"),
+            "source_snapshot": self.artifact(
+                "build-source.json", json.dumps({"revision": revision, "source_tree": tree}).encode()),
+            "run_id": "1", "run_attempt": "1",
+            "workflow_path": ".github/workflows/build.yml", "workflow_revision": "a" * 40,
+            "backend": backend}
+        self.artifact(name + "-build.json", json.dumps(receipt).encode())
+        return receipt
+
+    def test_build_receipt_cross_binds_source_binary_and_historical_alias(self):
+        revision, tree = "a" * 40, "b" * 40
+        receipt = self.build_receipt(revision, tree)
+        pinned = contract.sha256(self.root / "candidate-build.json")
+        result = contract.current_native_build(self.root, "candidate", revision, tree, pinned)
+        self.assertEqual(result["binary_sha256"], sha(b"compiler"))
+        for field, value in (("revision", "f" * 40), ("source_tree", "f" * 40),
+                             ("dirty", True), ("backend", "independent-direct"),
+                             ("provider", "untrusted-host")):
+            altered = dict(receipt, **{field: value})
+            self.artifact("candidate-build.json", json.dumps(altered).encode())
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                contract.current_native_build(
+                    self.root, "candidate", revision, tree,
+                    contract.sha256(self.root / "candidate-build.json"))
+        self.artifact("candidate-build.json", json.dumps(receipt).encode())
+        with self.assertRaises(AssertionError):
+            contract.current_native_build(self.root, "candidate", revision, tree, "f" * 64)
+        (self.root / "candidate-ide.exe").write_bytes(b"forged compiler")
+        with self.assertRaises(AssertionError):
+            contract.current_native_build(self.root, "candidate", revision, tree, pinned)
+        self.build_receipt(contract.CURRENT_NATIVE_REFERENCE_REVISION,
+                           contract.CURRENT_NATIVE_REFERENCE_TREE,
+                           contract.CURRENT_NATIVE_REFERENCE_BACKEND, "baseline")
+        historical = contract.current_native_build(
+            self.root, "reference", contract.CURRENT_NATIVE_REFERENCE_REVISION,
+            contract.CURRENT_NATIVE_REFERENCE_TREE, contract.sha256(self.root / "baseline-build.json"))
+        self.assertEqual(historical["backend"], "historical-mir-stack-alias")
+
+
+    def test_frozen_gap_projection_and_all_control_exclusion_obligations(self):
+        root = Path(__file__).resolve().parents[1]
+        inputs = {row["path"]: row for row in contract.table(root / "docs/native-retirement-support-v1.tsv")}
+        subjects = [path for path, source in inputs.items() if source["role"] == "subject"]
+        rows = []
+        for fixture in subjects:
+            for target in contract.TARGETS:
+                for frontend in ("local-backed-canonical", "direct-ssa"):
+                    for pic in ("0", "1"):
+                        for mode in contract.CURRENT_NATIVE_ALLOCATORS:
+                            rows.append({"row": str(len(rows)), "group": str(len(rows) // 2),
+                                         "fixture": fixture, "target": target, "frontend_lowering": frontend,
+                                         "PIC": pic, "allocator": mode,
+                                         "compile_obligation": inputs[fixture]["compile_obligation"]})
+        gap_raw = (root / "docs/native-retirement-supported-gaps-v1.tsv").read_bytes()
+        self.artifact("supported-gap-ledger.tsv", gap_raw)
+        manifest = {"supported_gap_ledger": "docs/native-retirement-supported-gaps-v1.tsv",
+                    "supported_gap_ledger_sha256": sha(gap_raw)}
+        gaps, digest = contract.current_native_gaps(self.root, manifest, rows)
+        self.assertEqual(len(gaps), 128)
+        self.assertEqual(digest, contract.FULL_SUPPORTED_GAP_LEDGER_SHA256)
+        applicability = {(item["fixture"], item["target"]): (item["applicability"], item["reason"])
+                         for item in contract.table(root / "docs/native-retirement-applicability-v1.tsv")}
+        nonexecuted = [row for row in rows if contract.expected_nonexecuted(
+            row, *applicability.get((row["fixture"], row["target"]), ("", "")))]
+        self.assertEqual(len(nonexecuted), 3120)
+        self.assertEqual(sum(row["compile_obligation"] == contract.NON_OBJECT_CONTROL_OBLIGATION
+                             for row in nonexecuted), 576)
+        gap_path = self.root / "supported-gap-ledger.tsv"
+        gap_path.write_bytes(gap_raw.replace(b"admitted-supported", b"producer-exclusion", 1))
+        manifest["supported_gap_ledger_sha256"] = contract.sha256(gap_path)
+        with self.assertRaises(AssertionError):
+            contract.current_native_gaps(self.root, manifest, rows)
+
+
 if __name__ == "__main__":
     unittest.main()

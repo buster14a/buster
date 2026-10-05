@@ -73,6 +73,7 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 MAX_PAGES = 20
 POLICY_PATHS = (
+    "docs/current-native-object-census-v1.json",
     "tools/merge_queue_admission.py",
     "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_integration.py",
