@@ -25,6 +25,18 @@ thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
 
+`c_parse_parameter_list_names_validate` checks a completed parameter list before
+its names can overwrite function parameter bindings. A scratch hash table belongs
+to one published list and reports its first repeated name at the later parameter,
+including the earlier declaration's line and column. Unnamed parameters are
+skipped, and separate prototype scopes, nested function-pointer lists and C23
+unnamed definitions retain their existing rules. Direct, parenthesized and block
+local declarators use the same check. The local suffix reader reserves its outer
+parameter range before parsing nested declarators, keeping child names outside
+that list. `c_test_duplicate_parameter_names` checks syntax-only/lowering
+parity, both frontend forms and symbol/spelling lookup, and inspects the outer
+parameter names of nested block-local prototypes.
+
 Windows target predefines in `c_source.c` normalize `__inline` and `__forceinline`
 to the function specifier `inline`, without injecting a storage class. UCRT-style
 `static __inline` and `extern __inline` declarations retain their source storage;
@@ -93,6 +105,7 @@ checks remain defensive checks for direct lowering callers.
 | Lowering responsibility | Semantic owner / shared policy |
 | --- | --- |
 | Invalid type/specifier combinations, incomplete and void objects, parameter/return layouts | Existing declarator analysis, `c_parse_validate_signature`, `c_parse_validate_vla_declarations` |
+| Repeated names within one parameter list | `c_parse_parameter_list_names_validate`; completed direct, parenthesized and local declarator ranges |
 | Integer literals, typed constant expressions, static assertions, `sizeof`/alignment, enum and designator values | `c_parse_typed_constant`, `c_parse_validate_deferred_assertions`, `c_parse_validate_sizeof_operands`; shared literal selection and floating-point bit helpers |
 | Zero-width named bit-fields, explicit alignment, array element stride, alignment redeclarations | `c_parse_validate_bit_field_widths`, `c_parse_validate_alignment_range`, `c_parse_validate_array_strides`, `c_parse_validate_alignment_redeclarations` |
 | Initializer shape, promoted members, separators, string width/bounds, automatic range designators, VLA initialization/storage | `c_parse_validate_initializer_shape`, `c_parse_infer_initializer_array_count_core`, `c_parse_validate_vla_declarations` |
