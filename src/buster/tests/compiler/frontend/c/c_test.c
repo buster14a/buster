@@ -19721,7 +19721,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArgu
                         for (u32 entity_index = 0; entity_index < semantic.entity_count; entity_index += 1)
                         {
                             CEntity entity = semantic.entities[entity_index];
-                            if (!string_equal(entity.name, S8("local_api"))) continue;
+                            // The block declaration publishes a C_ENTITY_FUNCTION registration and the
+                            // lexical C_ENTITY_LOCAL binding; the binding is the one source declaration.
+                            if (entity.kind != C_ENTITY_LOCAL || !string_equal(entity.name, S8("local_api"))) continue;
                             found += 1;
                             CType* type = c_type_from_id(&semantic, entity.type);
                             if (BUSTER_REQUIRE(arguments, type && type->kind == C_TYPE_FUNCTION && type->parameter_count == 2))
@@ -19734,7 +19736,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArgu
                     }
                     CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("duplicate-parameter-names.c"), tokens, syntax,
                         target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
-                    BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                    BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == lowered.diagnostic_count,
+                        string_format(temporary.arena, S8("parameter names dialect={u32} symbols={u32} form={u32} semantic={u32} lowered={u32}: {S8}"),
+                                      dialect, symbols, form, semantic.diagnostic_count, lowered.diagnostic_count, cases[case_index].source));
                     for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
                     {
                         CDiagnostic left = semantic.diagnostics[diagnostic];
