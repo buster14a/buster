@@ -39130,7 +39130,6 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
 #if BUSTER_BENCH_ALLOCATIONS
-    BUSTER_TEST_FIXTURE(arguments, c_test_c99_inline_linkage);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_fact_census);
 #endif
     // Fixtures run in byte order of their names. Register a new fixture at
@@ -39165,6 +39164,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_auto_local_declarations);
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_initializers);
     BUSTER_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
+    BUSTER_TEST_FIXTURE(arguments, c_test_c99_inline_linkage);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_assignment_values);
     BUSTER_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operand_runtime);
