@@ -797,6 +797,26 @@ have bounded 30-second deadlines. `object_tests` covers REL/RELA, instruction
 classes, scale mismatches and malformed sites; `link_tests` derives patched
 addresses from static/dynamic section tables and imported-data copy slots.
 
+## Wasm function-address capability
+
+`compiler_driver_test_wasm_function_addresses` constructs and validates canonical
+IR before emission for both pointer widths. Four topologies cover first-index
+imports/definitions and later definitions. Six escape paths use pointer FUNCTION,
+place FUNCTION/address-of, void-pointer/integer round trips, volatile storage,
+returned pointers and address/dereference aliases. Wasm32 must refuse these
+runtime addresses with instruction attribution and empty artifact aliases;
+Wasm64 keeps its nonzero handles. Direct CALL and unused inert references are
+accepted controls. Independent Node checks use the original module SHA-256,
+repeated emission equality and file readbacks, with the existing deadline and
+exact terminal marker. Baseline modules that are incorrectly admitted are still
+executed, so null collisions are observable rather than hidden by a refusal check.
+
+`compiler_driver_test_wasm_function_address_outputs` checks both frontend forms
+through the actual Wasm32 driver: alias, storage/return, indirect-call and static
+relocation refusals preserve absent/existing output destinations. Both direct
+Wasm targets retain successful C direct-call controls. Inline source/oracle bytes
+leave the frozen support inventory and startup shims unchanged.
+
 ## Wasm object-address alignment
 
 `compiler_driver_test_wasm_stack_alignment` lowers both C frontend forms for
