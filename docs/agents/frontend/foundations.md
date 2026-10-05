@@ -338,6 +338,13 @@ without facts for identical bitcode and diagnostics.
   `c_macro_conditional_tests` module compares semantic token sequences with
   independent Clang/GCC preprocessors and runs a Buster-built selected-branch
   fixture through both C lowering modes (GitHub #76).
+- Active `#ifdef`/`#ifndef`, matched `#else`/`#endif`, and `#include`,
+  `#include_next`, or `#import` directives accept trailing tokens after their
+  operand/header name with a `c.extra-directive-tokens` warning; skipped
+  conditional groups do not warn. Function-like macro definitions require a
+  single `#` to precede a parameter, and `defined` cannot be used as a macro
+  name in `#define` or `#undef`. Assembly-comment-line mode retains its
+  stringification compatibility behavior.
 - `c_conditional_number` admits the complete bounded integer spelling, checks
   overflow before accumulation, and leaves its output unchanged on failure.
   Ordinary constants and the x87 initializer folder share it; do not restore a
@@ -1025,11 +1032,73 @@ needs object identity must explicitly materialize storage.
 Complex rvalues use this same operation through `c_ir_complex_compose`, not a
 `LOCAL`/`FIELD`/`STORE`/`LOAD` construction sequence. Arithmetic consumers in
 `c_ir_complex_split` project a known constructor's two scalar operands directly.
-This bounded projection does not apply to the `__real__`/`__imag__` lvalue path:
-component assignments must continue to designate their original object.
-Qualifiers, volatile memory, and non-constructor values retain their existing
-explicit load/store path. No whole-function cleanup pass is required. Raw IR
-tests cover both direct frontend SSA and its memory-form reference, so scalar
+GNU value projections also read known constructor operands directly. Component
+assignments follow the place machine and continue to designate their original
+object. Qualifiers, volatile memory, and non-constructor values retain their
+explicit load/store path. No whole-function cleanup pass is required.
+
+The registered `c_test_runtime_place_updates` requires compound-literal scalar,
+member and indexed prefix/postfix updates, and GNU complex-part assignments used
+as values (#1261). Fixed returned/stored values and indexed call counters protect
+old/new results, original-object identity, one evaluation, volatile accesses and
+postfix precedence: `(__imag__ z)++` updates the imaginary component, while
+`__imag__ z++` projects the previous whole-complex update. Const and nonplace
+operands remain rejected through semantic-only and lowering APIs, including
+real-component projections of enumerators under prefix/postfix updates and
+nested complete groups. A separate canonical volatile scalar-literal neighbor
+requires one volatile read and two volatile stores (initialization and update),
+so place recovery cannot retain an artificial value read or erase its qualifier.
+Both the expression core and the exact scalar-literal completion copy the
+object's volatile flag before its initializer store.
+Independent sources run through syntax, semantic and
+canonical APIs on six native layouts, GNU17/GNU23 and both frontend forms. A
+combined executable retains all literal oracles in every native allocator mode
+at O0/O2. Hosted Linux x86-64 Clang compiles and executes all fifteen original
+cases plus a valid nested-projection neighbor in GNU17/GNU2x at O0/O2, including
+whole-complex postfix precedence and indexed compound-assignment single evaluation. Its separate indexed assignment
+control returns bits 0..4 for mismatched result, index-call count, stored real,
+stored imaginary and untouched neighbor; the expected exit is zero.
+GCC 15.2's earlier full program passed the twelve cases preceding the indexed
+compound assignment, then diverged there: its index-call count differed from one
+while all four
+value/storage checks matched. The failed full/mask evidence remains pinned to
+regression head `63024bec`. Mandatory GCC acceptance therefore calls fourteen
+unchanged original cases plus an explicitly sequenced index/address neighbor and
+the nested-projection neighbor. It retains the original fifteenth body without invoking it and excludes
+that diagnostic mask from active GCC acceptance. The neighbor protects its own
+fixed result/storage/counter values; it is not evidence for the original compound
+assignment's single evaluation. Buster's fifteen original oracles and Clang's
+full/mask controls remain unchanged. Compiler and process failures are assertions,
+and expected values never adapt to reference output.
+
+Runtime compound-literal updates reuse the existing expression child and recover
+the literal's materialized place, retaining its volatile access flag. Existing
+tail recovery retracts only a proven-unused final value read, preserving all
+earlier operand effects. Complex-part places instead lower their operand
+through a place child, then retain the original object's component and access
+flags. Parentheses and complex prefixes remain explicit stack continuations;
+rvalue arithmetic cannot gain a modifiable temporary through value projection.
+Both postfix gates retain compound literals as primary objects rather than casts,
+and keep complex-part unary prefixes outside a whole-object postfix update.
+A complex postfix result captures its prior scalar components in the existing
+immutable aggregate before the object is stored, so a later value projection
+cannot reread the updated object. Semantic projection retains const/volatile
+qualifiers, and whole-complex updates remain limited to GNU dialects. Explicit
+semantic-only and lowering refusal controls protect const and nonplace operands.
+An existing TYPE frame carries one query-local fact for the zero-valued imaginary
+projection of a real arithmetic operand; complete groups and component prefixes
+preserve it, while value-producing operators and dereference clear it. The existing
+expression-query flag row caches that fact independently of its checking-mode key.
+Update, assignment, address and asm-output consumers reject it without changing the
+CType or adding another type walk. A valid real-of-imaginary complex component
+neighbor still updates its original component, and real-scalar imaginary values
+remain usable as zero-valued expressions. When composing the modifiability helper
+with #2338's checked leaf-postfix continuation, pass the operand's TYPE nonplace
+projection fact alongside its CType; a scalar type answer alone does not establish
+a place. Capture that fact before any later type or layout query replaces it.
+These paths add no recursive descent, separate pass or retained lookup table.
+
+Raw IR tests cover both direct frontend SSA and its memory-form reference, so scalar
 parameter promotion cannot conceal complex construction temporaries.
 
 `c_ir_emit_initializer_capture` keeps the exact constructor operand contract.
@@ -1045,8 +1114,9 @@ Complex comparisons/truth conversion and floating classification combine
 Boolean comparisons with `IR_BINARY_BOOLEAN_AND`/`IR_BINARY_BOOLEAN_OR`.
 Their canonical verifier case requires matching Boolean value operands and a
 Boolean value result. Integer bitwise opcodes still require integer operands.
-Both native canonical emitters implement these Boolean operations as well as
-the existing machine selectors, including canonical fallback for x87 functions.
+Native machine selectors implement these Boolean operations. The public `none`
+allocator selects MIR-stack; unsupported native shapes are refused rather than
+falling back to a direct canonical emitter.
 
 A `_Bool` destination is one rule for every scalar source (C 6.3.1.2): the
 result is 0 exactly when the whole value compares equal to 0.
@@ -1193,6 +1263,21 @@ enumerators defer to typed semantic evaluation instead of replacing names with
 untyped decimal spellings. Full-width runtime constants use ordinary canonical
 shift/or operations; the one-immediate integer-constant contract is unchanged.
 
+Switch lowering applies integer promotion before checking the dispatch type.
+A `_Bool` parameter, comparison result or evaluated call therefore reaches
+the same signed-int dispatch as a narrow integer. Case constants and GNU
+ranges still convert to that promoted type before overlap validation.
+`c_test_switch_integer_controls` checks canonical signed-32-bit controls and
+single call preparation on six native targets in both frontend forms, plus
+desktop execution through all four allocators. Narrow signed/unsigned and
+64-bit cases remain independent controls.
+
+The current canonical SWITCH label representation contains one u64 per case.
+A signed or unsigned `__int128` control receives a structured unsupported
+diagnostic naming its type and the 64-bit dispatch limit, including when the
+case constants themselves fit 64 bits. Full 128-bit dispatch remains
+unimplemented; narrowing an input in the source is an explicit user choice.
+
 A selection or iteration statement is a block (C17 6.8.4p3, 6.8.5p5). When an
 `if`, `switch` or `while` controlling expression defines a tag, as in
 `if (sizeof(enum { Q = 8 })) v = Q;`, `c_parse_bind_block_statements` opens a
@@ -1296,4 +1381,5 @@ differential harness runs it with Clang/GCC at O0/O2; expected values are litera
 constants, not inferred from Buster. The fixed-range fixture additionally checks
 the aligned-base case against Clang. `c_test_enum_runtime` runs these two sources
 and the bit-field source in all four native allocator modes with strict codegen
-verification, rejecting machine fallback outside NONE.
+verification. Native NONE uses MIR-stack, so no mode has a direct-emitter
+fallback.

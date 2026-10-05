@@ -284,6 +284,16 @@ static void tp_cancel_handler(int signal_number)
     _exit(128 + signal_number);
 }
 
+static int tp_process_group_self_error(int status, int error)
+{
+    int result = status == 0 ? 0 : error;
+    /* The parent may already have installed this exact child's private group.
+     * EPERM also refuses a session leader whose group already equals its PID.
+     * Validate the required kernel state; do not retry or accept another group. */
+    if (result == EPERM && getpgrp() == getpid()) result = 0;
+    return result;
+}
+
 static TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
                             unsigned timeout_seconds, int cpu, int counters)
 {
@@ -334,10 +344,13 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
         close(ready[1]);
         close(launch[0]);
         struct { int stage, error; } failure = {TP_LAUNCH_NONE, 0};
-        if (setpgid(0, 0) != 0)
+        int group_status = setpgid(0, 0);
+        int group_error = group_status == 0 ? 0 : errno;
+        group_error = tp_process_group_self_error(group_status, group_error);
+        if (group_error)
         {
             failure.stage = TP_LAUNCH_GROUP;
-            failure.error = errno;
+            failure.error = group_error;
         }
         if (!failure.error && dup2(log, STDOUT_FILENO) < 0)
         {

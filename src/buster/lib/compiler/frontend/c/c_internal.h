@@ -1026,6 +1026,7 @@ typedef enum CParseExpressionTypeOperation
     C_PARSE_EXPRESSION_TYPE_INDIRECTION,
     C_PARSE_EXPRESSION_TYPE_ADDRESS_OF,
     C_PARSE_EXPRESSION_TYPE_COMPLEX_PART,
+    C_PARSE_EXPRESSION_TYPE_SUBSCRIPT,
 } CParseExpressionTypeOperation;
 
 typedef enum CTypeParseFrameKind
@@ -1038,6 +1039,8 @@ typedef enum CTypeParseFrameKind
     C_TYPE_PARSE_FRAME_AGGREGATE_SEGMENT,
     C_TYPE_PARSE_FRAME_AGGREGATE_RANGE,
     C_TYPE_PARSE_FRAME_PARENTHESIZED,
+    C_TYPE_PARSE_FRAME_FUNCTION_SUFFIX,
+    C_TYPE_PARSE_FRAME_PARAMETER_GROUP,
     C_TYPE_PARSE_FRAME_PARAMETER,
 } CTypeParseFrameKind;
 
@@ -1063,6 +1066,7 @@ struct CParseExpressionTypeTask
     u32 end;
     u32 split;
     u32 colon;
+    u32 trailing_subscript_plus_one;
     CTypeId left_type;
     CParseExpressionTypeOperation operation;
     u8 state;
@@ -1153,6 +1157,8 @@ struct CTypeParseFrame
     // single declarator carries is scanned separately and belongs to that
     // member alone.
     bool is_packed;
+    // Query-local category fact for a GNU imaginary projection of a real value.
+    bool expression_nonplace_projection;
 };
 
 typedef struct CTypeLayoutCache CTypeLayoutCache;
@@ -1185,6 +1191,7 @@ struct CTypeLayoutCache
 #define C_PARSE_EXPRESSION_QUERY_CHECKED 2u
 #define C_PARSE_EXPRESSION_QUERY_RUNTIME 4u
 #define C_PARSE_EXPRESSION_QUERY_CONSTANT 8u
+#define C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION 16u
 
 typedef struct CParseExpressionQuery CParseExpressionQuery;
 struct CParseExpressionQuery
@@ -1248,6 +1255,7 @@ struct CTypeParseMachine
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
     bool result_valid;
+    bool result_nonplace_projection;
     bool failed;
     bool semantic_constant_queries;
     bool validate_expression_constraints;
