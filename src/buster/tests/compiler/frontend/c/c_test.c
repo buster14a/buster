@@ -5177,6 +5177,65 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_typedef_scopes(UnitTestArgume
     return result;
 }
 
+// A callee wrapped in nested groups -- `(*(*(*p)))()` -- is probed by
+// c_ir_abstract_pointer_declarator, and a cast's type name is walked by
+// c_ir_type_name_declarator.  Both used to take one host stack frame per
+// nested `(`, so a valid call through a few tens of thousands of dereference
+// groups overflowed the stack (the driver crashed with SIGSEGV at 64000
+// levels while -fsyntax-only succeeded).  The depth here is far below the
+// crashing one only to keep the quadratic expression scans cheap; the shallow
+// cases pin the answers the loops must keep giving.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_group_nesting(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 depth = 16000;
+    String8 head = S8("int g(void);\nint f(void) { int (*p)(void) = g; return ");
+    String8 open = S8("(*");
+    String8 tail = S8("p");
+    String8 close = S8(")");
+    String8 call = S8("(); }\n");
+    u64 capacity = head.length + (u64)depth * (open.length + close.length) + tail.length + call.length;
+    char8* buffer = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(buffer, capacity, &length, head);
+    for (u32 index = 0; index < depth; index += 1)
+    {
+        c_test_append_source(buffer, capacity, &length, open);
+    }
+    c_test_append_source(buffer, capacity, &length, tail);
+    for (u32 index = 0; index < depth; index += 1)
+    {
+        c_test_append_source(buffer, capacity, &length, close);
+    }
+    c_test_append_source(buffer, capacity, &length, call);
+    String8 sources[] = {
+        {.pointer = buffer, .length = length},
+        S8("int g(void);\nint f(void) { int (*p)(void) = g; return (*(*(*p)))(); }\n"),
+        S8("typedef int (*(*Nested)(void))(void);\n"
+           "_Static_assert(sizeof(Nested) == 8, \"nested function pointer typedef\");\n"
+           "void* nested_cast(void) { return (void*)(int (*(*)(void))(void))0; }\n"
+           "void* stars_cast(void) { return (void*)(int (**)(void))0; }\n"
+           "void* qualified_cast(void) { return (void*)(int (*const*)(void))0; }\n"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index], S8("declarator-group-nesting.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        if (lowered.program)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -38466,6 +38525,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
     BUSTER_TEST_FIXTURE(arguments, c_test_declaration_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
+    BUSTER_TEST_FIXTURE(arguments, c_test_declarator_group_nesting);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_false);
     BUSTER_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);

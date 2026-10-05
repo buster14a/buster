@@ -19677,44 +19677,66 @@ BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u
 BUSTER_C_INTERNAL bool c_ir_abstract_pointer_declarator(CIntegerIrBuilder* builder, u32 open, u32 close)
 {
     CType ignored = {0};
-    u32 index = open + 1;
-    u32 pointer_count = 0;
-    while (index < close)
+    // Each nested group is one more level of this loop, not a call: the
+    // declarator is valid when every level's suffix reaches its own close and
+    // the innermost level is bare stars and qualifiers.
+    bool valid = true;
+    bool descend = true;
+    while (descend)
     {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_STAR))
+        descend = false;
+        u32 index = open + 1;
+        u32 pointer_count = 0;
+        while (index < close)
         {
-            pointer_count += 1;
-            index += 1;
-            continue;
+            CToken token = builder->preprocess.tokens[index];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_STAR))
+            {
+                pointer_count += 1;
+                index += 1;
+                continue;
+            }
+            if (token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, token), &ignored))
+            {
+                index += 1;
+                continue;
+            }
+            break;
         }
-        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, token), &ignored))
+        if (index == close)
         {
-            index += 1;
-            continue;
+            valid = pointer_count != 0;
         }
-        break;
+        else if (!pointer_count || !c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            valid = false;
+        }
+        else
+        {
+            u32 inner_close = c_ir_matching_delimiter_cached(builder, index, close, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (inner_close >= close)
+            {
+                valid = false;
+            }
+            else
+            {
+                u32 suffix = inner_close + 1;
+                if (suffix < close && c_token_is_punctuator(&builder->preprocess.tokens[suffix], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 suffix_close = c_ir_matching_delimiter_cached(builder, suffix, close, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    suffix = suffix_close < close ? suffix_close + 1 : suffix;
+                }
+                valid = suffix == close;
+                if (valid)
+                {
+                    open = index;
+                    close = inner_close;
+                    descend = true;
+                }
+            }
+        }
     }
-    if (index == close)
-    {
-        return pointer_count != 0;
-    }
-    if (!pointer_count || !c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        return false;
-    }
-    u32 inner_close = c_ir_matching_delimiter_cached(builder, index, close, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-    if (inner_close >= close || !c_ir_abstract_pointer_declarator(builder, index, inner_close))
-    {
-        return false;
-    }
-    u32 suffix = inner_close + 1;
-    if (suffix < close && c_token_is_punctuator(&builder->preprocess.tokens[suffix], C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        u32 suffix_close = c_ir_matching_delimiter_cached(builder, suffix, close, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        suffix = suffix_close < close ? suffix_close + 1 : suffix;
-    }
-    return suffix == close;
+    return valid;
 }
 
 // One dense-table classification of a call's callee token.  Interned
@@ -25741,67 +25763,87 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_function_type(CIntegerIrBuilder* build
     return result;
 }
 
-// One declarator over `type`, abstract as a type name always is.  It recurses
-// because the grammar does: `void (*(*)(void *, const char *))(void)` -- the
-// cast SQLite's Unix VFS applies to dlsym -- is a group whose own content is
-// another group, and each level's suffix and pointer chain describe what the
-// level inside it returns.
+// One declarator over `type`, abstract as a type name always is.  The grammar
+// nests -- `void (*(*)(void *, const char *))(void)`, the cast SQLite's Unix
+// VFS applies to dlsym, is a group whose own content is another group, and
+// each level's suffix and pointer chain describe what the level inside it
+// returns -- but the inner group is always the last thing a level does, so
+// the walk is a loop over `index`/`end` that narrows to the inner group
+// instead of one call per `(`.
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end, bool allow_function_pointer,
                                                        CType* qualifiers)
 {
-    if (allow_function_pointer && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    bool descend = true;
+    while (descend)
     {
-        u32 pointer_close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        u32 pointer_index = index + 1;
-        u32 pointer_count = 0;
-        while (pointer_index < pointer_close && c_token_is_punctuator(&builder->preprocess.tokens[pointer_index], C_PUNCTUATOR_STAR))
+        descend = false;
+        bool answered = false;
+        if (allow_function_pointer && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
-            pointer_count += 1;
-            pointer_index += 1;
-            while (pointer_index < pointer_close && builder->preprocess.tokens[pointer_index].kind == C_TOKEN_IDENTIFIER &&
-                   c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[pointer_index]), qualifiers))
+            u32 pointer_close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            u32 pointer_index = index + 1;
+            u32 pointer_count = 0;
+            while (pointer_index < pointer_close && c_token_is_punctuator(&builder->preprocess.tokens[pointer_index], C_PUNCTUATOR_STAR))
             {
+                pointer_count += 1;
                 pointer_index += 1;
+                while (pointer_index < pointer_close && builder->preprocess.tokens[pointer_index].kind == C_TOKEN_IDENTIFIER &&
+                       c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[pointer_index]), qualifiers))
+                {
+                    pointer_index += 1;
+                }
             }
-        }
-        u32 parameters_open = pointer_close + 1;
-        u32 parameters_close =
-            parameters_open < end ? c_ir_matching_delimiter_cached(builder, parameters_open, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
-                                  : end;
-        bool has_parameter_list = parameters_open < end && parameters_close + 1 == end &&
-                                  c_token_is_punctuator(&builder->preprocess.tokens[parameters_open], C_PUNCTUATOR_LEFT_PARENTHESIS);
-        bool nested_group = pointer_index < pointer_close && c_token_is_punctuator(&builder->preprocess.tokens[pointer_index], C_PUNCTUATOR_LEFT_PARENTHESIS);
-        if (has_parameter_list && (nested_group || (pointer_count && pointer_index == pointer_close)))
-        {
-            type = c_ir_type_name_function_type(builder, type, parameters_open, parameters_close);
-            while (type.value != IR_ID_UNDERLYING_INVALID && pointer_count)
+            u32 parameters_open = pointer_close + 1;
+            u32 parameters_close = parameters_open < end ? c_ir_matching_delimiter_cached(builder, parameters_open, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                                                          C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                                                         : end;
+            bool has_parameter_list = parameters_open < end && parameters_close + 1 == end &&
+                                      c_token_is_punctuator(&builder->preprocess.tokens[parameters_open], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            bool nested_group = pointer_index < pointer_close && c_token_is_punctuator(&builder->preprocess.tokens[pointer_index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            if (has_parameter_list && (nested_group || (pointer_count && pointer_index == pointer_close)))
             {
-                type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
-                pointer_count -= 1;
+                type = c_ir_type_name_function_type(builder, type, parameters_open, parameters_close);
+                while (type.value != IR_ID_UNDERLYING_INVALID && pointer_count)
+                {
+                    type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
+                    pointer_count -= 1;
+                }
+                answered = true;
+                if (nested_group)
+                {
+                    index = pointer_index;
+                    end = pointer_close;
+                    allow_function_pointer = true;
+                    descend = true;
+                }
             }
-            return nested_group ? c_ir_type_name_declarator(builder, type, pointer_index, pointer_close, true, qualifiers) : type;
-        }
-        if (pointer_count && pointer_index == pointer_close && parameters_open < end &&
-            c_token_is_punctuator(&builder->preprocess.tokens[parameters_open], C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            type = c_ir_type_name_suffix(builder, type, parameters_open, end);
-            while (type.value != IR_ID_UNDERLYING_INVALID && pointer_count)
+            else if (pointer_count && pointer_index == pointer_close && parameters_open < end &&
+                     c_token_is_punctuator(&builder->preprocess.tokens[parameters_open], C_PUNCTUATOR_LEFT_BRACKET))
             {
-                type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
-                pointer_count -= 1;
+                type = c_ir_type_name_suffix(builder, type, parameters_open, end);
+                while (type.value != IR_ID_UNDERLYING_INVALID && pointer_count)
+                {
+                    type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
+                    pointer_count -= 1;
+                }
+                answered = true;
             }
-            return type;
+            else if (!pointer_count && pointer_close < end && pointer_close + 1 == end)
+            {
+                // The declarator's only parenthesized group is the parameter list,
+                // so the type name is the function type itself. Without this shape
+                // the suffix below rejected the whole type name, and sizeof over it
+                // fell back to the prediction's int guess -- 4, where GNU folds 1.
+                type = c_ir_type_name_function_type(builder, type, index, pointer_close);
+                answered = true;
+            }
         }
-        if (!pointer_count && pointer_close < end && pointer_close + 1 == end)
+        if (!answered)
         {
-            // The declarator's only parenthesized group is the parameter list,
-            // so the type name is the function type itself. Without this shape
-            // the suffix below rejected the whole type name, and sizeof over it
-            // fell back to the prediction's int guess -- 4, where GNU folds 1.
-            return c_ir_type_name_function_type(builder, type, index, pointer_close);
+            type = c_ir_type_name_suffix(builder, type, index, end);
         }
     }
-    return c_ir_type_name_suffix(builder, type, index, end);
+    return type;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer)
