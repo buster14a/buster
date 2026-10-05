@@ -479,6 +479,85 @@ operand diagnostics. No pair instruction words or generated identities are
 duplicated in the source adapter.
 Unsupported post-index memory operands are refused with their full spelling,
 so their writeback cannot silently disappear during comment handling.
+`ldr`-family statements whose address is a label rather than `[...]` select the
+control owner's PC-relative LDR (literal) rows.
+
+### AArch64 base instruction vocabulary
+
+AArch64 statements the table-driven owners refuse are retried by the base A64
+encoder (`aarch64_base_assembly.c`, entry `a64_base_assemble`), which encodes
+constant-operand GNU/LLVM spellings straight to one word. Statements an owner
+already accepts never reach it. Its vocabulary is:
+
+- Arithmetic: ADD/ADDS/SUB/SUBS with immediates, shifted registers and extended
+  registers, plus CMP/CMN/NEG/NEGS. A negative immediate selects the opposite
+  operation, a larger immediate with its low 12 bits clear uses `lsl #12`, and
+  an SP operand selects the extended form, all as llvm-mc does. Also
+  ADC/ADCS/SBC/SBCS and NGC/NGCS.
+- Logical and moves: AND/ORR/EOR/ANDS/BIC/ORN/EON/BICS with bitmask immediates
+  or shifted registers, plus TST and MVN. MOV covers register to register,
+  to and from SP, immediates (MOVZ, then MOVN, then an ORR bitmask), and
+  element/vector moves. Explicit MOVZ/MOVN/MOVK are accepted.
+- Bitfield: SBFM/BFM/UBFM; LSL/LSR/ASR/ROR with an immediate or a register;
+  SXTB/SXTH/SXTW/UXTB/UXTH; SBFX/UBFX/BFXIL; SBFIZ/UBFIZ/BFI; EXTR.
+- Conditional and other data processing: CSEL/CSINC/CSINV/CSNEG, the
+  CSET/CSETM/CINC/CINV/CNEG aliases (AL/NV refused), CCMP/CCMN with a register
+  or immediate, UDIV/SDIV/LSLV/LSRV/ASRV/RORV, RBIT/REV16/REV/REV32/REV64/CLZ/CLS.
+- Multiply: MADD/MSUB/SMADDL/SMSUBL/UMADDL/UMSUBL/SMULH/UMULH, with the
+  MUL/MNEG/SMULL/UMULL/SMNEGL/UMNEGL aliases.
+- Single loads and stores: LDR/STR (W/X and B/H/S/D/Q),
+  LDRB/STRB/LDRH/STRH/LDRSB/LDRSH/LDRSW and PRFM (named or `#imm` operation).
+  Addressing covers scaled unsigned offsets, pre- and post-index, and register
+  offsets with LSL/UXTW/SXTW/SXTX. An offset the scaled form cannot hold uses
+  the unscaled encoding, as llvm-mc does. The LDUR/STUR family and PRFUM take
+  unscaled offsets only.
+- Pairs and exclusives: LDP/STP/LDPSW (offset, pre- and post-index) and
+  LDNP/STNP. LDXR/LDAXR/STXR/STLXR/LDAR/STLR, each with B/H forms.
+- Floating point (`fp-armv8`): FMOV (register, general register including
+  `Vn.D[1]`, imm8, and `#0.0` as ZR); FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FNMUL;
+  FABS/FNEG/FSQRT/FRINT{N,P,M,Z,A,X,I}; FCVT; FMADD/FMSUB/FNMADD/FNMSUB;
+  FCMP/FCMPE (including `#0.0`); FCCMP/FCCMPE; FCSEL. FCVT{N,A,P,M,Z}{S,U} and
+  SCVTF/UCVTF take general registers (with fixed-point `#fbits` where the
+  architecture has it) or the AdvSIMD scalar same-size form.
+- NEON element moves: UMOV/SMOV/INS/DUP and their MOV aliases.
+- AdvSIMD forms compilers emit:
+  - MOVI/MVNI and ORR/BIC immediates, including `lsl`/`msl` and the 64-bit
+    byte-mask form (`movi d0, #0000000000000000`), and FMOV vector immediates;
+  - MVN/NOT and EXT;
+  - XTN{2}; SHL, SSHR, USHR, SSRA and USRA (vector, or scalar D);
+  - SSHLL/USHLL{2} and their SXTL/UXTL{2} aliases;
+  - SADDL/UADDL/SSUBL/USUBL/SMULL/UMULL/SMLAL/UMLAL/SMLSL/UMLSL{2};
+  - CMEQ/CMGE/CMGT/CMLE/CMLT against `#0`;
+  - single-lane LD1/ST1 (`{ v0.s }[1], [x0]`, optionally post-indexed).
+- System: DMB/DSB (named or `#imm` option), ISB, CLREX, BRK/HLT/SVC/HVC/SMC/UDF.
+  MRS/MSR accept NZCV, DAIF, FPCR, FPSR, TPIDR_EL0, TPIDRRO_EL0, CTR_EL0,
+  DCZID_EL0, CNTFRQ_EL0, CNTPCT_EL0, CNTVCT_EL0, MIDR_EL1, MPIDR_EL1 and
+  CurrentEL; MSR refuses the read-only names. Barrier immediates are limited
+  to the twelve named options. The generic `s<op0>_<op1>_c<n>_c<m>_<op2>`
+  spelling stays with the system-register owner. The system owners' own rows remain gated to the Apple M1
+  profile, so on other targets these spellings reach this encoder.
+- Feature-gated: half-precision operands need `fullfp16`; LSE
+  LD{ADD,CLR,EOR,SET,SMAX,SMIN,UMAX,UMIN}, ST<op>, SWP and CAS (each with
+  `A`/`AL`/`L` and `B`/`H` suffixes) need `lse`. Apple M1 has both. Without the
+  feature the diagnostic names it.
+
+Writeback whose base register is also a transfer register, and an LDP whose two
+destinations are the same register, are operand diagnostics, as in llvm-mc.
+
+Not in this vocabulary, and still refused unless another owner accepts them:
+
+- symbolic or relocated operands such as `:lo12:` and labels (the control owner
+  handles label LDR);
+- CASP, LDAPR (RCPC), LDTR/STTR, BFC, CRC32 and pointer authentication;
+- AdvSIMD forms beyond the list above that the direct SIMD owner does not
+  cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
+  multi-register or replicating structure loads and stores.
+
+`tools/aarch64_assembler_census.py` assembles every constant instruction line
+Clang emits for the `tests/*.c` fixtures with both Buster and llvm-mc and
+compares the disassembly. LLVM is a test-time oracle only. The script fails
+on any encoding difference, and on any refusal whose mnemonic is not in its
+documented-unsupported list.
 
 Integer data expressions retain `.` as the current field's section-relative
 address, including each separate operand in a comma-separated directive.
@@ -518,10 +597,11 @@ contribute one and two bytes to `.init` and any padding between them would
 run as code.
 
 AArch64 units fold same-section, binding-invariant `b`, `bl`, `b.cond`,
-`cbz`/`cbnz`, and `tbz`/`tbnz` references using the shared control semantic
-fixup, including signed addends and numeric labels. Out-of-range or unaligned
-references are diagnosed at their physical source position. Undefined,
-cross-section, weak, and default-visible ELF global short branches are refused
+`cbz`/`cbnz`, `tbz`/`tbnz` and LDR (literal, W/X/SW and S/D/Q destinations)
+references using the shared control semantic fixup, including signed addends
+and numeric labels. Out-of-range or unaligned references are diagnosed at
+their physical source position. Undefined, cross-section, weak, and
+default-visible ELF global short branches and literal loads are refused
 because the object model cannot retain their relocation families; `b`/`bl`
 retain the existing object relocations. This unit-local capability does not
 enable machine inline-asm private-label expansion. The registered driver

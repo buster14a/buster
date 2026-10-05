@@ -19,6 +19,7 @@
 // compiler_driver_test_wasm_bit_counts checks direct canonical semantic widths.
 // compiler_driver_test_wasm_switch_images checks typed selector/key equality.
 // compiler_driver_test_quoted_assembly_round_trip covers printed string/call symbols.
+// compiler_driver_test_aarch64_assembly_round_trip reassembles AArch64 -S listings.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
 // the optional independent Clang cross-assembly observer.
 // compiler_driver_test_bare_dwarf_sections checks flag-less DWARF source names
@@ -4225,6 +4226,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_quoted_assembly_round_tr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_object_text(ObjectFile const* object)
+{
+    ByteSlice text = {0};
+    for (u32 section = 0; section < object->section_count && !text.pointer; section += 1)
+    {
+        if (object->sections[section].kind == OBJECT_SECTION_TEXT)
+        {
+            text = object->sections[section].data;
+        }
+    }
+    return text;
+}
+
+// An AArch64 `-S` listing reassembles to the text bytes direct `-c` writes
+// (#2673): frames (`stp`/`ldp` pre/post-index, `mov x29, sp`), calls, arrays,
+// loops, shifts, selects and wide immediates, under every allocator. Listings
+// that print `.word` (floating point, division and narrowing on the printer
+// side) depend on the AArch64 `.word` width tracked in #1282 and stay out of
+// this fixture until it lands.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_assembly_round_trip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("aarch64-round-trip"), S8(".c"));
+    String8 listing = buster_test_temporary_path(arena, S8("aarch64-round-trip-listing"), S8(".s"));
+    String8 listing_object = buster_test_temporary_path(arena, S8("aarch64-round-trip-listing"), S8(".o"));
+    String8 direct_object = buster_test_temporary_path(arena, S8("aarch64-round-trip-direct"), S8(".o"));
+    bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "extern long observe(long, long, char const*);\n"
+        "struct pair { long a; long b; long c[3]; };\n"
+        "static long table[8] = {3, 1, 4, 1, 5, 9, 2, 6};\n"
+        "long frame_calls(long n, long m, unsigned long u)\n"
+        "{\n"
+        "    long local[16];\n"
+        "    struct pair p = {n, m, {1, 2, 3}};\n"
+        "    for (long i = 0; i < 16; i += 1) local[i] = i * n + table[i & 7];\n"
+        "    long total = 0;\n"
+        "    for (long i = 0; i < n && i < 16; i += 1) total += local[i] * (i + 1) - (long)(u >> (i & 7));\n"
+        "    total ^= (m << 3) | (m >> 2);\n"
+        "    total += p.c[n & 1] + (n > 3 ? -1 : 7) + observe(total, p.b, \"frame\");\n"
+        "    return observe(total, total * m, \"again\") + local[n & 15];\n"
+        "}\n")));
+    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    for (u32 mode = 0; BUSTER_REQUIRE(arguments, written) && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        String8 allocator = string_format(arena, S8("-fregister-allocator={S8}"), modes[mode]);
+        String8 print_command[] = {S8("-target"), S8("aarch64-linux"), S8("-g0"), allocator, S8("-S"), source, S8("-o"), listing};
+        CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print_command)));
+        String8 direct_command[] = {S8("-target"), S8("aarch64-linux"), S8("-g0"), allocator, S8("-c"), source, S8("-o"), direct_object};
+        CompilerDriverResult direct = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_command)));
+        BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+        BUSTER_TEST_RAW(arguments, direct.error == COMPILER_DRIVER_ERROR_NONE && direct.has_object, direct.diagnostic);
+        if (printed.error == COMPILER_DRIVER_ERROR_NONE && direct.error == COMPILER_DRIVER_ERROR_NONE && direct.has_object)
+        {
+            String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, string_first_sequence(assembly, S8("stp x29, x30, [sp, #-0x10]!")) != BUSTER_STRING_NO_MATCH &&
+                                       string_first_sequence(assembly, S8(".word")) == BUSTER_STRING_NO_MATCH);
+            String8 assemble_command[] = {S8("-target"), S8("aarch64-linux"), S8("-c"), listing, S8("-o"), listing_object};
+            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble_command)));
+            BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, assembled.diagnostic);
+            if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+            {
+                ByteSlice expected = compiler_driver_test_object_text(&direct.object);
+                ByteSlice actual = compiler_driver_test_object_text(&assembled.object);
+                BUSTER_TEST_RAW(arguments, expected.length && expected.length == actual.length &&
+                                               memcmp(expected.pointer, actual.pointer, expected.length) == 0, allocator);
+            }
+        }
+    }
+    os_file_delete(source);
+    os_file_delete(listing);
+    os_file_delete(listing_object);
+    os_file_delete(direct_object);
+    scratch_end(temporary);
+    return result;
+}
+
 // Assemble through both suffix inference and explicit -x selection, serialize
 // the objects, and compare the complete text against independent literal words.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_statements(UnitTestArguments* arguments)
@@ -4288,7 +4370,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_statements(Unit
     String8 input = buster_test_temporary_path(arena, S8("assembly-postindex-refusal"), S8(".s"));
     String8 output = buster_test_temporary_path(arena, S8("assembly-postindex-refusal"), S8(".o"));
     String8 sentinel = S8("existing object stays intact");
-    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8(".text\nldr x1, [x2], #8\n"))) &&
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8(".text\nldr x1, [x2], #256\n"))) &&
         file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
     {
         String8 command[] = {S8("-target"), targets[1], S8("-c"), input, S8("-o"), output};
@@ -19061,6 +19143,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bare_dwarf_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_assembly_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_control_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);

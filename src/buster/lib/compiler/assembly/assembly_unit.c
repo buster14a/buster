@@ -1524,7 +1524,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_aarch64_control_relocation(AssemblyReloca
 {
     return kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26 || kind == ASSEMBLY_RELOCATION_AARCH64_CALL26 ||
            kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 || kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ||
-           kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+           kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14 || kind == ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19;
 }
 
 // Decode the retained word through the shared semantic owner before applying
@@ -1554,7 +1554,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_aarch64_control_fixup(AssemblyUnitBuilder
                 (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CALL26 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_CALL26) ||
                 (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) ||
                 (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) ||
-                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14);
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14) ||
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_LITERAL19);
     }
     u32 patched = 0;
     BusterAarch64ControlFixupResult fixup = {0};
@@ -1650,6 +1651,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
         {
             String8 mnemonic = relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 ? S8("b.cond")
                                : relocation.kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ? S8("cbz/cbnz")
+                               : relocation.kind == ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19 ? S8("ldr (literal)")
                                                                                            : S8("tbz/tbnz");
             builder->line = builder->relocation_lines[index];
             builder->column = builder->relocation_columns[index];

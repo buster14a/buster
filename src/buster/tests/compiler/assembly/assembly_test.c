@@ -2905,6 +2905,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArgumen
         {S8("add x0, x1, x2"), 0x8b020020},
         {S8("mov x0, x1"), 0xaa0103e0},
         {S8("add x3, x4, w5, uxtw #2"), 0x8b254883},
+        // Base A64 encoder forms (#2673); llvm-mc 18.1.3 encodings. The
+        // post-index form keeps its writeback.
+        {S8("ldr x1, [x2], #8"), 0xf8408441},
+        {S8("mov sp,#1"), 0xb24003ff},
+        {S8("mov x0,#-1"), 0x92800000},
+        {S8("mov x0,#65536"), 0xd2a00020},
     };
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(arm_targets); target_index += 1)
     {
@@ -2927,13 +2933,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArgumen
             BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && unit.section_count == 1 &&
                 assembly_test_bytes_equal(unit.sections[0].data, expected, sizeof(expected)), source);
         }
-        // Post-index is outside the current scalar-memory grammar. Retaining
-        // its immediate must refuse the complete form, never erase writeback.
-        AssemblyUnitResult refused = assembly_unit_encode(arguments->arena, S8(".text\nldr x1, [x2], #8\n"),
+        // A post-index immediate outside the signed nine-bit range refuses the
+        // complete form rather than erasing writeback.
+        AssemblyUnitResult refused = assembly_unit_encode(arguments->arena, S8(".text\nldr x1, [x2], #256\n"),
             (AssemblyEncodeOptions){.target = target});
         BUSTER_TEST(arguments, refused.diagnostic_count == 1);
-        String8 invalid_moves[] = {S8("mov sp,#1"), S8("mov x0,#-1"), S8("mov x0,#65536"),
-                                  S8("mov x0,missing"), S8("mov x0,#1,"), S8("mov x0,#1,x1")};
+        String8 invalid_moves[] = {S8("mov wsp,#0x123456789"), S8("mov x0,missing"), S8("mov x0,#1,"), S8("mov x0,#1,x1")};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_moves); index += 1)
         {
             AssemblyEncodeResult invalid_move = assembly_encode(arguments->arena, invalid_moves[index],
@@ -7120,7 +7125,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8("ldr w0, [w1]\n"
            "str sp, [x1]\n"
            "ldrb x0, [x1]\n"
-           "strh w0, [x1, #1]\n"
+           "strh w0, [x1, #-257]\n"
            "ldr x0, [xzr]\n"
            "ldr x0, [x1, #32768]\n"),
         (AssemblyEncodeOptions){.target = aarch64_target});
@@ -9258,10 +9263,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("cmhi v0.8b, v1.8b, v2.b[0]\n"),
         S8_INITIALIZER("cmhs v0.8b, v1.8b, v2.8b, v3.8b\n"),
         S8_INITIALIZER("cmtst v0.8b, v1.8b\n"),
-        S8_INITIALIZER("cmeq v0.8b, v1.8b, #0\n"),
-        S8_INITIALIZER("cmge v0.4s, v1.4s, #0\n"),
         S8_INITIALIZER("cmgt d0, d1, #0\n"),
     };
+    // Vector compare-with-zero is owned by the base A64 encoder (#2673);
+    // llvm-mc 18.1.3 encodings.
+    AssemblyEncodeResult compare_zero = assembly_encode(arguments->arena, S8("cmeq v0.8b, v1.8b, #0\ncmge v0.4s, v1.4s, #0\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, compare_zero.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(compare_zero.bytes, (u8 const[]){0x20, 0x98, 0x20, 0x0e, 0x20, 0x88, 0xa0, 0x6e}, 8));
     for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_aarch64_advsimd_compare); malformed_index += 1)
     {
         AssemblyEncodeResult malformed = assembly_encode(
@@ -10061,13 +10070,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     static u8 const expected_orr_alias_condition[] = {0x20, 0x1c, 0xa1, 0x0e};
     BUSTER_TEST(arguments, orr_alias_condition.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(orr_alias_condition.bytes, expected_orr_alias_condition, 4));
-    /* MVN/MOV aliases stay outside the direct canonical spelling table. */
+    /* MVN/MOV aliases stay outside the direct canonical spelling table; the
+       base A64 encoder (#2673) owns them as NOT and ORR (llvm-mc 18.1.3). */
     AssemblyEncodeResult mvn_alias = assembly_encode(
         arguments->arena, S8("mvn v0.8b, v1.8b\n"), (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
     AssemblyEncodeResult mov_alias = assembly_encode(
         arguments->arena, S8("mov v0.8b, v1.8b\n"), (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
-    BUSTER_TEST(arguments, mvn_alias.diagnostic_count == 1 && mvn_alias.bytes.length == 0);
-    BUSTER_TEST(arguments, mov_alias.diagnostic_count == 1 && mov_alias.bytes.length == 0);
+    BUSTER_TEST(arguments, mvn_alias.diagnostic_count == 0 && assembly_test_bytes_equal(mvn_alias.bytes, (u8 const[]){0x20, 0x58, 0x20, 0x2e}, 4));
+    BUSTER_TEST(arguments, mov_alias.diagnostic_count == 0 && assembly_test_bytes_equal(mov_alias.bytes, expected_orr_alias_condition, 4));
     static String8 const malformed_aarch64_direct_simd_final3[] = {
         S8_INITIALIZER("dup v0.2d, w1\n"),
         S8_INITIALIZER("dup v0.2d, wzr\n"),
@@ -10157,10 +10167,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, S8("blraa x1, sp\n"), (AssemblyEncodeOptions){.target = aarch64_m1_no_pauth});
     BUSTER_TEST(arguments, aarch64_direct_gpr_no_pauth.diagnostic_count == 1 &&
                                aarch64_direct_gpr_no_pauth.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    // The M1-provenanced direct-GPR rows stay target-gated; on a generic
+    // target the base A64 encoder (#2673) owns ADCS (llvm-mc 18.1.3).
     AssemblyEncodeResult aarch64_direct_gpr_generic = assembly_encode(
         arguments->arena, S8("adcs w1, w2, w3\n"), (AssemblyEncodeOptions){.target = aarch64_target});
-    BUSTER_TEST(arguments, aarch64_direct_gpr_generic.diagnostic_count == 1 &&
-                               aarch64_direct_gpr_generic.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+    BUSTER_TEST(arguments, aarch64_direct_gpr_generic.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_direct_gpr_generic.bytes, (u8 const[]){0x41, 0x00, 0x03, 0x3a}, 4));
 
     AssemblyEncodeResult aarch64_system = assembly_encode(
         arguments->arena,
@@ -10266,9 +10278,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_system_transaction.diagnostic_count == 1 &&
                                assembly_test_bytes_equal(aarch64_system_transaction.bytes, expected_aarch64_system_transaction,
                                                          sizeof(expected_aarch64_system_transaction)));
+    // The system owners' rows are gated to the M1 profile; the base A64
+    // encoder (#2673) owns these base spellings on generic targets.
     AssemblyEncodeResult aarch64_system_generic = assembly_encode(
         arguments->arena, S8("brk #1\nmrs x0, nzcv\n"), (AssemblyEncodeOptions){.target = aarch64_target});
-    BUSTER_TEST(arguments, aarch64_system_generic.diagnostic_count == 2 && aarch64_system_generic.bytes.length == 0);
+    BUSTER_TEST(arguments, aarch64_system_generic.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_system_generic.bytes,
+                                                         (u8 const[]){0x20, 0x00, 0x20, 0xd4, 0x00, 0x42, 0x3b, 0xd5}, 8));
     AssemblyEncodeResult aarch64_system_register_generic = assembly_encode(
         arguments->arena,
         S8("mrs x0, fpsr\n"
@@ -10291,7 +10307,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena,
         S8("mrs w0, fpsr\n"
            "msr fpcr, w0\n"
-           "mrs x0, nzcv\n"
+           "msr ctr_el0, x0\n"
            "mrs x0, S3_3_C7_C8_1\n"),
         (AssemblyEncodeOptions){.target = aarch64_inline_baseline_target});
     BUSTER_TEST(arguments, aarch64_system_register_generic_invalid.diagnostic_count == 4 &&
