@@ -2085,6 +2085,9 @@ BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_const
 BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                                        CScopeId scope, u32 start, u32 end, String8* syntax_error,
                                                                        u32* syntax_token, u32* member_alignment);
+BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                                            CScopeId scope, u32 start, u32 end, bool sizeof_expression_query,
+                                                                            String8* syntax_error, u32* syntax_token, u32* member_alignment);
 BUSTER_C_INTERNAL u32 c_parse_type_member_alignment_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                            CScopeId scope, u32 start, u32 end);
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
@@ -23566,6 +23569,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         u32 operand_start = start + 1;
         u32 operand_end = end;
         CTypeId type = C_TYPE_ID_INVALID;
+        bool refused = false;
         if (c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
             c_parse_matching_delimiter_indexed(result, preprocess, operand_start) + 1 == end)
         {
@@ -23603,11 +23607,13 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             {
                 type = C_TYPE_ID_INVALID;
             }
+            refused = machine->enum_sizeof_expression_query && type.value < result->type_count;
         }
-        if (machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_ENUM && type.value >= result->type_count)
+        if (!refused && machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_ENUM && type.value >= result->type_count)
         {
             c_parse_expression_type_query(machine, arena, preprocess, result, scope, operand_start, operand_end, &type);
         }
+        refused |= machine->enum_sizeof_expression_query && type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION;
         u64 size = 0;
         u32 alignment = 0;
         CTypeParseMachine* layout_machine = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE ? 0 : machine;
@@ -23617,18 +23623,26 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         bool is_alignof = c_parse_alignof_word(spelling);
         bool member_valid = !is_alignof || c_semantic_alignof_member(arena, preprocess, result, scope, operand_start, operand_end, &member_alignment);
         bool member_answer = is_alignof && (!member_valid || member_alignment != 0);
-        value.valid = member_answer ? member_valid : machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_ENUM
+        value.valid = member_answer ? member_valid : !refused && (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_ENUM
             ? c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope, operand_start, operand_end, &size, &alignment)
-            : c_parse_type_layout(layout_machine, arena, preprocess, result, type, &size, &alignment);
+            : c_parse_type_layout(layout_machine, arena, preprocess, result, type, &size, &alignment));
         if (member_answer) alignment = member_alignment;
-        if (!member_answer && !value.valid && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE)
+        if (!member_answer && !refused && !value.valid && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE)
         {
             // An earlier incomplete array's plain initializer may establish
             // its size before semantic completion publishes the inferred count.
             value.valid = c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope,
                                                                     operand_start, operand_end, &size, &alignment);
         }
-        if (!member_answer && type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION)
+        if (!value.valid && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_ENUM && string_equal(spelling, S8("sizeof")))
+        {
+            // The live declaration-point model owns earlier pending facts.
+            // A private TYPE machine returns only the size, never a type ID.
+            CIntegerConstant query = c_parse_type_integer_constant_query_core(arena, preprocess, result, scope, start, end, true, 0, 0, 0);
+            value.valid = query.valid && !query.is_negative && !query.magnitude_high;
+            if (value.valid) size = query.magnitude;
+        }
+        if (!member_answer && !refused && type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION)
         {
             size = 1;
             alignment = 4;
@@ -24082,12 +24096,24 @@ BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseRes
     return supported;
 }
 
-BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+                                                                         bool sizeof_expression_query)
 {
     bool supported = true;
     for (u32 index = start; supported && index < end;)
     {
         u32 after = c_parse_skip_attributes(preprocess, index, end);
+        if (sizeof_expression_query)
+        {
+            // This partial enum fallback declines attributes and nested layout
+            // operators; type-only expression reads can hide their operands.
+            supported = after == index;
+            if (supported && index != start && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+            {
+                String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+                supported = !string_equal(spelling, S8("sizeof")) && !c_parse_alignof_word(spelling);
+            }
+        }
         if (after == index)
         {
             index += 1;
@@ -24117,9 +24143,9 @@ BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseRe
 // The caller supplies the semantic model at the expression's declaration point.
 // A full-unit model may contain later bindings and tag completions; deferred
 // consumers must freeze their operand facts before using this reader.
-BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                                       CScopeId scope, u32 start, u32 end, String8* syntax_error,
-                                                                       u32* syntax_token, u32* member_alignment)
+BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                                            CScopeId scope, u32 start, u32 end, bool sizeof_expression_query,
+                                                                            String8* syntax_error, u32* syntax_token, u32* member_alignment)
 {
     CIntegerConstant constant = {.type = C_TYPE_ID_INVALID};
     if (member_alignment) *member_alignment = 0;
@@ -24193,7 +24219,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         query.expression_scalar_types = scalar_types;
         CTypeLayoutStatistics statistics = {0};
         query.type_layout_statistics = &statistics;
-        bool supported = c_parse_type_constant_vector_arguments_supported(&query, preprocess, start, end);
+        bool supported = c_parse_type_constant_vector_arguments_supported(&query, preprocess, start, end, sizeof_expression_query);
         bool single = end == start + 1;
         u32 capacity = single || !supported ? 0 : end - start + 16;
         CTypeParseMachine query_machine = {
@@ -24206,6 +24232,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
             .mutation_capacity = capacity,
             .expression_task_capacity = capacity,
             .constant_evaluation_mode = C_CONSTANT_EVALUATION_TYPE,
+            .enum_sizeof_expression_query = sizeof_expression_query,
         };
         u32 error_token = start;
         CParseResult syntax_checkpoint = query;
@@ -24282,6 +24309,14 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* ar
         scratch_end(model_temporary);
     }
     return constant;
+}
+
+BUSTER_C_INTERNAL CIntegerConstant c_parse_type_integer_constant_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                                       CScopeId scope, u32 start, u32 end, String8* syntax_error,
+                                                                       u32* syntax_token, u32* member_alignment)
+{
+    return c_parse_type_integer_constant_query_core(arena, preprocess, result, scope, start, end, false, syntax_error, syntax_token,
+                                                    member_alignment);
 }
 
 BUSTER_C_INTERNAL BUSTER_UNUSED_DECL CIntegerConstant c_parse_type_integer_constant(Arena* arena,
@@ -27879,11 +27914,12 @@ BUSTER_C_INTERNAL String8 c_parse_asm_constraint_shape(String8 text, bool output
 {
     String8 message = {0};
     bool modifier = text.length == 2 || (text.length == 3 && text.pointer[1] == '&');
-    if (output && (!modifier || (text.pointer[0] != '=' && text.pointer[0] != '+')))
+    bool register_union = c_semantic_asm_register_alternative(text, output) != IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+    if (!register_union && output && (!modifier || (text.pointer[0] != '=' && text.pointer[0] != '+')))
     {
         message = S8("malformed asm output constraint");
     }
-    else
+    else if (!register_union)
     {
         u64 prefix = output ? text.length - 1 : 0;
         String8 classes = output ? S8("abcdSDrmxt") : S8("abcdSDrmxtuX");
@@ -28092,7 +28128,9 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                     }
                     if (!message.length && text.length && operand_end < section_end)
                     {
-                        u64 constraint = c_parse_asm_register_class(text.pointer[output ? text.length - 1 : 0]);
+                        u64 constraint = c_semantic_asm_register_alternative(text, output);
+                        if (constraint == IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
+                            constraint = c_parse_asm_register_class(text.pointer[output ? text.length - 1 : 0]);
                         bool matching = !output && (text.pointer[0] == '[' || (text.pointer[0] >= '0' && text.pointer[0] <= '9'));
                         u32 match = UINT32_MAX;
                         CScopeId scope = c_parse_scope_for_token(result, declaration->scope, operand_start);
@@ -28159,7 +28197,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                             if (!message.length) message = c_parse_asm_bound_register(machine, result, preprocess, scope, operand_start, operand_end, &constraint);
                             constraint |= output ? IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT : 0;
                             constraint |= output && text.pointer[0] == '+' ? IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE : 0;
-                            constraint |= output && text.length == 3 ? IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER : 0;
+                            constraint |= output && text.pointer[1] == '&' ? IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER : 0;
                         }
                         operands[operand_count] = (CSemanticAsmOperand){.name = operand_name, .size = scalar.layout.size, .type_class = type_class};
                         constraints[operand_count++] = constraint;
@@ -28203,6 +28241,8 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
         if (!message.length && separator_count >= 3 && separator_count <= 4)
         {
             u32 limit = separator_count == 4 ? separators[3] : close;
+            String8* clobbers = arena_allocate(machine->scratch_arena, String8, limit - separators[2]);
+            u32 clobber_count = 0;
             for (u32 cursor = separators[2] + 1; !message.length && cursor < limit; cursor += 1)
             {
                 if (preprocess.tokens[cursor].kind == C_TOKEN_STRING_LITERAL)
@@ -28210,17 +28250,24 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                     CIrDecodedString decoded = {0};
                     bool valid = c_ir_decode_string_literal_range_for_target(machine->scratch_arena, preprocess, preprocess.target, cursor, cursor + 1, result->string_literals, &decoded);
                     valid &= decoded.element_width == 1;
-                    stack_clobber |= valid && string_equal((String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count}, S8("st"));
+                    String8 clobber = c_semantic_asm_clobber_name(preprocess.target,
+                        (String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count});
+                    stack_clobber |= valid && string_equal(clobber, S8("st"));
                     rbx_clobber |= valid && c_semantic_asm_clobber_matches_constraint(preprocess.target,
-                        (String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count}, IR_INLINE_ASSEMBLY_CONSTRAINT_B);
-                    if (!valid || !c_semantic_asm_clobber_valid(preprocess.target, (String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count}))
+                        clobber, IR_INLINE_ASSEMBLY_CONSTRAINT_B);
+                    if (!valid || !c_semantic_asm_clobber_valid(preprocess.target, clobber))
                     {
                         message = S8("unsupported GNU inline assembly clobber");
                     }
+                    for (u32 previous = 0; !message.length && previous < clobber_count; previous += 1)
+                    {
+                        if (string_equal(clobbers[previous], clobber)) message = S8("unsupported GNU inline assembly clobber");
+                    }
+                    if (!message.length) clobbers[clobber_count++] = clobber;
                     for (u32 operand = 0; !message.length && operand < operand_count; operand += 1)
                     {
                         if (c_semantic_asm_clobber_matches_constraint(preprocess.target,
-                            (String8){.pointer = (char8*)decoded.bytes.pointer, .length = decoded.element_count}, constraints[operand]))
+                            clobber, constraints[operand]))
                             message = S8("asm operand constraint conflicts with its clobber list");
                     }
                 }

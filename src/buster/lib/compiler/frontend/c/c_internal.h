@@ -1269,6 +1269,8 @@ struct CTypeParseMachine
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool type_identity_queries_active;
+    // Only the private fallback for failed ENUM sizeof expression leaves.
+    bool enum_sizeof_expression_query;
     // How many GNU `_Alignof(object)` evaluations of an object's alignment
     // records enclose this one, and whether one of them hit
     // C_ALIGNOF_OBJECT_DEPTH_LIMIT; see c_parse_alignof_object_alignment.
@@ -1286,6 +1288,7 @@ struct CParsePromotedMemberWork
 };
 
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);
+BUSTER_C_EXTERN String8 c_semantic_asm_clobber_name(Target target, String8 clobber);
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint);
 
 BUSTER_C_EXTERN void c_parse_index_declarations(CParseResult* result, Arena* arena);
@@ -1312,6 +1315,10 @@ struct CIrConstantValue
     u64 integer_high;
     f64 floating;
     CIrConstantValueKind kind;
+    // Set only on the value a function identifier folds to, which is already
+    // its decayed pointer. Unary `&` accepts exactly that value, so `&f` is
+    // `f`; every operator result clears it, keeping `&(rvalue)` refused.
+    bool function_designator;
 };
 
 BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
@@ -1376,6 +1383,8 @@ BUSTER_C_EXTERN bool c_semantic_asm_vector_operand(IrType* type);
 BUSTER_C_EXTERN bool c_semantic_asm_x87_operand(IrType* type);
 
 BUSTER_C_EXTERN bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_out);
+
+BUSTER_C_EXTERN u64 c_semantic_asm_register_alternative(String8 text, bool output);
 
 BUSTER_C_EXTERN u64 c_semantic_asm_bound_register(Target target, String8 label);
 
