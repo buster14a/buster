@@ -553,20 +553,17 @@ Not in this vocabulary, and still refused unless another owner accepts them:
   cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
   multi-register or replicating structure loads and stores.
 
-`tools/aarch64_assembler_census.py` assembles every constant instruction line
-Clang emits for the `tests/*.c` fixtures with both Buster and llvm-mc and
-compares the disassembly. LLVM is a test-time oracle only. The script fails
-closed:
-- on any encoding difference;
-- on any refusal that matches none of its documented-unsupported operand
-  shapes;
-- on an observer failure;
-- on an empty or uncompared corpus.
+`aarch64_base_assembly_tests` checks the encoder against llvm-mc-derived words
+for each family, plus refusal and feature-gating controls. The driver round
+trip `compiler_driver_test_aarch64_assembly_round_trip` reassembles `-S` output
+under every allocator. A corpus-wide differential census against llvm-mc
+(26,350 of 26,351 constant lines identical, 0 different, one documented
+refusal) was recorded on #2688. Its native, #2467-compliant reimplementation
+is tracked in [#2695](https://github.com/buster14a/buster/issues/2695).
 
-It reports fixtures Clang cannot compile. `tools/aarch64_assembler_census_test.py`
-pins this behavior with stub tools. Arrangement suffixes and lane indices
-accept only unsigned decimal architectural spellings: `v1.-16b`, `v1.0x10b` and
-`v1.s[0x1]` are operand diagnostics.
+Arrangement suffixes and lane indices accept only unsigned decimal
+architectural spellings: `v1.-16b`, `v1.0x10b` and `v1.s[0x1]` are operand
+diagnostics.
 
 Integer data expressions retain `.` as the current field's section-relative
 address, including each separate operand in a comma-separated directive.

@@ -11,9 +11,9 @@
 // frame pairs, unscaled and register-offset transfers, MOV/shift/select
 // aliases, scalar multiply and floating point, element moves, barriers,
 // exception generation, MRS/MSR, common AdvSIMD forms and LSE.
-// Expected words are llvm-mc 18.1.3 `-show-encoding` output; the census in
-// tools/aarch64_assembler_census.py repeats the comparison over the
-// compiler-emitted fixture corpus.
+// Expected words are llvm-mc 18.1.3 `-show-encoding` output. The corpus-wide
+// census over compiler-emitted fixtures is recorded on #2688; its native
+// reimplementation is tracked by #2695.
 
 typedef struct Aarch64BaseAssemblyCase Aarch64BaseAssemblyCase;
 struct Aarch64BaseAssemblyCase
