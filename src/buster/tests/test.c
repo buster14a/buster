@@ -959,7 +959,9 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
 #endif
     [TEST_ID_IR] = {S8_INITIALIZER("ir_tests"), &ir_tests},
     [TEST_ID_IR_ORACLE] = {S8_INITIALIZER("ir_oracle_tests"), &ir_oracle_tests, true},
-    [TEST_ID_IR_ORACLE_NATIVE] = {S8_INITIALIZER("ir_oracle_native_tests"), &ir_oracle_native_tests, true},
+    // This re-exec payload uses only in-memory mappings. Its timeout child is
+    // killed before final cleanup, so leave unused temporary roots unallocated.
+    [TEST_ID_IR_ORACLE_NATIVE] = {S8_INITIALIZER("ir_oracle_native_tests"), &ir_oracle_native_tests, false},
     [TEST_ID_VECTOR_CONTRACT] = {S8_INITIALIZER("vector_contract_tests"), &vector_contract_tests},
     [TEST_ID_LLVM_BITCODE] = {S8_INITIALIZER("llvm_bitcode_tests"), &llvm_bitcode_tests},
     [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
