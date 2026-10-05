@@ -484,10 +484,20 @@ immediate field as wide as its operand takes either interpretation, so
 an all-ones 64-bit literal is the sign-extended -1. Deliberate differences from
 GNU as: values outside -2^(w-1)..2^w-1 and negative shift counts are diagnosed
 rather than wrapped, and a `movabs` value that fits a sign-extended imm32
-takes the shorter `mov` row. The `moffs` forms of `movabs`, `ret`/`retq` with
-an immediate, multi-byte `nop` with operands, and the short accumulator ALU
-forms (`and al, imm8` encodes as `80 /4 ib`, a byte longer than GNU's `24 ib`)
-are tracked in [#2680](https://github.com/buster14a/buster/issues/2680).
+takes the shorter `mov` row. `ret`/`retq` with an immediate (`c2 imm16`), a
+multi-byte `nop` with a register or memory operand (`nopw 0(%rax,%rax,1)`,
+`nopl 0x0(%rax)`, `nop %eax`, Intel `nop word ptr [rax + rax]`; always the
+`0F 1F /0` encoding) and the `movabs` moffs forms (`movabsq 0x1122334455667788, %rax`
+and the store, `a0`..`a3` in every width, Intel `movabs rax, ds:addr`) assemble
+to GNU's bytes; a moffs `movabs` forces the moffs row even when the address
+would fit a ModRM disp32, and a symbolic address is not accepted. A bare `cs`
+or `ds` instruction prefix before an AT&T mnemonic and unsized AT&T `nop mem`
+are not accepted (write `%cs:` in the operand and `nopl`). Known remaining
+deviations in encoding choice ([#2680](https://github.com/buster14a/buster/issues/2680)):
+the short accumulator ALU forms (`and al, imm8` encodes as `80 /4 ib`, a byte
+longer than GNU's `24 ib`) and the register-register `movq %xmm3, %xmm9` form
+choice; both are equal-value encodings left alone because changing them would
+change shared encoder selection.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`
 and their dot-delimited suffixes, exact `.init`/`.fini`, and the existing

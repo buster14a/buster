@@ -9373,13 +9373,15 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                     filter_view = &filter_storage;
                 }
                 if (!filter_parsed) continue;
-                // The public one-memory NOP spelling is the architectural 0F 1F /0
-                // padding form.  XED also indexes decode-only 0F 18/19 aliases under
+                // The public one-memory or one-register NOP spelling is the architectural
+                // 0F 1F /0 padding form.  XED also indexes decode-only 0F 18/19 aliases under
                 // the NOP mnemonic; keep those aliases out of source/link selection.
                 if (buster_x86_metadata_input_string_equal(query.mnemonic, S8("NOP")) && query.operand_count == 1 &&
-                    query.operands && query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                    query.operands && (query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY ||
+                                       query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) &&
                     filter_view->opcode_count >= 2 && filter_view->opcode[0] == 0x0f && filter_view->opcode[1] != 0x1f)
                     continue;
+                if (query.source_moffs && !buster_x86_metadata_emit_is_moffs(form, *filter_view)) continue;
                 bool x87_free_pop = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87")) &&
                                     buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FFREEP"));
                 if ((!x87_free_pop && buster_x86_metadata_emit_string_has(form.attributes, S8("UNDOCUMENTED"))) ||
