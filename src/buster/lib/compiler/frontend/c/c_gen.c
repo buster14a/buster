@@ -11468,6 +11468,9 @@ struct CIrExt80Value
     // The operand's own arithmetic rank, which decides where an operation on
     // it would round.  See c_ir_ext80_fold_apply.
     u8 rank;
+    // Unsigned integer domain after promotion, retained through grouping.
+    // Zero denotes a signed integer or any real floating value.
+    u8 unsigned_width;
 };
 
 // The real floating types in conversion-rank order: an operation rounds in
@@ -11637,19 +11640,24 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_round(CIrExt80Big const* numerator, CIrE
 // rounds to float before the multiply, not after it.
 BUSTER_C_INTERNAL bool c_ir_ext80_value_convert(CIrExt80Value* value, u8 rank)
 {
+    CIrExt80Value converted = *value;
     bool result = true;
-    if (value->rank != rank && rank != C_IR_EXT80_RANK_LONG_DOUBLE && !c_ir_ext80_value_is_special(*value) && value->significand)
+    if (converted.rank != rank && rank != C_IR_EXT80_RANK_LONG_DOUBLE && !c_ir_ext80_value_is_special(converted) && converted.significand)
     {
         CIrExt80Big numerator;
         CIrExt80Big denominator;
         s32 binary_exponent = 0;
         bool negative = false;
         c_ir_ext80_big_set_u64(&denominator, 1);
-        result = c_ir_ext80_value_rational(*value, &numerator, &binary_exponent, &negative) &&
-                 c_ir_ext80_value_round(&numerator, &denominator, binary_exponent, negative, rank, value);
+        result = c_ir_ext80_value_rational(converted, &numerator, &binary_exponent, &negative) &&
+                 c_ir_ext80_value_round(&numerator, &denominator, binary_exponent, negative, rank, &converted);
     }
-    value->rank = rank;
-
+    if (result)
+    {
+        converted.rank = rank;
+        converted.unsigned_width = 0;
+        *value = converted;
+    }
     return result;
 }
 
@@ -11676,6 +11684,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_special(CPunctuator op, CIrExt80Value le
     {
         *result_out = c_ir_ext80_value_is_nan(left) ? left : right;
         result_out->rank = rank;
+        result_out->unsigned_width = 0;
     }
     else
     {
@@ -11875,20 +11884,68 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_apply(CPunctuator op, CIrExt80Value left,
     return result;
 }
 
-// One numeric token as the long double value it converts to.  The three cases
-// are the literal's own type: an L-suffixed spelling is already this format, a
-// plain or f-suffixed spelling rounds to double or float first and widens
-// exactly, and an integer spelling converts from its own integer type, where a
-// leading minus on an unsigned literal wraps before the widening.
-//
-// A spelling whose magnitude does not fit its own type is not a refusal: C
-// gives it the infinity or the signed zero, and musl spells `INFINITY` as
-// `1e5000f` whenever the compiler does not offer the GNU builtins, which is
-// how an overflowing literal reaches a static initializer in the first place.
-BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 token_index, bool negative, CIrExt80Value* value_out)
+// Unary signs act in the operand's promoted integer domain until a real
+// conversion occurs. Integer values are exact here and need no rational core.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_unary(bool negative, CIrExt80Value* value)
+{
+    bool result = true;
+    if (negative)
+    {
+        if (value->rank != C_IR_EXT80_RANK_INTEGER)
+        {
+            value->exponent_sign ^= C_IR_EXT80_SIGN;
+        }
+        else if (value->unsigned_width)
+        {
+            u64 integer = 0;
+            if (value->significand)
+            {
+                u32 exponent = value->exponent_sign & C_IR_EXT80_SPECIAL_EXPONENT;
+                result = !(value->exponent_sign & C_IR_EXT80_SIGN) && exponent >= 16383 && exponent <= 16383 + 63 &&
+                         value->unsigned_width <= 64;
+                if (result)
+                {
+                    u32 shift = 63 - (exponent - 16383);
+                    u64 discarded = shift ? value->significand & (((u64)1 << shift) - 1) : 0;
+                    integer = value->significand >> shift;
+                    result = !discarded;
+                }
+            }
+            if (result)
+            {
+                integer = 0 - integer;
+                if (value->unsigned_width < 64)
+                {
+                    integer &= ((u64)1 << value->unsigned_width) - 1;
+                }
+                u32 shift = integer ? leading_zeroes_u64(integer) : 0;
+                value->significand = integer << shift;
+                value->exponent_sign = integer ? (u16)(16383 + 63 - shift) : 0;
+            }
+        }
+        else if (value->significand)
+        {
+            value->exponent_sign ^= C_IR_EXT80_SIGN;
+        }
+        else
+        {
+            value->exponent_sign = 0;
+        }
+    }
+    return result;
+}
+
+// One numeric token before any unary operator: a long-double spelling is
+// already in this format, while a float/double spelling first rounds in its
+// own format and widens exactly. An integer is exact and retains its promoted
+// unsigned domain until an operator or real conversion consumes it.
+// Overflow and underflow of real spellings retain their existing values.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 token_index, CIrExt80Value* value_out)
 {
     String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]);
     u64 significand = 0;
+    bool negative = false;
+    u8 unsigned_width = 0;
     u16 exponent_sign = 0;
     bool floating = c_number_is_float(spelling);
     char8 suffix = 0;
@@ -11954,24 +12011,9 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 
             {
                 return false;
             }
-            if (negative)
-            {
-                if (integer_type.is_signed)
-                {
-                    negative = integer != 0;
-                }
-                else
-                {
-                    integer = 0 - integer;
-                    if (integer_type.bit_width < 64)
-                    {
-                        integer &= ((u64)1 << integer_type.bit_width) - 1;
-                    }
-                    // Unary minus on an unsigned integer wraps in that
-                    // integer type before the conversion to long double.
-                    negative = false;
-                }
-            }
+            // Narrow unsigned literals promote to signed int before a unary
+            // operation; wider unsigned literals retain their modulo width.
+            unsigned_width = !integer_type.is_signed && integer_type.bit_width >= 32 ? (u8)integer_type.bit_width : 0;
             CIrExt80Big numerator;
             CIrExt80Big denominator;
             c_ir_ext80_big_set_u64(&numerator, integer);
@@ -11988,6 +12030,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 
             .significand = significand,
             .exponent_sign = exponent_sign,
             .rank = rank,
+            .unsigned_width = unsigned_width,
         };
     }
     else if (status == C_IR_ROUND_OVERFLOW)
@@ -12042,6 +12085,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
     if (c_token_is_punctuator(token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(token, C_PUNCTUATOR_MINUS))
     {
         bool negative = c_token_is_punctuator(token, C_PUNCTUATOR_MINUS);
+        u32 operator_index = fold->cursor;
         fold->cursor += 1;
         while (fold->cursor < fold->limit &&
                c_token_in_well_known_set(fold->preprocess.spelling_base, fold->preprocess.tokens[fold->cursor],
@@ -12051,11 +12095,10 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
         }
         if (fold->cursor < fold->limit && fold->preprocess.tokens[fold->cursor].kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
-            // A sign directly on a literal converts in that literal's own
-            // type, which is where the unsigned wrap has to happen.
+            // Direct and grouped operands use the same promoted-domain sign.
             u32 number = fold->cursor;
             fold->cursor += 1;
-            if (!c_ir_ext80_fold_number(fold->preprocess, number, negative, value_out))
+            if (!c_ir_ext80_fold_number(fold->preprocess, number, value_out) || !c_ir_ext80_fold_unary(negative, value_out))
             {
                 fold->blame = number;
                 return false;
@@ -12069,8 +12112,12 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
         {
             return false;
         }
-        value_out->exponent_sign ^= negative ? UINT16_C(0x8000) : 0;
-        return true;
+        bool applied = c_ir_ext80_fold_unary(negative, value_out);
+        if (!applied)
+        {
+            fold->blame = operator_index;
+        }
+        return applied;
     }
     if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
@@ -12098,7 +12145,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
     {
         u32 number = fold->cursor;
         fold->cursor += 1;
-        if (!c_ir_ext80_fold_number(fold->preprocess, number, false, value_out))
+        if (!c_ir_ext80_fold_number(fold->preprocess, number, value_out))
         {
             fold->blame = number;
             return false;
