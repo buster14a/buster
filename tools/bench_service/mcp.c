@@ -848,18 +848,21 @@ BUSTER_GLOBAL_LOCAL void bq_mcp_message(BqMcpSession* session, char const* socke
         u32 info = bq_mcp_member(&json, params, S8("clientInfo"));
         u32 capabilities = bq_mcp_member(&json, params, S8("capabilities"));
         String8 requested, client_name, client_version;
-        bool ok = !session->phase && bq_mcp_meta_valid(&json, params) && bq_mcp_text(&json, bq_mcp_member(&json, params, S8("protocolVersion")), &requested) &&
+        bool ok = bq_mcp_meta_valid(&json, params) && bq_mcp_text(&json, bq_mcp_member(&json, params, S8("protocolVersion")), &requested) &&
             capabilities < json.count && json.tokens[capabilities].kind == BQ_MCP_OBJECT &&
             bq_mcp_text(&json, bq_mcp_member(&json, info, S8("name")), &client_name) && client_name.length &&
             bq_mcp_text(&json, bq_mcp_member(&json, info, S8("version")), &client_version) && client_version.length;
-        if (!ok) bq_mcp_rpc_error(output, &json, id, -32602, "Invalid initialization or already initialized");
+        if (!ok) bq_mcp_rpc_error(output, &json, id, -32602, "Invalid initialization");
         else
         {
             bq_mcp_id(output, &json, id);
             bq_mcp_append(output, S8(",\"result\":{\"protocolVersion\":"));
             bq_mcp_string(output, string_equal(requested, S8("2025-06-18")) ? requested : S8(BQ_MCP_VERSION));
             bq_mcp_append(output, S8(",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"buster-bench-service\",\"version\":\"1\"},\"instructions\":\"Use bench_capabilities to check installed recipes. Native programs use typed begin/write/finish uploads and a native-execute-v1 or native-runtime-v1 submission with the manifest digest in both SHA fields. native-runtime-v1 returns diagnostic process-latency samples, not a qualified verdict. Compilation is unavailable. This adapter requires the authenticated Unix socket. Service capabilities identify local synchronous or unqualified off-host cached mode; the synchronous backend may time out while a job runs. bench_artifact_receipt and bench_artifact_read return the sealed result archive in bounded verified slices. EOF and MCP request cancellation do not cancel jobs; use bench_cancel.\"}}\n"));
-            session->phase = 1;
+            /* A tunnel keeps one stdio child for several logical clients.
+             * Valid initialization probes are idempotent; preserve readiness
+             * when another client initializes on the same authenticated pipe. */
+            if (!session->phase) session->phase = 1;
         }
     }
     else if (session->phase != 2) bq_mcp_rpc_error(output, &json, id, -32002, "Initialization is incomplete");

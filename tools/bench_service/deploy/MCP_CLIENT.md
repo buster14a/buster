@@ -92,6 +92,29 @@ associated with the tunnel. Those account facts must be verified in the actual
 workspace; a documentation example or successful local tool enumeration does
 not establish them. See the official [connection and testing guide](https://developers.openai.com/plugins/deploy/connect-chatgpt).
 
+A shared stdio tunnel can issue more than one valid `initialize` request to
+the same adapter process, including a setup probe followed by the actual
+client handshake. The adapter acknowledges each request and preserves an
+already ready transport. Invalid parameters still fail; initialization does
+not submit, cancel, reset or authenticate a job.
+
+For tunnel-client 0.0.14, enable its initialized-notification compatibility
+guard when connecting ChatGPT's legacy client path:
+
+```sh
+tunnel-client run --profile buster-bench \
+    --mcp.stdio-send-initialized-notification
+```
+
+This makes the tunnel send `notifications/initialized` after a successful
+initialization, and suppresses a later duplicate from the caller. The adapter
+still requires that notification before its first tool call. Use a service
+revision containing the shared-stdio fix; the notification guard alone cannot
+fix an older adapter that rejects a second initialization. Check the installed
+client's help for newer releases. See the official client's
+[protocol documentation](https://github.com/openai/tunnel-client/blob/v0.0.14/docs/protocol.md)
+for the opt-in guard.
+
 Keep credentials in operator-managed deployment storage. Do not put them in
 requests, source control, compiler workspaces, job artifacts or diagnostic logs.
 

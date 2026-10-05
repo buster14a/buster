@@ -674,7 +674,12 @@ executable directly with `mcp` and the operator-selected socket pathname;
 `build.sh` writes build output and must not be used as the stdio server command.
 The adapter negotiates `2025-11-25` or `2025-06-18`, supports initialization,
 ping, `tools/list` and `tools/call`, and writes only newline-delimited JSON-RPC
-to stdout. Diagnostics stay on stderr. No dependency, listener, privileged
+to stdout. Valid initialization requests are idempotent on the same stdio
+transport: a tunnel may run setup probes and several logical clients through
+one authenticated adapter process. A repeated request keeps an already ready
+transport ready; malformed initialization is still rejected without changing
+its state. The first initialization still requires `notifications/initialized`
+before tool calls. Diagnostics stay on stderr. No dependency, listener, privileged
 transition, queue writer, direct queue fallback or worker is added.
 
 The tools describe the operations the public service actually implements:
