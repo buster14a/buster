@@ -587,7 +587,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult truetype_test_font_atlas(UnitTestArguments* a
     TTF_AtlasBuild build = truetype_font_atlas_build(arena, (ByteSlice){.pointer = bytes, .length = length}, text_height);
     BUSTER_TEST(arguments, build.status == TTF_ATLAS_SUCCESS && build.description.pointer && build.description.width == atlas_edge &&
                                build.description.height == atlas_edge);
-    if (build.status == TTF_ATLAS_SUCCESS)
+    if (build.status == TTF_ATLAS_SUCCESS && build.description.pointer && build.description.characters)
     {
         const FontCharacter* letter = &build.description.characters['A'];
         BUSTER_TEST(arguments, letter->width >= 15 && letter->width <= 17 && letter->height == letter->width);
