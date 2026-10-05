@@ -86,13 +86,6 @@ installing a pinned and checksummed Zig and the distribution's mold, both of
 which the images lack. Canonical local and Forgejo workflows continue to
 bootstrap with TCC.
 
-The separately installed Benchpress recipe driver is compiled from the
-reviewed `build.c` with Clang and checked for a nonexecutable `GNU_STACK`
-header. Its transient unit keeps `MemoryDenyWriteExecute=yes`; the TCC
-bootstrap executable lacks that header and cannot spawn stages there. This
-installed artifact is reviewed by digest and is never a local-bootstrap
-substitute. See the [broker installation contract](../../tools/bench_service/deploy/SYSTEMD_BROKER.md).
-
 Because every hosted driver is Clang-built, the `Workflow lint` job in
 `.github/workflows/ci.yml` also runs the Ubuntu image's GCC over `build.c` with
 `-Wall -Werror -fsyntax-only` and the driver's usual flags. It covers only the
@@ -109,13 +102,8 @@ commit below, records `tcc -v`, removes
 the local bootstrap cache, and runs `./build.sh time_trace_summary_self_test`
 twice to prove both cold publication and warm reuse. This check does not select
 the dedicated benchmark runner or require privileged installation.
-The same hosted check runs native service tests, their ASan/UBSan variant, and
-the fixed smoke recipe self-test through this TCC-built driver. It also builds
-the broker and both static gates and runs their component regressions with
-`bench_service_broker self-test`. These use
-temporary fixtures and do not provision or qualify the benchmark host. It also
-runs the [source-size report and change ratchet](../source-size.md) on the
-validated merge revision against its first parent.
+It also runs the [source-size report and change ratchet](../source-size.md) on
+the validated merge revision against its first parent.
 
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
@@ -172,26 +160,6 @@ ID|version|path, and a changed signature re-probes every candidate (each
 `BUSTER_HAS_C_FLAG_*` entry is dropped first), so an in-place compiler upgrade
 does not need `./build.sh generate`; `tools/native_target_compatibility_test.py`
 covers this behavior.
-
-The Linux fixed `bench_service_recipe` publishes private frozen-tree receipts
-after each successful base-build and candidate-build cleanup. The files
-`validate-buster-v1.base-build.inventory` and
-`validate-buster-v1.candidate-build.inventory` contain complete bounded node
-identities, modes and owners, executable SHA-256 digests, exact recipe
-job/token/revisions, boot ID and scan-completion monotonic time. The source
-publishes each receipt without replacement and syncs its file and result
-directory before reporting that stage successful; a scan, identity, capacity
-or publication failure prevents the next stage from launching. These private
-result files are conserved by the existing BQ bundle index. A separate 64 MiB
-serialized-file limit applies in addition to node, depth, path and hashing
-limits; overflow fails the recipe. These are source-owned statements, while
-the external stage observer records its own inventory and timing independently.
-The build and result descriptors are pinned at preparation, before the stages
-create anything, so every tree walk (locking, receipts, temporary sweeps and
-syncs) reads a fresh open file of the same inode rather than a dup: btrfs
-(Linux 6.5+) never lists entries created after a directory's open file, and a
-consumed offset hides them everywhere (`BENCH_SERVICE_RECIPE_PINNED_WALK_TEST`).
-A failed post-stage check prints `error: STAGE post-stage check failed: CHECK`.
 
 ```sh
 ./build.sh generate                 # configure a fresh tree (Debug, clang)

@@ -48,8 +48,8 @@ OWNER_ONLY_PATHS = (
     "tools/native_retirement_automation.py", "tools/native_retirement_controller.py",
     "tools/native_retirement_integration.py", "tools/native_retirement_merge_gate.py",
     "tools/merge_conflict_preflight.py", "tools/native_retirement_performance*",
-    "tools/throughput/retirement_stats*", "tools/bench_service/deploy/*",
-    "tools/bench_service/profiles/*", "tools/bench_service/workflow_policy_test.py",
+    "tools/throughput/retirement_stats*", "tools/bench_direct/*",
+    "benchmarks/9700x/ADMISSION.md",
 )
 
 

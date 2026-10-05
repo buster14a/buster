@@ -23,14 +23,12 @@ exit status, timings and printed output.
 
 They are diagnostic process latency from fork through wait4, with CPU time and
 peak RSS from the kernel's accounting. They are not a qualified compiler or
-runtime comparison. This path does not hold the benchmark service's host lease
-and does not seal its results: one runner serializes GitHub jobs, but a service
-job or a shell session on the host can overlap. The summary records the load
-average before and after so a disturbed run is visible.
+runtime comparison. Nothing excludes other activity on the host: one runner
+serializes GitHub jobs, but a shell session can overlap. The summary records
+the load average before and after so a disturbed run is visible. Results are
+the job log and summary; they are not sealed or authenticated.
 
 The workflow is `.github/workflows/9700x-direct-bench.yml` and the harness is
 `tools/bench_direct/run_workloads.py`; both are taken from `main`, never from
 the pull request. Who may start it, and what an administrator must configure,
-is in [the admission guide](../../tools/bench_service/deploy/GITHUB_ADMISSION.md#direct-workload-gate).
-For contained execution with sealed evidence use
-[the benchmark service](../../tools/bench_service/USING.md) instead.
+is in [the admission guide](ADMISSION.md).

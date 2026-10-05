@@ -236,7 +236,7 @@ class AuthorizationTests(unittest.TestCase):
     def test_self_authorization_and_threshold_paths_need_owner(self):
         for path in (a.POLICY_PATH, a.CONTROLLER_PATH, a.WRITER_PATH,
                      "tools/native_retirement_integration.py", "tools/native_retirement_automation.py",
-                     "tools/throughput/retirement_stats.h", "tools/bench_service/deploy/gateway.c"):
+                     "tools/throughput/retirement_stats.h", "tools/bench_direct/run_workloads.py"):
             with self.subTest(path=path):
                 with self.assertRaises(a.AutomationError):
                     a.require_scope(self.api.policy, 1791, {"kind": "bootstrap", "changed_paths": [path]})
