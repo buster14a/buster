@@ -115,6 +115,9 @@ jobs:
           python3 tools/new_audit.py --check
           python3 -B tools/check_markdown_links.py --self-test
           python3 -B tools/check_markdown_links.py
+      - name: Check bounded string sequence search work
+        shell: bash
+        run: python3 -B tools/string_first_sequence_work.py --output "$RUNNER_TEMP/string-sequence-work"
       - name: Compile the build driver with GCC
         shell: bash
         run: |
