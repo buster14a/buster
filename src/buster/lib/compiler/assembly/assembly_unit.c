@@ -1,15 +1,15 @@
 // The assembly translation unit: assembly_unit_encode at the bottom takes the
 // complete text of a `.s` file and returns sections, symbols, relocations, and
 // diagnostics. assembly.c's assembly_encode is the instruction layer beneath
-// it and is called once per instruction line; everything a whole file has that
+// it and is called once per instruction statement; everything a whole file has that
 // a single statement does not lives here.
 //
-// Three passes over an AssemblyUnitBuilder sized from the line count:
+// Three passes over an AssemblyUnitBuilder sized from the statement count:
 //   assembly_unit_collect_numeric_labels  local `1:` definitions in source
 //                                         order, so `1f`/`1b` can name one
 //   assembly_unit_parse                   labels, directives, and one
 //                                         assembly_encode call per
-//                                         instruction line, each producing a
+//                                         instruction statement, each producing a
 //                                         piece of bytes in a section
 //   assembly_unit_materialize             pieces concatenated per section and
 //                                         binding-invariant same-section
@@ -24,12 +24,15 @@
 //   assembly_unit_materialize_integers     final-label data evaluation
 //   assembly_unit_directive_*              the directive vocabulary
 //   assembly_unit_instruction              the assembly_encode call
+//   assembly_unit_statement                target comments/separators and positions
+//   assembly_unit_aarch64_control_fixup     checked final-label control fixups
 //   assembly_unit_parse, assembly_unit_encode
 //
 // Anything the vocabulary does not cover is refused with a diagnostic naming
 // the directive and its line; nothing is silently dropped.
 
 #include <buster/lib/compiler/assembly/assembly_unit_internal.h>
+#include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
 
 #include <buster/lib/string.h>
 
@@ -55,6 +58,14 @@ struct AssemblyUnitNumericLabel
 {
     String8 name;
     u64 value;
+    u64 statement;
+};
+
+typedef struct AssemblyUnitSourceCursor AssemblyUnitSourceCursor;
+struct AssemblyUnitSourceCursor
+{
+    u64 offset;
+    u64 line_start;
     u32 line;
 };
 
@@ -83,6 +94,7 @@ struct AssemblyUnitBuilder
     // The source line each relocation came from, kept beside the public array
     // so a displacement that does not fit can name the line that wrote it.
     u32* relocation_lines;
+    u32* relocation_columns;
     AssemblyUnitInteger* integers;
     u32 integer_count;
     u32 integer_capacity;
@@ -95,6 +107,7 @@ struct AssemblyUnitBuilder
     u32 current_section;
     u32 line;
     u32 column;
+    u64 statement;
 };
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_space(char8 value)
@@ -202,32 +215,47 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern(AssemblyUnitBuilder* builder
 
 // --------------------------------------------------------------- sections
 
-// The section a name selects when the directive carries no flags. musl's
-// crti.s writes `.section .init` with nothing else, and GNU as places `.init`
-// and `.fini` in executable sections by name.
+// Bare section defaults are an exact name, or a dot-delimited member of
+// an ordinary code/data family. DWARF names retain their nonallocated kinds;
+// unsupported bare names cannot silently acquire flags from a raw prefix.
 BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, AssemblyUnitSectionKind* kind)
 {
     static const struct
     {
-        String8 prefix;
+        String8 name;
         AssemblyUnitSectionKind kind;
+        bool suffix;
     } rows[] = {
-        {S8_INITIALIZER(".text"), ASSEMBLY_UNIT_SECTION_TEXT},
-        {S8_INITIALIZER(".init"), ASSEMBLY_UNIT_SECTION_TEXT},
-        {S8_INITIALIZER(".fini"), ASSEMBLY_UNIT_SECTION_TEXT},
-        {S8_INITIALIZER(".rodata"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
-        {S8_INITIALIZER(".data"), ASSEMBLY_UNIT_SECTION_DATA},
-        {S8_INITIALIZER(".bss"), ASSEMBLY_UNIT_SECTION_ZERO},
+        {S8_INITIALIZER(".text"), ASSEMBLY_UNIT_SECTION_TEXT, true},
+        {S8_INITIALIZER(".init"), ASSEMBLY_UNIT_SECTION_TEXT, false},
+        {S8_INITIALIZER(".fini"), ASSEMBLY_UNIT_SECTION_TEXT, false},
+        {S8_INITIALIZER(".rodata"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA, true},
+        {S8_INITIALIZER(".data"), ASSEMBLY_UNIT_SECTION_DATA, true},
+        {S8_INITIALIZER(".bss"), ASSEMBLY_UNIT_SECTION_ZERO, true},
+        {S8_INITIALIZER(".debug_info"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO, false},
+        {S8_INITIALIZER(".debug_abbrev"), ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV, false},
+        {S8_INITIALIZER(".debug_line"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE, false},
+        {S8_INITIALIZER(".debug_str"), ASSEMBLY_UNIT_SECTION_DEBUG_STR, false},
+        {S8_INITIALIZER(".debug_loc"), ASSEMBLY_UNIT_SECTION_DEBUG_LOC, false},
+        {S8_INITIALIZER(".debug_ranges"), ASSEMBLY_UNIT_SECTION_DEBUG_RANGES, false},
+        {S8_INITIALIZER(".debug_addr"), ASSEMBLY_UNIT_SECTION_DEBUG_ADDR, false},
+        {S8_INITIALIZER(".debug_str_offsets"), ASSEMBLY_UNIT_SECTION_DEBUG_STR_OFFSETS, false},
+        {S8_INITIALIZER(".debug_line_str"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE_STR, false},
+        {S8_INITIALIZER(".debug_rnglists"), ASSEMBLY_UNIT_SECTION_DEBUG_RNGLISTS, false},
+        {S8_INITIALIZER(".debug_loclists"), ASSEMBLY_UNIT_SECTION_DEBUG_LOCLISTS, false},
     };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rows); index += 1)
+    bool matched = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rows) && !matched; index += 1)
     {
-        if (string_starts_with_sequence(name, rows[index].prefix))
+        matched = string_equal(name, rows[index].name) ||
+                  (rows[index].suffix && name.length > rows[index].name.length &&
+                   name.pointer[rows[index].name.length] == '.' && string_starts_with_sequence(name, rows[index].name));
+        if (matched)
         {
             *kind = rows[index].kind;
-            return true;
         }
     }
-    return false;
+    return matched;
 }
 
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_section_select(AssemblyUnitBuilder* builder, String8 name, AssemblyUnitSectionKind kind)
@@ -497,7 +525,12 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_split_operands(String8 text, String8* oper
     bool quoted = false;
     for (u64 index = 0; index <= text.length; index += 1)
     {
-        if (index < text.length && text.pointer[index] == '"' && (!index || text.pointer[index - 1] != '\\'))
+        if (index < text.length && quoted && text.pointer[index] == '\\' && index + 1 < text.length)
+        {
+            index += 1;
+            continue;
+        }
+        if (index < text.length && text.pointer[index] == '"')
         {
             quoted = !quoted;
             continue;
@@ -623,7 +656,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_align(AssemblyUnitBuilder* buil
     {
         return false;
     }
-    bool power = string_equal(directive, S8(".p2align"));
+    // GNU as reads `.align` as a byte count on x86 ELF but as a power of two
+    // on AArch64, where it is the same directive as `.p2align`.
+    bool power = string_equal(directive, S8(".p2align")) || (string_equal(directive, S8(".align")) && builder->target.cpu_arch == CPU_ARCH_AARCH64);
     s64 requested = 0;
     if (!assembly_unit_evaluate_absolute(builder, parts[0], &requested) || requested < 0 || requested > (power ? 20 : 1 << 20))
     {
@@ -711,6 +746,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_relocation_append(AssemblyUnitBuilder* bu
         return false;
     }
     builder->relocation_lines[builder->result.relocation_count] = builder->line;
+    builder->relocation_columns[builder->result.relocation_count] = builder->column;
     builder->result.relocations[builder->result.relocation_count++] = (AssemblyUnitRelocation){
         .addend = addend,
         .offset = offset,
@@ -719,6 +755,36 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_relocation_append(AssemblyUnitBuilder* bu
         .kind = kind,
     };
     return true;
+}
+
+// Byte width of an integer data directive, or zero for any other spelling.
+// GNU as gives `.word` the target's word: 16 bits on x86, 32 on AArch64,
+// which also spells 16 bits `.hword` and 64 bits `.xword`/`.dword`.
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_integer_directive_width(Target target, String8 directive)
+{
+    bool aarch64 = target.cpu_arch == CPU_ARCH_AARCH64;
+    u32 width = 0;
+    if (string_equal(directive, S8(".byte")))
+    {
+        width = 1;
+    }
+    else if (string_equal(directive, S8(".short")) || string_equal(directive, S8(".hword")) || string_equal(directive, S8(".value")))
+    {
+        width = 2;
+    }
+    else if (string_equal(directive, S8(".word")))
+    {
+        width = aarch64 ? 4 : 2;
+    }
+    else if (string_equal(directive, S8(".long")) || string_equal(directive, S8(".int")))
+    {
+        width = 4;
+    }
+    else if (string_equal(directive, S8(".quad")) || (aarch64 && (string_equal(directive, S8(".xword")) || string_equal(directive, S8(".dword")))))
+    {
+        width = 8;
+    }
+    return width;
 }
 
 // Retain data expressions until labels and binding directives are complete.
@@ -815,7 +881,20 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_materialize_integers(AssemblyUnitBuilder*
             valid = kind != ASSEMBLY_RELOCATION_COUNT && symbol != UINT32_MAX &&
                     assembly_unit_relocation_append(builder, symbol, integer.offset, addend, kind);
         }
-        else if (valid)
+        else if (valid && integer.width < 8)
+        {
+            // Accept either a signed or an unsigned reading of the field and
+            // refuse anything wider, as llvm-mc does: those bits would be
+            // lost, which GNU as only warns about.
+            s64 limit = (s64)1 << (integer.width * 8);
+            if (value.constant < -(limit >> 1) || value.constant >= limit)
+            {
+                assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("value does not fit directive {S8}"),
+                                                integer.directive);
+                valid = false;
+            }
+        }
+        if (valid && !value.has_symbol)
         {
             ByteSlice bytes = builder->result.sections[integer.section].data;
             for (u32 byte = 0; byte < integer.width; byte += 1)
@@ -951,22 +1030,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
     {
         return assembly_unit_directive_zero(builder, operands);
     }
-    if (string_equal(directive, S8(".byte")))
+    u32 width = assembly_unit_integer_directive_width(builder->target, directive);
+    if (width)
     {
-        return assembly_unit_directive_integer(builder, 1, directive, operands);
-    }
-    if (string_equal(directive, S8(".short")) || string_equal(directive, S8(".word")) || string_equal(directive, S8(".hword")) ||
-        string_equal(directive, S8(".value")))
-    {
-        return assembly_unit_directive_integer(builder, 2, directive, operands);
-    }
-    if (string_equal(directive, S8(".long")) || string_equal(directive, S8(".int")))
-    {
-        return assembly_unit_directive_integer(builder, 4, directive, operands);
-    }
-    if (string_equal(directive, S8(".quad")))
-    {
-        return assembly_unit_directive_integer(builder, 8, directive, operands);
+        return assembly_unit_directive_integer(builder, width, directive, operands);
     }
     if (string_equal(directive, S8(".ascii")))
     {
@@ -999,10 +1066,22 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
 BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder, String8 line, String8* rewritten, String8* plt_symbol)
 {
     bool changed = false;
+    bool quoted = false;
     for (u64 index = 0; index < line.length && !changed; index += 1)
     {
-        bool boundary = !index || (!assembly_unit_name_character(line.pointer[index - 1]) && line.pointer[index - 1] != '@');
-        changed = (line.pointer[index] == '@') || (boundary && assembly_unit_digit(line.pointer[index]));
+        if (quoted && line.pointer[index] == '\\' && index + 1 < line.length)
+        {
+            index += 1;
+        }
+        else if (line.pointer[index] == '"')
+        {
+            quoted = !quoted;
+        }
+        else if (!quoted)
+        {
+            bool boundary = !index || (!assembly_unit_name_character(line.pointer[index - 1]) && line.pointer[index - 1] != '@');
+            changed = (line.pointer[index] == '@') || (boundary && assembly_unit_digit(line.pointer[index]));
+        }
     }
     if (!changed)
     {
@@ -1015,10 +1094,35 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
     char8* text = arena_allocate(builder->arena, char8, capacity);
     u64 length = 0;
     u64 index = 0;
+    u64 quoted_name_begin = 0;
+    u64 quoted_name_end = 0;
+    quoted = false;
     while (index < line.length)
     {
         char8 code_unit = line.pointer[index];
         bool boundary = !index || (!assembly_unit_name_character(line.pointer[index - 1]) && line.pointer[index - 1] != '@');
+        if (quoted && code_unit == '\\' && index + 1 < line.length)
+        {
+            text[length++] = code_unit;
+            text[length++] = line.pointer[index + 1];
+            index += 2;
+            continue;
+        }
+        if (code_unit == '"')
+        {
+            if (quoted) quoted_name_end = index;
+            else quoted_name_begin = index + 1;
+            quoted = !quoted;
+            text[length++] = code_unit;
+            index += 1;
+            continue;
+        }
+        if (quoted)
+        {
+            text[length++] = code_unit;
+            index += 1;
+            continue;
+        }
         if (boundary && assembly_unit_digit(code_unit))
         {
             u64 digits_end = index;
@@ -1040,11 +1144,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
                     {
                         continue;
                     }
-                    if (direction == 'b' && candidate.line <= builder->line)
+                    if (direction == 'b' && candidate.statement <= builder->statement)
                     {
                         name = candidate.name;
                     }
-                    if (direction == 'f' && candidate.line > builder->line && !name.length)
+                    if (direction == 'f' && candidate.statement > builder->statement && !name.length)
                     {
                         name = candidate.name;
                     }
@@ -1080,17 +1184,26 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
             }
             String8 suffix = string_slice(line, index + 1, suffix_end);
             u64 name_begin = index;
-            while (name_begin && assembly_unit_name_character(line.pointer[name_begin - 1]))
+            u64 name_end = index;
+            if (index && line.pointer[index - 1] == '"' && quoted_name_end == index - 1)
             {
-                name_begin -= 1;
+                name_begin = quoted_name_begin;
+                name_end = quoted_name_end;
+            }
+            else
+            {
+                while (name_begin && assembly_unit_name_character(line.pointer[name_begin - 1]))
+                {
+                    name_begin -= 1;
+                }
             }
             if ((!string_equal(suffix, S8("PLT")) && !string_equal(suffix, S8("plt"))) ||
-                name_begin == index || plt_symbol->length)
+                name_begin == name_end || plt_symbol->length)
             {
                 assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("unsupported symbol modifier '@{S8}'"), suffix);
                 return false;
             }
-            *plt_symbol = string_slice(line, name_begin, index);
+            *plt_symbol = string_slice(line, name_begin, name_end);
             index = suffix_end;
             continue;
         }
@@ -1142,6 +1255,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                                                    (AssemblyEncodeOptions){
                                                        .target = builder->target,
                                                        .syntax = builder->syntax,
+                                                       .unit_control_relocations = true,
                                                    });
     if (encoded.diagnostic_count)
     {
@@ -1218,43 +1332,115 @@ BUSTER_GLOBAL_LOCAL u64 assembly_unit_leading_label(String8 line)
     return end && end < line.length && line.pointer[end] == ':' ? end : 0;
 }
 
-// Every source line, with block comments already blanked. Line comments are
-// stripped here so the two label passes and the instruction layer all see the
-// same text.
-BUSTER_GLOBAL_LOCAL String8 assembly_unit_statement(String8 source, u64* cursor, u32* column)
+// Apple AArch64 uses ';' for comments and '%%' between statements. The other
+// supported targets use ';' between statements; '#' is an x86 comment only.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_apple_aarch64(Target target)
 {
-    u64 start = *cursor;
-    char8 const* line_start = source.pointer + start;
-    u64 end = start;
-    while (end < source.length && source.pointer[end] != '\n')
+    return target.cpu_arch == CPU_ARCH_AARCH64 &&
+           (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS);
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_unit_line_comment(Target target, String8 source, u64 index)
+{
+    char8 value = source.pointer[index];
+    return (value == '#' && target.cpu_arch == CPU_ARCH_X86_64) ||
+           (value == ';' && assembly_unit_apple_aarch64(target)) ||
+           (value == '/' && index + 1 < source.length && source.pointer[index + 1] == '/');
+}
+
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_separator_length(Target target, String8 source, u64 index)
+{
+    u32 length;
+    if (assembly_unit_apple_aarch64(target))
     {
-        end += 1;
+        length = source.pointer[index] == '%' && index + 1 < source.length && source.pointer[index + 1] == '%' ? 2 : 0;
     }
-    *cursor = end < source.length ? end + 1 : source.length;
-    String8 line = string_slice(source, start, end);
-    for (u64 index = 0; index < line.length; index += 1)
+    else
     {
-        if (line.pointer[index] == '#' || line.pointer[index] == ';' ||
-            (line.pointer[index] == '/' && index + 1 < line.length && line.pointer[index + 1] == '/'))
+        length = source.pointer[index] == ';' ? 1 : 0;
+    }
+    return length;
+}
+
+// Block comments have already been blanked. Both passes consume this same
+// target-aware stream; physical positions stay separate from statement order.
+BUSTER_GLOBAL_LOCAL String8 assembly_unit_statement(Target target, String8 source, AssemblyUnitSourceCursor* cursor, u32* line_number, u32* column)
+{
+    u64 start = cursor->offset;
+    u64 line_start = cursor->line_start;
+    u64 end = start;
+    char8 quote = 0;
+    bool done = false;
+    *line_number = cursor->line;
+    while (end < source.length && !done)
+    {
+        char8 value = source.pointer[end];
+        if (value == '\n')
         {
-            line.length = index;
-            break;
+            cursor->offset = end + 1;
+            cursor->line_start = end + 1;
+            cursor->line += 1;
+            done = true;
+        }
+        else if (quote)
+        {
+            if (value == '\\' && end + 1 < source.length && source.pointer[end + 1] != '\n')
+            {
+                end += 2;
+            }
+            else
+            {
+                if (value == quote) quote = 0;
+                end += 1;
+            }
+        }
+        else if (value == '"' || value == '\'')
+        {
+            quote = value;
+            end += 1;
+        }
+        else if (assembly_unit_line_comment(target, source, end))
+        {
+            cursor->offset = end;
+            while (cursor->offset < source.length && source.pointer[cursor->offset] != '\n') cursor->offset += 1;
+            if (cursor->offset < source.length)
+            {
+                cursor->offset += 1;
+                cursor->line_start = cursor->offset;
+                cursor->line += 1;
+            }
+            done = true;
+        }
+        else
+        {
+            u32 separator_length = assembly_unit_separator_length(target, source, end);
+            if (separator_length)
+            {
+                cursor->offset = end + separator_length;
+                done = true;
+            }
+            else
+            {
+                end += 1;
+            }
         }
     }
-    String8 trimmed = assembly_unit_trim(line);
-    *column = trimmed.length ? (u32)((u64)(trimmed.pointer - line_start) + 1) : 1;
+    if (!done) cursor->offset = end;
+    String8 trimmed = assembly_unit_trim(string_slice(source, start, end));
+    *column = trimmed.length ? (u32)((u64)(trimmed.pointer - source.pointer) - line_start + 1) : 1;
     return trimmed;
 }
 
 BUSTER_GLOBAL_LOCAL void assembly_unit_collect_numeric_labels(AssemblyUnitBuilder* builder, String8 source)
 {
-    u64 cursor = 0;
-    u32 line_number = 0;
-    while (cursor < source.length)
+    AssemblyUnitSourceCursor cursor = {.line = 1};
+    u64 statement = 0;
+    while (cursor.offset < source.length)
     {
         u32 column = 0;
-        String8 line = assembly_unit_statement(source, &cursor, &column);
-        line_number += 1;
+        u32 line_number = 0;
+        String8 line = assembly_unit_statement(builder->target, source, &cursor, &line_number, &column);
+        statement += 1;
         u64 label = assembly_unit_leading_label(line);
         while (label)
         {
@@ -1266,7 +1452,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_collect_numeric_labels(AssemblyUnitBuilde
                 builder->numeric_labels[builder->numeric_label_count] = (AssemblyUnitNumericLabel){
                     .name = string_format(builder->arena, S8(".Lnum.{u64}.{u32}"), value, builder->numeric_label_count),
                     .value = value,
-                    .line = line_number,
+                    .statement = statement,
                 };
                 builder->numeric_label_count += 1;
             }
@@ -1278,13 +1464,13 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_collect_numeric_labels(AssemblyUnitBuilde
 
 BUSTER_GLOBAL_LOCAL void assembly_unit_parse(AssemblyUnitBuilder* builder, String8 source)
 {
-    u64 cursor = 0;
+    AssemblyUnitSourceCursor cursor = {.line = 1};
     u32 numeric_index = 0;
     String8 pending_prefix = {0};
-    while (cursor < source.length && builder->result.diagnostic_count < ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY)
+    while (cursor.offset < source.length && builder->result.diagnostic_count < ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY)
     {
-        String8 line = assembly_unit_statement(source, &cursor, &builder->column);
-        builder->line += 1;
+        String8 line = assembly_unit_statement(builder->target, source, &cursor, &builder->line, &builder->column);
+        builder->statement += 1;
         u64 label = assembly_unit_leading_label(line);
         if (pending_prefix.length && (label || (line.length && line.pointer[0] == '.')))
         {
@@ -1367,6 +1553,61 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_parse(AssemblyUnitBuilder* builder, Strin
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_unit_aarch64_control_relocation(AssemblyRelocationKind kind)
+{
+    return kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26 || kind == ASSEMBLY_RELOCATION_AARCH64_CALL26 ||
+           kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 || kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ||
+           kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+}
+
+// Decode the retained word through the shared semantic owner before applying
+// its checked displacement. Symbol values and signed addends remain separate.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_aarch64_control_fixup(AssemblyUnitBuilder* builder, AssemblyUnitRelocation relocation,
+                                                             AssemblyUnitSymbol symbol, String8* mnemonic)
+{
+    ByteSlice data = builder->result.sections[relocation.section].data;
+    bool valid = !(relocation.offset & 3) && relocation.offset <= data.length &&
+                 sizeof(u32) <= data.length - relocation.offset;
+    BusterAarch64ControlInstruction instruction = {0};
+    BusterAarch64ControlSemanticRecord row = {0};
+    u32 word = 0;
+    if (valid)
+    {
+        for (u32 byte = 0; byte < sizeof(word); byte += 1)
+        {
+            word |= (u32)data.pointer[relocation.offset + byte] << (byte * 8);
+        }
+        valid = buster_aarch64_control_semantic_decode(word, &instruction) &&
+                buster_aarch64_control_semantic_row(instruction.row, &row);
+    }
+    if (valid)
+    {
+        (void)buster_aarch64_control_semantic_string(row.mnemonic, mnemonic);
+        valid = (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_BRANCH26) ||
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CALL26 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_CALL26) ||
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) ||
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) ||
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14);
+    }
+    u32 patched = 0;
+    BusterAarch64ControlFixupResult fixup = {0};
+    if (valid)
+    {
+        valid = buster_aarch64_control_semantic_fixup(instruction.row, word,
+            (BusterAarch64ControlFixupRequest){.target = builder->target, .place_address = relocation.offset,
+                .target_address = symbol.value, .addend = relocation.addend, .symbol_defined = true}, &patched, &fixup) &&
+                fixup.resolved;
+    }
+    if (valid)
+    {
+        for (u32 byte = 0; byte < sizeof(patched); byte += 1)
+        {
+            data.pointer[relocation.offset + byte] = (u8)(patched >> (byte * 8));
+        }
+    }
+    return valid;
+}
+
 // Pieces become section bytes, and every relocation that names a symbol
 // defined in its own section with binding-invariant identity can be resolved
 // here. Weak definitions remain replaceable even when hidden; ELF globals
@@ -1422,12 +1663,41 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
                     : relocation.kind == ASSEMBLY_RELOCATION_AARCH64_PREL32 ? 4
                                                                       : 0;
         bool replaceable = symbol.weak || (elf && symbol.global && !symbol.hidden);
+        bool control = assembly_unit_aarch64_control_relocation(relocation.kind);
+        bool short_control = control && relocation.kind != ASSEMBLY_RELOCATION_AARCH64_BRANCH26 &&
+                             relocation.kind != ASSEMBLY_RELOCATION_AARCH64_CALL26;
+        if (control && symbol.defined && symbol.section == relocation.section && !replaceable)
+        {
+            String8 mnemonic = S8("control");
+            if (!assembly_unit_aarch64_control_fixup(builder, relocation, symbol, &mnemonic))
+            {
+                builder->line = builder->relocation_lines[index];
+                builder->column = builder->relocation_columns[index];
+                assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE,
+                    string_format(builder->arena, S8("AArch64 {S8} branch to '{S8}' is out of range or unaligned"), mnemonic, symbol.name));
+                return;
+            }
+            continue;
+        }
+        if (short_control)
+        {
+            String8 mnemonic = relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 ? S8("b.cond")
+                               : relocation.kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ? S8("cbz/cbnz")
+                                                                                           : S8("tbz/tbnz");
+            builder->line = builder->relocation_lines[index];
+            builder->column = builder->relocation_columns[index];
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                string_format(builder->arena, S8("AArch64 {S8} branch to '{S8}' requires a binding-invariant target defined in the same section"),
+                    mnemonic, symbol.name));
+            return;
+        }
         if (!width || !symbol.defined || symbol.section != relocation.section || replaceable)
         {
             // A PC-relative data field can follow an opcode-valued byte. Only
             // instruction encoding proves that this reference is a branch.
             relocation.plt = elf && (relocation.plt || (relocation.x86_branch && !symbol.hidden && (symbol.global || !symbol.defined)));
             builder->relocation_lines[kept] = builder->relocation_lines[index];
+            builder->relocation_columns[kept] = builder->relocation_columns[index];
             builder->result.relocations[kept++] = relocation;
             continue;
         }
@@ -1436,7 +1706,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
             (width == 4 && (value < INT32_MIN || value > INT32_MAX)))
         {
             builder->line = builder->relocation_lines[index];
-            builder->column = 1;
+            builder->column = builder->relocation_columns[index];
             assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, S8("branch to '{S8}' does not fit its displacement"),
                                             symbol.name);
             return;
@@ -1511,20 +1781,59 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     // anything else reads the text: every pass then sees the same line
     // numbering, and the same columns, as the file on disk.
     char8* text = arena_allocate(arena, char8, source.length ? source.length : 1);
-    u32 line_count = 1;
+    u32 statement_count = 1;
     u32 comma_count = 0;
     for (u64 index = 0; index < source.length; index += 1)
     {
         text[index] = source.pointer[index];
-        line_count += source.pointer[index] == '\n';
+        statement_count += source.pointer[index] == '\n';
         comma_count += source.pointer[index] == ',';
     }
-    for (u64 index = 0; index + 1 < source.length;)
+    char8 quote = 0;
+    for (u64 index = 0; index < source.length;)
     {
+        char8 value = source.pointer[index];
+        if (value == '\n')
+        {
+            quote = 0;
+            index += 1;
+            continue;
+        }
+        if (quote)
+        {
+            if (value == '\\' && index + 1 < source.length && source.pointer[index + 1] != '\n')
+            {
+                index += 2;
+            }
+            else
+            {
+                if (value == quote) quote = 0;
+                index += 1;
+            }
+            continue;
+        }
+        if (value == '"' || value == '\'')
+        {
+            quote = value;
+            index += 1;
+            continue;
+        }
+        if (assembly_unit_line_comment(options.target, source, index))
+        {
+            while (index < source.length && source.pointer[index] != '\n') index += 1;
+            continue;
+        }
+        u32 separator_length = assembly_unit_separator_length(options.target, source, index);
+        if (separator_length)
+        {
+            statement_count += 1;
+            index += separator_length;
+            continue;
+        }
         // The scan reads `source` rather than `text`: `text` is being blanked
         // as it goes, so a closing `*/` looked for there would never be found
         // and the whole file after the first comment would disappear.
-        if (source.pointer[index] != '/' || source.pointer[index + 1] != '*')
+        if (value != '/' || index + 1 >= source.length || source.pointer[index + 1] != '*')
         {
             index += 1;
             continue;
@@ -1548,17 +1857,18 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     }
     String8 blanked = {.pointer = text, .length = source.length};
 
-    builder.symbol_capacity = line_count * 2 + comma_count + ASSEMBLY_UNIT_SECTION_CAPACITY;
-    builder.relocation_capacity = line_count + comma_count + 16;
-    builder.integer_capacity = line_count + comma_count + 16;
-    builder.piece_capacity = line_count + 16;
-    builder.numeric_label_capacity = line_count * 2 + 16;
+    builder.symbol_capacity = statement_count * 2 + comma_count + ASSEMBLY_UNIT_SECTION_CAPACITY;
+    builder.relocation_capacity = statement_count + comma_count + 16;
+    builder.integer_capacity = statement_count + comma_count + 16;
+    builder.piece_capacity = statement_count + 16;
+    builder.numeric_label_capacity = statement_count * 2 + 16;
     builder.result.sections = arena_allocate(arena, AssemblyUnitSection, ASSEMBLY_UNIT_SECTION_CAPACITY);
     builder.section_offsets = arena_allocate(arena, u64, ASSEMBLY_UNIT_SECTION_CAPACITY);
     builder.result.symbols = arena_allocate(arena, AssemblyUnitSymbol, builder.symbol_capacity);
     builder.result.relocations = arena_allocate(arena, AssemblyUnitRelocation, builder.relocation_capacity);
     builder.integers = arena_allocate(arena, AssemblyUnitInteger, builder.integer_capacity);
     builder.relocation_lines = arena_allocate(arena, u32, builder.relocation_capacity);
+    builder.relocation_columns = arena_allocate(arena, u32, builder.relocation_capacity);
     builder.pieces = arena_allocate(arena, AssemblyUnitPiece, builder.piece_capacity);
     builder.numeric_labels = arena_allocate(arena, AssemblyUnitNumericLabel, builder.numeric_label_capacity);
 

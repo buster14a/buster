@@ -35,8 +35,9 @@ typedef enum CTokenKind
 // Every punctuator the lexer can produce, so that recognizing one is a scalar
 // compare instead of a string compare.  The declaration order is the lexer's
 // maximal-munch scan order: a spelling must precede every spelling it starts
-// with.  Digraphs stay distinct from the punctuators they spell, because
-// callers ask about a spelling and never about a meaning.
+// with. Digraph ids identify spellings while scanning; published tokens and
+// shape sidecars carry the equivalent ordinary punctuator id. Their spelling
+// offsets and lengths still preserve the source bytes for #, ## and printing.
 typedef enum CPunctuator
 {
     C_PUNCTUATOR_NONE,
@@ -279,6 +280,7 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_INVALID_UTF8,
     C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
     C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+    C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -905,7 +907,11 @@ struct CMember
     // aggregate's own alignment.
     bool is_packed;
     bool bit_width_resolved;
-    u8 reserved;
+    // The member's struct or union type was still incomplete where the
+    // member was declared (C17 6.7.2.1p3). Its own tag and a tag defined only
+    // later both read complete once the unit is parsed, so the fact is taken
+    // at the declarator and diagnosed with the other member constraints.
+    bool has_incomplete_type;
 };
 
 // One `_Alignas(...)` or GNU `aligned(...)` request, as either the type it
@@ -1016,6 +1022,8 @@ struct CEnumMember
     // finalized once, at the closing brace, according to the selected dialect.
     CTypeId declaration_type;
     CTypeId type;
+    // The declaration-point ICE survives completion. On Microsoft targets an
+    // implicit successor's published signed-int value can differ from it.
     CIntegerConstant integer_constant;
     u64 value;
     bool is_negative;
@@ -1093,6 +1101,9 @@ struct CEntity
     // The function's only definition so far is GNU inline-only, so the unit
     // may still give its external definition.
     bool definition_is_gnu_inline_only;
+    // The file-scope entity's first declaration was written `static`, so it
+    // has internal linkage (C17 6.2.2p3) and later declarations must agree.
+    bool has_internal_linkage;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -1155,6 +1166,15 @@ struct CDeclaration
     u32 declarator_count;
     u32 body_start;
     u32 body_token_count;
+    // A pre-C23 function definition may name its parameters first and type
+    // them in the declarations between the closing ')' and the body.  These
+    // two immutable token ranges keep that grammar out of the ordinary
+    // prototype declarator while letting the semantic pass reuse the block
+    // declaration parser for the types.
+    u32 identifier_list_start;
+    u32 identifier_list_token_count;
+    u32 parameter_declaration_start;
+    u32 parameter_declaration_token_count;
     u32 parameter_start;
     u32 parameter_count;
     u32 alignment_start;
@@ -1168,6 +1188,7 @@ struct CDeclaration
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
+    bool is_identifier_list_definition;
     // A GNU `extern inline` function definition: its body is only for
     // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
     bool is_gnu_inline_only;
@@ -1231,6 +1252,10 @@ struct CParserDeclaration
     u32 declarator_count;
     u32 body_start;
     u32 body_token_count;
+    u32 identifier_list_start;
+    u32 identifier_list_token_count;
+    u32 parameter_declaration_start;
+    u32 parameter_declaration_token_count;
     u32 name_token;
     u32 function_name_token;
     // The body's _Static_assert statements in body order; null for the
@@ -1245,7 +1270,8 @@ struct CParserDeclaration
     bool is_variadic;
     bool seen_equal;
     bool is_declarator_continuation;
-    u8 reserved[2];
+    bool is_identifier_list_definition;
+    u8 reserved[1];
 };
 
 typedef struct CNumberFacts CNumberFacts;

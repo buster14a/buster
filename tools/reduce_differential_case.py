@@ -5,8 +5,8 @@ Takes family:seed:unit, regenerates that single-unit program, and greedily
 deletes lines while the divergence between clang and `ide cc` survives.  The
 interestingness check preserves the divergence category:
 
-  behavior   all four modes compile, clang -O0 and -O2 agree (so the reduced
-             program is still well defined), and at least one ide mode's
+  behavior   all four modes compile, clang -O0 and -O2 terminate normally
+             and agree, and at least one ide mode's
              (exit, stdout) differs from clang's
   rejects    clang -O0 and -O2 compile and agree, and ide fails to compile
              with the same normalized diagnostic as the original
@@ -15,8 +15,9 @@ interestingness check preserves the divergence category:
 
 Line deletion is tried in coarse-to-fine blocks (a poor man's ddmin), then
 single lines, repeated to a fixpoint.  Deleting a line can only shrink the
-program, and the clang -O0/-O2 agreement gate keeps undefined behavior from
-sneaking into the reduced fixture.
+program. The clang -O0/-O2 gate refuses incomplete or disagreeing reference
+results; agreement is a screen, not proof of defined behavior. Source validity
+and preservation of the original failure still require independent review.
 
 Usage:
     tools/reduce_differential_case.py bit_field:17:2
@@ -30,7 +31,10 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from differential_c_harness import generate_program, DEFAULT_IDE, REPOSITORY_ROOT
+from differential_c_harness import (
+    generate_program, DEFAULT_IDE, REPOSITORY_ROOT, REFERENCE_C_FLAGS,
+    reference_run_completed,
+)
 
 # A healthy candidate runs in milliseconds; a deletion that breaks the
 # prelude's emit loop spins forever, so the run timeout stays tight.
@@ -90,8 +94,8 @@ class Checker:
         with open(source_path, "w") as source_file:
             source_file.write(text)
         commands = {
-            "clang-O0": ["clang", "-O0", "-w"],
-            "clang-O2": ["clang", "-O2", "-w"],
+            "clang-O0": ["clang", "-O0", "-w", *REFERENCE_C_FLAGS],
+            "clang-O2": ["clang", "-O2", "-w", *REFERENCE_C_FLAGS],
             "ide": [self.ide_path, "cc"],
             "ide-canon": [self.ide_path, "cc", "-fno-register-allocator"],
         }
@@ -106,27 +110,28 @@ class Checker:
         reference = evaluate("clang-O0")
         if reference[0] != "ran":
             return ("invalid", "clang rejected")
-        if reference[1] == "timeout":
-            # A candidate whose reference build hangs has left the
-            # deterministic regime (a deletion broke the emit loop); an ide
-            # timeout is only a divergence when clang terminates.
-            return ("invalid", "reference timed out")
+        if not reference_run_completed(reference[1]):
+            return ("invalid", "reference did not terminate normally")
         control = None
         for label in ide_modes:
             state = evaluate(label)
-            if state[0] == "compile-fail":
-                if state[1] is not None and state[1] < 0:
-                    return ("ide-crash", "signal %d" % -state[1])
-                return ("rejects", normalize_diagnostic(state[2]))
-            if state[1] == "timeout" or state[1:] != reference[1:]:
+            divergent = state[0] == "compile-fail" or state[1:] != reference[1:]
+            if divergent:
                 if control is None:
                     control = evaluate("clang-O2")
-                    if control[0] != "ran" or control[1:] != reference[1:]:
-                        return ("invalid", "clang modes disagree")
+                    if (control[0] != "ran" or not reference_run_completed(control[1])
+                            or control[1:] != reference[1:]):
+                        return ("invalid", "clang modes disagree or did not complete")
+                if state[0] == "compile-fail":
+                    if state[1] is None:
+                        return ("invalid", "%s compilation timed out" % label)
+                    if not reference_run_completed(state[1]):
+                        return ("ide-crash", "%s compiler status %d" % (label, state[1]))
+                    return ("rejects", "%s: %s" % (label, normalize_diagnostic(state[2])))
                 if state[1] == "timeout":
                     return ("behavior", "%s timeout" % label)
-                if isinstance(state[1], int) and state[1] < 0:
-                    return ("run-crash", "%s signal %d" % (label, -state[1]))
+                if isinstance(state[1], int) and not reference_run_completed(state[1]):
+                    return ("run-crash", "%s runtime status %d" % (label, state[1]))
                 return ("behavior", "%s differs" % label)
         return ("ok", "")
 
@@ -184,7 +189,7 @@ def main():
     print("reducing %s: %s (%s)" % (tag, category, detail))
     # Pin reduction to the one mode that diverged: rejects come from the
     # shared frontend, behavior stays with the mode that showed it.
-    if "ide-canon" in detail:
+    if detail.startswith("ide-canon"):
         ide_modes = ("ide-canon",)
     else:
         ide_modes = ("ide",)
