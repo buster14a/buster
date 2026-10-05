@@ -50,6 +50,21 @@ separate array-only duration check still permits a static pointer to a VLA while
 rejecting a VLA object with static duration. Function prototype parameter types
 retain their existing rules; the VM walk stops at function types.
 
+Constant negative array bounds are rejected at the original bound expression
+by `c_parse_validate_array_bound_values`, after expression/type-name validation
+has populated the bound table. A temporary source-token bitset also admits
+newly read bound rows while querying each original expression only once.
+The existing typed integer query supplies the
+target signed-magnitude fact, including narrow casts and 128-bit operands;
+masked low-limb values do not decide the sign. Parameter `static`, qualifiers
+and nullability words are skipped by the same prefix reader as the syntax check.
+Runtime VLA bounds, inferred bounds, flexible arrays and GNU zero-length arrays
+keep their existing policies. `c_test_negative_array_bounds` covers five negative
+spellings across eleven declaration/type-name contexts in GNU17/C17/C23, with exact
+source locations and matching semantic-only/full-compilation refusal. Both
+frontend forms validate positive neighbors in those dialects, including
+enum/typedef shadowing, and GNU-zero neighbors independently.
+
 The bound check uses the semantic typed constant folder. NORMAL-mode sizeof
 type operands use the complete abstract-declarator reader, so parenthesized
 pointers to arrays and functions retain their pointer size. Its explicit task
@@ -185,6 +200,51 @@ conjunction operator shares the spelling; a body with a goto label and
 the gate through the private seam beside the unchanged diagnostics.
 
 ## Regression contract
+
+Lowering checks the query machine's five arrays, missing scope-child indexes,
+per-function builder arrays and body tasks before carving them. Ordinary queries
+reuse thread scratch. When the finalized scope/query plan exceeds its remaining
+reservation, lowering creates a private arena for that checked plan plus the
+ordinary arena's remaining workspace (normally 256 MiB), rounded by doubling.
+The private arena is destroyed on both successful and failed lowering; no result
+may retain its pointers. This grows virtual address reservation, not populated
+query depth or committed rows.
+
+Each function preflights its builder arrays and a conservative token-derived
+body-task, retained statement-state and SSA workspace plan. The function arena
+grows before the first builder allocation and reuses the largest mapping until
+the translation unit finishes. Body tasks reserve at most five rows per token
+plus four; geometric SSA event/read/local growth includes old arrays, bounded
+by four times the canonical row capacity. SSA slots and finish work have their
+own allowances in the same plan. These allowances do not claim every possible
+SSA graph has linear storage: existing dynamic checks remain authoritative.
+Reservations double from the existing size and are checked against
+`ARENA_MAX_RESERVATION` (2^48 bytes); unavailable mappings become structured
+source diagnostics. Neither the driver's translation-unit reservation nor the
+ordinary thread scratch reservation changes.
+
+SSA event/read growth and retained assignment
+states check the remaining capacity at each growth or allocation. A refused
+query publishes a source diagnostic before creating an `IrProgram`; a refused
+function retains its rejected state and cannot certify partial canonical IR.
+Private test preflight limits preserve their refusal path and disable reservation
+growth.
+
+`c_test_ir_lower_scratch_capacity` exercises both frontend SSA forms, accepted
+small source, query and function refusal, a synthetic million-token query plan
+under an explicit fixed budget, small and large function reservation plans,
+and isolated body-task/SSA-growth exhaustion in a small arena. Arithmetic
+controls pin exact fit, alignment, zero count and multiplication overflow.
+The private smaller-budget wrapper avoids allocating huge source/IR fixtures in
+every test configuration; it does not change driver options. These are resource
+limit regressions for #1330 and the query prerequisite of #1412, not a promise
+that every allocation in lowering has a recoverable failure path.
+
+`c_test_ir_query_scratch_growth` generates one valid 400,000-element unsigned-byte
+initializer. An explicit 256 MiB query budget must refuse that source before
+program publication; ordinary lowering must grow, certify and validate canonical
+IR, infer the array extent and preserve every independently expected payload byte.
+The fixture checks results after the private query arena has been destroyed.
 
 `compiler_driver_test_syntax_diagnostic_equivalence` contains frozen acceptance
 expectations, valid neighbors and rejected cases from the migration. Each source
