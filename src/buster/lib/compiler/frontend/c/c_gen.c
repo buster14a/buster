@@ -3,7 +3,9 @@
 // IrProgram from the preprocessed token stream and the parser's entities,
 // scopes, and types, lowering every function body and global initializer.
 // c_ir_lower_capacity_plan owns the non-mutating count/overflow check before
-// the program arena is touched. The remaining phase/state graph is in
+// the program arena is touched. c_ir_scratch_reservation_size and
+// c_ir_function_scratch_tail_reservation size large lowering workspaces before
+// their first allocation. The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
 // There is no AST — lowering re-walks token ranges directly, resolving
 // identifiers through the parse result's scopes and answering structure
@@ -14509,6 +14511,7 @@ struct CIrLowerBodyState
     u32 label_count;
     u32 index;
     u32 switch_case_count;
+    u32 switch_control_start;
     u32 switch_body_start;
     u32 switch_body_close;
     u32 vla_alignment;
@@ -14948,6 +14951,8 @@ typedef enum CIrPlaceContinuation
     C_IR_PLACE_CONTINUATION_SUBSCRIPT,
     C_IR_PLACE_CONTINUATION_GROUP,
     C_IR_PLACE_CONTINUATION_EXPRESSION,
+    C_IR_PLACE_CONTINUATION_REAL_PART,
+    C_IR_PLACE_CONTINUATION_IMAGINARY_PART,
 } CIrPlaceContinuation;
 
 typedef enum CIrCompoundContinuation
@@ -15084,6 +15089,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 token_index);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token_index);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source);
 
 BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
@@ -15125,6 +15131,29 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             start += 1;
             end -= 1;
         }
+        CConditionalOperator part = C_CONDITIONAL_OPERATOR_COUNT;
+        if (start < end && c_ir_complex_part_operator(builder, builder->preprocess.tokens[start], &part))
+        {
+            // The part of an object remains a place. Lower the operand as a
+            // place child so a constructor or arithmetic value cannot acquire
+            // modifiable storage through the ordinary value projection.
+            frame->as.place.local = 0;
+            frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[start]);
+            frame->as.place.start = start;
+            frame->as.place.end = end;
+            frame->as.place.index = end;
+            frame->as.place.continuation = part == C_CONDITIONAL_REAL_PART ? C_IR_PLACE_CONTINUATION_REAL_PART
+                                                                         : C_IR_PLACE_CONTINUATION_IMAGINARY_PART;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                    .kind = C_IR_LOWER_FRAME_PLACE,
+                                                    .as.place = {.start = start + 1, .end = end},
+                                                }))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
         u32 dereference_count = 0;
         // A unary `*` before the base identifier applies to the complete
         // postfix expression (`*p->field` means `*(p->field)`).  Keep that
@@ -15161,6 +15190,13 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             IrTypeId grouped_cast_type = depth ? IR_TYPE_ID_INVALID : c_ir_group_type_name(builder, index, close - 1);
             if (grouped_cast_type.value != IR_ID_UNDERLYING_INVALID)
             {
+                if (close < end && c_token_is_punctuator(&builder->preprocess.tokens[close], C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    // Expression lowering already materializes a compound
+                    // literal and its suffixes. Recover that object's place,
+                    // without interpreting its type name as a cast operand.
+                    goto c_ir_place_expression_base;
+                }
                 // `*(int*)ud` is a place whose pointer operand is a cast,
                 // rather than a parenthesized single identifier.  Preserve
                 // the cast type so the base value can be converted before
@@ -15316,6 +15352,7 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
                 // value and recover its final load's source place when the
                 // child returns.  The same path handles the older
                 // dereference-over-complex-base shape used by Lua.
+c_ir_place_expression_base:
                 frame->as.place.local = 0;
                 frame->as.place.place = IR_VALUE_ID_INVALID;
                 frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[start]);
@@ -15467,7 +15504,29 @@ c_ir_place_base_resolved:
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_VLA)
+        if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_REAL_PART ||
+            frame->as.place.continuation == C_IR_PLACE_CONTINUATION_IMAGINARY_PART)
+        {
+            IrValueId operand = machine->child_result.value;
+            bool imaginary = frame->as.place.continuation == C_IR_PLACE_CONTINUATION_IMAGINARY_PART;
+            IrType* type = operand.value < builder->function->value_count
+                               ? ir_type_from_id(&builder->program->types, builder->function->values[operand.value].canonical_type) : 0;
+            IrValueId place = IR_VALUE_ID_INVALID;
+            if (type && builder->function->values[operand.value].category == IR_VALUE_PLACE)
+            {
+                if (type->is_complex)
+                {
+                    place = c_ir_emit_field_index_place(builder, operand, imaginary ? 1u : 0u, frame->as.place.source);
+                }
+                else if (!imaginary && (type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN))
+                {
+                    place = operand;
+                }
+            }
+            frame->as.place.place = place;
+            frame->as.place.index = frame->as.place.end;
+        }
+        else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_VLA)
         {
             frame->as.place.place = machine->child_result.value;
             frame->as.place.index = machine->child_result.index;
@@ -15493,7 +15552,14 @@ c_ir_place_base_resolved:
         else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_EXPRESSION)
         {
             IrValueId place = machine->child_result.value;
-            IrValueId direct_place = c_ir_ssa_read_place(builder, place, false);
+            // The expression child only materializes a value to return it.
+            // Retract its terminal read when the existing recovery contract
+            // proves it is unused, retaining all earlier operand effects.
+            IrValueId direct_place = c_ir_recover_place_from_value(builder, place);
+            if (direct_place.value == IR_ID_UNDERLYING_INVALID)
+            {
+                direct_place = c_ir_ssa_read_place(builder, place, false);
+            }
             if (direct_place.value != IR_ID_UNDERLYING_INVALID)
             {
                 place = direct_place;
@@ -16280,11 +16346,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     reference.result = reference_result;
     c_ir_append_instruction(builder, reference, reference_source);
 
-    // The declaration's attribute is the general answer -- glibc marks exit,
-    // abort and longjmp with it -- and the three names remain because a
-    // platform's headers may declare the assertion helpers without one.
-    bool noreturn = signature.is_noreturn || string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
-                    string_equal(target->name, S8("__assert_perror_fail"));
+    // The bound declaration owns call effects; the name may identify a
+    // returning function with internal linkage or a different assembler name.
+    bool noreturn = signature.is_noreturn;
     bool terminates = noreturn && !c_ir_lowering_resumes_after_call(builder);
     // A void call still needs an expression-machine placeholder. Emit it
     // before a terminating call so UNREACHABLE follows the call immediately;
@@ -17708,6 +17772,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_part_operator(CIntegerIrBuilder* b
         }
         return type->kind == IR_TYPE_FLOAT ? c_ir_complex_zero(builder, type_id, source)
                                            : c_ir_emit_integer_value_typed(builder, 0, false, (CToken){0}, type_id);
+    }
+    IrValueId real = IR_VALUE_ID_INVALID;
+    IrValueId imaginary_value = IR_VALUE_ID_INVALID;
+    if (c_ir_complex_constructed_parts(builder, value, &real, &imaginary_value))
+    {
+        return imaginary ? imaginary_value : real;
     }
     IrTypeId element = complex_type->element_type;
     IrValueId place = c_ir_complex_operand_place(builder, value, source);
@@ -25362,12 +25432,30 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_increment(CIntegerIrBuilder* builder, IrVa
         }
         return prefix ? atomic_result : atomic_previous;
     }
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    if (!prefix && c_ir_value_complex_type(builder, previous))
+    {
+        IrTypeId captured_type = builder->function->values[previous.value].canonical_type;
+        // A postfix result is a captured value. Retaining the original load's
+        // object would let a subsequent part projection reread it after the
+        // update. Capture both components in the existing immutable aggregate.
+        IrValueId real = IR_VALUE_ID_INVALID;
+        IrValueId imaginary = IR_VALUE_ID_INVALID;
+        if (!c_ir_complex_split(builder, previous, &real, &imaginary, source))
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        previous = c_ir_complex_compose(builder, captured_type, real, imaginary, source);
+        if (previous.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+    }
     IrValueId values[2] = {
         previous,
         one,
     };
     u32 value_count = 2;
-    IrSourceRange source = c_ir_token_source_range(builder, token);
     if (!c_ir_apply_operation(builder, c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, values, &value_count,
                               source, IR_TYPE_ID_INVALID) ||
         value_count != 1 || !c_ir_emit_store_place(builder, place, type, values[0], source))
@@ -26261,7 +26349,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 value_is_aggregate = type_close + 1 < index &&
                                      c_token_is_punctuator(&builder->preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE);
             }
-            while (child && c_ir_initializer_type_is_aggregate(child) && !value_is_aggregate && !string_initializer &&
+            while (child && c_ir_initializer_type_is_aggregate(child) && !child->is_complex && !value_is_aggregate && !string_initializer &&
                    !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
             {
                 if (frame->as.nested_compound_literal.state->cursor_count >= frame->as.nested_compound_literal.state->cursor_capacity)
@@ -28969,6 +29057,11 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         {
             IrValueId literal = machine->child_result.value;
             IrValueId literal_place = c_ir_emit_temporary(builder, state->pending_type, state->pending_source);
+            if (literal_place.value < builder->function->value_count)
+            {
+                IrType* literal_type = ir_type_from_id(&builder->program->types, state->pending_type);
+                builder->function->values[literal_place.value].is_volatile = literal_type && literal_type->is_volatile;
+            }
             if (literal.value == IR_ID_UNDERLYING_INVALID || literal_place.value == IR_ID_UNDERLYING_INVALID ||
                 !c_ir_emit_store_place(builder, literal_place, state->pending_type, literal, state->pending_source))
             {
@@ -29165,17 +29258,21 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     if (postfix_place_update && update_operand_start < update_operand_end)
     {
         CToken first = builder->preprocess.tokens[update_operand_start];
+        CConditionalOperator part = C_CONDITIONAL_OPERATOR_COUNT;
         postfix_update_has_outer_prefix =
             c_token_is_punctuator(&first, C_PUNCTUATOR_STAR) || c_token_is_punctuator(&first, C_PUNCTUATOR_AMPERSAND) ||
             c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS) ||
             c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION) || c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE) ||
+            c_ir_complex_part_operator(builder, first, &part) ||
             (first.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, first))));
         if (!postfix_update_has_outer_prefix && c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, update_operand_start, update_operand_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
                                                        C_PUNCTUATOR_RIGHT_PARENTHESIS);
             postfix_update_has_outer_prefix =
-                close + 1 < update_operand_end && c_ir_group_type_name(builder, update_operand_start, close).value != IR_ID_UNDERLYING_INVALID;
+                close + 1 < update_operand_end &&
+                !c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+                c_ir_group_type_name(builder, update_operand_start, close).value != IR_ID_UNDERLYING_INVALID;
         }
     }
     u32 update_operand_depth = 0;
@@ -29395,7 +29492,9 @@ c_ir_expression_core_loop:
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, index, operand_end - 1, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                 outer_prefix =
-                    close < operand_end - 1 && close + 1 < operand_end - 1 && c_ir_group_type_name(builder, index, close).value != IR_ID_UNDERLYING_INVALID;
+                    close < operand_end - 1 && close + 1 < operand_end - 1 &&
+                    !c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+                    c_ir_group_type_name(builder, index, close).value != IR_ID_UNDERLYING_INVALID;
             }
             if (postfix && !outer_prefix)
             {
@@ -34381,6 +34480,11 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             {
                 value = c_ir_emit_cast(builder, value, task.as.compound_literal.type, task.as.compound_literal.source);
                 IrValueId place = c_ir_emit_temporary(builder, task.as.compound_literal.type, task.as.compound_literal.source);
+                if (place.value < builder->function->value_count)
+                {
+                    IrType* literal_type = ir_type_from_id(&builder->program->types, task.as.compound_literal.type);
+                    builder->function->values[place.value].is_volatile = literal_type && literal_type->is_volatile;
+                }
                 if (value.value == IR_ID_UNDERLYING_INVALID || place.value == IR_ID_UNDERLYING_INVALID ||
                     !c_ir_emit_store_place(builder, place, task.as.compound_literal.type, value, task.as.compound_literal.source))
                 {
@@ -39242,7 +39346,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 has_range |= switch_cases[case_index].is_range;
             }
             IrBlockId merge = c_ir_block_create(builder);
-            if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || merge.value == IR_ID_UNDERLYING_INVALID)
+            if (!switched_type || merge.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
             }
@@ -39264,10 +39368,21 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 switched_type_id = promoted_type;
                 switched_type = ir_type_from_id(&builder->program->types, switched_type_id);
-                if (!switched_type)
+            }
+            // Bool controls reach the ordinary integer dispatch after promotion.
+            // SWITCH case storage is one u64 per label; a wide control must not
+            // silently lose its high limb even when every label fits u64.
+            if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || switched_type->bit_width > 64)
+            {
+                if (switched_type && switched_type->kind == IR_TYPE_INTEGER && switched_type->bit_width > 64)
                 {
-                    return false;
+                    builder->failure_message = switched_type->is_signed
+                        ? S8("switch controlling type '__int128' is unsupported; integer switch dispatch supports at most 64 bits")
+                        : S8("switch controlling type 'unsigned __int128' is unsupported; integer switch dispatch supports at most 64 bits");
+                    builder->failure_kind_plus_one = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS + 1;
+                    builder->failure_token_index = state->switch_control_start;
                 }
+                return false;
             }
             // Every case label is converted here, plain labels included.  A
             // label is folded in the type it is spelled in, so `case -1` on a
@@ -39919,6 +40034,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     cases[last_ranged_case].content_end = body_close;
                 }
                 state->switch_case_count = case_count;
+                state->switch_control_start = index + 2;
                 state->switch_body_start = body_open + 1;
                 state->switch_body_close = body_close;
                 state->child_source = c_ir_token_source_range(builder, first);
@@ -50924,6 +51040,55 @@ BUSTER_C_INTERNAL bool c_ir_query_scratch_reservation(u64 reserved_size, u64* po
     return fits;
 }
 
+// Grow virtual reservation, not live rows. A request is accepted as a whole
+// before arena_create; explicit test budgets keep their original refusal path.
+BUSTER_C_INTERNAL bool c_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out)
+{
+    bool fits = size_out && current_size >= arena_minimum_position && current_size <= ARENA_MAX_RESERVATION &&
+                required_size >= arena_minimum_position && required_size <= ARENA_MAX_RESERVATION;
+    u64 size = current_size;
+    while (fits && size < required_size)
+    {
+        size = size <= ARENA_MAX_RESERVATION / 2 ? size * 2 : ARENA_MAX_RESERVATION;
+    }
+    if (fits)
+    {
+        *size_out = size;
+    }
+    return fits;
+}
+
+BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64 body_capacity, u64 lowering_capacity, bool direct_ssa)
+{
+    // One task per token, four more per control and one per switch label.
+    // A token cannot be both a control keyword and a switch label.
+    u64 task_capacity = body_capacity * 5 + 4;
+    bool fits = task_capacity <= UINT32_MAX &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrBodyTask), task_capacity + 1, BUSTER_ALIGN_OF(CIrBodyTask)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrLabel), body_capacity + 1, BUSTER_ALIGN_OF(CIrLabel)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSwitchCase), body_capacity + 1, BUSTER_ALIGN_OF(CIrSwitchCase)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSubstatementCase), body_capacity + 1, BUSTER_ALIGN_OF(CIrSubstatementCase)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrLowerAssignmentStatementState), body_capacity, BUSTER_ALIGN_OF(CIrLowerAssignmentStatementState)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrLowerAutomaticDeclarationState), body_capacity, BUSTER_ALIGN_OF(CIrLowerAutomaticDeclarationState)) &&
+                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrLowerAutomaticDeclarationListState), body_capacity, BUSTER_ALIGN_OF(CIrLowerAutomaticDeclarationListState));
+    if (fits && direct_ssa)
+    {
+        // Doubling retains old allocations: their sum is below four times
+        // the requested rows. Include SSA work arrays in the same plan so
+        // a large flat body does not merely move failure from frames to SSA.
+        u64 rows = lowering_capacity * 4;
+        fits = c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrDirectSsa), 1, BUSTER_ALIGN_OF(CIrDirectSsa)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaEvent), rows, BUSTER_ALIGN_OF(CIrSsaEvent)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaRead), rows, BUSTER_ALIGN_OF(CIrSsaRead)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaLocal), rows, BUSTER_ALIGN_OF(CIrSsaLocal)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaSlot), rows * 2, BUSTER_ALIGN_OF(CIrSsaSlot)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaParameter), lowering_capacity, BUSTER_ALIGN_OF(CIrSsaParameter)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(u32), lowering_capacity * 24, BUSTER_ALIGN_OF(u32)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(void*), lowering_capacity * 2, BUSTER_ALIGN_OF(void*));
+    }
+    return fits;
+}
+
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                                              CIRLowerOptions options, CIrLowerCapacityPlan plan, Arena* temporary_arena,
                                                              u64 function_reservation_limit)
@@ -52943,6 +53108,26 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         u32 candidate_index = entity_function_declarations[use.entity.value];
         if (candidate_index == UINT32_MAX)
         {
+            // Block-scope linkage declarations retain source-local rows.
+            // Their uses still reach the named function's definition, including
+            // a visible static function, rather than an automatic object.
+            CEntity entity = parse.entities[use.entity.value];
+            if (entity.kind == C_ENTITY_LOCAL && entity.is_extern && entity.type.value < parse.type_count &&
+                parse.types[entity.type.value].kind == C_TYPE_FUNCTION)
+            {
+                CIrFunctionNameResolution* resolution = c_ir_function_name_resolution_symbol(&constant_builder, entity.symbol, entity.name);
+                if (resolution && resolution->unique)
+                {
+                    CEntityId target_entity = parse.declarations[resolution->declaration_index].entity;
+                    if (target_entity.value < parse.entity_count)
+                    {
+                        candidate_index = entity_function_declarations[target_entity.value];
+                    }
+                }
+            }
+        }
+        if (candidate_index == UINT32_MAX)
+        {
             continue;
         }
         u32 owner_index = use.token_index < preprocess.token_count ? token_function_declarations_plus_one[use.token_index] - 1 : UINT32_MAX;
@@ -53299,7 +53484,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         // the body is long does not exhaust the stack.  The other consumers of
         // lowering_capacity are per-value arrays the bound does not widen.
         u64 lower_frame_capacity = lowering_capacity + (u64)(declaration.body_start - declaration_start) * 3;
-        u64 reserved_size = function_reservation_limit ? BUSTER_MIN(function_reservation_limit, lowering_arena->reserved_size) : lowering_arena->reserved_size;
+        u64 reserved_size = function_reservation_limit ? BUSTER_MIN(function_reservation_limit, lowering_arena->reserved_size) : ARENA_MAX_RESERVATION;
         u64 position = lowering_arena->position;
         u64 local_array_capacity = local_capacity ? local_capacity : 1;
         u64 call_array_capacity = prepared_call_capacity ? prepared_call_capacity : 1;
@@ -53328,6 +53513,28 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrPreparedControlExpression),
                                           prepared_control_expression_capacity ? prepared_control_expression_capacity : 1,
                                           BUSTER_ALIGN_OF(CIrPreparedControlExpression));
+        if (scratch_fits && lowering_capacity <= UINT32_MAX && local_capacity <= UINT32_MAX && local_slot_capacity <= UINT32_MAX &&
+            prepared_call_capacity <= UINT32_MAX && prepared_control_expression_capacity <= UINT32_MAX && lower_frame_capacity <= UINT32_MAX &&
+            !function_reservation_limit)
+        {
+            u64 requested_size = 0;
+            scratch_fits = c_ir_function_scratch_tail_reservation(&position, body_array_capacity, lowering_capacity, direct_ssa_enabled) &&
+                           c_ir_scratch_reservation_size(position, lowering_arena->reserved_size, &requested_size);
+            if (scratch_fits && requested_size > lowering_arena->reserved_size)
+            {
+                Arena* grown = arena_create((ArenaCreation){.reserved_size = requested_size, .flags = {.no_pool = true}});
+                scratch_fits = grown != 0;
+                if (scratch_fits)
+                {
+                    // No builder rows exist yet. Close the old mark before
+                    // replacing its arena; every later path owns this mark.
+                    scratch_end(lowering_temporary);
+                    arena_destroy(lowering_arena, 1);
+                    lowering_arena = grown;
+                    lowering_temporary = arena_begin_temporal(lowering_arena);
+                }
+            }
+        }
         if (lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || local_slot_capacity > UINT32_MAX ||
             prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX || !scratch_fits)
         {
@@ -53785,7 +53992,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         Arena* temporary_conflicts[] = {arena};
         TemporalArena temporary = scratch_begin(temporary_conflicts, BUSTER_ARRAY_LENGTH(temporary_conflicts));
         Arena* temporary_arena = temporary.arena;
-        u64 reserved_size = query_reservation_limit ? BUSTER_MIN(query_reservation_limit, temporary_arena->reserved_size) : temporary_arena->reserved_size;
+        u64 reserved_size = query_reservation_limit ? BUSTER_MIN(query_reservation_limit, temporary_arena->reserved_size) : ARENA_MAX_RESERVATION;
+        Arena* owned_temporary_arena = 0;
         u64 position = temporary_arena->position;
         bool fits = true;
         if (!parse.scope_children_offsets)
@@ -53803,6 +54011,28 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                    c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), parse.scope_count, BUSTER_ALIGN_OF(u32));
         }
         fits = fits && c_ir_query_scratch_reservation(reserved_size, &position, plan.query_frame_capacity);
+        if (fits && !query_reservation_limit)
+        {
+            // Keep one ordinary arena's remaining workspace after the query
+            // stack and scope index. Initializers and declaration scratch
+            // must not lose the workspace the old fixed reservation provided.
+            u64 workspace = temporary_arena->reserved_size - temporary_arena->position;
+            fits = c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, 1, workspace, 1);
+            u64 requested_size = 0;
+            fits = fits && c_ir_scratch_reservation_size(position, temporary_arena->reserved_size, &requested_size);
+            // Ordinary queries continue to reuse thread scratch. Only a query
+            // stack larger than its available workspace needs another mapping.
+            u64 query_position = position - (fits ? workspace : 0);
+            if (fits && query_position > temporary_arena->reserved_size)
+            {
+                owned_temporary_arena = arena_create((ArenaCreation){.reserved_size = requested_size, .flags = {.no_pool = true}});
+                fits = owned_temporary_arena != 0;
+                if (fits)
+                {
+                    temporary_arena = owned_temporary_arena;
+                }
+            }
+        }
         if (fits)
         {
             result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena, function_reservation_limit);
@@ -53814,6 +54044,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
                 .location = parse.declaration_count ? c_preprocess_site_location(&preprocess, parse.declarations[0].location) : (CSourceLocation){0},
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
+        }
+        if (owned_temporary_arena)
+        {
+            arena_destroy(owned_temporary_arena, 1);
         }
         scratch_end(temporary);
     }
@@ -53839,6 +54073,20 @@ CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena, String8 sour
                                                      CIRLowerOptions options, u64 query_reservation_limit, u64 function_reservation_limit)
 {
     return c_lower_to_ir_run(arena, source_path, preprocess, parse, target, options, query_reservation_limit, function_reservation_limit);
+}
+
+bool c_test_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out)
+{
+    return c_ir_scratch_reservation_size(required_size, current_size, size_out);
+}
+
+bool c_test_ir_function_scratch_size(u32 body_capacity, u32 lowering_capacity, bool direct_ssa, u64* size_out)
+{
+    u64 position = arena_minimum_position;
+    bool fits = c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(CIrLowerFrame), lowering_capacity, BUSTER_ALIGN_OF(CIrLowerFrame)) &&
+                c_ir_function_scratch_tail_reservation(&position, body_capacity, lowering_capacity, direct_ssa) &&
+                c_ir_scratch_reservation_size(position, BUSTER_MB(256), size_out);
+    return fits;
 }
 
 bool c_test_ir_arena_reservation_advance(u64 reserved_size, u64* position, u64 element_size, u64 count, u64 alignment)

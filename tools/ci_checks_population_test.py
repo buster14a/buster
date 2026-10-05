@@ -3,8 +3,10 @@
 import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -129,6 +131,34 @@ class NativeCatalogueTests(unittest.TestCase):
 
 
 class PopulationEpochTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # This reader intentionally pins the historical campaign's helpers.
+        # Exercise those bytes while ordinary CI is free to change its default.
+        temporary = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(temporary.cleanup)
+        cls.reader_root = Path(temporary.name)
+        tools = cls.reader_root / "tools"
+        tools.mkdir()
+        catalogue = json.loads(CATALOGUE.read_text(encoding="utf-8"))
+        for name in population.READER_FILES:
+            blob = catalogue["producer_blobs"].get("tools/" + name,
+                population.INPUT_PRODUCERS.get("tools/" + name))
+            data = subprocess.check_output(["git", "-C", str(ROOT), "cat-file", "blob", blob], timeout=30) \
+                if blob else (ROOT / "tools" / name).read_bytes()
+            (tools / name).write_bytes(data)
+        (cls.reader_root / "docs").mkdir()
+        (cls.reader_root / "docs" / CATALOGUE.name).write_bytes(CATALOGUE.read_bytes())
+        spec = importlib.util.spec_from_file_location("frozen_github_ci_time", tools / "github_ci_time.py")
+        frozen_github = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(frozen_github)
+        for owner, name, value in ((population, "__file__", str(tools / "ci_checks_population.py")),
+                                   (population, "github", frozen_github),
+                                   (qualification, "github", frozen_github)):
+            patch = mock.patch.object(owner, name, value)
+            patch.start()
+            cls.addClassCleanup(patch.stop)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -337,6 +367,18 @@ class PopulationEpochTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already exists"):
             population.prepare(self.root / "declaration.json")
         self.assertEqual(population.digest(self.root / "declaration.json"), frozen_digest)
+
+    def test_current_helper_cannot_replace_the_frozen_campaign_dependency(self):
+        helper = self.reader_root / "tools" / "github_ci_time.py"
+        original = helper.read_bytes()
+        changed = (ROOT / "tools" / "github_ci_time.py").read_bytes() + b"\n# changed dependency\n"
+        try:
+            helper.write_bytes(changed)
+            prepared = population.prepare(self.root / "changed-reader-declaration.json")
+            with self.assertRaisesRegex(ValueError, "accepted sample-reader dependency changed: github_ci_time.py"):
+                population.read_declaration(self.root, prepared["declaration"])
+        finally:
+            helper.write_bytes(original)
 
     def test_complete_heterogeneous36_retains_profiles_and_exact_ratio_boundaries(self):
         report = self.report()

@@ -90,7 +90,7 @@
 //                                                 entity lookup
 //   c_parse_local_declarations                    block-scope declarations,
 //                                                 auto inference, local
-//                                                 functions
+//                                                 linkage redeclarations
 //   c_parse_label_address_prefix_proven,          statement boundaries, asm
 //   c_parse_statement_end                         goto, label addresses
 //   c_parse_bind_function_body                    binds body identifiers to
@@ -1213,6 +1213,7 @@ BUSTER_C_INTERNAL void c_type_parse_frame_complete(CTypeParseMachine* machine, C
     machine->result_type = type;
     machine->result_index = index;
     machine->result_valid = valid;
+    machine->result_nonplace_projection = frame->kind == C_TYPE_PARSE_FRAME_SIZEOF && frame->expression_nonplace_projection;
 }
 
 // A committed state is the byte 1 and an uncommitted one the byte 0, the two
@@ -3859,11 +3860,103 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
                                                                               CPreprocessResult preprocess, u32 start, u32 end, u8 const* skipped)
 {
     CCallArityDiagnostic result = {0};
+    typedef struct CCallAttributeGroup CCallAttributeGroup;
+    struct CCallAttributeGroup
+    {
+        u32 next_name;
+        u32 payload_end;
+    };
+    enum { C_CALL_ATTRIBUTE_INLINE_GROUPS = 8 };
+    CCallAttributeGroup inline_attribute_groups[C_CALL_ATTRIBUTE_INLINE_GROUPS];
+    CCallAttributeGroup* attribute_groups = inline_attribute_groups;
+    Arena* attribute_arena = 0;
+    u32 attribute_group_count = 0;
+    u32 attribute_group_capacity = C_CALL_ATTRIBUTE_INLINE_GROUPS;
     CParseCandidates calls = c_parse_call_candidates(preprocess);
     for (u32 index = c_parse_candidates_next(&calls, start, end); index + 1 < end && !result.message.length;
          index = c_parse_candidates_next(&calls, index + 1, end))
     {
         CToken token = preprocess.tokens[index];
+        while (attribute_group_count && index >= attribute_groups[attribute_group_count - 1].payload_end)
+        {
+            attribute_group_count -= 1;
+        }
+        bool attribute_name = false;
+        if (attribute_group_count)
+        {
+            CCallAttributeGroup* group = attribute_groups + attribute_group_count - 1;
+            // Advance only over attribute specifiers, jumping their argument
+            // groups through the retained delimiter index. The call cursor
+            // still visits every candidate inside those arguments.
+            while (group->next_name < index && group->next_name < group->payload_end)
+            {
+                u32 next = group->next_name + 1;
+                if (preprocess.tokens[group->next_name].kind == C_TOKEN_IDENTIFIER && next < group->payload_end &&
+                    c_token_is_punctuator(&preprocess.tokens[next], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 close = c_parse_matching_delimiter_indexed(analysis, preprocess, next);
+                    next = close < group->payload_end ? close + 1 : group->payload_end;
+                }
+                group->next_name = next;
+            }
+            attribute_name = group->next_name == index;
+        }
+        if (attribute_name)
+        {
+            continue;
+        }
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ATTRIBUTE_KEYWORDS) &&
+            c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(analysis, preprocess, index + 1);
+            if (close < end)
+            {
+                u32 payload_start = index + 2;
+                u32 payload_end = close;
+                if (payload_start < payload_end && c_token_is_punctuator(&preprocess.tokens[payload_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    c_parse_matching_delimiter_indexed(analysis, preprocess, payload_start) + 1 == payload_end)
+                {
+                    payload_start += 1;
+                    payload_end -= 1;
+                }
+                if (attribute_group_count == attribute_group_capacity)
+                {
+                    // Spill only for simultaneous nesting beyond the fixed
+                    // local buffer. A private arena avoids exhausting the two
+                    // scratch arenas when message/model owners occupy both.
+                    CTokenPositionIndex* positions = analysis->position_index;
+                    u32 first = c_parse_position_lower_bound(positions->attribute_positions, positions->attribute_count, start);
+                    u32 after = c_parse_position_lower_bound(positions->attribute_positions, positions->attribute_count, end);
+                    u32 doubled = attribute_group_capacity <= UINT32_MAX / 2 ? attribute_group_capacity * 2 : UINT32_MAX;
+                    u32 capacity = BUSTER_MIN(after - first, doubled);
+                    if (!attribute_arena && capacity > attribute_group_count)
+                    {
+                        attribute_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+                    }
+                    if (attribute_arena && capacity > attribute_group_count)
+                    {
+                        CCallAttributeGroup* groups = arena_allocate(attribute_arena, CCallAttributeGroup, capacity);
+                        memcpy(groups, attribute_groups, sizeof(*groups) * attribute_group_count);
+                        attribute_groups = groups;
+                        attribute_group_capacity = capacity;
+                    }
+                    else
+                    {
+                        result.message = S8("could not allocate GNU attribute-role frames");
+                        result.token_index = index;
+                    }
+                }
+                if (!result.message.length)
+                {
+                    attribute_groups[attribute_group_count++] = (CCallAttributeGroup){
+                        .next_name = payload_start,
+                        .payload_end = payload_end,
+                    };
+                }
+            }
+            continue;
+        }
         bool is_member_call =
             index && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
                       c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
@@ -3928,6 +4021,10 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
                                                           type->parameter_count, type->is_variadic, argument_count);
             result.token_index = index;
         }
+    }
+    if (attribute_arena)
+    {
+        BUSTER_VALIDATE(arena_destroy(attribute_arena, 1));
     }
     return result;
 }
@@ -5237,13 +5334,33 @@ BUSTER_C_INTERNAL String8 c_parse_scalar_conversion_message(Target target, CType
     return message;
 }
 
+BUSTER_C_INTERNAL bool c_parse_complex_part_token(CPreprocessResult preprocess, CToken token)
+{
+    String8 spelling = token.kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, token) : (String8){0};
+    return string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__imag__"));
+}
+
 BUSTER_C_INTERNAL bool c_parse_expression_place_shape(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
 {
-    while (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-           c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
+    // A complex part designates the same object as its operand. Strip these
+    // unary prefixes together with complete groups; the remaining shape must
+    // still be an object, not a cast, call or arithmetic value.
+    while (start < end)
     {
-        start += 1;
-        end -= 1;
+        if (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
+        {
+            start += 1;
+            end -= 1;
+        }
+        else if (c_parse_complex_part_token(preprocess, preprocess.tokens[start]))
+        {
+            start += 1;
+        }
+        else
+        {
+            break;
+        }
     }
     bool place = false;
     if (start < end)
@@ -5313,14 +5430,27 @@ BUSTER_C_INTERNAL bool c_parse_array_parameter_pointer_is_const(CParseResult* re
 // pointer is const: `argv++` and `*SK++` are the ordinary spellings (lmdb's
 // `mdb_copy`, mbedtls's `des_setkey`). A local or member array is not
 // adjusted and stays unmodifiable.
-BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type)
+BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type, bool nonplace_projection)
 {
-    bool valid = type.value < result->type_count && c_parse_expression_place_shape(result, preprocess, start, end);
-    while (valid && start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-           c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
+    bool valid = !nonplace_projection && type.value < result->type_count && c_parse_expression_place_shape(result, preprocess, start, end);
+    // Match the place-shape normalization before resolving an identifier:
+    // component prefixes cannot turn an enumerator into a modifiable object.
+    while (valid && start < end)
     {
-        start += 1;
-        end -= 1;
+        if (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
+        {
+            start += 1;
+            end -= 1;
+        }
+        else if (c_parse_complex_part_token(preprocess, preprocess.tokens[start]))
+        {
+            start += 1;
+        }
+        else
+        {
+            break;
+        }
     }
     bool identifier = valid && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER;
     CEntityId entity = C_ENTITY_ID_INVALID;
@@ -5337,7 +5467,8 @@ BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, C
         bool adjusted_parameter = value.kind == C_TYPE_ARRAY && entity.value < result->entity_count &&
                                   result->entities[entity.value].kind == C_ENTITY_PARAMETER &&
                                   !c_parse_array_parameter_pointer_is_const(result, type);
-        valid = !value.is_const && (c_parse_expression_real_kind(value.kind) || value.kind == C_TYPE_POINTER || adjusted_parameter);
+        valid = !value.is_const && (c_parse_expression_real_kind(value.kind) || value.kind == C_TYPE_POINTER || adjusted_parameter ||
+                                   (c_preprocess_dialect_is_gnu(preprocess.dialect) && c_type_kind_is_complex(value.kind)));
     }
     if (valid && identifier)
     {
@@ -5348,11 +5479,6 @@ BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, C
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_parse_complex_part_token(CPreprocessResult preprocess, CToken token)
-{
-    String8 spelling = token.kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, token) : (String8){0};
-    return string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__imag__"));
-}
 
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
@@ -5408,6 +5534,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             .end = end,
         };
         frame->type = C_TYPE_ID_INVALID;
+        frame->expression_nonplace_projection = false;
         frame->stage = C_TYPE_PARSE_STAGE_FINISH;
     }
     else if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
@@ -5416,6 +5543,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         // so the tail handed back before the push is free to reclaim.
         machine->expression_task_count = frame->task_mark + frame->task_capacity;
         frame->type = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
+        frame->expression_nonplace_projection = machine->result_valid && machine->result_nonplace_projection;
         frame->task_count -= 1;
         frame->stage = C_TYPE_PARSE_STAGE_FINISH;
     }
@@ -5423,11 +5551,13 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
     u32 task_count = frame->task_count;
     u32 capacity = frame->task_capacity;
     CTypeId last = frame->type;
+    bool nonplace_projection = frame->expression_nonplace_projection;
     while (task_count)
     {
         CParseExpressionTypeTask* task = tasks + task_count - 1;
         if (!task->state)
         {
+            nonplace_projection = false;
             // `__extension__` binds as a unary prefix and keeps its operand's
             // type, so dropping it cannot change what the operand types as.
             bool stripped = true;
@@ -5464,10 +5594,12 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 (machine->runtime_expression_constraints ? C_PARSE_EXPRESSION_QUERY_RUNTIME : 0u) |
                 (machine->semantic_constant_queries ? C_PARSE_EXPRESSION_QUERY_CONSTANT : 0u);
             if (query && query->end == task->end && query->scope.value == scope.value &&
-                (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
+                (query->flags & ~(C_PARSE_EXPRESSION_QUERY_CHECKED | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)) ==
+                (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
                 (query->flags & flags) == flags && query->type.value < result->type_count)
             {
                 last = query->type;
+                nonplace_projection = (query->flags & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
                 task_count -= 1;
                 continue;
             }
@@ -5827,7 +5959,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             {
                 CTypeKind kind = result->types[last.value].kind;
                 if (machine->validate_expression_constraints && !machine->expression_constraint.length &&
-                    (!c_parse_update_operand_modifiable(result, preprocess, task->start + 1, task->end, last) ||
+                    (!c_parse_update_operand_modifiable(result, preprocess, task->start + 1, task->end, last, nonplace_projection) ||
                      kind == C_TYPE_STRUCT || kind == C_TYPE_UNION || kind == C_TYPE_NULLPTR))
                 {
                     machine->expression_constraint = S8("increment or decrement operand is not a modifiable place");
@@ -5863,6 +5995,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 machine->expression_constraint = S8("could not lower logical expression core");
                 machine->expression_constraint_token = task->end;
             }
+            nonplace_projection = false;
             task_count -= 1;
             continue;
         }
@@ -5870,14 +6003,26 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         {
             // GNU `__real__`/`__imag__` yield a complex operand's element
             // type and leave a real arithmetic operand's type unpromoted.
-            CTypeKind kind = last.value < result->type_count ? result->types[last.value].kind : C_TYPE_INVALID;
+            CType operand = last.value < result->type_count ? result->types[last.value] : (CType){0};
+            CTypeKind kind = last.value < result->type_count ? operand.kind : C_TYPE_INVALID;
             if (c_type_kind_is_complex(kind))
             {
                 last = c_parse_expression_scalar_type(result, c_type_kind_complex_element(kind));
+                if (last.value < result->type_count && (operand.is_const || operand.is_volatile))
+                {
+                    last = c_parse_add_qualified_type(result, last, (CType){.is_const = operand.is_const, .is_volatile = operand.is_volatile});
+                }
             }
             else if (!c_parse_expression_real_kind(kind))
             {
                 last = C_TYPE_ID_INVALID;
+            }
+            else
+            {
+                // The imaginary part of a real arithmetic operand is zero,
+                // a value rather than a place. Outer real projections retain
+                // that fact; an outer imaginary projection also yields zero.
+                nonplace_projection |= string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[task->start]), S8("__imag__"));
             }
             task_count -= 1;
             continue;
@@ -5885,7 +6030,8 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         if (task->operation == C_PARSE_EXPRESSION_TYPE_INDIRECTION || task->operation == C_PARSE_EXPRESSION_TYPE_ADDRESS_OF)
         {
             if (task->operation == C_PARSE_EXPRESSION_TYPE_ADDRESS_OF && machine->validate_expression_constraints &&
-                !machine->expression_constraint.length && !c_parse_expression_place_shape(result, preprocess, task->start + 1, task->end))
+                !machine->expression_constraint.length &&
+                (nonplace_projection || !c_parse_expression_place_shape(result, preprocess, task->start + 1, task->end)))
             {
                 machine->expression_constraint = S8("could not lower logical expression core");
                 machine->expression_constraint_token = task->end;
@@ -5915,6 +6061,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 last = pointer->kind == C_TYPE_POINTER || pointer->kind == C_TYPE_ARRAY ? pointer->element_type
                        : pointer->kind == C_TYPE_FUNCTION ? last : C_TYPE_ID_INVALID;
             }
+            nonplace_projection = false;
             task_count -= 1;
             continue;
         }
@@ -6020,10 +6167,13 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             if (left_pointer && right_pointer && c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS))
                 pointer_valid = c_parse_types_compatible(arena, result, preprocess,
                     c_parse_unqualified_type(result, left_type->element_type), c_parse_unqualified_type(result, right_type->element_type));
-            bool invalid = aggregate || !null_valid || !pointer_valid || (!vector && integer_operator && !integers);
+            bool void_operand = left_type->kind == C_TYPE_VOID || right_type->kind == C_TYPE_VOID;
+            bool invalid = aggregate || void_operand || !null_valid || !pointer_valid || (!vector && integer_operator && !integers);
             if (invalid || (complex && !complex_operator))
             {
-                machine->expression_constraint = invalid ? S8("could not lower logical expression core") : S8("this operator has no complex form");
+                machine->expression_constraint = void_operand ? S8("void value not ignored as it ought to be")
+                                                 : invalid    ? S8("could not lower logical expression core")
+                                                              : S8("this operator has no complex form");
                 machine->expression_constraint_token = task->end;
             }
         }
@@ -6121,8 +6271,10 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         }
         break;
         }
+        nonplace_projection = false;
         task_count -= 1;
     }
+    frame->expression_nonplace_projection = nonplace_projection;
     if (last.value >= result->type_count)
     {
         c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
@@ -6159,7 +6311,8 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
             ? machine->expression_queries + start - machine->expression_query_start : 0;
     machine->mutation_type_limit = result->type_count;
     CTypeId type = query && query->end == end && query->scope.value == scope.value &&
-                           (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
+                           (query->flags & ~(C_PARSE_EXPRESSION_QUERY_CHECKED | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)) ==
+                (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
                            (query->flags & flags) == flags && query->type.value < result->type_count
                        ? query->type
                        : c_parse_expression_leaf_without_cast(arena, preprocess, result, scope, start, end);
@@ -6178,6 +6331,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
 {
     WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_ROOTS, 1);
+    machine->result_nonplace_projection = false;
     c_parse_type_identity_prepare(machine, arena, preprocess, result, scope, start, end);
     CParseExpressionQuery* query = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->expression_queries &&
         machine->expression_query_result == result && machine->expression_query_tokens == preprocess.tokens && !machine->frame_count &&
@@ -6200,11 +6354,13 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
     literal &= !c_parse_literal_query_machine_only;
 #endif
     if (query && query->end == end && query->scope.value == scope.value &&
-        (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
+        (query->flags & ~(C_PARSE_EXPRESSION_QUERY_CHECKED | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)) ==
+                (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
         (query->flags & flags) == flags && query->type.value < result->type_count)
     {
         WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_CACHE_HITS, 1);
         *type_out = query->type;
+        machine->result_nonplace_projection = (query->flags & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
         valid = true;
     }
     else if (literal)
@@ -6246,7 +6402,8 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
             *type_out = machine->result_type;
         }
         if (query && valid && !machine->expression_constraint.length && result->diagnostic_count == checkpoint.diagnostic_count)
-            *query = (CParseExpressionQuery){.end = end, .scope = scope, .type = *type_out, .flags = flags};
+            *query = (CParseExpressionQuery){.end = end, .scope = scope, .type = *type_out,
+                .flags = flags | (machine->result_nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u)};
     }
     return valid;
 }
@@ -12582,6 +12739,20 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     {
         c_parse_add_noreturn_function_type(result, noreturn_function);
     }
+    CType const* member_record = declarator_type.value < result->type_count ? &result->types[declarator_type.value] : 0;
+    if (member_record && !member_record->is_complete && member_record->has_unqualified_type &&
+        member_record->unqualified_type.value < result->type_count)
+    {
+        member_record = &result->types[member_record->unqualified_type.value];
+    }
+    // A tag defined inside the enclosing aggregate -- by this member's own
+    // specifiers or an earlier member's -- is complete here although its
+    // completion is recorded only with the enclosing aggregate's.
+    bool defined_in_place = member_record && member_record->definition_start > frame->start && member_record->definition_start < frame->end;
+    bool defined_before = member_record && member_record->definition_start &&
+                          member_record->definition_start + member_record->definition_token_count <= frame->start;
+    bool has_incomplete_type = member_record && (member_record->kind == C_TYPE_STRUCT || member_record->kind == C_TYPE_UNION) &&
+                               !member_record->is_complete && !defined_in_place && !defined_before;
     BUSTER_VALIDATE(result->member_count < result->member_capacity);
     result->members[result->member_count++] = (CMember){
         .name = c_token_spelling(preprocess.spelling_base, name),
@@ -12596,6 +12767,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         .is_bit_field = is_bit_field,
         .is_packed = member_packed,
         .bit_width_resolved = bit_width_resolved,
+        .has_incomplete_type = has_incomplete_type,
     };
     frame->declarator_start = frame->declarator_end < frame->end ? frame->declarator_end + 1 : frame->end;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
@@ -17944,6 +18116,14 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                                                       CEntityId entity)
 {
     CToken token = preprocess.tokens[token_index];
+    bool hidden_typedef = false;
+    if (entity.value < result->entity_count && result->entities[entity.value].scope.value == 0 &&
+        result->entities[entity.value].declaration_token_plus_one > token_index + 1)
+    {
+        // C11 6.2.1p7 starts scope just after the declarator.
+        hidden_typedef = result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+        entity = C_ENTITY_ID_INVALID;
+    }
     bool first_use = token_index < result->identifier_use_by_token_capacity && !result->identifier_use_by_token_plus_one[token_index];
     BUSTER_VALIDATE(result->identifier_use_count < result->identifier_use_capacity);
     u32 use_index = result->identifier_use_count++;
@@ -17996,7 +18176,12 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                                     string_equal(spelling, S8("__imag__")) || string_equal(spelling, S8("__imag"));
         predefined_function_name |= c_preprocess_dialect_is_c23(preprocess.dialect) &&
                                     (string_equal(spelling, S8("true")) || string_equal(spelling, S8("false")) || string_equal(spelling, S8("nullptr")));
-        if (unmodeled_builtin_type)
+        if (hidden_typedef)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
+                               string_format(arena, S8("unknown type name '{S8}'"), spelling));
+        }
+        else if (unmodeled_builtin_type)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
                                string_format(arena, S8("unknown type name '{S8}'"), spelling));
@@ -19023,6 +19208,10 @@ BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CScope
     }
 }
 
+BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range_core(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                   CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out,
+                                                                   bool* request_out);
+
 BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                     CScopeId scope, u32 declaration_index, u32 start, u32 end)
 {
@@ -19467,6 +19656,15 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         // C17 6.2.2p5: without a storage-class specifier the declarator links
         // as if it were written `extern`, so it declares no automatic object.
         bool declares_function = !is_typedef && declared_type && declared_type->kind == C_TYPE_FUNCTION;
+        // Match the file-scope constraint before a neutral request could be
+        // replaced by a preceding declaration's alignment run. Declarator
+        // GNU attributes keep their separate extension path.
+        if (declares_function && alignment_count)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                               S8("alignment specifier cannot be applied to a function"));
+            return false;
+        }
         if (declares_function && result->declaration_count < result->declaration_capacity && result->entity_count + 1 < result->entity_capacity)
         {
             String8 function_name = c_token_spelling(preprocess.spelling_base, name);
@@ -19527,8 +19725,63 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         CEntityId duplicate = c_parse_lookup_entity_in_scope(result, scope, declared_symbol, declared_name);
         if (duplicate.value != C_ID_UNDERLYING_INVALID)
         {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_REDEFINITION, S8("redefinition of local identifier"));
-            return false;
+            CEntity* previous = result->entities + duplicate.value;
+            // C17 6.7p3/p4 permits compatible repeated declarations with
+            // linkage. Keep one local row per source declarator: lowering
+            // finds declaration statements through their individual ranges.
+            if (is_typedef || !(is_extern || declares_function) || previous->kind != C_ENTITY_LOCAL || !previous->is_extern)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_REDEFINITION,
+                                   S8("redefinition of local identifier"));
+                return false;
+            }
+            if (!c_parse_types_compatible(arena, result, preprocess, previous->type, type) || previous->is_thread_local != is_thread_local)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                   string_format(arena, S8("conflicting declaration of '{S8}'"), declared_name));
+                return false;
+            }
+            bool requested = false;
+            if (previous->alignment_count || declarator_alignment_count)
+            {
+                u32 previous_alignment;
+                bool previously_requested;
+                String8 message = c_parse_validate_alignment_range_core(machine, result, preprocess, previous->scope, previous->type,
+                    previous->alignment_start, previous->alignment_count, &previous_alignment, &previously_requested);
+                if (!message.length)
+                {
+                    u32 requested_alignment;
+                    message = c_parse_validate_alignment_range_core(machine, result, preprocess, scope, type,
+                        declarator_alignment_start, declarator_alignment_count, &requested_alignment, &requested);
+                    if (!message.length && previously_requested && requested && previous_alignment != requested_alignment)
+                    {
+                        message = S8("redeclaration has a different alignment requirement");
+                    }
+                }
+                if (message.length)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_ALIGNMENT, message);
+                    return false;
+                }
+            }
+            // A declaration without a nonzero request does not erase an
+            // earlier one. C17 6.7.5p5 makes _Alignas(0) neutral too.
+            if (!requested)
+            {
+                declarator_alignment_start = previous->alignment_start;
+                declarator_alignment_count = previous->alignment_count;
+            }
+            CType previous_type = result->types[previous->type.value];
+            CType new_type = result->types[type.value];
+            bool previous_complete_array = previous_type.kind == C_TYPE_ARRAY && previous_type.array_bound < result->array_bound_count &&
+                (result->array_bounds[previous_type.array_bound].token_count || result->array_bounds[previous_type.array_bound].has_inferred_count);
+            bool new_incomplete_array = new_type.kind == C_TYPE_ARRAY && new_type.array_bound < result->array_bound_count &&
+                !result->array_bounds[new_type.array_bound].token_count && !result->array_bounds[new_type.array_bound].has_inferred_count;
+            if ((previous_complete_array && new_incomplete_array) ||
+                (previous_type.kind == C_TYPE_FUNCTION && !previous_type.is_unprototyped && new_type.is_unprototyped))
+            {
+                type = previous->type;
+            }
         }
         CEntityId entity = {
             .value = result->entity_count,
@@ -24126,7 +24379,9 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
     {
         CType target = result->types[destination.value];
         CType from = result->types[source.value];
-        message = c_parse_scalar_conversion_message(preprocess.target, target.kind, from.kind, machine->runtime_expression_constraints);
+        message = from.kind == C_TYPE_VOID && target.kind != C_TYPE_VOID
+                      ? S8("void value not ignored as it ought to be")
+                      : c_parse_scalar_conversion_message(preprocess.target, target.kind, from.kind, machine->runtime_expression_constraints);
         bool source_pointer = from.kind == C_TYPE_POINTER || from.kind == C_TYPE_ARRAY || from.kind == C_TYPE_FUNCTION;
         bool target_pointer = target.kind == C_TYPE_POINTER;
         bool target_integer = c_parse_expression_integer_kind(target.kind);
@@ -24613,6 +24868,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         CTypeId type_id = C_TYPE_ID_INVALID;
         u64 query_mark = machine->scratch_arena->position;
         bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, operand_start, operand_end, &type_id);
+        bool nonplace_projection = machine->result_nonplace_projection;
         arena_set_position(machine->scratch_arena, query_mark);
         CTypeId assignment_type_id = type_id;
         bool assignment_typed = typed && type_id.value < result->type_count;
@@ -24692,7 +24948,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         {
             c_parse_lowering_constraint_consider(diagnostic, S8("unsupported C function-body statement or expression near '('"), index, call_open);
         }
-        if (read_only)
+        if (read_only || (typed && nonplace_projection))
         {
             u32 location = index + 1 < end ? index + 1 : index;
             if (update)
@@ -24721,7 +24977,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 string_format(result->arena, S8("unsupported C function-body statement or expression near '{S8}'"),
                               c_token_spelling(preprocess.spelling_base, preprocess.tokens[operand_start])), index, operand_start);
         }
-        else if (update && typed && !c_parse_update_operand_modifiable(result, preprocess, operand_start, operand_end, type_id))
+        else if (update && typed && !c_parse_update_operand_modifiable(result, preprocess, operand_start, operand_end, type_id, nonplace_projection))
         {
             c_parse_lowering_constraint_consider(diagnostic, S8("increment or decrement operand is not a modifiable place"), index, operand_start);
         }
@@ -24994,8 +25250,9 @@ BUSTER_C_INTERNAL bool c_parse_declarator_has_initializer(CPreprocessResult prep
     return initialized;
 }
 
-BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                              CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out)
+BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range_core(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                   CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out,
+                                                                   bool* request_out)
 {
     String8 message = {0};
     u64 mark = machine->scratch_arena->position;
@@ -25059,8 +25316,15 @@ BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* ma
         message = S8("invalid object alignment");
     }
     if (alignment_out) *alignment_out = (u32)BUSTER_MAX(maximum, natural);
+    if (request_out) *request_out = maximum != 0;
     arena_set_position(machine->scratch_arena, mark);
     return message;
+}
+
+BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                              CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out)
+{
+    return c_parse_validate_alignment_range_core(machine, result, preprocess, scope, type, start, count, alignment_out, 0);
 }
 
 BUSTER_C_SHARED bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
@@ -25559,6 +25823,23 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                 {
                     diagnostic = (CParseInitializerDiagnostic){.message = S8("expected ')' after type name"), .token = cursor};
                 }
+                else if (type.value < result->type_count && cursor == close)
+                {
+                    CType const* operand = &result->types[type.value];
+                    if (!operand->is_complete && operand->has_unqualified_type && operand->unqualified_type.value < result->type_count)
+                    {
+                        operand = &result->types[operand->unqualified_type.value];
+                    }
+                    // C17 6.5.3.4p1: neither operator applies to an incomplete type.
+                    if ((operand->kind == C_TYPE_STRUCT || operand->kind == C_TYPE_UNION) && !operand->is_complete)
+                    {
+                        diagnostic = (CParseInitializerDiagnostic){
+                            .message = string_format(result->arena, S8("invalid application of '{S8}' to an incomplete type"),
+                                                     c_token_spelling(preprocess.spelling_base, token)),
+                            .token = index,
+                        };
+                    }
+                }
             }
         }
         for (u32 update = operand_start; !nested && !diagnostic.message.length && update < operand_end; update += 1)
@@ -25591,7 +25872,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
             bool typed = place_start < place_end && c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result,
                                                                                     update_scope, place_start, place_end, &type);
             arena_set_position(machine->scratch_arena, query_mark);
-            if (typed && !c_parse_update_operand_modifiable(result, preprocess, place_start, place_end, type))
+            if (typed && !c_parse_update_operand_modifiable(result, preprocess, place_start, place_end, type, machine->result_nonplace_projection))
                 diagnostic = (CParseInitializerDiagnostic){.message = S8("increment or decrement operand is not a modifiable place"), .token = update};
         }
         if (grouped && !nested) walked_end = close;
@@ -25993,9 +26274,10 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             }
             if (shape.message.length)
             {
-                String8 message = simple_conversion_failure
-                    ? simple_conversion_message
-                    : string_format(result->arena, S8("could not lower initializer expression for local '{S8}'"), entity->name);
+                String8 message = simple_conversion_failure ? simple_conversion_message
+                                  : string_equal(shape.message, S8("void value not ignored as it ought to be"))
+                                      ? shape.message
+                                      : string_format(result->arena, S8("could not lower initializer expression for local '{S8}'"), entity->name);
                 u32 token = simple_conversion_failure ? shape_start : location;
                 if (!simple_conversion_failure && shape.container.value < result->type_count &&
                     string_equal(shape.message, S8("aggregate designator names an unknown field")))
@@ -26472,8 +26754,7 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
     BUSTER_UNUSED(arena);
 }
 
-BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
-                                                          CPreprocessResult preprocess)
+BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess)
 {
     for (u32 index = 0; index < result->member_count; index += 1)
     {
@@ -26481,6 +26762,19 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
         if (member.type.value < result->type_count && result->types[member.type.value].kind == C_TYPE_VOID)
         {
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member.location), C_DIAGNOSTIC_INVALID_VOID_OBJECT, S8("a member may not have type 'void'"));
+        }
+        if (member.has_incomplete_type)
+        {
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member.location), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                               member.name.length ? string_format(arena, S8("member '{S8}' has incomplete type"), member.name)
+                                                  : S8("a member may not have incomplete type"));
+        }
+        // C17 6.7.2.1p5: a bit-field has an integer type (enumerations included).
+        if (member.is_bit_field && member.type.value < result->type_count && !c_type_kind_is_integer(result->types[member.type.value].kind))
+        {
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member.location), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                               member.name.length ? string_format(arena, S8("bit-field '{S8}' has non-integer type"), member.name)
+                                                  : S8("bit-field has non-integer type"));
         }
         u32 alignment_token = member.alignment_start < result->alignment_count ? result->alignments[member.alignment_start].token_start : 0;
         CScopeId member_scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, alignment_token);
@@ -26513,6 +26807,80 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_widths(CTypeParseMachine* mach
                                    string_format(arena, S8("named bit-field '{S8}' has zero width"), member.name));
             }
             arena_set_position(machine->scratch_arena, mark);
+        }
+    }
+    // Every named member of one struct or union has its own name. A
+    // qualified copy shares the members of its unqualified type, which is the
+    // one checked.
+    for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
+    {
+        CType const* record = &result->types[type_index];
+        if ((record->kind != C_TYPE_STRUCT && record->kind != C_TYPE_UNION) || !record->is_complete || record->has_unqualified_type ||
+            record->is_const || record->is_volatile || record->is_atomic)
+        {
+            continue;
+        }
+        u32 member_end = BUSTER_MIN(record->member_start + record->member_count, result->member_count);
+        for (u32 later = record->member_start + 1; later < member_end; later += 1)
+        {
+            CMember const* member = &result->members[later];
+            for (u32 earlier = record->member_start; member->name.length && earlier < later; earlier += 1)
+            {
+                if (c_parse_member_named(&result->members[earlier], member->symbol, member->name))
+                {
+                    c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member->location), C_DIAGNOSTIC_REDEFINITION,
+                                       string_format(arena, S8("duplicate member '{S8}'"), member->name));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// C17 6.5.3.2p1: the operand of unary '&' is not declared `register`. An
+// operand-ending token before the '&' makes it the binary operator, and '->',
+// '[' or '(' after the name address a pointee or a call result instead.
+BUSTER_C_INTERNAL void c_parse_validate_register_addresses(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration,
+                                                           u8 const* skipped, CParseLoweringConstraintDiagnostic* diagnostic)
+{
+    u32 start = declaration->body_start;
+    u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
+    for (u32 index = start; index + 1 < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        CToken operand = preprocess.tokens[index + 1];
+        if (skipped[index - start] || !c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND) || operand.kind != C_TOKEN_IDENTIFIER ||
+            (index + 2 < end && (c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_ARROW) ||
+                                 c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_BRACKET) ||
+                                 c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_PARENTHESIS))))
+        {
+            continue;
+        }
+        if (index > start)
+        {
+            CToken before = preprocess.tokens[index - 1];
+            bool binary = (before.kind != C_TOKEN_IDENTIFIER && before.kind != C_TOKEN_PUNCTUATOR) ||
+                          c_token_is_punctuator(&before, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                          c_token_is_punctuator(&before, C_PUNCTUATOR_RIGHT_BRACKET) || c_token_is_punctuator(&before, C_PUNCTUATOR_PLUS_PLUS) ||
+                          c_token_is_punctuator(&before, C_PUNCTUATOR_MINUS_MINUS);
+            if (!binary && before.kind == C_TOKEN_IDENTIFIER)
+            {
+                CToken member_access = index - 1 > start ? preprocess.tokens[index - 2] : (CToken){0};
+                binary = c_token_is_punctuator(&member_access, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&member_access, C_PUNCTUATOR_ARROW) ||
+                         c_parse_lookup_entity_token(result, preprocess.spelling_base, c_parse_scope_for_token(result, declaration->scope, index - 1),
+                                                     &before).value < result->entity_count;
+            }
+            if (binary)
+            {
+                continue;
+            }
+        }
+        CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, c_parse_scope_for_token(result, declaration->scope, index + 1),
+                                                       &preprocess.tokens[index + 1]);
+        if (entity.value < result->entity_count && result->entities[entity.value].is_register)
+        {
+            c_parse_lowering_constraint_consider(diagnostic,
+                string_format(result->arena, S8("address of register variable '{S8}' requested"), result->entities[entity.value].name), index, index + 1);
         }
     }
 }
@@ -27357,6 +27725,11 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                         CScopeId scope = c_parse_scope_for_token(result, declaration->scope, operand_start);
                         CTypeId type = C_TYPE_ID_INVALID;
                         c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, operand_start, operand_end, &type);
+                        if (output && machine->result_nonplace_projection)
+                        {
+                            message = string_format(result->arena, S8("unsupported C function-body statement or expression near '{S8}'"),
+                                                    c_token_spelling(preprocess.spelling_base, preprocess.tokens[operand_start]));
+                        }
                         IrType scalar = c_parse_constant_scalar_type(result, preprocess.target, type);
                         u32 alignment = 0;
                         scalar.layout.resolved = c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &scalar.layout.size, &alignment);
@@ -27838,6 +28211,21 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
     }
 }
 
+BUSTER_C_INTERNAL u32 c_parse_array_bound_expression_start(CPreprocessResult preprocess, CArrayBound bound)
+{
+    u32 start = bound.token_start;
+    u32 end = BUSTER_MIN((u32)preprocess.token_count, start + bound.token_count);
+    CType qualifiers = {0};
+    while (start < end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+           (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("static")) ||
+            c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[start], &qualifiers) ||
+            c_parse_nullability_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]))))
+    {
+        start += 1;
+    }
+    return start;
+}
+
 // Every recorded array bound is one expression once its `static`, qualifier
 // and nullability words are set aside; `[]` and `[*]` have none to check.
 BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
@@ -27847,16 +28235,8 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* ma
     for (u32 bound_index = 0; bound_index < bound_count && !reported; bound_index += 1)
     {
         CArrayBound bound = result->array_bounds[bound_index];
-        u32 start = bound.token_start;
+        u32 start = c_parse_array_bound_expression_start(preprocess, bound);
         u32 end = BUSTER_MIN((u32)preprocess.token_count, bound.token_start + bound.token_count);
-        CType qualifiers = {0};
-        while (start < end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
-               (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("static")) ||
-                c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[start], &qualifiers) ||
-                c_parse_nullability_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]))))
-        {
-            start += 1;
-        }
         u32 token = 0;
         String8 message = {0};
         if (bound.is_static && (start == end || bound.is_star))
@@ -27878,6 +28258,43 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_syntax(CTypeParseMachine* ma
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_EXPECTED_DECLARATION, message);
             reported = true;
         }
+    }
+}
+
+// Use the typed signed-magnitude result: narrow casts and 128-bit values
+// cannot be classified by comparing a masked low limb with INT64_MAX.
+// Runtime bounds and GNU zero bounds retain their existing behavior.
+BUSTER_C_INTERNAL void c_parse_validate_array_bound_values(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
+{
+    if (result->array_bound_count)
+    {
+        u64 validation_mark = machine->scratch_arena->position;
+        // A typed sizeof/_Generic query can append another spelling of a bound.
+        // Visit each original source expression once, including newly read rows.
+        u64 checked_bytes = (preprocess.token_count + 7) / 8;
+        u8* checked = arena_allocate(machine->scratch_arena, u8, checked_bytes);
+        memset(checked, 0, checked_bytes);
+        for (u32 index = 0; index < result->array_bound_count; index += 1)
+        {
+            CArrayBound bound = result->array_bounds[index];
+            u32 start = c_parse_array_bound_expression_start(preprocess, bound);
+            u32 end = BUSTER_MIN((u32)preprocess.token_count, bound.token_start + bound.token_count);
+            u8 mask = (u8)(1u << (start & 7));
+            if (start < end && !bound.is_star && !bound.has_inferred_count && !(checked[start / 8] & mask))
+            {
+                checked[start / 8] |= mask;
+                CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
+                u64 mark = machine->scratch_arena->position;
+                CIntegerConstant value = c_parse_typed_integer_constant(machine, machine->scratch_arena, preprocess, result, scope, start, end);
+                arena_set_position(machine->scratch_arena, mark);
+                if (value.valid && value.is_negative)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                                       S8("array bound is a negative integer constant"));
+                }
+            }
+        }
+        arena_set_position(machine->scratch_arena, validation_mark);
     }
 }
 
@@ -27946,7 +28363,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[token]), C_DIAGNOSTIC_INVALID_ALIGNMENT, message);
         }
     }
-    c_parse_validate_bit_field_widths(machine, arena, result, preprocess);
+    c_parse_validate_members(machine, arena, result, preprocess);
     c_parse_validate_deferred_assertions(machine, arena, result, preprocess);
     c_parse_validate_alias_targets(arena, result, preprocess);
     c_parse_validate_static_initializers(machine, arena, result, preprocess);
@@ -28035,6 +28452,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
             declaration->body_start, declaration->body_start + declaration->body_token_count, false, skipped);
         c_parse_lowering_constraint_consider(&diagnostic, compound.message, compound.token, compound.token);
         c_parse_validate_builtin_calls(machine, result, preprocess, declaration, skipped, &diagnostic);
+        c_parse_validate_register_addresses(result, preprocess, declaration, skipped, &diagnostic);
         c_parse_validate_atomic_accesses(machine, result, preprocess, declaration, skipped, &diagnostic);
         c_parse_validate_assembly(machine, result, preprocess, declaration, skipped, &diagnostic);
         c_parse_validate_return_statements(machine, result, preprocess, declaration, &diagnostic);
@@ -28086,6 +28504,8 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
                                    C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, checked.message);
         }
     }
+    // Type names in expressions can append bounds after declaration binding.
+    c_parse_validate_array_bound_values(machine, result, preprocess);
     result->expression_scalar_types = 0;
 }
 
@@ -28493,6 +28913,16 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                          : syntax_declaration->name_token;
         u32 declaration_symbol = c_parse_symbol_or_intern(&result, declaration_name_token < token_count ? preprocess.tokens[declaration_name_token].symbol : 0,
                                                           declaration->name);
+        bool declares_static = false;
+        bool declares_extern = false;
+        u32 specifier_end = declaration_name_token < token_count && declaration_name_token > declaration->token_start
+                                ? declaration_name_token
+                                : declaration->token_start;
+        for (u32 token_index = declaration->token_start; token_index < specifier_end; token_index += 1)
+        {
+            declares_static |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_STATIC);
+            declares_extern |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_EXTERN);
+        }
 #if !BUSTER_OPTIMIZE
         BUSTER_CHECK(declaration_name_token >= token_count ||
                      string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[declaration_name_token]), declaration->name));
@@ -28560,6 +28990,23 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declaration->entity = (CEntityId){
                 .value = existing_index,
             };
+            // C17 6.2.2p7: an identifier with both internal and external
+            // linkage. `extern`, and a function with no storage class, take
+            // the linkage of a visible prior declaration instead.
+            if (entity_kind != C_ENTITY_TYPEDEF && existing->kind != C_ENTITY_TYPEDEF)
+            {
+                if (declares_static && !existing->has_internal_linkage)
+                {
+                    c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       string_format(arena, S8("static declaration of '{S8}' follows non-static declaration"), declaration->name));
+                }
+                else if (!declares_static && !declares_extern && existing->has_internal_linkage && entity_kind == C_ENTITY_OBJECT &&
+                         !declares_function_type)
+                {
+                    c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       string_format(arena, S8("non-static declaration of '{S8}' follows static declaration"), declaration->name));
+                }
+            }
             if (existing->is_definition && declaration->is_definition &&
                 !(existing->definition_is_gnu_inline_only && !declaration->is_gnu_inline_only))
             {
@@ -28647,6 +29094,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             .is_thread_local = is_thread_local,
             .is_constexpr = declaration->is_constexpr,
             .definition_is_gnu_inline_only = declaration->is_gnu_inline_only,
+            .has_internal_linkage = declares_static,
         };
         // The name is that token's spelling, so the id the candidate search
         // already settled is the entity's.

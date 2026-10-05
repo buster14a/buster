@@ -1157,6 +1157,8 @@ struct CTypeParseFrame
     // single declarator carries is scanned separately and belongs to that
     // member alone.
     bool is_packed;
+    // Query-local category fact for a GNU imaginary projection of a real value.
+    bool expression_nonplace_projection;
 };
 
 typedef struct CTypeLayoutCache CTypeLayoutCache;
@@ -1189,6 +1191,7 @@ struct CTypeLayoutCache
 #define C_PARSE_EXPRESSION_QUERY_CHECKED 2u
 #define C_PARSE_EXPRESSION_QUERY_RUNTIME 4u
 #define C_PARSE_EXPRESSION_QUERY_CONSTANT 8u
+#define C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION 16u
 
 typedef struct CParseExpressionQuery CParseExpressionQuery;
 struct CParseExpressionQuery
@@ -1252,6 +1255,7 @@ struct CTypeParseMachine
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
     bool result_valid;
+    bool result_nonplace_projection;
     bool failed;
     bool semantic_constant_queries;
     bool validate_expression_constraints;
