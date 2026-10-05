@@ -230,6 +230,20 @@ fixture as well as compiling both architectures.
 - x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
   0 tied to operand 1. Allocators satisfy the physical two-address constraint;
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.
+- FAST's existing prepass records one advisory byte per virtual register for
+  a nearby fixed-register or forced-scratch consumer. Only immutable values
+  defined in the same block, at most eight rows before the first qualifying
+  use, receive a hint. The two definition free-pick sites consume it only if
+  the lane is already free in the existing candidate mask and the value does
+  not prefer callee-saved registers. Hints never evict or override fixed,
+  tied, pinned, reserved or class constraints; normal preferred/free/dead/LRU
+  selection remains the fallback. The prepass and placement share the same
+  immutable function lifetime. QUALITY inherits the hints through FAST reruns
+  and retains its strict acceptance comparison. `MACHINE_FAST_CONSUMER_HINTS`
+  defaults to 1; the diagnostic `MACHINE_FAST_AVOID_SCRATCH_PICK` variant
+  defaults to 0. Static code-size observations do not establish compiler
+  throughput gains. The registered consumer-hint MIR fixture verifies the
+  constrained lane, absence of unnecessary edits and deterministic placement.
 - QUALITY scheduling remains pressure-first and deterministic. Pressure is
   counted per register class; metadata supplies barriers, memory membership,
   and implicit vector-state chain membership through the published

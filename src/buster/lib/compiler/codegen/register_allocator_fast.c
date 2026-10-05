@@ -957,6 +957,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick_hinted(MachineFastState* state, u64 cl
     }
     u64 preferred_class = prefers_callee_saved ? state->description->callee_saved_mask : ~state->description->callee_saved_mask;
     u64 free = machine_fast_free_candidates(state, candidates);
+    u32 result;
 #if !MACHINE_FAST_CONSUMER_HINTS
     BUSTER_UNUSED(hint);
 #endif
@@ -967,57 +968,61 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick_hinted(MachineFastState* state, u64 cl
     // already excludes forbidden, pinned and out-of-class registers.
     if (hint != UINT32_MAX && !prefers_callee_saved && hint < 64u && ((free >> hint) & 1u))
     {
-        return hint;
+        result = hint;
     }
+    else
 #endif
-#if MACHINE_FAST_AVOID_SCRATCH_PICK
-    // Greedy variant: the forced scratches are exactly the registers
-    // constrained rows take over, so keep them out of unrelated free picks
-    // while any other lane is open. Only the general file participates; the
-    // vector file's scratches sit in a different class mask entirely.
     {
+#if MACHINE_FAST_AVOID_SCRATCH_PICK
+        // Greedy variant: the forced scratches are exactly the registers
+        // constrained rows take over, so keep them out of unrelated free picks
+        // while any other lane is open. Only the general file participates;
+        // the vector file's scratches sit in a different class mask entirely.
         u64 scratch = machine_fast_lane(state->description->slot_scratch[0]) | machine_fast_lane(state->description->slot_scratch[1]) |
                       machine_fast_lane(state->description->slot_scratch[2]) | machine_fast_lane(state->description->slot_scratch[3]);
         u64 without_scratch = free & ~scratch;
         free = without_scratch ? without_scratch : free;
-    }
 #endif
-    u64 preferred_free = free & preferred_class;
-    if (preferred_free)
-    {
-        return machine_fast_first_set(preferred_free);
-    }
-    if (free)
-    {
-        return machine_fast_first_set(free);
-    }
-
-    u32 best = UINT32_MAX;
-    u32 best_age = UINT32_MAX;
-    u32 dead = UINT32_MAX;
-    // Every candidate is held once no free one exists; walk the candidate
-    // bits, ascending as the file walk was, rather than the whole file.
-    for (u64 remaining = candidates; remaining; remaining &= remaining - 1u)
-    {
-        u32 physical_register = machine_fast_first_set(remaining);
-        // A dead owner costs nothing to displace: its spill is dropped.
-        if (dead == UINT32_MAX && machine_fast_owner_is_dead(state, physical_register))
+        u64 preferred_free = free & preferred_class;
+        if (preferred_free)
         {
-            dead = physical_register;
+            result = machine_fast_first_set(preferred_free);
         }
-        if (state->age[physical_register] < best_age)
+        else if (free)
         {
-            best_age = state->age[physical_register];
-            best = physical_register;
+            result = machine_fast_first_set(free);
+        }
+        else
+        {
+            u32 best = UINT32_MAX;
+            u32 best_age = UINT32_MAX;
+            u32 dead = UINT32_MAX;
+            // Every candidate is held once no free one exists; walk the candidate
+            // bits, ascending as the file walk was, rather than the whole file.
+            for (u64 remaining = candidates; remaining; remaining &= remaining - 1u)
+            {
+                u32 physical_register = machine_fast_first_set(remaining);
+                // A dead owner costs nothing to displace: its spill is dropped.
+                if (dead == UINT32_MAX && machine_fast_owner_is_dead(state, physical_register))
+                {
+                    dead = physical_register;
+                }
+                if (state->age[physical_register] < best_age)
+                {
+                    best_age = state->age[physical_register];
+                    best = physical_register;
+                }
+            }
+            if (dead != UINT32_MAX)
+            {
+                best = dead;
+            }
+            BUSTER_CHECK(best < state->active_register_count); // The caller must leave an allocatable candidate.
+            machine_fast_spill(state, best);
+            result = best;
         }
     }
-    if (dead != UINT32_MAX)
-    {
-        best = dead;
-    }
-    BUSTER_CHECK(best < state->active_register_count); // The caller must leave an allocatable candidate.
-    machine_fast_spill(state, best);
-    return best;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u64 class_mask, u64 forbidden_mask, bool prefers_callee_saved)
