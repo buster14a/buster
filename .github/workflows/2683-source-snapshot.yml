@@ -12,10 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: 2ad6834d391e1f4f518d28a8283671c540914202
           persist-credentials: false
       - name: Archive the pinned repair inputs
         run: |
-          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" 2ad6834d391e1f4f518d28a8283671c540914202 AGENTS.md PROJECTS.md build.c build.sh build.ps1 CMakeLists.txt src tools tests cmake .github LICENSES docs/agents docs/clang-analyze-shards.md docs/project-tracking.md docs/ci-checks-population.md docs/ci-workflow-audit.md docs/ci-combination-shards.md docs/ci-suite-partition.md
+          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD AGENTS.md PROJECTS.md build.c build.sh build.ps1 CMakeLists.txt src tools tests cmake .github LICENSES docs/agents docs/clang-analyze-shards.md docs/project-tracking.md docs/ci-checks-population.md docs/ci-workflow-audit.md docs/ci-combination-shards.md docs/ci-suite-partition.md
           sha256sum "$RUNNER_TEMP/buster-source.tar.gz"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
