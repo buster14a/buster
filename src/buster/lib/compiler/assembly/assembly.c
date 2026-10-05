@@ -49,7 +49,6 @@
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 #include <buster/lib/compiler/assembly/aarch64_system_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_system_registers.h>
-#include <buster/lib/compiler/assembly/aarch64_syntax.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 
 #include <buster/lib/string.h>

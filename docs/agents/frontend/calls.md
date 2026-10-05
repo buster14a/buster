@@ -50,6 +50,22 @@ in both frontend forms.
   `c_parse_entity_kind_redeclares` in `c_parse.c` is what keeps this spelling
   and an ordinary prototype one entity, which in musl every published name
   has.
+- Compatible repeated block-scope `extern` object declarations and function
+  declarations keep separate declaration-local rows for token-range ownership;
+  `c_parse_local_declarations` permits the repeated binding only when both
+  declarations have linkage. Type and thread-storage conflicts are diagnosed
+  as conflicting declarations; explicit nonzero alignment requests must agree.
+  An omitted request or `_Alignas(0)` keeps an earlier request, and an incomplete
+  array or unprototyped function spelling keeps an earlier complete type.
+  Function alignment specifiers remain invalid even when their request is zero.
+  Lowering resolves linked local function uses through the function-name index
+  when building definition dependencies, retaining called static functions
+  without rooting unused function bodies or their dependencies.
+  No-linkage object duplicates remain redefinitions. Registered
+  `c_test_local_linkage_redeclarations` checks semantic-only analysis and both
+  canonical-IR frontend forms. Its runtime companion exercises syntax-only,
+  object output and linked executables in C17/GNU17 and all native allocator
+  modes, including visible internal-linkage objects/functions.
 - **Usual integer arithmetic conversions choose rank before representation.**
   The parse-side expression typer and canonical lowering both call
   `c_semantic_integer_arithmetic_kind` after their context's integer
@@ -329,6 +345,22 @@ markers, checks structured diagnostic parity and refused programs, and
 independently validates accepted canonical IR. Local declaration controls
 avoid the separately tracked repeated-linkage restriction (#1562).
 
+`c_test_attribute_call_roles` checks GNU attribute-name/function collisions
+through semantic-only validation, both canonical frontend forms and the
+native driver. Attribute heads designate attributes; calls inside argument
+expressions still require their declared arity. Distinct cleanup callbacks,
+their retained entity identities and one callback per scope exit are checked
+independently, alongside wrong-arity calls, incompatible callbacks and local
+shadowing. The named-call candidate walk distinguishes specifier names while
+retaining candidates inside argument expressions. Eight local frames cover
+ordinary nested payloads; deeper nesting spills into a private arena bounded
+by existing attribute positions and destroyed without pooling before returning.
+Repeated shared
+queries retain no role buffers in their model or message arenas, even when
+those owners occupy both scratch arenas. No broad pass or persistent role table
+is added. The regression keeps explicit returns to isolate this constraint
+from non-void falloff (#1357).
+
 All parameter-list paths share the void and ellipsis constraints. The void
 sentinel is sole, unnamed and unqualified, including through a void typedef;
 ellipsis terminates the list and requires a fixed parameter before C23. C23
@@ -394,3 +426,22 @@ across both frontend SSA forms on eligible hosts. Semantic checks
 for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
+
+## Resolved non-returning call effects (#1350)
+
+`c_ir_emit_call_target` uses the resolved signature's `is_noreturn` contract.
+The C name and assembler name identify the callee; they do not independently
+add a non-returning effect. This keeps continuation after a returning internal
+function named `abort` and agrees with indirect calls. Explicit standard/GNU
+attributes and effects on later declarations remain authoritative. Existing
+void placeholders, call consumers and terminator ordering remain unchanged.
+
+The registered `c_test_resolved_call_effects` validates named returning and
+marked callers in GNU17/GNU23, six native data models and both frontend forms.
+It checks exact CALL counts, RETURN/UNREACHABLE presence and canonical validity.
+Independent runtime oracles cover direct, parenthesized, macro, pointer and
+shadowed calls, storage live after a call, conditional continuation, used integer
+results and an explicit assembler name. Supported desktop execution covers all
+four allocator modes and both forms with strict codegen verification. Standard,
+GNU and later-declaration non-returning helpers each exit through the explicitly
+marked `_Exit`; a continuation that executes instead fails the runtime oracle.

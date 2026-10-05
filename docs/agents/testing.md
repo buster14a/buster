@@ -88,6 +88,12 @@
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
+- Modules with only test consumers join `ide` through
+  `BUSTER_COMPILER_TEST_MODULES` and a matching `#if BUSTER_INCLUDE_TESTS`
+  unity include. `truetype` and the AArch64 syntax model (`aarch64_syntax.c`
+  and its generated table) follow this rule; `aarch64_syntax.c` fails with
+  `#error` in a tests-disabled compile, so self-host stage 1 cannot silently
+  regain it.
 - Active CI is defined under `.github/workflows/`; the current tree has no
   Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
@@ -130,6 +136,12 @@
   For cancelled current-PR validation, see [bounded CI recovery](../ci-cancellation-recovery.md)
   and its offline checks: `python3 tests/ci_recovery_test.py` and
   `python3 .github/scripts/test_merge_queue_fail_fast.py`.
+  The lint job's `Validate the performance audit index` step also runs
+  `tools/check_markdown_links.py`: every relative inline link, image and
+  reference definition in tracked Markdown must resolve to a tracked path.
+  Fenced code, code spans, URL schemes and `#anchor` fragments are not checked,
+  and audit records get no exemption, so deleting a linked file fails with
+  `file:line: target`.
   Changing a `runs-on` label means changing `.github/actionlint.yaml` too,
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and

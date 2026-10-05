@@ -1,8 +1,8 @@
 # Instruction-selection throughput benchmark
 
 `ide bench-select <self-contained-source.c>` measures the production native
-x86-64 or AArch64 selector. It does not measure the diagnostic declarative rule
-matcher in `machine_select_generated.c`. No timers or counters are added to
+x86-64 or AArch64 validated selector by replaying retained canonical IR after
+warmup. No timers or counters are added to
 ordinary `ide cc` execution, and selection, legalization, feature policy,
 placement, and encoding are unchanged.
 

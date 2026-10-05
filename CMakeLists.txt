@@ -1374,17 +1374,26 @@ set(GNU_FAMILY_UNITY_DISABLE_WARNINGS
     "$<${BUSTER_UNITY_BUILD_CONDITION}:-Wno-unused-function>"
 )
 
-set(GNU_FAMILY_NATIVE_TARGET -march=native)
+# Diagnostic trees may pick another -march= value, for example x86-64-v3 so
+# Valgrind (which cannot decode EVEX) runs the compiler. Trusted trees keep
+# native; see docs/agents/benchmarking.md.
+set(BUSTER_NATIVE_TARGET native CACHE STRING "GNU-family -march= value for host builds")
+if (NOT BUSTER_NATIVE_TARGET MATCHES "^[A-Za-z0-9_.+-]+$")
+    message(FATAL_ERROR "BUSTER_NATIVE_TARGET must be a single -march= value, got '${BUSTER_NATIVE_TARGET}'")
+endif()
+set(GNU_FAMILY_NATIVE_TARGET -march=${BUSTER_NATIVE_TARGET})
 if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # Win64 guarantees only 16-byte stack alignment. MinGW GCC 15 can emit
     # 32-byte-aligned AVX spills without realigning the incoming stack.
     list(APPEND GNU_FAMILY_NATIVE_TARGET -mno-avx)
 endif()
-buster_native_target_compatibility_flags(
-    GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY
-    "${CMAKE_C_COMPILER_ID}" "${C_COMPILER_ZIG}" "${CMAKE_C_COMPILER_VERSION}" "${CMAKE_SYSTEM_PROCESSOR}" "${BUSTER_CROSS_COMPILE}"
-)
-list(APPEND GNU_FAMILY_NATIVE_TARGET ${GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY})
+if (BUSTER_NATIVE_TARGET STREQUAL "native")
+    buster_native_target_compatibility_flags(
+        GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY
+        "${CMAKE_C_COMPILER_ID}" "${C_COMPILER_ZIG}" "${CMAKE_C_COMPILER_VERSION}" "${CMAKE_SYSTEM_PROCESSOR}" "${BUSTER_CROSS_COMPILE}"
+    )
+    list(APPEND GNU_FAMILY_NATIVE_TARGET ${GNU_FAMILY_NATIVE_TARGET_COMPATIBILITY})
+endif()
 
 # Match the unsigned plain-char contract of GNU_FAMILY_OPTIONS. /J changes
 # the compiler's type semantics; defining _CHAR_UNSIGNED alone is not enough.
@@ -2083,12 +2092,13 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
-# The headless compiler has no production font or image consumer. Keep the
-# reusable modules registered above, but add them to ide only for their tests
-# (and image fuzzing). Future product targets must name their own dependencies.
+# The headless compiler has no production font, image or AArch64 syntax-model
+# consumer. Keep the reusable modules registered above, but add them to ide only
+# for their tests (and image fuzzing). Future product targets must name their
+# own dependencies.
 set(BUSTER_COMPILER_TEST_MODULES)
 if (BUSTER_INCLUDE_TESTS)
-    list(APPEND BUSTER_COMPILER_TEST_MODULES truetype)
+    list(APPEND BUSTER_COMPILER_TEST_MODULES truetype compiler_aarch64_syntax)
 endif()
 if (BUSTER_INCLUDE_TESTS OR BUSTER_FUZZ_AVAILABLE)
     list(APPEND BUSTER_COMPILER_TEST_MODULES image)
@@ -2111,7 +2121,6 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_aarch64_system_registers
     compiler_aarch64_semantics
     compiler_aarch64_system_semantics
-    compiler_aarch64_syntax
     compiler_aarch64_semantic_vm
     compiler_aarch64_direct_simd
     compiler_aarch64_complex_simd
