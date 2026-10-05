@@ -38,6 +38,16 @@ Each `-c` unit has already written its own `.o`, and `-S`, `-E`,
 `-fsyntax-only` and `-emit-llvm` finish before the link, so they retain
 nothing per unit and leave `CompilerDriverResult.object` unset.
 
+The registered `compiler_diagnostic_tests` include a desktop flush-failure
+cleanup regression. It injects one refusal after the real staging write, checks
+source mapping and native handle balance, old-or-absent destination bytes and
+a private directory inventory, then reuses the same invocation successfully
+against an independent literal preprocessing result. Close and staging deletion
+remain native operations. Android and iOS skip this desktop observation path
+explicitly; the existing portable write-failure tests still run. This is
+controlled failure-path coverage, not a real disk-failure or crash-durability
+claim. Run `ide test --module=compiler_diagnostic_tests --verbose=1 --ci=1`.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
@@ -551,6 +561,15 @@ or `wasm32-wasip1` (also spelled `wasm32-wasi`). The latter emits a WASI Preview
 command module, with an exported `_start` and 32-bit pointers. Its `--sysroot`
 header paths and supported imports are in [WASI.md](../../WASI.md). Direct wasm32
 output rejects `-emit-llvm`, native link inputs, and `-S`.
+
+Wasm32 also refuses runtime function addresses, including stored/returned
+references and aliases; direct calls remain supported. The existing instruction
+emitter checks pointer-valued FUNCTION materialization and function-typed
+operand escapes outside a direct CALL callee. This prevents a zero function
+index from masquerading as null without adding a use-graph pass or allocation.
+Refusal produces a Wasm driver error with empty artifact aliases before output
+publication; existing destination bytes remain intact. Memory64 behavior and
+its nonzero function handles are unchanged.
 
 The direct backend consumes canonical integer bit-count operations at their
 semantic bit width, independently of the i32/i64 WebAssembly carrier. Leading

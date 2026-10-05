@@ -404,6 +404,20 @@ without facts for identical bitcode and diagnostics.
   range into a synthesized token view while retaining either derived index
   gives the wrong classification. Spelling, source recovery, and pack changes
   still belong to the original preprocess result (GitHub #629).
+- Integer `constexpr` declarations consume the existing typed integer query's
+  signed magnitude and both limbs, rather than preprocessing arithmetic or
+  signedness guessed from token spelling. Exact representability uses the
+  expression's C conversions and the destination's target width, including
+  enum underlying types and 128-bit destinations. A value whose magnitude
+  needs the high limb receives an explicit unsupported-storage diagnostic:
+  `CEntity` still publishes one magnitude limb, so full-width constexpr
+  publication remains open under GitHub #1572. The live declaration machine
+  retains its evaluation mode while a scoped arithmetic guard refuses signed
+  overflow, including when later casts would hide it and regardless of `-fwrapv`;
+  machineless validation uses the protected declaration-point query. Supported
+  integer128 scalar objects retain relocation-free 16-byte initializer images.
+  `c_test_constexpr_integer_types` covers typed
+  arithmetic, casts, declaration scope and refused publication.
 - A `_Static_assert` whose expression types as an integer takes its value
   from the typed evaluator (`c_parse_typed_constant`), with C's types,
   promotions and conversions: `0u - 1 == 4294967295u` holds and
@@ -517,6 +531,14 @@ without facts for identical bitcode and diagnostics.
   so no result may reference it. `c_preprocess_seal` copies the preprocessing
   result out of it; semantic layout queries keep their tables there and
   release them on return. See [compiler phase lifetimes](../../compiler-lifetime.md).
+- `debug_fill_ir_type` copies each nonempty canonical type name once into
+  the debug model's arena. Its initial `name` and `declaration_name` fields
+  share that immutable payload. For a nonempty canonical name, an
+  `IR_SYMBOL_TYPE` can replace only the declaration-name field later;
+  an empty canonical name retains the existing symbol-name fallback.
+  Neither field borrows canonical name bytes.
+  `debug_test_type_name_ownership` checks canonical-input mutation, owned
+  storage sharing, declaration-name replacement and both empty-name forms.
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin
