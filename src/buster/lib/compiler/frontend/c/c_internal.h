@@ -171,6 +171,10 @@ BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 // the entity that ends before the operand. `*cursor` starts at zero.
 BUSTER_C_EXTERN bool c_alignof_object_next_run(CParseResult const* result, CEntityId entity, u32 token_index, u32* cursor, u32* start_out,
                                                u32* count_out);
+// A final member expression uses its declaring aggregate's placement
+// alignment; every lookup and layout query operates on a protected model.
+BUSTER_C_EXTERN bool c_semantic_alignof_member(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                u32 start, u32 end, u32* alignment);
 BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
 // The GNU layout attributes the frontend implements, as the parser spells
 // them. `__has_attribute` answers from these same predicates so the query
@@ -195,6 +199,8 @@ BUSTER_C_EXTERN bool c_ir_control_substatement_position(CPreprocessResult const*
 // The cold half of c_ir_named_label_at: the full proof, reached only for a
 // token that already looks like `<identifier> :`.
 BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
+// Exclude member colons after c_ir_named_label_at proves a label shape.
+BUSTER_C_EXTERN bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index);
 // Whether a named label starts at `index`. Both loops that size and fill a
 // body's label table ask this of every body token, so the necessary condition
 // — an identifier followed by a colon — is inline and the proof stays out of
@@ -500,7 +506,7 @@ BUSTER_C_EXTERN void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u
 // AAPCS64    The same placement, but every bit-field's container -- named,
 //            unnamed or zero-width -- raises the record's alignment (AAPCS64
 //            10.1.8). AArch64 Linux, Android, UEFI and bare metal; not Darwin.
-// MICROSOFT  The Windows rule, for the MSVC and MinGW environments alike: a
+// MICROSOFT  The Windows (MSVC) rule; MinGW triples are rejected (#1492): a
 //            bit-field occupies a storage unit of its declared type's size,
 //            and the next one shares it only while its declared type has the
 //            same size and its bits still fit. A zero-width bit-field matters
@@ -1024,6 +1030,7 @@ typedef enum CParseExpressionTypeOperation
     C_PARSE_EXPRESSION_TYPE_INDIRECTION,
     C_PARSE_EXPRESSION_TYPE_ADDRESS_OF,
     C_PARSE_EXPRESSION_TYPE_COMPLEX_PART,
+    C_PARSE_EXPRESSION_TYPE_SUBSCRIPT,
 } CParseExpressionTypeOperation;
 
 typedef enum CTypeParseFrameKind
@@ -1036,6 +1043,8 @@ typedef enum CTypeParseFrameKind
     C_TYPE_PARSE_FRAME_AGGREGATE_SEGMENT,
     C_TYPE_PARSE_FRAME_AGGREGATE_RANGE,
     C_TYPE_PARSE_FRAME_PARENTHESIZED,
+    C_TYPE_PARSE_FRAME_FUNCTION_SUFFIX,
+    C_TYPE_PARSE_FRAME_PARAMETER_GROUP,
     C_TYPE_PARSE_FRAME_PARAMETER,
 } CTypeParseFrameKind;
 
@@ -1047,6 +1056,7 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_PARAMETERS,
     C_TYPE_PARSE_STAGE_PARAMETER_RESULT,
     C_TYPE_PARSE_STAGE_FINISH,
+    C_TYPE_PARSE_STAGE_POSTFIX,
 } CTypeParseFrameStage;
 
 struct CTypeMutation
@@ -1061,6 +1071,7 @@ struct CParseExpressionTypeTask
     u32 end;
     u32 split;
     u32 colon;
+    u32 trailing_subscript_plus_one;
     CTypeId left_type;
     CParseExpressionTypeOperation operation;
     u8 state;
@@ -1151,6 +1162,8 @@ struct CTypeParseFrame
     // single declarator carries is scanned separately and belongs to that
     // member alone.
     bool is_packed;
+    // Query-local category fact for a GNU imaginary projection of a real value.
+    bool expression_nonplace_projection;
 };
 
 typedef struct CTypeLayoutCache CTypeLayoutCache;
@@ -1183,6 +1196,7 @@ struct CTypeLayoutCache
 #define C_PARSE_EXPRESSION_QUERY_CHECKED 2u
 #define C_PARSE_EXPRESSION_QUERY_RUNTIME 4u
 #define C_PARSE_EXPRESSION_QUERY_CONSTANT 8u
+#define C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION 16u
 
 typedef struct CParseExpressionQuery CParseExpressionQuery;
 struct CParseExpressionQuery
@@ -1245,7 +1259,11 @@ struct CTypeParseMachine
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
+    // Constexpr initializers keep NORMAL's type-name grammar, but reject
+    // signed arithmetic overflow before a cast can hide its wrapped bits.
+    bool reject_signed_constant_overflow;
     bool result_valid;
+    bool result_nonplace_projection;
     bool failed;
     bool semantic_constant_queries;
     bool validate_expression_constraints;

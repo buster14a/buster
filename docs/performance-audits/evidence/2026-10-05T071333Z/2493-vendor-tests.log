@@ -1,0 +1,587 @@
+DEFAULT_STATIC_LIBRARY_NATIVE_V1 target=x86_64-linux compiler=/usr/bin/clang archiver=/usr/bin/llvm-ar host_control=pass direct=pass sysroot_named=pass
+ASSEMBLY_ATOMIC_PAIR_CLANG status=matched text_bytes=108
+clang version 23.1.1
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/bin
+gcc (GCC) 16.2.1 20260810
+Copyright (C) 2026 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=long float expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=short double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=unsigned float expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=signed double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=long long double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=float double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=_Imaginary double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=long _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=_Float16 long expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=unsigned _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=_Float16 int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=_Float16 _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=int struct S expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=struct S int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=unsigned struct S expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=struct S unsigned expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=int union U expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=union U int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=int enum E expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=enum E int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=struct S enum E expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=_Complex int expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=_Complex char expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=long long int expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=double _Complex expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=_Float16 expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=c17 source=_Float16 _Complex expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=long float expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=short double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=unsigned float expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=signed double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=long long double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=float double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=_Imaginary double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=long _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=_Float16 long expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=unsigned _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=_Float16 int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=_Float16 _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=int struct S expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=struct S int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=unsigned struct S expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=struct S unsigned expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=int union U expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=union U int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=int enum E expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=enum E int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=struct S enum E expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=_Complex int expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=_Complex char expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=long long int expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=double _Complex expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=_Float16 expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/clang dialect=-std=gnu17 source=_Float16 _Complex expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=long float expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=short double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=unsigned float expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=signed double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=long long double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=float double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=_Imaginary double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=long _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=_Float16 long expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=unsigned _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=_Float16 int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=_Float16 _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=int struct S expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=struct S int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=unsigned struct S expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=struct S unsigned expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=int union U expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=union U int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=int enum E expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=enum E int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=struct S enum E expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=_Complex int expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=_Complex char expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=long long int expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=double _Complex expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=_Float16 expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=c17 source=_Float16 _Complex expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=long float expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=short double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=unsigned float expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=signed double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=long long double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=float double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=_Imaginary double expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=long _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=_Float16 long expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=unsigned _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=_Float16 int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=_Float16 _Float16 expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=int struct S expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=struct S int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=unsigned struct S expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=struct S unsigned expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=int union U expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=union U int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=int enum E expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=enum E int expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=struct S enum E expected=refused status=1
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=_Complex int expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=_Complex char expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=long long int expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=double _Complex expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=_Float16 expected=accepted status=0
+TYPE_SPECIFIER_ORACLE compiler=/usr/bin/gcc dialect=-std=gnu17 source=_Float16 _Complex expected=accepted status=0
+WASM_NODE_PROCESS oracle=bit-field-aggregate mode=-ffrontend-ssa status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=63569 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=0 wait_us=63368 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_READY startup_ms=1791185694012
+64 independent Wasm bit-field aggregate executions passed
+stderr:
+
+WASM_NODE_PROCESS oracle=bit-field-aggregate mode=-fno-frontend-ssa status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=85806 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=0 wait_us=85624 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_READY startup_ms=1791185694210
+64 independent Wasm bit-field aggregate executions passed
+stderr:
+
+WASM_NODE_PROCESS oracle=policy mode=complete status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=18421 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=17586 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY pass
+stderr:
+
+WASM_NODE_PROCESS oracle=policy mode=summary-then-exit status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=111001 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=104274 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY pass
+stderr:
+
+WASM_NODE_PROCESS oracle=policy mode=nonzero status=nonzero-exit spawned=1 result=1 platform_status=0x700 timed_out=0 marker=1 elapsed_us=31190 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=28504 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY pass
+stderr:
+
+WASM_NODE_PROCESS oracle=policy mode=incomplete status=incomplete-output spawned=1 result=0 platform_status=0x0 timed_out=0 marker=0 elapsed_us=32154 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=30739 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY incomplete
+stderr:
+
+WASM_NODE_PROCESS oracle=policy mode=stderr status=stderr-output spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=28943 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=23397 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY pass
+stderr:
+unexpected stderr
+
+WASM_NODE_PROCESS oracle=policy mode=summary-then-hang status=summary-before-timeout spawned=1 result=1 platform_status=0x9 timed_out=1 marker=1 elapsed_us=524376 deadline_us=500000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=20351 wait_us=501827 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY pass
+stderr:
+
+WASM_NODE_PROCESS oracle=policy mode=hang status=timeout spawned=1 result=1 platform_status=0x9 timed_out=1 marker=0 elapsed_us=512284 deadline_us=500000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=10208 wait_us=501380 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+stderr:
+
+WASM_NODE_PROCESS oracle=policy mode=delayed-summary-then-hang status=summary-before-timeout spawned=1 result=1 platform_status=0x9 timed_out=1 marker=1 elapsed_us=1264712 deadline_us=500000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=760704 wait_us=503510 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY pass
+stderr:
+
+WASM_NODE_PROCESS oracle=policy mode=missing-ready status=startup-failure spawned=1 result=1 platform_status=0x9 timed_out=1 marker=0 elapsed_us=127424 deadline_us=500000 ready=0 readiness_files_ok=1 node_ready=0 startup_us=108901 wait_us=13211 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+stderr:
+
+WASM_NODE_PROCESS oracle=policy mode=launch-failure status=launch-failure spawned=0 result=4 platform_status=0x0 timed_out=0 marker=0 elapsed_us=5238 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=0 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=silent-pre-ready-hang status=timeout spawned=1 result=1 platform_status=0x9 timed_out=1 marker=0 elapsed_us=604459 deadline_us=500000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=67010 wait_us=525214 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+stderr:
+
+WASM_NODE_RETRY oracle=integer-policy reason=silent-pre-readiness-timeout attempt=2
+WASM_NODE_PROCESS oracle=integer-policy mode=ready-complete status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=36608 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=0 wait_us=35412 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_READY startup_ms=123456789
+WASM_NODE_POLICY pass
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=silent-pre-ready-hang status=timeout spawned=1 result=1 platform_status=0x9 timed_out=1 marker=0 elapsed_us=535436 deadline_us=500000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=32697 wait_us=501230 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+stderr:
+
+WASM_NODE_RETRY oracle=integer-policy reason=silent-pre-readiness-timeout attempt=2
+WASM_NODE_PROCESS oracle=integer-policy mode=silent-pre-ready-hang status=timeout spawned=1 result=1 platform_status=0x9 timed_out=1 marker=0 elapsed_us=544603 deadline_us=500000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=40484 wait_us=501092 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=post-ready-hang status=timeout spawned=1 result=1 platform_status=0x9 timed_out=1 marker=0 elapsed_us=511653 deadline_us=500000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=10109 wait_us=501194 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_READY startup_ms=123456789
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=summary-then-hang status=summary-before-timeout spawned=1 result=1 platform_status=0x9 timed_out=1 marker=1 elapsed_us=512923 deadline_us=500000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=11359 wait_us=501144 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY pass
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=nonzero status=nonzero-exit spawned=1 result=1 platform_status=0x700 timed_out=0 marker=1 elapsed_us=14119 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=13766 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY pass
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=complete status=missing-node-readiness spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=3497 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=3141 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY pass
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=incomplete status=incomplete-output spawned=1 result=0 platform_status=0x0 timed_out=0 marker=0 elapsed_us=4879 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=4206 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY incomplete
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=stderr status=stderr-output spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=3032 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=2732 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_POLICY pass
+stderr:
+unexpected stderr
+
+WASM_NODE_PROCESS oracle=integer-policy mode=ready-stamped-complete status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=3448 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=0 wait_us=3173 node_done=1 done_uptime_us=250000 node_exit=1 exit_uptime_us=260000 post_done_us=0
+stdout:
+WASM_NODE_READY startup_ms=123456789
+WASM_NODE_POLICY pass
+WASM_NODE_DONE uptime_us=250000 resources=
+WASM_NODE_EXIT uptime_us=260000
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=stamped-then-teardown-hang status=summary-then-teardown-stall spawned=1 result=1 platform_status=0x9 timed_out=1 marker=1 elapsed_us=511836 deadline_us=500000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=10101 wait_us=501245 node_done=1 done_uptime_us=250000 node_exit=1 exit_uptime_us=260000 post_done_us=261836
+stdout:
+WASM_NODE_READY startup_ms=123456789
+WASM_NODE_POLICY pass
+WASM_NODE_DONE uptime_us=250000 resources=
+WASM_NODE_EXIT uptime_us=260000
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=stamped-then-event-loop-hang status=summary-then-event-loop-stall spawned=1 result=1 platform_status=0x9 timed_out=1 marker=1 elapsed_us=511540 deadline_us=500000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=10102 wait_us=501101 node_done=1 done_uptime_us=250000 node_exit=0 exit_uptime_us=0 post_done_us=261540
+stdout:
+WASM_NODE_READY startup_ms=123456789
+WASM_NODE_POLICY pass
+WASM_NODE_DONE uptime_us=250000 resources=Timeout
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=stamp-without-summary status=incomplete-output spawned=1 result=0 platform_status=0x0 timed_out=0 marker=0 elapsed_us=3295 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=0 wait_us=2955 node_done=1 done_uptime_us=250000 node_exit=1 exit_uptime_us=260000 post_done_us=0
+stdout:
+WASM_NODE_READY startup_ms=123456789
+WASM_NODE_DONE uptime_us=250000 resources=
+WASM_NODE_EXIT uptime_us=260000
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=malformed-stamp status=incomplete-output spawned=1 result=0 platform_status=0x0 timed_out=0 marker=0 elapsed_us=3188 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=0 wait_us=2914 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_NODE_READY startup_ms=123456789
+WASM_NODE_POLICY pass
+WASM_NODE_DONE uptime_us=
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-policy mode=launch-failure status=launch-failure spawned=0 result=4 platform_status=0x0 timed_out=0 marker=0 elapsed_us=110 deadline_us=5000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=0 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+stderr:
+
+WASM_NODE_PROCESS oracle=integer mode=default status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=88469 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=0 wait_us=88093 node_done=1 done_uptime_us=58499 node_exit=1 exit_uptime_us=58592 post_done_us=29970
+stdout:
+WASM_NODE_READY startup_ms=1791185740949
+1504 frontend-to-Wasm integer checks passed
+WASM_NODE_DONE uptime_us=58499 resources=PipeWrap,PipeWrap
+WASM_NODE_EXIT uptime_us=58592
+stderr:
+
+WASM_NODE_PROCESS oracle=unsigned-div-rem mode=default status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=115632 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=1 startup_us=0 wait_us=115438 node_done=1 done_uptime_us=85016 node_exit=1 exit_uptime_us=86757 post_done_us=30616
+stdout:
+WASM_NODE_READY startup_ms=1791185741055
+WASM_UNSIGNED_ARTIFACT sha256=c9d05eca431ae862eec86197b2e1dbbc056f44331946cbe95184e9ef61162ba2
+WASM_UNSIGNED_WITNESS export=u32_div dividend=4294967295 divisor=2 expected=2147483647 status=pass
+WASM_UNSIGNED_WITNESS export=u32_rem dividend=4294967295 divisor=2 expected=1 status=pass
+WASM_UNSIGNED_WITNESS export=u64_div dividend=18446744073709551615 divisor=2 expected=9223372036854775807 status=pass
+WASM_UNSIGNED_WITNESS export=u64_rem dividend=18446744073709551615 divisor=2 expected=1 status=pass
+WASM_UNSIGNED_CONTROL baseline=unsigned status=pass
+WASM_UNSIGNED_CONTROL export=u32_div mutation=signed-opcode actual=0 expected=2147483647 status=rejected
+WASM_UNSIGNED_CONTROL export=u32_rem mutation=signed-opcode actual=-1 expected=1 status=rejected
+WASM_UNSIGNED_CONTROL export=u64_div mutation=signed-opcode actual=0 expected=9223372036854775807 status=rejected
+WASM_UNSIGNED_CONTROL export=u64_rem mutation=signed-opcode actual=-1 expected=1 status=rejected
+4/4 unsigned high-bit div/rem checks and 4/4 signedness controls passed
+WASM_NODE_DONE uptime_us=85016 resources=PipeWrap,PipeWrap
+WASM_NODE_EXIT uptime_us=86757
+stderr:
+
+WASM_NODE_PROCESS oracle=function-table mode=frontend-memory status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=81046 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=80472 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+96/96 Wasm64 function-table engine checks passed
+stderr:
+
+WASM_NODE_PROCESS oracle=function-table mode=frontend-ssa status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=62833 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=62554 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+96/96 Wasm64 function-table engine checks passed
+stderr:
+
+WASM64_STACK_EMISSION frontend=-fno-frontend-ssa argv=-target,wasm64-unknown-freestanding,-nostdinc,-O1,-fno-frontend-ssa,-o,<temporary>,<source> source_sha256=1066e090e07b8925ba133a1e33a6ab683dfff012ffdef3ea2bdde0945959063b module_sha256=26a69abe08745191d1784cef5e53c04d7b09e7eb76ac78ff6389a363ca67af2b
+WASM64_STACK_PROCESS mode=direct spawned=1 result=0 platform_status=0x0 timed_out=0 elapsed_us=83219
+stdout:
+WASM64_STACK_RUNTIME {"process.execPath":"/usr/bin/node","process.execArgv":[],"memory64_flags":[],"NODE_OPTIONS":null,"node":"v26.10.0","v8":"14.6.202.34-node.34","module_sha256":"26a69abe08745191d1784cef5e53c04d7b09e7eb76ac78ff6389a363ca67af2b"}
+WASM64_STACK_RESULT validation=pass execution=pass exact_limit=pass overflow_traps=2 unexpected_memory_traps=0
+stderr:
+
+WASM64_STACK_PROCESS mode=flagged-provenance-control spawned=1 result=0 platform_status=0x0 timed_out=0 elapsed_us=102868
+stdout:
+WASM64_STACK_RUNTIME {"process.execPath":"/usr/bin/node","process.execArgv":["--title=buster-wasm64-provenance-130690"],"memory64_flags":[],"NODE_OPTIONS":null,"node":"v26.10.0","v8":"14.6.202.34-node.34","module_sha256":"26a69abe08745191d1784cef5e53c04d7b09e7eb76ac78ff6389a363ca67af2b"}
+stderr:
+
+WASM64_STACK_EMISSION frontend=-ffrontend-ssa argv=-target,wasm64-unknown-freestanding,-nostdinc,-O1,-ffrontend-ssa,-o,<temporary>,<source> source_sha256=1066e090e07b8925ba133a1e33a6ab683dfff012ffdef3ea2bdde0945959063b module_sha256=38e31b0be31e821d2f088a0ef68fb69def68bdbec15fd16fd6c167d5210e257b
+WASM64_STACK_PROCESS mode=direct spawned=1 result=0 platform_status=0x0 timed_out=0 elapsed_us=128507
+stdout:
+WASM64_STACK_RUNTIME {"process.execPath":"/usr/bin/node","process.execArgv":[],"memory64_flags":[],"NODE_OPTIONS":null,"node":"v26.10.0","v8":"14.6.202.34-node.34","module_sha256":"38e31b0be31e821d2f088a0ef68fb69def68bdbec15fd16fd6c167d5210e257b"}
+WASM64_STACK_RESULT validation=pass execution=pass exact_limit=pass overflow_traps=2 unexpected_memory_traps=0
+stderr:
+
+WASM64_STACK_PROCESS mode=flagged-provenance-control spawned=1 result=0 platform_status=0x0 timed_out=0 elapsed_us=87376
+stdout:
+WASM64_STACK_RUNTIME {"process.execPath":"/usr/bin/node","process.execArgv":["--title=buster-wasm64-provenance-130690"],"memory64_flags":[],"NODE_OPTIONS":null,"node":"v26.10.0","v8":"14.6.202.34-node.34","module_sha256":"38e31b0be31e821d2f088a0ef68fb69def68bdbec15fd16fd6c167d5210e257b"}
+stderr:
+
+WASM_NODE_PROCESS oracle=stack-alignment mode=pointer-4-frontend-0 status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=109153 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=108885 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_STACK_ALIGNMENT sha256=463261c2c92b7e00169239c4f333bf7b5f033b6275b69542dcee270e7d287173 pointer_bytes=4 checks=84
+84/84 Wasm stack alignment engine checks passed
+stderr:
+
+WASM_NODE_PROCESS oracle=stack-alignment mode=pointer-4-frontend-1 status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=97054 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=96714 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_STACK_ALIGNMENT sha256=463261c2c92b7e00169239c4f333bf7b5f033b6275b69542dcee270e7d287173 pointer_bytes=4 checks=84
+84/84 Wasm stack alignment engine checks passed
+stderr:
+
+WASM_NODE_PROCESS oracle=stack-alignment mode=pointer-8-frontend-0 status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=124453 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=124213 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_STACK_ALIGNMENT sha256=80f96586b3656ec8c81e9df72ef0f11a2b896281151d198a3ba095d25098d3b4 pointer_bytes=8 checks=84
+84/84 Wasm stack alignment engine checks passed
+stderr:
+
+WASM_NODE_PROCESS oracle=stack-alignment mode=pointer-8-frontend-1 status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=113157 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=112487 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_STACK_ALIGNMENT sha256=80f96586b3656ec8c81e9df72ef0f11a2b896281151d198a3ba095d25098d3b4 pointer_bytes=8 checks=84
+84/84 Wasm stack alignment engine checks passed
+stderr:
+
+WASM_NODE_PROCESS oracle=bit-counts mode=pointer-4 status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=143199 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=142932 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_BIT_COUNTS sha256=42e95cac87af179a7fc1588879bf8b934aefc1cd7af221fc4f9b3ad3f85c0a3b pointer_bytes=4 checks=5352 failures=0
+5352/5352 Wasm bit count engine checks passed
+stderr:
+
+WASM_NODE_PROCESS oracle=bit-counts mode=pointer-8 status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=142258 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=142044 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_BIT_COUNTS sha256=d20f40dad5026f64d830d7931b20cf90e37834e9cbce58a030ecd24bfdb656f6 pointer_bytes=8 checks=5352 failures=0
+5352/5352 Wasm bit count engine checks passed
+stderr:
+
+WASM_NODE_PROCESS oracle=switch-images mode=pointer-4 status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=114734 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=114498 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_SWITCH_IMAGES sha256=3baf41fd7e59835954b2ca90c2e1f7ca93f96871b409edee4edd1bdfb0adcfb9 pointer_bytes=4 checks=8845 failures=0
+8845/8845 Wasm SWITCH image engine checks passed
+stderr:
+
+WASM_NODE_PROCESS oracle=switch-images mode=pointer-8 status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=176679 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=176275 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+WASM_SWITCH_IMAGES sha256=4447bff43749122c868b30b84514ccd2e6a4683301f2fb69f9edc8da0d5bd574 pointer_bytes=8 checks=8845 failures=0
+8845/8845 Wasm SWITCH image engine checks passed
+stderr:
+
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-linux allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-linux allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-apple-macos allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-apple-macos allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=x86_64-unknown-windows allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=mir-stack frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=fast frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=fast frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=quality frontend=-fno-frontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+MIR_COVERAGE target=aarch64-unknown-windows allocator=-fregister-allocator=quality frontend=-ffrontend-ssa fixtures=18 strict_successes=18 expected_rejections=0 failures=0
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:207:5: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  207 |     0x1p-25F16,
+      |     ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:208:6: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  208 |     -0x1p-25F16,
+      |      ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:217:5: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  217 |     65520.0F16,
+      |     ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:218:6: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  218 |     -65520.0F16,
+      |      ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:221:5: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  221 |     1e1000F16,
+      |     ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:222:5: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  222 |     1e-1000F16,
+      |     ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:304:15: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  304 |     out[10] = 0x1p-25F16;
+      |               ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:305:16: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  305 |     out[11] = -0x1p-25F16;
+      |                ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:314:15: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  314 |     out[20] = 65520.0F16;
+      |               ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:315:16: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  315 |     out[21] = -65520.0F16;
+      |                ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:318:15: warning: magnitude of floating-point constant too large for type '_Float16'; maximum is 65504 [-Wliteral-range]
+  318 |     out[24] = 1e1000F16;
+      |               ^
+/tmp/buster-tests-130690-1-5621081982484/buster-float16-codegen-source-130690-0.c:319:15: warning: magnitude of floating-point constant too small for type '_Float16'; minimum is 5.9605E-8 [-Wliteral-range]
+  319 |     out[25] = 1e-1000F16;
+      |               ^
+12 warnings generated.
+tests/basic_c_wide_vector_abi.c:73:32: warning: AVX vector return of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   73 |     destination.value.vector = wide_abi_make(10u);
+      |                                ^
+tests/basic_c_wide_vector_abi.c:84:32: warning: AVX vector argument of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   84 |     destination.value.vector = wide_abi_ninth(first.vector, second.vector, first.vector, second.vector,
+      |                                ^
+tests/basic_c_wide_vector_abi.c:96:9: warning: AVX vector argument of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   96 |     if (wide_abi_varargs(7u, 11ull, first.vector, second.vector, 13ull) != expected) { result = 5; }
+      |         ^
+3 warnings generated.
+tests/basic_c_wide_vector_abi.c:35:1: warning: AVX vector return of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   35 | WideAbiVector wide_abi_make(unsigned int seed)
+      | ^
+tests/basic_c_wide_vector_abi.c:42:1: warning: AVX vector return of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   42 | WideAbiVector wide_abi_mix(WideAbiVector first, unsigned int tag, WideAbiVector second)
+      | ^
+tests/basic_c_wide_vector_abi.c:42:42: warning: AVX vector argument of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   42 | WideAbiVector wide_abi_mix(WideAbiVector first, unsigned int tag, WideAbiVector second)
+      |                                          ^
+tests/basic_c_wide_vector_abi.c:49:1: warning: AVX vector return of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   49 | WideAbiVector wide_abi_ninth(WideAbiVector a, WideAbiVector b, WideAbiVector c, WideAbiVector d,
+      | ^
+tests/basic_c_wide_vector_abi.c:49:44: warning: AVX vector argument of type 'WideAbiVector' (vector of 8 'unsigned int' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   49 | WideAbiVector wide_abi_ninth(WideAbiVector a, WideAbiVector b, WideAbiVector c, WideAbiVector d,
+      |                                            ^
+5 warnings generated.
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:160:9: warning: AVX vector argument of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+  160 |     if (non_power_positioned(7, (F64x3){1.0, 2.0, 3.0}, 11) != 24.0)
+      |         ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:162:9: warning: AVX vector argument of type 'U64x3' (vector of 3 'unsigned long long' values) without 'avx' enabled changes the ABI [-Wpsabi]
+  162 |     if (non_power_positioned_u64(7, (U64x3){1, 2, 3}, 11) != 24)
+      |         ^
+2 warnings generated.
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:66:1: warning: AVX vector return of type 'U64x3' (vector of 3 'unsigned long long' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   66 | U64x3 non_power_u64(U64x3 value)
+      | ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:66:27: warning: AVX vector argument of type 'U64x3' (vector of 3 'unsigned long long' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   66 | U64x3 non_power_u64(U64x3 value)
+      |                           ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:76:1: warning: AVX vector return of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   76 | F64x3 non_power_f64(F64x3 value)
+      | ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:76:27: warning: AVX vector argument of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   76 | F64x3 non_power_f64(F64x3 value)
+      |                           ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:81:1: warning: AVX vector return of type 'F64x6' (vector of 6 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   81 | F64x6 non_power_f64x6(F64x6 value)
+      | ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:81:29: warning: AVX vector argument of type 'F64x6' (vector of 6 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   81 | F64x6 non_power_f64x6(F64x6 value)
+      |                             ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:90:1: warning: AVX vector return of type 'F64x12' (vector of 12 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   90 | F64x12 non_power_f64x12(F64x12 value)
+      | ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:90:32: warning: AVX vector argument of type 'F64x12' (vector of 12 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   90 | F64x12 non_power_f64x12(F64x12 value)
+      |                                ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:99:1: warning: AVX vector return of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   99 | F64x3 non_power_add(F64x3 left, F64x3 right)
+      | ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:99:27: warning: AVX vector argument of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+   99 | F64x3 non_power_add(F64x3 left, F64x3 right)
+      |                           ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:104:47: warning: AVX vector argument of type 'F64x3' (vector of 3 'double' values) without 'avx' enabled changes the ABI [-Wpsabi]
+  104 | double non_power_positioned(int before, F64x3 value, int after)
+      |                                               ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:109:68: warning: AVX vector argument of type 'U64x3' (vector of 3 'unsigned long long' values) without 'avx' enabled changes the ABI [-Wpsabi]
+  109 | unsigned long long non_power_positioned_u64(unsigned before, U64x3 value, unsigned after)
+      |                                                                    ^
+12 warnings generated.
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:81:1: warning: AVX vector return of type 'F64x6' (vector of 6 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   81 | F64x6 non_power_f64x6(F64x6 value)
+      | ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:81:29: warning: AVX vector argument of type 'F64x6' (vector of 6 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   81 | F64x6 non_power_f64x6(F64x6 value)
+      |                             ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:90:1: warning: AVX vector return of type 'F64x12' (vector of 12 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   90 | F64x12 non_power_f64x12(F64x12 value)
+      | ^
+/tmp/buster-tests-130690-1-5621081982484/buster-padded-vector-source-130690.c:90:32: warning: AVX vector argument of type 'F64x12' (vector of 12 'double' values) without 'avx512f' enabled changes the ABI [-Wpsabi]
+   90 | F64x12 non_power_f64x12(F64x12 value)
+      |                                ^
+4 warnings generated.
+object.error == OBJECT_ERROR_NONE && local_dynamic_count != 0 && dtp_offset_count >= 2 failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:14619
+local-dynamic TLS link /usr/bin/gcc -g image 0: could not read object /tmp/buster-tests-130690-1-5621081982484/buster-local-dynamic-tls-130690/foreign-0-2.o: unsupported compressed ELF debug section .debug_info
+linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:14660
+local-dynamic TLS link /usr/bin/gcc -g image 1: could not read object /tmp/buster-tests-130690-1-5621081982484/buster-local-dynamic-tls-130690/foreign-0-2.o: unsupported compressed ELF debug section .debug_info
+linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:14660
+local-dynamic TLS link /usr/bin/gcc -g image 2: could not read object /tmp/buster-tests-130690-1-5621081982484/buster-local-dynamic-tls-130690/foreign-0-2.o: unsupported compressed ELF debug section .debug_info
+linked.error == COMPILER_DRIVER_ERROR_NONE && host_ran && compiler_driver_test_image_run(arguments, arena, &program_path, 1, directory, &output) failed at /home/david/Documents/Codex/2026-10-05/fi/work/foundation_ready/pr2493/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_test_local_dynamic_tls:14660
+LINK_TLS_ARTIFACT variant=0 archive=0 pie=0 sample=0 compiler_ns=0 link_ns=2026604 total_artifact_ns=2026604 host_preparation_ns=288764352 bytes=21336 hash=13948123586887292907
+LINK_TLS_ARTIFACT variant=0 archive=0 pie=1 sample=0 compiler_ns=0 link_ns=1518430 total_artifact_ns=1518430 host_preparation_ns=288764352 bytes=25192 hash=16061023268938007188
+LINK_TLS_ARTIFACT variant=0 archive=1 pie=0 sample=0 compiler_ns=0 link_ns=2419478 total_artifact_ns=2419478 host_preparation_ns=288764352 bytes=21336 hash=13948123586887292907
+LINK_TLS_ARTIFACT variant=0 archive=1 pie=1 sample=0 compiler_ns=0 link_ns=3920643 total_artifact_ns=3920643 host_preparation_ns=288764352 bytes=25192 hash=16061023268938007188
+LINK_TLS_ARTIFACT variant=1 archive=0 pie=0 sample=0 compiler_ns=0 link_ns=14843415 total_artifact_ns=14843415 host_preparation_ns=535505621 bytes=21336 hash=4097689014473668117
+LINK_TLS_ARTIFACT variant=1 archive=0 pie=1 sample=0 compiler_ns=0 link_ns=19953504 total_artifact_ns=19953504 host_preparation_ns=535505621 bytes=25192 hash=429483403896414790
+LINK_TLS_ARTIFACT variant=1 archive=1 pie=0 sample=0 compiler_ns=0 link_ns=8576753 total_artifact_ns=8576753 host_preparation_ns=535505621 bytes=21336 hash=4097689014473668117
+LINK_TLS_ARTIFACT variant=1 archive=1 pie=1 sample=0 compiler_ns=0 link_ns=21260652 total_artifact_ns=21260652 host_preparation_ns=535505621 bytes=25192 hash=429483403896414790
+warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]
+1 warning generated.
+WASM_NODE_PROCESS oracle=wasi-preview1 mode=small-and-grown status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=2172776 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=2171284 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+buster wasi ok
+buster wasi ok
+3/3 wasm32 WASI Preview 1 command executions passed
+stderr:
+
+WASM_NODE_PROCESS oracle=alignment mode=default status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=741324 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=740187 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+14/14 frontend-to-Wasm over-aligned scalar checks passed
+stderr:
+
+WASM_NODE_PROCESS oracle=local-aggregate mode=frontend-memory status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=1730738 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=1728695 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+245 independent Wasm local aggregate executions passed
+stderr:
+
+WASM_NODE_PROCESS oracle=local-aggregate mode=frontend-ssa status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=2562904 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=2551927 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+245 independent Wasm local aggregate executions passed
+stderr:
+
+WASM_NODE_PROCESS oracle=integer-opcodes mode=default status=success spawned=1 result=0 platform_status=0x0 timed_out=0 marker=1 elapsed_us=7105064 deadline_us=30000000 ready=1 readiness_files_ok=1 node_ready=0 startup_us=0 wait_us=7091044 node_done=0 done_uptime_us=0 node_exit=0 exit_uptime_us=0 post_done_us=0
+stdout:
+3254/3254 scalar integer Wasm64 engine checks passed
+stderr:
+
+memory operand ok
+weak reference bound to the library
+weak reference bound to the library
+weak reference bound to the library
+weak reference bound to the library
+[63029/63033] Unit tests (2 of 57 modules selected)
+[1/2] Module tests
+[0/0] External tests
