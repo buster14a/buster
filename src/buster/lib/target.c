@@ -534,9 +534,11 @@ TargetParseResult target_parse_triple(String8 triple)
         {
             result.target.os = OPERATING_SYSTEM_WINDOWS;
         }
-        else if (target_component_equal(component, S8("gnu")) || target_component_equal(component, S8("gnullvm")))
+        else if (result.target.os == OPERATING_SYSTEM_WINDOWS &&
+                 (target_component_equal(component, S8("gnu")) || target_component_equal(component, S8("gnullvm"))))
         {
-            // Free-form on every other system; on Windows it names MinGW.
+            // These name MinGW after Windows; before its OS they remain
+            // free-form vendor spellings, including an explicit MSVC target.
             gnu_environment = component;
         }
         else if (target_component_equal(component, S8("uefi")))
