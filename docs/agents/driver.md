@@ -448,7 +448,17 @@ family, `.file`, `.ident`, and Clang's `.addrsig`/`.addrsig_sym`. In an instruct
 own statement, so `b .`, `bl .`, `b.cond .`, `cbz x0, .`,
 `ldr x0, .`, `jmp .+5` and the like resolve locally without a relocation or a symbol-table entry. AArch64 `b`/`bl` and the
 other PC-relative control forms also take `#imm` (a byte displacement) as well
-as a bare `imm`, matching llvm-mc (#2687). A global
+as a bare `imm`, matching llvm-mc (#2687). The constant is a byte
+displacement from the instruction and may be negative (`cbz x0, #-4`); the
+range is the form's own (`b.cond`, `cbz`, `cbnz` and `adr` 1 MiB, `tbz` and
+`tbnz` 32 KiB, `b`/`bl` 128 MiB; all but `adr` a multiple of 4) and a value
+outside it or misaligned is refused (#2706). `adr Xd, label` folds a target
+defined in its own section like a branch does. Any other target (another
+section, an undefined name, a `.globl` or `.weak` label) stays an
+`R_AARCH64_ADR_PREL_LO21` relocation with its symbol and addend on ELF, which
+the object reader, in-memory/ELF linkers and `object_aarch64_elf_page_relocate`
+resolve as S + A - P; Mach-O and COFF have no such relocation, so there a
+target the unit cannot fold is refused. `adrp` with a symbol is still refused. A global
 `.comm` (an ELF common symbol, as `-fcommon` produces) and a `.set` of an
 absolute value are refused by name. Widths and alignment follow the target
 as in GNU as: on x86-64 `.align N` is N bytes and `.word` is 16 bits; on

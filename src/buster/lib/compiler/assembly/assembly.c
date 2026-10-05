@@ -12926,6 +12926,10 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                         {
                             kind = ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19;
                         }
+                        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_ADR_BYTE21 && builder->unit_control_relocations)
+                        {
+                            kind = ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21;
+                        }
                     }
                     if (kind == ASSEMBLY_RELOCATION_COUNT ||
                         !assembly_relocation_append(builder, instruction->offset, expression, kind, 0))
@@ -12936,7 +12940,11 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                     }
                     continue;
                 }
-                if (target < 0 || (u64)target > UINT64_MAX)
+                // A unit assembles one statement at a time, so a bare or `#`
+                // constant is the byte displacement from the instruction
+                // itself and may be negative. Elsewhere it is an address.
+                bool backward_displacement = target < 0 && builder->unit_control_relocations && !expression.has_symbol;
+                if (target < 0 && !backward_displacement)
                 {
                     assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
                                         S8("AArch64 control target is out of range"));
@@ -12949,7 +12957,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                         (BusterAarch64ControlFixupRequest){
                             .target = builder->target,
                             .place_address = instruction->offset,
-                            .target_address = (u64)target,
+                            .target_address = backward_displacement ? instruction->offset : (u64)target,
+                            .addend = backward_displacement ? target : 0,
                             .symbol_defined = true,
                         },
                         &patched, &fixup))

@@ -486,7 +486,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   staging and patches them after layout; imported data uses its dynamic
   symbol's copy-slot address, including aliases. Untyped exported AArch64
   ELF text labels can serve as assembly entry points; explicit object types
-  remain data. Mach-O, PE and TLS relocation contracts remain separate.
+  remain data. `ELF_ADR_PREL_LO21` (relocation 274, an assembly `adr` to a
+  target the unit could not fold, #2706) rides the same family: its REL addend
+  is the unscaled signed imm21 byte displacement and the relocated value is
+  S + A - P with no page truncation. Mach-O, PE and TLS relocation contracts
+  remain separate.
 
 - AArch64 ELF `ELF_GOT_PAGE21`/`ELF_GOT_LD64_LO12` (types 311/312)
   use `GDAT(S)` and require zero addends under AAELF64. The importer rejects

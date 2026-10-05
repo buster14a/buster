@@ -4085,6 +4085,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyReloca
     case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED: *object_kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S; break;
     case ASSEMBLY_RELOCATION_AARCH64_BRANCH26: *object_kind = OBJECT_RELOCATION_AARCH64_JUMP26; break;
     case ASSEMBLY_RELOCATION_AARCH64_CALL26: *object_kind = OBJECT_RELOCATION_AARCH64_CALL26; break;
+    case ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21: *object_kind = OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21; break;
     default: valid = false; break;
     }
     return valid;

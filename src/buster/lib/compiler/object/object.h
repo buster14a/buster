@@ -195,6 +195,10 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12,
     // IMAGE_REL_ARM64_SECREL_HIGH12A: shifted ADD of TLS offset bits 12..23.
     OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12,
+    // R_AARCH64_ADR_PREL_LO21: the signed byte displacement S + A - P in the
+    // immediate of an ADR. It joins the ELF page family because the reader,
+    // linkers and object_aarch64_elf_page_relocate treat it the same way.
+    OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -208,7 +212,7 @@ BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
 BUSTER_F_DECL u32 object_relocation_kind_width(ObjectRelocationKind kind);
 
 // AArch64 ELF page-address kinds object_aarch64_elf_page_relocate accepts:
-// direct ADRP with ADD or scaled LD/ST, and the GOT ADRP/LDR pair.
+// direct ADRP with ADD or scaled LD/ST, the GOT ADRP/LDR pair, and ADR.
 BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKind kind);
 
 // Apply the ordinary Windows ARM64 PAGEBASE_REL21/PAGEOFFSET_12A contract to

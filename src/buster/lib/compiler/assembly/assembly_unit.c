@@ -1493,6 +1493,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
         assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, S8("an instruction cannot be emitted into a zero-fill section"));
         return false;
     }
+    // A64 instructions are four-byte words, and every object consumer demands
+    // a four-byte section alignment before it accepts a relocation on one.
+    // llvm-mc raises the section's alignment the same way (no padding is added).
+    if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && builder->result.sections[builder->current_section].alignment < 4)
+    {
+        builder->result.sections[builder->current_section].alignment = 4;
+    }
     AssemblyEncodeResult encoded = assembly_encode(builder->arena, rewritten,
                                                    (AssemblyEncodeOptions){
                                                        .target = builder->target,
@@ -1801,7 +1808,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_aarch64_control_relocation(AssemblyReloca
 {
     return kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26 || kind == ASSEMBLY_RELOCATION_AARCH64_CALL26 ||
            kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 || kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ||
-           kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14 || kind == ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19;
+           kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14 || kind == ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19 ||
+           kind == ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21;
 }
 
 // Decode the retained word through the shared semantic owner before applying
@@ -1832,7 +1840,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_aarch64_control_fixup(AssemblyUnitBuilder
                 (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) ||
                 (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) ||
                 (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14) ||
-                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_LITERAL19);
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_LITERAL19) ||
+                (relocation.kind == ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21 && row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_ADR_BYTE21);
     }
     u32 patched = 0;
     BusterAarch64ControlFixupResult fixup = {0};
@@ -1909,8 +1918,12 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
                                                                       : 0;
         bool replaceable = symbol.weak || (elf && symbol.global && !symbol.hidden);
         bool control = assembly_unit_aarch64_control_relocation(relocation.kind);
+        // The 26-bit branches, and ADR on ELF, have a relocation for a target a
+        // unit cannot fold; the short conditional forms and LDR (literal) do
+        // not, and neither Mach-O nor COFF has one for ADR.
         bool short_control = control && relocation.kind != ASSEMBLY_RELOCATION_AARCH64_BRANCH26 &&
-                             relocation.kind != ASSEMBLY_RELOCATION_AARCH64_CALL26;
+                             relocation.kind != ASSEMBLY_RELOCATION_AARCH64_CALL26 &&
+                             !(elf && relocation.kind == ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21);
         if (control && symbol.defined && symbol.section == relocation.section && !replaceable)
         {
             String8 mnemonic = S8("control");
@@ -1929,6 +1942,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
             String8 mnemonic = relocation.kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 ? S8("b.cond")
                                : relocation.kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ? S8("cbz/cbnz")
                                : relocation.kind == ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19 ? S8("ldr (literal)")
+                               : relocation.kind == ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21 ? S8("adr")
                                                                                            : S8("tbz/tbnz");
             builder->line = builder->relocation_lines[index];
             builder->column = builder->relocation_columns[index];
