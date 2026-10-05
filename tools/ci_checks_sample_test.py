@@ -221,7 +221,7 @@ class SampleTests(unittest.TestCase):
         # one complete synthetic platform. Reuse that validated condition tuple;
         # strict sample/desktop/journal readers remain real. This is no CI proof.
         names = ("Windows x86-64 release", "Windows x86-64 checks")
-        with mock.patch.object(qualification.github, "COMBINATION_PLATFORMS", names), mock.patch.object(qualification, "conditions", return_value=validated_conditions):
+        with mock.patch.object(qualification, "cohort_desktop_jobs", return_value=names), mock.patch.object(qualification, "conditions", return_value=validated_conditions):
             result = sample.assemble(path, "sample-123.json")
             item = qualification.record(self.root, result["sample"])
             observed = qualification.sample(self.root, item, qualification.PROSPECTIVE_COHORT)
@@ -250,7 +250,7 @@ class SampleTests(unittest.TestCase):
         path, value = self.input()
         validated_conditions = qualification.conditions(self.root, value["conditions"], qualification.record(self.root, value["run"]))
         before = {file: file.read_bytes() for file in self.root.rglob("*") if file.is_file()}
-        with mock.patch.object(qualification.github, "COMBINATION_PLATFORMS", ("Windows x86-64 release", "Windows x86-64 checks")), mock.patch.object(qualification, "conditions", return_value=validated_conditions), mock.patch.object(qualification, "sample", side_effect=ValueError("strict rejection")):
+        with mock.patch.object(qualification, "cohort_desktop_jobs", return_value=("Windows x86-64 release", "Windows x86-64 checks")), mock.patch.object(qualification, "conditions", return_value=validated_conditions), mock.patch.object(qualification, "sample", side_effect=ValueError("strict rejection")):
             with self.assertRaisesRegex(ValueError, "strict rejection"):
                 sample.assemble(path, "sample.json")
         self.assertFalse((self.root / "sample.json").exists())

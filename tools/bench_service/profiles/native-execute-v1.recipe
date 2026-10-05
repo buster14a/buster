@@ -1,0 +1,8 @@
+schema=1
+recipe=native-execute-v1
+source-manifest=BQ-NATIVE-V1
+operation=execute-once
+platform=linux-x86-64-static-elf
+arguments=none
+compilation=unavailable
+benchmark-metrics=unavailable

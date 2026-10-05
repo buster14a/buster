@@ -175,11 +175,32 @@ def cohort(campaign):
     return result
 
 
+def _cohort_desktop(variant):
+    split_platforms = ("Linux x86-64", "Linux AArch64", "Windows x86-64") if variant == "split-overlap" else ()
+    return tuple(f"{platform} {shard}" for platform in github.PLATFORMS
+                 for shard in (("release",) + github.SPLIT_CHECK_SHARDS
+                               if platform in split_platforms else github.COMBINATION_SHARDS))
+
+
+def cohort_desktop_jobs(variant):
+    """The #2120 cohorts froze ten combined or sixteen split desktop jobs.
+
+    macOS AArch64 still had grouped checks then; the later current split
+    layout (#2659) is never an admissible cohort inventory.
+    """
+    return _cohort_desktop(variant)
+
+
+def cohort_jobs(variant):
+    """The exact 21/27-job cohort inventory, without the optional reuse job."""
+    return _cohort_desktop(variant) + github.MOBILE + github.NATIVE + github.UEFI + github.ANALYZER + \
+        ("Workflow lint", "CI complete")
+
+
 def timing(run, variant, cohort_name=LEGACY_COHORT):
     require(isinstance(cohort_name, str) and cohort_name in COHORT_BRANCHES, "unknown qualification cohort")
     require(variant in VARIANTS, "unknown qualification variant")
-    layout = "split" if variant == "split-overlap" else "combined"
-    expected = Counter(github.combination_jobs(layout))
+    expected = Counter(cohort_jobs(variant))
     jobs = run.get("jobs", [])
     actual = Counter(job.get("name") for job in jobs)
     if github.MAIN_REUSE_JOB in actual:
@@ -502,7 +523,7 @@ def sample(root, item, cohort_name=LEGACY_COHORT):
     run = record(root, item["run"])
     measured = timing(run, variant, cohort_name)
     entries, normalized = conditions(root, item["conditions"], run)
-    desktop_names = github.SPLIT_COMBINATION_PLATFORMS if variant == "split-overlap" else github.COMBINATION_PLATFORMS
+    desktop_names = cohort_desktop_jobs(variant)
     items = item.get("desktops", [])
     require(Counter(i["job"] for i in items) == Counter(desktop_names), "missing/duplicate desktop evidence")
     platforms = {}

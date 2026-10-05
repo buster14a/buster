@@ -477,7 +477,7 @@ class WorkflowSetupTests(unittest.TestCase):
 
 
 class CompletionGateTests(unittest.TestCase):
-    def sample(self, checks_layout="combined"):
+    def sample(self, checks_layout=github_ci_time.DEFAULT_CHECKS_LAYOUT):
         jobs = []
         desktop_names = (github_ci_time.SPLIT_COMBINATION_PLATFORMS if checks_layout == "split"
                          else github_ci_time.COMBINATION_PLATFORMS)
@@ -499,22 +499,22 @@ class CompletionGateTests(unittest.TestCase):
                          "steps": [{"name": step, "status": "completed", "conclusion": "success"} for step in steps]})
         return jobs
 
-    def check(self, jobs, attempt=1, checks_layout="combined"):
+    def check(self, jobs, attempt=1, checks_layout=github_ci_time.DEFAULT_CHECKS_LAYOUT):
         return github_ci_time.validate_required_jobs(jobs, 123, attempt, "a" * 40,
                                                      expected_names=github_ci_time.combination_jobs(checks_layout))
 
     def test_all_twenty_one_jobs_and_exact_ten_desktop_shards(self):
         self.assertEqual(len(github_ci_time.COMBINATION_JOBS), 21)
         self.assertEqual(len(github_ci_time.COMBINATION_PLATFORMS), 10)
-        self.assertEqual(self.check(self.sample()), [])
+        self.assertEqual(self.check(self.sample("combined"), checks_layout="combined"), [])
 
     def test_split_inventory_is_exact_and_cannot_mix_with_combined_checks(self):
         jobs = self.sample("split")
-        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_JOBS), 27)
-        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_PLATFORMS), 16)
+        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_JOBS), 29)
+        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_PLATFORMS), 18)
         self.assertEqual(self.check(jobs, checks_layout="split"), [])
-        self.assertTrue(self.check(jobs))
-        self.assertTrue(self.check(self.sample(), checks_layout="split"))
+        self.assertTrue(self.check(jobs, checks_layout="combined"))
+        self.assertTrue(self.check(self.sample("combined"), checks_layout="split"))
         for name in github_ci_time.SPLIT_COMBINATION_PLATFORMS:
             if name in github_ci_time.COMBINATION_PLATFORMS:
                 continue
@@ -556,32 +556,60 @@ class CompletionGateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     github_ci_time.latest_run_jobs(history + [newer], 123, 2, "a" * 40)
 
-    def test_split_api_gate_accepts_only_explicit_dispatch_runs(self):
+    def test_split_api_gate_accepts_ordinary_runs_and_exact_split_dispatch_refs(self):
         jobs = self.sample("split")
         run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40,
                "event": "workflow_dispatch", "head_branch": "codex/ci-checks-split-overlap"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1, checks_layout="split")
-        branches = ("codex/ci-checks-split-overlap", "codex/2120-evidence-v2-split-overlap")
-        self.assertEqual(github_ci_time.SPLIT_QUALIFICATION_BRANCHES, branches)
-        for branch in branches:
-            dispatched = dict(run, head_branch=branch)
-            with self.subTest(branch=branch), mock.patch.object(
-                    github_ci_time, "api_get", side_effect=[dispatched, {"total_count": len(jobs), "jobs": jobs}]):
-                self.assertTrue(github_ci_time.require_jobs(args)["success"])
-            for event in (None, "", "push", "pull_request", "merge_group", "schedule"):
-                with self.subTest(branch=branch, event=event), mock.patch.object(
-                        github_ci_time, "api_get", return_value=dict(dispatched, event=event)) as fetch:
-                    with self.assertRaisesRegex(ValueError, "requires a workflow_dispatch"):
-                        github_ci_time.require_jobs(args)
-                    self.assertEqual(fetch.call_count, 1)
-        for branch in (None, "", "main", "codex/ci-checks-combined-overlap", "codex/ci-checks-combined-all-builds",
-                       "codex/2120-evidence-v2-combined-overlap", "codex/2120-evidence-v2-combined-all-builds",
-                       "codex/ci-checks-split-overlap-extra", "codex/2120-evidence-v2-split-overlap-extra",
-                       "codex/2120-evidence-v2-split", "refs/heads/codex/2120-evidence-v2-split-overlap"):
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, {"total_count": len(jobs), "jobs": jobs}]):
+            self.assertTrue(github_ci_time.require_jobs(args)["success"])
+        for event in ("push", "pull_request", "merge_group", "workflow_dispatch"):
+            for branch in ("main", "v1.0", "codex/ci-checks-split-overlap",
+                           "codex/2120-evidence-v2-split-overlap", "codex/ci-checks-combined-overlap"):
+                if event == "workflow_dispatch" and branch in github_ci_time.COMBINED_QUALIFICATION_BRANCHES:
+                    continue
+                with self.subTest(event=event, branch=branch), mock.patch.object(
+                        github_ci_time, "api_get", side_effect=[dict(run, event=event, head_branch=branch),
+                                                               {"total_count": len(jobs), "jobs": jobs}]):
+                    self.assertTrue(github_ci_time.require_jobs(args)["success"])
+        for branch in github_ci_time.COMBINED_QUALIFICATION_BRANCHES:
+            args.event_ref = "refs/heads/" + branch
             with self.subTest(branch=branch), mock.patch.object(github_ci_time, "api_get", return_value=dict(run, head_branch=branch)) as fetch:
-                with self.assertRaisesRegex(ValueError, "exact qualification branch"):
+                with self.assertRaisesRegex(ValueError, "event and exact qualification ref"):
                     github_ci_time.require_jobs(args)
                 self.assertEqual(fetch.call_count, 1)
+            args.event_ref = "refs/tags/" + branch
+            with self.subTest(tag=branch), mock.patch.object(github_ci_time, "api_get", side_effect=[
+                    dict(run, head_branch=branch), {"total_count": len(jobs), "jobs": jobs}]):
+                self.assertTrue(github_ci_time.require_jobs(args)["success"])
+
+    def test_combined_api_gate_keeps_exact_manual_cohorts_only(self):
+        jobs = self.sample("combined")
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40,
+               "event": "workflow_dispatch"}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1, checks_layout="combined")
+        for branch in github_ci_time.COMBINED_QUALIFICATION_BRANCHES:
+            args.event_ref = "refs/heads/" + branch
+            with self.subTest(branch=branch), mock.patch.object(github_ci_time, "api_get", side_effect=[
+                    dict(run, head_branch=branch), {"total_count": len(jobs), "jobs": jobs}]):
+                self.assertTrue(github_ci_time.require_jobs(args)["success"])
+            args.event_ref = "refs/tags/" + branch
+            with self.subTest(tag=branch), mock.patch.object(github_ci_time, "api_get", return_value=dict(run, head_branch=branch)):
+                with self.assertRaisesRegex(ValueError, "event and exact qualification ref"):
+                    github_ci_time.require_jobs(args)
+            args.event_ref = "refs/heads/" + branch
+            for event in ("push", "pull_request", "merge_group"):
+                with self.subTest(event=event, branch=branch), mock.patch.object(
+                        github_ci_time, "api_get", return_value=dict(run, event=event, head_branch=branch)) as fetch:
+                    with self.assertRaisesRegex(ValueError, "event and exact qualification ref"):
+                        github_ci_time.require_jobs(args)
+                    self.assertEqual(fetch.call_count, 1)
+        for branch in (None, "main", "codex/ci-checks-combined-overlap-extra",
+                       "codex/ci-checks-split-overlap", "codex/2120-evidence-v2-split-overlap"):
+            args.event_ref = "refs/heads/" + branch if branch else None
+            with self.subTest(branch=branch), mock.patch.object(github_ci_time, "api_get", return_value=dict(run, head_branch=branch)):
+                with self.assertRaisesRegex(ValueError, "event and exact qualification ref"):
+                    github_ci_time.require_jobs(args)
 
     def test_split_api_gate_rejects_wrong_workflow_or_execution_identity(self):
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1, checks_layout="split")
@@ -610,7 +638,7 @@ class CompletionGateTests(unittest.TestCase):
             elif mutation == "foreign-source":
                 jobs[0]["head_sha"] = "b" * 40
             else:
-                jobs = self.sample()
+                jobs = self.sample("combined")
             batch = {"total_count": len(jobs), "jobs": jobs}
             with self.subTest(mutation=mutation), mock.patch.object(
                     github_ci_time, "api_get", side_effect=[run] + [batch] * 4), \
@@ -620,7 +648,7 @@ class CompletionGateTests(unittest.TestCase):
             self.assertTrue(report["errors"])
 
     def test_missing_duplicate_failed_cancelled_and_skipped_jobs_fail(self):
-        total = len(github_ci_time.COMBINATION_JOBS)
+        total = len(github_ci_time.combination_jobs())
         for index in range(total):
             jobs = self.sample()
             jobs.pop(index)
@@ -634,7 +662,7 @@ class CompletionGateTests(unittest.TestCase):
                     jobs[index]["conclusion"] = conclusion
                     self.assertTrue(self.check(jobs))
         for index, job in enumerate(self.sample()):
-            if job["name"] not in github_ci_time.COMBINATION_PLATFORMS + github_ci_time.NATIVE:
+            if job["name"] not in github_ci_time.SPLIT_COMBINATION_PLATFORMS + github_ci_time.NATIVE:
                 continue
             for step in range(len(job["steps"])):
                 for conclusion in ("failure", "cancelled", "skipped", None):
@@ -675,7 +703,7 @@ class CompletionGateTests(unittest.TestCase):
     def test_api_gate_paginates_latest_jobs_and_rejects_partial_inventory(self):
         jobs = self.sample()
         total = len(jobs)
-        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
         responses = [run, {"total_count": total, "jobs": jobs[:10]}, {"total_count": total, "jobs": jobs[10:]}]
         with mock.patch.object(github_ci_time, "api_get", side_effect=responses) as fetch:
@@ -705,7 +733,7 @@ class CompletionGateTests(unittest.TestCase):
         jobs = self.sample()
         pending = copy.deepcopy(jobs)
         pending[0].update(status="in_progress", conclusion=None)
-        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
         responses = [run, {"total_count": len(jobs), "jobs": pending},
                      {"total_count": len(jobs), "jobs": jobs}]
@@ -720,10 +748,10 @@ class CompletionGateTests(unittest.TestCase):
     def test_stale_in_progress_step_record_is_refreshed_for_exact_run_and_head(self):
         jobs = self.sample()
         pending = copy.deepcopy(jobs)
-        target = next(job for job in pending if job["name"] == "macOS AArch64 checks")
+        target = next(job for job in pending if job["name"] == "macOS AArch64 sanitized-debug")
         step = next(step for step in target["steps"] if step["name"] == "Desktop result and reproduction")
         step.update(status="in_progress", conclusion=None)
-        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
         responses = [run, {"total_count": len(jobs), "jobs": pending},
                      {"total_count": len(jobs), "jobs": jobs}]
@@ -738,7 +766,7 @@ class CompletionGateTests(unittest.TestCase):
         jobs = self.sample()
         failed = copy.deepcopy(jobs)
         failed[0].update(conclusion="failure")
-        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
         with mock.patch.object(github_ci_time, "api_get", side_effect=[run, {"total_count": len(jobs), "jobs": failed}]) as fetch, \
                 mock.patch.object(github_ci_time.time, "sleep") as sleep:
@@ -751,13 +779,13 @@ class CompletionGateTests(unittest.TestCase):
 
     def test_partial_rerun_shadow_never_borrows_an_older_green_steps_record(self):
         first_attempt = self.sample()
-        target_name = "macOS AArch64 checks"
+        target_name = "macOS AArch64 sanitized-debug"
         shadow = copy.deepcopy(next(job for job in first_attempt if job["name"] == target_name))
         shadow.update(id=101, run_attempt=2, steps=[])
         current_gate = copy.deepcopy(next(job for job in first_attempt if job["name"] == "CI complete"))
         current_gate.update(id=102, run_attempt=2)
         history = first_attempt + [current_gate, shadow]
-        run = {"id": 123, "run_attempt": 2, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        run = {"id": 123, "run_attempt": 2, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=2)
         batch = {"total_count": len(history), "jobs": history}
         with mock.patch.object(github_ci_time, "api_get", side_effect=[run] + [batch] * 4) as fetch, \
@@ -782,7 +810,7 @@ class CompletionGateTests(unittest.TestCase):
         jobs = self.sample()
         pending = copy.deepcopy(jobs)
         pending[0]["steps"] = []
-        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
         batch = {"total_count": len(jobs), "jobs": pending}
         with mock.patch.object(github_ci_time, "api_get", side_effect=[run, batch]) as fetch, \
@@ -799,9 +827,9 @@ class CompletionGateTests(unittest.TestCase):
     def test_completed_job_with_missing_steps_refreshes_exact_snapshot(self):
         jobs = self.sample()
         incomplete = copy.deepcopy(jobs)
-        target = next(job for job in incomplete if job["name"] == "Windows x86-64 checks")
+        target = next(job for job in incomplete if job["name"] == "Windows x86-64 sanitized-debug")
         target["steps"] = []
-        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
         batch = {"total_count": len(jobs), "jobs": incomplete}
         with mock.patch.object(github_ci_time, "api_get", side_effect=[run, batch,
@@ -814,7 +842,7 @@ class CompletionGateTests(unittest.TestCase):
         sleep.assert_called_once_with(1.0)
 
     def gate_inputs(self, run_attempt=1):
-        run = {"id": 123, "run_attempt": run_attempt, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        run = {"id": 123, "run_attempt": run_attempt, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=run_attempt)
         return run, args
 
@@ -897,7 +925,7 @@ class CompletionGateTests(unittest.TestCase):
 
     def test_successful_job_with_empty_steps_is_a_distinct_unresolved_case(self):
         jobs = self.sample()
-        target = next(job for job in jobs if job["name"] == "Linux x86-64 checks")
+        target = next(job for job in jobs if job["name"] == "Linux x86-64 sanitized-debug")
         target["steps"] = []
         run, args = self.gate_inputs()
         batch = {"total_count": len(jobs), "jobs": jobs}
@@ -906,7 +934,7 @@ class CompletionGateTests(unittest.TestCase):
             result = github_ci_time.require_jobs(args)
         self.assertFalse(result["success"])
         self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
-        self.assertTrue(any("Linux x86-64 checks: completed job returned no step records (steps=[])" in error
+        self.assertTrue(any("Linux x86-64 sanitized-debug: completed job returned no step records (steps=[])" in error
                             for error in result["errors"]))
 
     def run_gate_main(self, responses, output, summary):
@@ -945,7 +973,7 @@ class CompletionGateTests(unittest.TestCase):
             self.assertFalse((Path(temporary) / "raised.json").exists())
 
     def lost_runner_job(self, jobs):
-        target = next(job for job in jobs if job["name"] == "macOS AArch64 checks")
+        target = next(job for job in jobs if job["name"] == "macOS AArch64 sanitized-debug")
         target.update(conclusion="failure", started_at="2026-09-28T15:17:35Z", completed_at="2026-09-28T16:04:37Z",
                       runner_name="GitHub Actions 1000119276", labels=["macos-26"])
         target["steps"] = [
@@ -986,7 +1014,7 @@ class CompletionGateTests(unittest.TestCase):
     def test_gate_retains_interruption_evidence_without_changing_its_verdict(self):
         jobs = self.sample()
         target = self.lost_runner_job(jobs)
-        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
         batch = {"total_count": len(jobs), "jobs": jobs}
         lost = [{"message": github_ci_time.RUNNER_LOST_MESSAGE}]
@@ -1002,7 +1030,7 @@ class CompletionGateTests(unittest.TestCase):
             self.assertEqual(fetch.call_count, 3)
             self.assertIn(f"check-runs/{target['id']}/annotations", fetch.call_args_list[2].args[1])
             self.assertTrue(any("required job did not complete successfully" in error for error in result["errors"]))
-            record = next(job for job in result["jobs"] if job["name"] == "macOS AArch64 checks")["interruption"]
+            record = next(job for job in result["jobs"] if job["name"] == "macOS AArch64 sanitized-debug")["interruption"]
             self.assertEqual(record["classification"], classification)
             self.assertIn("CI_RUNNER_INTERRUPTION", "".join(call.args[0] for call in stderr.write.call_args_list))
             self.assertTrue(all("interruption" not in job for job in result["jobs"] if job["name"] != target["name"]))
@@ -1017,9 +1045,8 @@ class CompletionGateTests(unittest.TestCase):
         exclude_variants = [json.loads(value) for value in re.findall(r"'([^']*)'", exclude_expression) if value.startswith("[")]
         self.assertEqual(len(shard_variants), 2)
         self.assertEqual(len(exclude_variants), 2)
-        dispatch_guard = ("github.event_name == 'workflow_dispatch' && "
-                          "(github.ref == 'refs/heads/codex/ci-checks-split-overlap' || "
-                          "github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap')")
+        dispatch_guard = "github.event_name == 'workflow_dispatch' && (" + " || ".join(
+            "github.ref == 'refs/heads/" + branch + "'" for branch in github_ci_time.COMBINED_QUALIFICATION_BRANCHES) + ")"
         self.assertIn(dispatch_guard, shard_expression)
         self.assertIn(dispatch_guard, exclude_expression)
         for expression in (shard_expression, exclude_expression):
@@ -1027,10 +1054,10 @@ class CompletionGateTests(unittest.TestCase):
         includes = re.findall(r"^          - name: (.+)\n            lane: (.+)\n", desktop, re.M)
         self.assertEqual(Counter(lanes), Counter(f"{platform}-{arch}" for platform, arch in ci_summary._COVERAGE_POLICY_ANCHORS if (platform, arch) != ("macos", "x86_64")))
         self.assertEqual(Counter(lane for _, lane in includes), Counter(lanes))
-        self.assertEqual(Counter(shard_variants[1]), Counter(github_ci_time.COMBINATION_SHARDS))
-        self.assertEqual(exclude_variants[1], [])
-        for variant, expected in ((0, github_ci_time.SPLIT_COMBINATION_PLATFORMS),
-                                  (1, github_ci_time.COMBINATION_PLATFORMS)):
+        self.assertEqual(Counter(shard_variants[0]), Counter(github_ci_time.COMBINATION_SHARDS))
+        self.assertEqual(exclude_variants[0], [])
+        for variant, expected in ((0, github_ci_time.COMBINATION_PLATFORMS),
+                                  (1, github_ci_time.SPLIT_COMBINATION_PLATFORMS)):
             expanded = [f"{name} {shard}" for name, lane in includes for shard in shard_variants[variant]
                         if {"lane": lane, "shard": shard} not in exclude_variants[variant]]
             self.assertEqual(Counter(expanded), Counter(expected))
@@ -1051,14 +1078,14 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
         self.assertIn('--checks-layout "$BUSTER_CI_CHECKS_LAYOUT"', aggregate)
 
-    def test_candidate_layout_and_windows_admission_are_dispatch_branch_scoped(self):
+    def test_default_split_keeps_only_combined_and_barrier_dispatch_overrides(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         inputs = workflow.split("  workflow_dispatch:", 1)[1].split("\n# Supersede", 1)[0]
         self.assertNotIn("      checks_layout:\n", inputs)
         self.assertNotIn("      test_admission:\n", inputs)
-        self.assertIn("BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && "
-                      "(github.ref == 'refs/heads/codex/ci-checks-split-overlap' || "
-                      "github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && 'split' || 'combined' }}", workflow)
+        guard = "github.event_name == 'workflow_dispatch' && (" + " || ".join(
+            "github.ref == 'refs/heads/" + branch + "'" for branch in github_ci_time.COMBINED_QUALIFICATION_BRANCHES) + ")"
+        self.assertIn("BUSTER_CI_CHECKS_LAYOUT: ${{ " + guard + " && 'combined' || 'split' }}", workflow)
         desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
         windows = desktop.split("      - name: Combination matrix (Windows)\n", 1)[1].split("      - name:", 1)[0]
         admission = re.search(r"^          BUSTER_MATRIX_TEST_ADMISSION: (.+)$", windows, re.M).group(1)
@@ -1107,9 +1134,9 @@ class CompletionGateTests(unittest.TestCase):
         return run
 
     def test_timing_includes_every_new_shard_and_rejects_partial_runs(self):
-        for layout, job_count in (("combined", 21), ("split", 27)):
+        for layout, job_count in (("combined", 21), ("historical-split", 27), ("split", 29)):
             with self.subTest(layout=layout):
-                run = self.timing_sample(layout)
+                run = self.historical_split_timing_sample() if layout == "historical-split" else self.timing_sample(layout)
                 measurement, reason = github_ci_time.measure(run)
                 self.assertIsNone(reason)
                 self.assertEqual(measurement["runner_seconds"], job_count * 60)
@@ -1121,15 +1148,28 @@ class CompletionGateTests(unittest.TestCase):
                     self.assertIsNone(github_ci_time.measure(bad)[0])
                 self.assertIsNone(github_ci_time.measure(dict(run, run_attempt=2))[0])
 
+    def historical_split_timing_sample(self):
+        # The pre-#2659 27-job layout: macOS AArch64 still had grouped checks.
+        run = self.timing_sample("split")
+        grouped = next(job for job in self.timing_sample("combined")["jobs"] if job["name"] == "macOS AArch64 checks")
+        run["jobs"] = [job for job in run["jobs"] if not (job["name"].startswith("macOS AArch64 ") and
+                                                          job["name"].split(" ")[-1] in github_ci_time.SPLIT_CHECK_SHARDS)]
+        run["jobs"].append(grouped)
+        self.assertEqual(sorted(job["name"] for job in run["jobs"]), sorted(github_ci_time.HISTORICAL_SPLIT_COMBINATION_JOBS))
+        self.assertTrue(self.check(run["jobs"], checks_layout="split"))
+        return run
+
     def test_combined_and_split_timing_cohorts_stay_separate_on_the_same_workflow_blob(self):
         combined = self.timing_sample()
+        historical = self.historical_split_timing_sample()
+        historical["id"] = 125
         split = self.timing_sample("split")
         split["id"] = 124
-        summary = github_ci_time.summarize({"runs": [combined, split]})
+        summary = github_ci_time.summarize({"runs": [combined, historical, split]})
         self.assertEqual(summary["excluded"], {})
-        self.assertEqual(len(summary["cohorts"]), 2)
+        self.assertEqual(len(summary["cohorts"]), 3)
         self.assertEqual({row["n"] for row in summary["cohorts"]}, {1})
-        self.assertEqual({row["medians"]["runner_seconds"] for row in summary["cohorts"]}, {21 * 60, 27 * 60})
+        self.assertEqual({row["medians"]["runner_seconds"] for row in summary["cohorts"]}, {21 * 60, 27 * 60, 29 * 60})
 
 
 class DraftMacosDeferralTests(unittest.TestCase):
@@ -1149,7 +1189,8 @@ class DraftMacosDeferralTests(unittest.TestCase):
         return jobs
 
     def check(self, jobs, draft, attempt=1):
-        return github_ci_time.validate_required_jobs(jobs, 123, attempt, "a" * 40, draft)
+        return github_ci_time.validate_required_jobs(jobs, 123, attempt, "a" * 40, draft,
+                                                     expected_names=github_ci_time.combination_jobs())
 
     def workflow_jobs(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -1159,16 +1200,16 @@ class DraftMacosDeferralTests(unittest.TestCase):
             "mobile": workflow.split("\n  mobile:\n", 1)[1].split("\n  uefi:\n", 1)[0],
         }
 
-    def test_exactly_the_four_macos_runner_jobs_are_deferrable(self):
+    def test_exactly_the_six_macos_runner_jobs_are_deferrable(self):
         jobs = self.workflow_jobs()
         expected = []
         desktop = re.findall(r"^          - name: (.+)\n            lane: .+\n            runner: (.+)$", jobs["test"], re.M)
         expected += [f"{name} {shard}" for name, runner in desktop if runner.startswith("macos-")
-                     for shard in github_ci_time.COMBINATION_SHARDS]
+                     for shard in ("release",) + github_ci_time.SPLIT_CHECK_SHARDS]
         for job in ("native", "mobile"):
             entries = re.findall(r"^          - name: (.+)\n            runner: (.+)$", jobs[job], re.M)
             expected += [name for name, runner in entries if runner.startswith("macos-")]
-        self.assertEqual(len(expected), 4)
+        self.assertEqual(len(expected), 6)
         self.assertEqual(Counter(expected), Counter(github_ci_time.MACOS_RUNNER_JOBS))
 
     def test_first_attempt_draft_accepts_deferred_macos_lanes_only(self):
@@ -1176,7 +1217,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
         self.assertEqual(self.check(self.sample(deferred=False), draft=True), [])
         self.assertEqual(self.check(self.sample(deferred=False), draft=False), [])
         errors = self.check(self.sample(), draft=False)
-        self.assertEqual(sum("only the first attempt of a draft pull-request run" in error for error in errors), 4)
+        self.assertEqual(sum("only the first attempt of a draft pull-request run" in error for error in errors), 6)
         # A cancelled no-op rerun by rerun-failed-jobs runs the real lane
         # instead; a deferral record from a later attempt is never accepted.
         jobs = self.sample()
@@ -1212,7 +1253,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
         latest = github_ci_time.latest_run_jobs(first + second, 123, 2, "a" * 40)
         self.assertFalse(any(github_ci_time.deferred_base_name(job["name"]) for job in latest))
         self.assertEqual(self.check(latest, draft=True, attempt=2), [])
-        failed = next(job for job in second if job["name"] == "macOS AArch64 checks")
+        failed = next(job for job in second if job["name"] == "macOS AArch64 sanitized-debug")
         failed["conclusion"] = "failure"
         latest = github_ci_time.latest_run_jobs(first + second, 123, 2, "a" * 40)
         self.assertTrue(self.check(latest, draft=True, attempt=2))
@@ -1266,7 +1307,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 inventory = self.rerun_failed_inventory(attempts)
                 latest = github_ci_time.latest_run_jobs(inventory, 123, attempts, "a" * 40)
                 deferred = [job for job in latest if github_ci_time.deferred_base_name(job["name"])]
-                self.assertEqual(len(deferred), 4)
+                self.assertEqual(len(deferred), 6)
                 self.assertEqual({job["run_attempt"] for job in deferred}, {1})
                 self.assertEqual(self.check(latest, draft=True, attempt=attempts), [])
                 result = self.gate_rerun(inventory, attempts, draft=True)
@@ -1276,7 +1317,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 result = self.gate_rerun(inventory, attempts, draft=False)
                 self.assertFalse(result["success"])
                 self.assertEqual(sum("only the first attempt of a draft pull-request run" in error
-                                     for error in result["errors"]), 4)
+                                     for error in result["errors"]), 6)
         # Non-draft control without deferrals: an ordinary partial rerun still passes.
         result = self.gate_rerun(self.rerun_failed_inventory(2, deferred=False), 2, draft=False)
         self.assertTrue(result["success"], result["errors"])
