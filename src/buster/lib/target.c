@@ -524,7 +524,7 @@ TargetParseResult target_parse_triple(String8 triple)
         {
             result.invalid_component = component;
             result.error = TARGET_PARSE_ERROR_ENVIRONMENT;
-            return result;
+            break;
         }
         else if (target_component_equal(component, S8("windows")) || target_component_equal(component, S8("win32")) ||
                  target_component_equal(component, S8("msvc")))
@@ -552,12 +552,12 @@ TargetParseResult target_parse_triple(String8 triple)
         component_index += 1;
         component_start = component_end < triple.length ? component_end + 1 : triple.length;
     }
-    if (result.target.os == OPERATING_SYSTEM_COUNT)
+    if (result.error == TARGET_PARSE_ERROR_NONE && result.target.os == OPERATING_SYSTEM_COUNT)
     {
         result.invalid_component = triple;
         result.error = TARGET_PARSE_ERROR_OPERATING_SYSTEM;
     }
-    else if (result.target.os == OPERATING_SYSTEM_WINDOWS && gnu_environment.length)
+    else if (result.error == TARGET_PARSE_ERROR_NONE && result.target.os == OPERATING_SYSTEM_WINDOWS && gnu_environment.length)
     {
         result.invalid_component = gnu_environment;
         result.error = TARGET_PARSE_ERROR_ENVIRONMENT;
