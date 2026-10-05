@@ -918,6 +918,10 @@ fi
 simulator_owned=0
 runtime=
 device_type=
+simulator_selection_kind=explicit
+simulator_tools_directory=${BASH_SOURCE[0]%/*}
+if [[ $simulator_tools_directory == "${BASH_SOURCE[0]}" ]]; then simulator_tools_directory=.; fi
+simulator_tools_directory=$simulator_tools_directory/../tools
 boot_recovery_eligible=0
 shutdown_postcondition_eligible=0
 shutdown_postcondition_probe_status=not-run
@@ -1004,16 +1008,25 @@ trap 'exit 143' TERM
 if [[ -z $udid ]]; then
     if udid_output=$(run_with_timeout "$boot_timeout_seconds" \
         xcrun simctl list devices available -j 2>/dev/null | python3 -c '
-import json, sys
+import json, os, sys
 name = sys.argv[1]
 data = json.load(sys.stdin)["devices"]
-for runtime_devices in data.values():
+for selected_runtime, runtime_devices in data.items():
     for device in runtime_devices:
         if device.get("name") == name and device.get("isAvailable", True):
+            if os.environ.get("BUSTER_CI_CONDITIONS_EVIDENCE") == "1":
+                try:
+                    sys.path.insert(0, sys.argv[2])
+                    from ci_ios_simulator import retain
+                    retain("name-reuse", device["udid"], selected_runtime,
+                           device.get("deviceTypeIdentifier"), os.environ)
+                except (ImportError, OSError, ValueError):
+                    print("CI_IOS_SIMULATOR_SELECTION retention failed", file=sys.stderr)
             print(device["udid"]); sys.exit(0)
 sys.exit(1)
-' "$device_name"); then
+' "$device_name" "$simulator_tools_directory"); then
         udid=$udid_output
+        simulator_selection_kind=name-reuse
     else
         udid=
     fi
@@ -1088,6 +1101,14 @@ if [[ -z $udid ]]; then
         exit 1
     fi
     simulator_owned=1
+    simulator_selection_kind=created
+fi
+
+if [[ ${BUSTER_CI_CONDITIONS_EVIDENCE:-0} == 1 && $simulator_selection_kind != name-reuse ]]; then
+    # An explicit UUID has no discovery witness; retain unknown without a probe.
+    python3 "$simulator_tools_directory/ci_ios_simulator.py" \
+        --kind "$simulator_selection_kind" --udid "$udid" \
+        --runtime "$runtime" --device-type "$device_type" || true
 fi
 
 echo "Using simulator $device_name ($udid)"

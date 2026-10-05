@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -19,6 +22,8 @@ ATTEMPT_TIMEOUT_SECONDS = 300
 BACKOFF_SECONDS = 5
 _LICENSE_INPUT = "y\n" * 100
 _PACKAGE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+_SYSTEM_IMAGE_METADATA_BYTES = 64 * 1024
+_SYSTEM_IMAGE_RECEIPT_BYTES = 8192
 
 
 class AndroidSdkError(RuntimeError):
@@ -216,6 +221,74 @@ def _print_failure_tail(log_path: Path, lines: int = 200) -> None:
         print(line, file=sys.stderr)
 
 
+def _system_image_revision(sdk_root: Path, package: str) -> dict[str, object]:
+    """Read only the same requested package's bounded actual revision witness."""
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise AndroidSdkError("safe system-image metadata observation is unavailable")
+    directory = os.open(sdk_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for segment in package_segments(package):
+            child = os.open(segment, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open("source.properties", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+        with os.fdopen(descriptor, "rb") as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= _SYSTEM_IMAGE_METADATA_BYTES:
+                raise AndroidSdkError("system-image metadata is not bounded regular data")
+            data = source.read(_SYSTEM_IMAGE_METADATA_BYTES + 1)
+            after = os.fstat(source.fileno())
+        current = os.stat("source.properties", dir_fd=directory, follow_symlinks=False)
+        fingerprints = [(value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+                        for value in (before, after, current)]
+        if fingerprints[0] != fingerprints[1] or fingerprints[1] != fingerprints[2] or len(data) != before.st_size:
+            raise AndroidSdkError("system-image metadata changed during observation")
+    finally:
+        os.close(directory)
+    revisions = []
+    for line in data.decode("utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if key.strip() == "Pkg.Revision":
+            if not separator:
+                raise AndroidSdkError("system-image revision is malformed")
+            revisions.append(value.strip())
+    if len(revisions) != 1 or re.fullmatch(r"[1-9][0-9]{0,15}", revisions[0]) is None:
+        raise AndroidSdkError("system-image revision is missing, duplicate or not a positive whole integer")
+    return {"revision": revisions[0], "source_properties": {
+        "path": str(package_directory(sdk_root, package) / "source.properties"),
+        "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}}
+
+
+def _retain_system_image_revision(sdk_root: Path, packages: Sequence[str], environment: Mapping[str, str],
+                                  source: str, combined: TextIO) -> None:
+    """Extra provenance is opt-in; no package, installer or exit policy changes."""
+    if environment.get("BUSTER_CI_CONDITIONS_EVIDENCE") == "1":
+        from ci_job_environment import actions_binding
+        receipt = {"schema": "buster-ci-android-system-image-revision-v1", "status": "unknown", "source": source}
+        try:
+            bindings, invalid = actions_binding(environment)
+            receipt.update(bindings)
+            if invalid:
+                raise AndroidSdkError("invalid or missing Actions binding")
+            selected = [package for package in packages if package.startswith("system-images;")]
+            if len(selected) != 1:
+                raise AndroidSdkError("one requested system-image package is required")
+            receipt["package"] = selected[0]
+            requested = environment.get("BUSTER_ANDROID_SYSTEM_IMAGE")
+            if requested is not None and requested != selected[0]:
+                raise AndroidSdkError("system-image request differs from the selected package")
+            receipt.update(_system_image_revision(sdk_root, selected[0]))
+            receipt["status"] = "observed"
+        except (ValueError, AndroidSdkError, OSError) as error:
+            receipt["reason"] = (str(error) if isinstance(error, (ValueError, AndroidSdkError)) and
+                                 not isinstance(error, UnicodeError) else "system-image metadata is unavailable or invalid")
+        data = json.dumps(receipt, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        if len(data.encode("utf-8")) > _SYSTEM_IMAGE_RECEIPT_BYTES:
+            data = json.dumps({"schema": receipt["schema"], "status": "unknown", "reason": "revision receipt exceeds byte bound"})
+        print("ANDROID_SDK_SYSTEM_IMAGE_REVISION " + data, file=combined, flush=True)
+        print("ANDROID_SDK_SYSTEM_IMAGE_REVISION " + data)
+
+
 def install(
     command: Sequence[str],
     sdk_root: Path | str,
@@ -265,6 +338,7 @@ def install(
                 )
             if not initial_invalid:
                 print("ANDROID_SDK_INSTALL_RESULT status=success attempts=0 source=preinstalled", file=combined)
+                _retain_system_image_revision(sdk_root, packages, effective_environment, "preinstalled", combined)
                 print("Android SDK packages are already installed and structurally valid.")
                 return 0
 
@@ -314,6 +388,7 @@ def install(
                         file=combined,
                         flush=True,
                     )
+                    _retain_system_image_revision(sdk_root, packages, effective_environment, "sdkmanager", combined)
                     print(f"Android SDK installation succeeded after {attempt} attempt(s).")
                     return 0
 

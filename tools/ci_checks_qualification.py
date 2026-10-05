@@ -17,8 +17,14 @@ JSON campaign schema (all paths relative to the campaign, unless noted):
 REF = {"path":"retained/file.json", "sha256":"64 lowercase hex"}.
 run is one complete run object from github_ci_time.py collect, including jobs
 and steps (not the collector's outer runs array). Each variant needs exactly
-three different complete first attempts, dispatched from its matching codex/
-ci-checks-<variant> branch, all at the same immutable source/workflow revision.
+three different complete first attempts at the same immutable source/workflow
+revision. Omitted cohort retains the historical codex/ci-checks-<variant> refs.
+The prospective refs codex/2120-evidence-v2-<variant> require a declaration:
+  "cohort":{"name":"issue2120-evidence-v2", "head_sha":"40 lowercase hex",
+            "workflow_blob_sha":"40 lowercase hex"}
+Every sample must match both declared pins and its exact cohort/variant ref;
+agreement between samples cannot redefine the declared source. Explicit
+legacy-v1 declarations use the historical refs and likewise require both pins.
 Every desktop job needs its unchanged result/coverage/phase summaries plus the
 complete matrix-phases directory. Native journals are replayed, not trusted
 because their summary says complete. Their summary digest binds the replay.
@@ -54,6 +60,13 @@ The selected Go, iOS/analyzer/UEFI Ninja and Android adb observations additional
 need selected_tools={tool:REF} receipts from ci_checks_tools.py. Their source,
 run/attempt and workflow job key are verified; only hash/version enter equality.
 Legacy logs without these observations remain pending.
+The iOS role additionally requires simulator_selection=REF for the actual
+selected-record receipt from ci_ios_simulator.py. Source/run/attempt/mobile-job
+identity and observed runtime/device type are required. The initial UUID joins
+selection provenance to the launcher log; only runtime/device type enter
+equality. The one CI batch selects once for both configurations. Collection
+must reject retention failures or repeated selection and retain replacement
+UUIDs from the separate recovery log; explicit-UUID overrides remain unknown.
 
 Native phase journals report CPU time and peak RSS as unknown. This consumer
 can meet or reject timing/census thresholds, but cannot accept either issue's
@@ -88,6 +101,12 @@ import github_ci_time as github
 
 SCHEMA = "buster-ci-checks-qualification-v1"
 VARIANTS = ("combined-overlap", "combined-all-builds", "split-overlap")
+LEGACY_COHORT = "legacy-v1"
+PROSPECTIVE_COHORT = "issue2120-evidence-v2"
+COHORT_BRANCHES = {
+    LEGACY_COHORT: {variant: "codex/ci-checks-" + variant for variant in VARIANTS},
+    PROSPECTIVE_COHORT: {variant: "codex/2120-evidence-v2-" + variant for variant in VARIANTS},
+}
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 CAP_KEYS = ("compiler", "path_hash", "identity", "target", "version")
@@ -142,15 +161,52 @@ def skipped_reuse(job):
     return job.get("name") == github.MAIN_REUSE_JOB and job.get("status") == "completed" and job.get("conclusion") == "skipped" and job.get("run_attempt") == 1
 
 
-def timing(run, variant):
-    layout = "split" if variant == "split-overlap" else "combined"
-    expected = Counter(github.combination_jobs(layout))
+def cohort(campaign):
+    """Select exact refs; prospective pins must come from the declaration."""
+    if "cohort" in campaign:
+        result = campaign["cohort"]
+        require(isinstance(result, dict) and set(result) == {"name", "head_sha", "workflow_blob_sha"},
+                "cohort requires a name and declared source/workflow pins")
+        require(isinstance(result["name"], str) and result["name"] in COHORT_BRANCHES, "unknown qualification cohort")
+        require(all(isinstance(result[key], str) and COMMIT.fullmatch(result[key]) for key in ("head_sha", "workflow_blob_sha")),
+                "malformed declared source/workflow pins")
+    else:
+        result = {"name": LEGACY_COHORT}
+    return result
+
+
+def _cohort_desktop(variant):
+    split_platforms = ("Linux x86-64", "Linux AArch64", "Windows x86-64") if variant == "split-overlap" else ()
+    return tuple(f"{platform} {shard}" for platform in github.PLATFORMS
+                 for shard in (("release",) + github.SPLIT_CHECK_SHARDS
+                               if platform in split_platforms else github.COMBINATION_SHARDS))
+
+
+def cohort_desktop_jobs(variant):
+    """The #2120 cohorts froze ten combined or sixteen split desktop jobs.
+
+    macOS AArch64 still had grouped checks then; the later current split
+    layout (#2659) is never an admissible cohort inventory.
+    """
+    return _cohort_desktop(variant)
+
+
+def cohort_jobs(variant):
+    """The exact 21/27-job cohort inventory, without the optional reuse job."""
+    return _cohort_desktop(variant) + github.MOBILE + github.NATIVE + github.UEFI + github.ANALYZER + \
+        ("Workflow lint", "CI complete")
+
+
+def timing(run, variant, cohort_name=LEGACY_COHORT):
+    require(isinstance(cohort_name, str) and cohort_name in COHORT_BRANCHES, "unknown qualification cohort")
+    require(variant in VARIANTS, "unknown qualification variant")
+    expected = Counter(cohort_jobs(variant))
     jobs = run.get("jobs", [])
     actual = Counter(job.get("name") for job in jobs)
     if github.MAIN_REUSE_JOB in actual:
         expected[github.MAIN_REUSE_JOB] = 1
     require(actual == expected, "not the exact 21/27 required jobs plus optional main-reuse job")
-    require(run.get("event") == "workflow_dispatch" and run.get("head_branch") == "codex/ci-checks-" + variant,
+    require(run.get("event") == "workflow_dispatch" and run.get("head_branch") == COHORT_BRANCHES[cohort_name][variant],
             "qualification dispatch branch/variant mismatch")
     require(run.get("path") == ".github/workflows/ci.yml" and COMMIT.fullmatch(str(run.get("head_sha", ""))) and
             COMMIT.fullmatch(str(run.get("workflow_blob_sha", ""))), "unresolved source/workflow")
@@ -243,6 +299,28 @@ def selected_tool(root, reference, run, job, tool):
     return comparable
 
 
+
+def simulator_selection(root, reference, run):
+    """Keep the selected UUID as provenance, comparing runtime/device only."""
+    value = record(root, reference)
+    require(isinstance(value, dict) and value.get("schema") == "buster-ci-ios-simulator-selection-v1" and
+            value.get("status") == "observed" and value.get("invalid_bindings") == [],
+            "missing/unknown selected iOS simulator observation")
+    expected = {"repository": "buster14a/buster", "source_revision": run["head_sha"], "run_id": str(run["id"]),
+                "run_attempt": str(run["run_attempt"]), "job": "mobile"}
+    require(all(value.get(key) == item for key, item in expected.items()), "iOS simulator source/run/attempt/job mismatch")
+    selection = value.get("selection", {})
+    require(isinstance(selection, dict) and set(selection) == {"kind", "udid", "runtime", "device_type"} and
+            selection.get("kind") in ("name-reuse", "created"), "iOS simulator was not actually discovered/created")
+    patterns = {"udid": r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}",
+                "runtime": r"com\.apple\.CoreSimulator\.SimRuntime\.[A-Za-z0-9-]+",
+                "device_type": r"com\.apple\.CoreSimulator\.SimDeviceType\.[A-Za-z0-9-]+"}
+    require(all(isinstance(selection.get(key), str) and len(selection[key].encode("utf-8")) <= 512 and
+                re.fullmatch(pattern, selection[key]) for key, pattern in patterns.items()),
+            "missing actual iOS simulator runtime/device/UUID identity")
+    return {key: selection[key] for key in ("runtime", "device_type")}
+
+
 def condition_inputs(root, entry, run, job):
     name = role(job["name"])
     tools, caches = condition_keys(name)
@@ -254,6 +332,9 @@ def condition_inputs(root, entry, run, job):
         require(entry["caches"]["explicit_actions_cache"] == "not-used", "unsupported explicit Actions-cache condition")
     if "BUSTER_CI_ZIG_CACHE_HIT" in caches:
         require(entry["caches"]["BUSTER_CI_ZIG_CACHE_HIT"] in ("true", "false"), "invalid observed Zig cache condition")
+    if name == "iOS AArch64":
+        require(entry["toolchains"]["ios_simulator"] == simulator_selection(root, entry.get("simulator_selection"), run),
+                "selected iOS simulator differs from condition map")
     if name == "Android x86-64":
         states = entry["caches"]["android_sdk_package_state_before"]
         require(isinstance(entry["toolchains"]["android_system_image"], str), "missing Android requested system-image identity")
@@ -387,6 +468,7 @@ def desktop(root, item, run, condition, variant):
     require(meta.get("GITHUB_SHA") == run["head_sha"] and str(meta.get("GITHUB_RUN_ID")) == str(run["id"]) and meta.get("GITHUB_RUN_ATTEMPT") == "1", "desktop result run identity mismatch")
     environment = phase_environment(summary, meta)
     rows, selected = policy_rows(coverage, environment)
+    capabilities = phases.capability_index(coverage.get("detected"), rows)
     report = phases.analyze(root / item["phase_directory"], coverage, environment)
     require(report == summary and result.get("matrix_phases") == summary, "retained phase summary differs from native journal replay/result")
     require(COMMIT.fullmatch(report["identity"]["source_tree"]) and all(HASH.fullmatch(str(identity.get(k, ""))) for k in ("source_hash", "driver_hash")), "missing exact source/tree/driver identity")
@@ -406,8 +488,6 @@ def desktop(root, item, run, condition, variant):
     executed = coverage.get("executed", [])
     require(len(executed) == 1 and executed[0].get("status") == "success" and executed[0].get("evidence") == "driver-complete" and
             executed[0].get("lane_id") == identity["lane_id"] and Counter(executed[0].get("rows", [])) == Counter(selected), "incomplete/duplicate selected-row completion")
-    capabilities = {row["id"]: row for row in coverage.get("detected", [])}
-    require(set(capabilities) == set(rows), "missing full capability census")
     runtime = {key for key in selected if rows[key].get("execution") == "runtime"}
     tests = item.get("tests", [])
     require(Counter(t["row_id"] for t in tests) == Counter(runtime), "missing/duplicate runtime assertion census")
@@ -437,13 +517,13 @@ def desktop(root, item, run, condition, variant):
             "logical_cpus": report["logical_cpus"], "cpu_budget": report["cpu_budget"], "selected": selected, "census": census}
 
 
-def sample(root, item):
+def sample(root, item, cohort_name=LEGACY_COHORT):
     variant = item["variant"]
     require(variant in VARIANTS, "unknown qualification variant")
     run = record(root, item["run"])
-    measured = timing(run, variant)
+    measured = timing(run, variant, cohort_name)
     entries, normalized = conditions(root, item["conditions"], run)
-    desktop_names = github.SPLIT_COMBINATION_PLATFORMS if variant == "split-overlap" else github.COMBINATION_PLATFORMS
+    desktop_names = cohort_desktop_jobs(variant)
     items = item.get("desktops", [])
     require(Counter(i["job"] for i in items) == Counter(desktop_names), "missing/duplicate desktop evidence")
     platforms = {}
@@ -473,12 +553,17 @@ def qualify(path):
     try:
         campaign = phases.read(path)
         require(campaign.get("schema") == SCHEMA and campaign.get("repository") == "buster14a/buster", "unknown campaign schema/repository")
+        declaration = cohort(campaign)
+        output["cohort"] = declaration
         items = campaign.get("samples", [])
         require(Counter(i.get("variant") for i in items) == Counter({v: 3 for v in VARIANTS}), "need exactly three complete first attempts per variant")
-        observations = [sample(path.parent, item) for item in items]
+        observations = [sample(path.parent, item, declaration["name"]) for item in items]
         require(len({o["run_id"] for o in observations}) == len(observations), "a GitHub run was counted more than once")
         reference = observations[0]
         for observation in observations:
+            for key in ("head_sha", "workflow_blob_sha"):
+                if key in declaration:
+                    require(observation[key] == declaration[key], "sample differs from declared cohort: " + key)
             for key in ("head_sha", "workflow_blob_sha", "conditions", "platforms"):
                 require(observation[key] == reference[key], "incomparable campaign: " + key)
         groups = defaultdict(list)

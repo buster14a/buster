@@ -4,6 +4,17 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- **TLS classification consumes canonical keyword spellings.** Preprocessing
+  rewrites C23/GNU23 `thread_local` to `_Thread_local`, including preprocessed
+  input. A remaining raw `thread_local` is an ordinary identifier; its use as
+  an object name, typedef, enumerator or initializer member cannot confer TLS.
+  File-scope semantic entities, canonical symbols and globals recognize only
+  `_Thread_local` and `__thread` for thread storage. Static initializers still
+  reject addresses of genuine TLS objects. `c_test_file_tls_dialect` checks
+  these facts and pointer initializer identity through both frontend forms;
+  `c_test_file_tls_dialect_runtime` checks ordinary object placement, address
+  relocations and execution under every native allocator in C17/GNU17.
+
 - **Windows x64 frame records describe instruction-time RSP.**
   `object_windows_x64_unwind_layout` retains SET_FPREG only when no fixed
   allocation follows frame establishment; its displacement is the action's
@@ -20,6 +31,22 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   (GitHub #363); object parsing alone is not runtime-unwind evidence.
   Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
   saves, and keeps saved-register offsets separate from stack-allocation sizes.
+- **AArch64 ELF variant procedure-call metadata is refused explicitly.**
+  `object_read_elf64` refuses every non-null, non-FILE symbol carrying
+  `STO_AARCH64_VARIANT_PCS` (st_other bit 0x80), naming the symbol and table
+  index. The neutral object model cannot preserve this marking or the
+  intermediary register/state guarantees required by
+  [AAELF64's symbol-table contract](https://github.com/ARM-software/abi-aa/blob/2025Q4/aaelf64/aaelf64.rst#symbol-table).
+  The check precedes reserved-index and unallocated-section skipping, so those
+  paths cannot silently erase the ABI requirement. An invalid name remains a
+  malformed-input error. Formatting is bounded by the remaining arena capacity;
+  when that space is unavailable, the unsupported-target error remains and no
+  diagnostic bytes are allocated. Ordinary AArch64 visibility, ignored FILE/null records
+  and other architectures retain their existing behavior; this is a refusal
+  boundary, with variant-PCS execution support still open under GitHub #1243.
+  `object_test_elf_variant_pcs` uses original raw ELF records to cover defined
+  and undefined FUNC/NOTYPE entries, local/global/weak bindings, every visibility,
+  reserved/discarded sections, unnamed/malformed names and x86-64 controls.
 - **Program-symbol identity crosses the object boundary.**
   `object_from_canonical_codegen_module` resolves a relocation's `IrSymbolId`
   through `entry_by_symbol`. Entries map to their own index; globals and
@@ -439,7 +466,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `ELF_ADD_LO12` object kinds (AAELF64 relocations 275/277). The reader keeps
   RELA's explicit addend and clears the encoded immediate. REL ADRP's initial
   addend is its **unscaled signed imm21**, unlike the executed displacement
-  or the Mach-O contract; REL ADD uses the unshifted unsigned imm12. Reject
+  or the Mach-O contract; REL ADD sign-extends its unshifted imm12 (2047,
+  2048 and 4095 become 2047, -2048 and -1). REL-to-RELA rewrites preserve
+  that signed canonical addend even when low12 truncation leaves linked
+  instruction bytes unchanged. Reject
   misaligned sites, wrong instruction classes and shifted ADD forms.
   `object_aarch64_elf_page_relocate` shares checked address arithmetic with
   in-memory and native ELF linking, and the generated A64 ADD plan owns the
@@ -448,6 +478,15 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   symbol's copy-slot address, including aliases. Untyped exported AArch64
   ELF text labels can serve as assembly entry points; explicit object types
   remain data. Mach-O, PE and TLS relocation contracts remain separate.
+
+- AArch64 ELF `ELF_GOT_PAGE21`/`ELF_GOT_LD64_LO12` (types 311/312)
+  use `GDAT(S)` and require zero addends under AAELF64. The importer rejects
+  nonzero REL instruction fields and nonzero RELA addends; canonical ELF
+  writing, assembly printing and the shared image patcher enforce the same
+  rule. A valid pair relaxes to ADRP/ADD of the symbol, including an imported
+  data symbol's copy slot; an undefined weak zero target becomes MOVZ/ADD
+  zero. Direct ADRP/ADD and scaled memory relocations retain their distinct
+  signed-addend rules. See [AAELF64 addends and relocation definitions](https://github.com/ARM-software/abi-aa/blob/a5e86d3fec7342719f3bd1f939ec1b8ac6438c4f/aaelf64/aaelf64.rst).
 
 - Direct AArch64 ELF unsigned-immediate memory references use distinct
   `ELF_LDST8_LO12`, `ELF_LDST16_LO12`, `ELF_LDST32_LO12`, `ELF_LDST64_LO12`
@@ -477,8 +516,17 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   unscaled and register-offset forms fail closed. The exact `__tls_index`
   symbol remains a distinct DATA-symbol contract restricted to a 32-bit
   unsigned-immediate LDR; the writer binds index-pair relocations to that
-  loader symbol. TLS section offsets use type 9
-  (`SECREL_LOW12A`); type 15 is `BRANCH19` and is not treated as TLS. ARM64
+  loader symbol. TLS section offsets use shifted ADD type 10
+  (`SECREL_HIGH12A`) followed by unshifted ADD type 9 (`SECREL_LOW12A`).
+  Canonical and MIR producers emit both halves, preserving offset bits 12..23
+  beyond 4 KiB. COFF's inline imm12 addend is an unscaled byte count even in
+  the shifted ADD; the PE linker adds it before splitting the final template
+  offset. Offsets beyond 24 bits, malformed ADD forms and arithmetic overflow
+  fail before executable publication. Registered codegen, original raw-COFF
+  and final PE byte tests cover both frontend forms, all allocators, carries,
+  initialized/zero-fill placement and output retention. This fixes #1323 W2;
+  platform TLS-index spelling/section interoperability and Mach-O descriptors
+  remain separate work. Type 15 is `BRANCH19` and is not treated as TLS. ARM64
   CodeView uses `SECREL` type 8 and the two-byte `SECTION` type 13, retaining
   checked inline addends. The PE linker applies all of these only after final
   layout and returns no executable bytes on a relocation failure.
