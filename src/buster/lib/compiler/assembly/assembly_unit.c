@@ -1421,6 +1421,25 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_prefix_only(String8 line)
     return false;
 }
 
+// `.` in an instruction operand is the address of the statement itself. The
+// instruction layer sees it as an undefined symbol named `.`, so each
+// statement gets a private label at its own offset; the usual same-section
+// resolution then folds it, and the `.Lnum.` prefix drops the label from the
+// object once nothing refers to it.
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_statement_address_symbol(AssemblyUnitBuilder* builder, u64 offset)
+{
+    String8 name = string_format(builder->arena, S8(".Lnum.dot.{u32}.{u64}"), builder->current_section, offset);
+    u32 symbol = assembly_unit_symbol_intern(builder, name);
+    if (symbol != UINT32_MAX)
+    {
+        AssemblyUnitSymbol* record = builder->result.symbols + symbol;
+        record->value = offset;
+        record->section = builder->current_section;
+        record->defined = true;
+    }
+    return symbol;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder, String8 line)
 {
     String8 rewritten = {0};
@@ -1458,7 +1477,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
         {
             return false;
         }
-        u32 symbol = assembly_unit_symbol_intern(builder, encoded.symbols[relocation.symbol].name);
+        String8 relocation_name = encoded.symbols[relocation.symbol].name;
+        u32 symbol = string_equal(relocation_name, S8(".")) ? assembly_unit_statement_address_symbol(builder, base)
+                                                           : assembly_unit_symbol_intern(builder, relocation_name);
         if (symbol == UINT32_MAX || !assembly_unit_relocation_append(builder, symbol, base + relocation.offset, relocation.addend, relocation.kind))
         {
             return false;

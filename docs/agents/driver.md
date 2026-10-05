@@ -444,7 +444,11 @@ relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
 of `symbol` or `symbol±constant` (or a `.`-relative value), resolved once every
 label is known, so GCC may write it ahead of the label it names; and, accepted
 and dropped because they carry no bytes the linked program uses, the `.cfi_*`
-family, `.file`, `.ident`, and Clang's `.addrsig`/`.addrsig_sym`. A global
+family, `.file`, `.ident`, and Clang's `.addrsig`/`.addrsig_sym`. In an instruction operand `.` is the address of its
+own statement, so `b .`, `bl .`, `b.cond .`, `cbz x0, .`,
+`ldr x0, .`, `jmp .+5` and the like resolve locally without a relocation or a symbol-table entry. AArch64 `b`/`bl` and the
+other PC-relative control forms also take `#imm` (a byte displacement) as well
+as a bare `imm`, matching llvm-mc (#2687). A global
 `.comm` (an ELF common symbol, as `-fcommon` produces) and a `.set` of an
 absolute value are refused by name. Widths and alignment follow the target
 as in GNU as: on x86-64 `.align N` is N bytes and `.word` is 16 bits; on

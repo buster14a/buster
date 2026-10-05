@@ -7102,7 +7102,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_pc_operand(AssemblyBuilder* bu
                                                               BusterAarch64ControlOperandValue* value,
                                                               AssemblyExpression* expression)
 {
-    if (!builder || !value || !expression || !assembly_expression_parse(builder, assembly_trim(text), expression))
+    text = assembly_trim(text);
+    // `#8` is the immediate-displacement spelling of a PC-relative operand.
+    if (text.length > 1 && text.pointer[0] == '#')
+    {
+        text = assembly_trim(string_slice(text, 1, text.length));
+    }
+    if (!builder || !value || !expression || !assembly_expression_parse(builder, text, expression))
     {
         return false;
     }
@@ -8237,6 +8243,12 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
             {
                 text.pointer += 1;
                 text.length -= 1;
+            }
+            // llvm-mc spells an immediate branch displacement `b #8` as well as `b 8`.
+            if (target.cpu_arch == CPU_ARCH_AARCH64 && (info.opcode == ASSEMBLY_OPCODE_AARCH64_B || info.opcode == ASSEMBLY_OPCODE_AARCH64_BL) &&
+                text.length > 1 && text.pointer[0] == '#')
+            {
+                text = assembly_trim(string_slice(text, 1, text.length));
             }
             if (target.cpu_arch == CPU_ARCH_AARCH64 &&
                 (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR ||

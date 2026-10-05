@@ -3871,6 +3871,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_quoted_instruction_symbols(Unit
     return result;
 }
 
+// `.` as a branch operand is the address of its own statement and `#imm` is a
+// byte displacement, so each of these folds to a fixed word with no relocation
+// and no leftover symbol (#2687). Words are the llvm-mc encodings, placed after
+// a leading nop so a wrongly absolute `.` or `#imm` would show.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_current_address_branches(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct AssemblyCurrentAddressCase AssemblyCurrentAddressCase;
+    struct AssemblyCurrentAddressCase
+    {
+        String8 line;
+        u32 word;
+    };
+    Target aarch64 = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    AssemblyCurrentAddressCase const cases[] = {
+        {S8("b ."), 0x14000000},
+        {S8("bl ."), 0x94000000},
+        {S8("b.eq ."), 0x54000000},
+        {S8("b.ne ."), 0x54000001},
+        {S8("cbz x0, ."), 0xb4000000},
+        {S8("cbnz x1, ."), 0xb5000001},
+        {S8("tbz x0, #3, ."), 0x36180000},
+        {S8("b .+8"), 0x14000002},
+        {S8("b .-4"), 0x17ffffff},
+        {S8("b #8"), 0x14000002},
+        {S8("bl #8"), 0x94000002},
+        {S8("bl #-4"), 0x97ffffff},
+        {S8("bl 8"), 0x94000002},
+        {S8("b.eq #8"), 0x54000040},
+        {S8("cbz x0, #8"), 0xb4000040},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        String8 source = string_format(arguments->arena, S8(".text\nnop\n{S8}\nret\n"), cases[index].line);
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = aarch64});
+        u8 expected[12] = {0x1f, 0x20, 0x03, 0xd5, 0, 0, 0, 0, 0xc0, 0x03, 0x5f, 0xd6};
+        for (u32 byte = 0; byte < 4; byte += 1)
+        {
+            expected[4 + byte] = (u8)(cases[index].word >> (byte * 8));
+        }
+        BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && !unit.symbol_count && unit.section_count == 1 &&
+            assembly_test_bytes_equal(unit.sections[0].data, expected, sizeof(expected)), source);
+    }
+    Target x86_64 = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    String8 const x86_sources[] = {S8(".text\nnop\njmp .\nret\n"), S8(".text\nnop\ncall .\nret\n"),
+                                   S8(".text\nnop\njmp .+5\nret\n")};
+    u8 const x86_expected[][8] = {
+        {0x90, 0xe9, 0xfb, 0xff, 0xff, 0xff, 0xc3, 0},
+        {0x90, 0xe8, 0xfb, 0xff, 0xff, 0xff, 0xc3, 0},
+        {0x90, 0xe9, 0x00, 0x00, 0x00, 0x00, 0xc3, 0},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(x86_sources); index += 1)
+    {
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, x86_sources[index], (AssemblyEncodeOptions){.target = x86_64});
+        BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && !unit.symbol_count && unit.section_count == 1 &&
+            assembly_test_bytes_equal(unit.sections[0].data, x86_expected[index], 7), x86_sources[index]);
+    }
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
@@ -3881,6 +3941,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_control_labels);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_current_address_branches);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
