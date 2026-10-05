@@ -6,6 +6,7 @@
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
 #include <buster/lib/os_internal.h>
+#include <buster/lib/system_headers.h>
 
 BUSTER_F_DECL String8 c_test_ir_diagnostic_type_name(Arena* arena, IrType const* type);
 
@@ -77,6 +78,165 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
 #endif
     BUSTER_TEST(arguments, os_file_delete(input));
     BUSTER_TEST(arguments, os_file_delete(output));
+    return result;
+}
+
+#if !BUSTER_ANDROID && !BUSTER_IOS && (BUSTER_WINDOWS || BUSTER_LINUX || BUSTER_MACOS)
+// Native directory enumeration is independent of the publication implementation.
+// The private directory may contain only artifact.i; any orphan is a failure.
+BUSTER_GLOBAL_LOCAL bool compiler_diagnostic_test_output_directory(Arena* arena, String8 directory, bool has_output)
+{
+    u32 count = 0;
+    bool valid;
+#if BUSTER_WINDOWS
+    String16 pattern = string16_from_string8(arena, string_format_z(arena, S8("{S8}\\*"), directory), true);
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileW(pattern.pointer, &data);
+    valid = find != INVALID_HANDLE_VALUE || GetLastError() == ERROR_FILE_NOT_FOUND;
+    if (find != INVALID_HANDLE_VALUE)
+    {
+        bool more = true;
+        while (more)
+        {
+            u64 length = 0;
+            while (data.cFileName[length]) { length += 1; }
+            String8 name = string8_from_string16(arena, (String16){.pointer = (char16*)data.cFileName, .length = length}, false);
+            if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+            {
+                count += 1;
+                valid &= string_equal(name, S8("artifact.i"));
+            }
+            more = FindNextFileW(find, &data) != 0;
+        }
+        valid &= GetLastError() == ERROR_NO_MORE_FILES;
+        valid &= FindClose(find) != 0;
+    }
+#else
+    BUSTER_UNUSED(arena);
+    DIR* directory_handle = opendir((const char*)directory.pointer);
+    valid = directory_handle != 0;
+    if (directory_handle)
+    {
+        bool more = true;
+        while (more)
+        {
+            errno = 0;
+            struct dirent* entry = readdir(directory_handle);
+            more = entry != 0;
+            if (entry)
+            {
+                String8 name = string_from_pointer((const char8*)entry->d_name);
+                if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+                {
+                    count += 1;
+                    valid &= string_equal(name, S8("artifact.i"));
+                }
+            }
+            else
+            {
+                valid &= errno == 0;
+            }
+        }
+        valid &= closedir(directory_handle) == 0;
+    }
+#endif
+    return valid && count == (u32)has_output;
+}
+#endif
+
+// A synthetic flush refusal after a real complete staging write. Zero-valued
+// CLOSE/DELETE steps witness the native unwind without replacing its outcome.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_flush_cleanup(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS && (BUSTER_WINDOWS || BUSTER_LINUX || BUSTER_MACOS)
+    Arena* arena = arguments->arena;
+    String8 input = buster_test_temporary_path(arena, S8("diagnostic-flush-cleanup-input"), S8(".c"));
+    String8 directory = buster_test_temporary_path(arena, S8("diagnostic-flush-cleanup-output"), S8(""));
+    OsDirectoryCreateResult created = os_make_directory_exclusive(directory);
+    if (BUSTER_REQUIRE(arguments, created.created && !created.error.v))
+    {
+        String8 output = string_format_z(arena, S8("{S8}/artifact.i"), directory);
+        String8 control = string_format_z(arena, S8("{S8}/inventory-control.bin"), directory);
+        String8 source = S8("int cleanup_value /* discarded */ = 42;\n");
+        String8 expected = S8("int cleanup_value = 42;\n");
+        String8 sentinel = S8("old complete output\0with suffix");
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-E"), S8("-nostdinc"), input, S8("-o"), output};
+            OsFileTestStep steps[] = {
+                {OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345},
+                {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 0},
+                {OS_FILE_TEST_DELETE, OS_FILE_TEST_ERROR, 0},
+            };
+            for (u32 existing = 0; existing < 2; existing += 1)
+            {
+                TemporalArena scratch = scratch_begin(&arena, 1);
+                BUSTER_TEST(arguments, os_file_delete(output));
+                if (existing) BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                // The inventory oracle must reject an extra private file.
+                BUSTER_TEST(arguments, file_write(control, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+                BUSTER_TEST(arguments, !compiler_diagnostic_test_output_directory(scratch.arena, directory, existing != 0));
+                BUSTER_TEST(arguments, os_file_delete(control));
+                BUSTER_TEST(arguments, compiler_diagnostic_test_output_directory(scratch.arena, directory, existing != 0));
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(scratch.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+                FileMapTestCounters maps_before = file_map_test_counters();
+                u64 handles_before = os_process_spawn_test_resource_count();
+                BUSTER_TEST(arguments, handles_before != 0);
+                os_file_test_begin(output, steps, BUSTER_ARRAY_LENGTH(steps));
+                CompilerDriverResult failed = compiler_driver_execute_invocation(scratch.arena, invocation);
+                u32 consumed = os_file_test_end();
+                u64 handles_after = os_process_spawn_test_resource_count();
+                FileMapTestCounters maps_after = file_map_test_counters();
+                arguments->show(arguments, S8("DRIVER_FLUSH_CLEANUP_FAILURE existing={u32} consumed={u32} status={u32} maps={u64} unmaps={u64} handles_before={u64} handles_after={u64}\n"),
+                                existing, consumed, (u32)failed.error, maps_after.mapped - maps_before.mapped,
+                                maps_after.unmapped - maps_before.unmapped, handles_before, handles_after);
+                BUSTER_TEST_RAW(arguments, failed.error == COMPILER_DRIVER_ERROR_FILE_WRITE, failed.diagnostic);
+                BUSTER_TEST(arguments, consumed == BUSTER_ARRAY_LENGTH(steps));
+                BUSTER_TEST(arguments, handles_after == handles_before);
+                BUSTER_TEST(arguments, maps_after.mapped == maps_before.mapped + 1 && maps_after.unmapped == maps_before.unmapped + 1);
+                BUSTER_STRING_TEST(arguments, failed.output, expected);
+                if (BUSTER_REQUIRE(arguments, failed.diagnostic_count == 1))
+                {
+                    BUSTER_STRING_TEST(arguments, failed.diagnostics[0].code, S8("driver.file-write"));
+                }
+                BUSTER_TEST(arguments, compiler_diagnostic_test_output_directory(scratch.arena, directory, existing != 0));
+                FileStats destination = os_file_replacement_target_stats(output);
+                BUSTER_TEST(arguments, destination.valid && destination.kind == (existing ? OS_FILE_KIND_REGULAR : OS_FILE_KIND_MISSING));
+                if (existing)
+                {
+                    ByteSlice preserved = file_read(scratch.arena, output, (FileReadOptions){0});
+                    BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved), sentinel);
+                }
+
+                // Reuse the invocation, input and output before fixture teardown.
+                maps_before = file_map_test_counters();
+                handles_before = os_process_spawn_test_resource_count();
+                CompilerDriverResult recovered = compiler_driver_execute_invocation(scratch.arena, invocation);
+                handles_after = os_process_spawn_test_resource_count();
+                maps_after = file_map_test_counters();
+                BUSTER_TEST_RAW(arguments, recovered.error == COMPILER_DRIVER_ERROR_NONE, recovered.diagnostic);
+                BUSTER_TEST(arguments, recovered.diagnostic_count == 0);
+                BUSTER_TEST(arguments, handles_before != 0 && handles_after == handles_before);
+                BUSTER_TEST(arguments, maps_after.mapped == maps_before.mapped + 1 && maps_after.unmapped == maps_before.unmapped + 1);
+                BUSTER_STRING_TEST(arguments, recovered.output, expected);
+                ByteSlice published = file_read(scratch.arena, output, (FileReadOptions){0});
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, published), expected);
+                BUSTER_TEST(arguments, compiler_diagnostic_test_output_directory(scratch.arena, directory, true));
+                arguments->show(arguments, S8("DRIVER_FLUSH_CLEANUP_RECOVERY existing={u32} status={u32} maps={u64} unmaps={u64} handles_before={u64} handles_after={u64}\n"),
+                                existing, (u32)recovered.error,
+                                maps_after.mapped - maps_before.mapped, maps_after.unmapped - maps_before.unmapped, handles_before, handles_after);
+                scratch_end(scratch);
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(input));
+        BUSTER_TEST(arguments, os_file_delete(output));
+        BUSTER_TEST(arguments, os_directory_delete(directory));
+    }
+#else
+    arguments->show(arguments, S8("DRIVER_FLUSH_CLEANUP skipped: desktop native mapping, handle census and directory observation required\n"));
+#endif
     return result;
 }
 
@@ -197,6 +357,7 @@ UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, comma.diagnostic_count == 0);
     BUSTER_TEST(arguments, os_file_delete(comma_path));
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_write_failures);
+    BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_flush_cleanup);
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_read_failures);
     BUSTER_TEST_FIXTURE(arguments, compiler_diagnostic_test_null_device_output);
     CompilerDiagnostic copy;

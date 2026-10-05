@@ -469,13 +469,19 @@ walk. Member sums, array-index multiplication and accumulated array offsets
 are checked before publication. Array-index expressions are constant-query
 children on the explicit query stack; a dot must separate member selections.
 
-Parser enumerators and static assertions still use
-`c_parse_constant_offsetof` / `c_parse_constant_member_offset`. They already
-promote anonymous members and refuse bit-fields. Issue #1570 remains open for
-a shared parser/lowering designator authority, signed-index policy, the
-parser's unchecked offset arithmetic and nested `offsetof` in array indices.
-The parser's index evaluator accepts `sizeof` but does not evaluate nested
-`offsetof`; this lowering repair does not settle those contracts.
+Parser enumerators and static assertions use `c_parse_constant_offsetof` as
+states 8/9 of the existing `CParseConstantTask` stack. Each array index is a
+typed child over its original token range, so nested `offsetof`, `sizeof` and
+integer casts retain C conversions without input-dependent recursion. Type IDs
+and token cursors survive child queries; the parent retains the accumulated
+offset. Anonymous promotion still uses `c_parse_constant_member_offset`.
+
+Parser and lowering walks require a nonnegative integer index with no remaining
+high limb after conversion to its actual type. Floating results, malformed dot
+separators and offsets beyond the target's `size_t` range are refused. Promoted
+member sums, index products and accumulated sums are checked before arithmetic.
+Issue #1570 remains open for a shared parser/lowering designator authority;
+the two walks now share these admission and arithmetic bounds.
 
 `c_test_offsetof_members` pins direct and anonymous member offsets, a nested
 anonymous struct within a union, and an anonymous array element through
@@ -486,10 +492,15 @@ runtime expressions, plus missing members, malformed dot separators and lowering
 The positive source also includes a named multidimensional member chain.
 Static initializer and runtime witnesses use an array index containing nested
 `sizeof` and `offsetof` queries; the matching parser enumerator uses literal
-index 1 so it remains independent of the parser's nested-index limitation.
+index 1 as an independent member-promotion control.
 `c_test_offsetof_members_runtime` compares all three constant contexts with
 addresses of real subobjects in generated programs, using both frontend forms
 and FAST and QUALITY. Runtime execution is omitted on Android/iOS.
+`c_test_offsetof_typed_indices` extends the parser/static/runtime comparison to
+nested typed indices on LP64, LLP64 and 32-bit layouts. Its refusal fixture checks
+signed negatives, high limbs, target-width multiplication/addition overflow and
+malformed separators; its runtime fixture checks real subobject addresses under
+both frontend forms with FAST and QUALITY.
 
 ## Parse-side layout solve: ordered passes and the agenda
 

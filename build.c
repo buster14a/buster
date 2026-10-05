@@ -22,6 +22,7 @@
 //   tools/matrix_phase.c                       optional desktop phase observation
 //   matrix_superbuild_*                          the test_all_combinations
 //                                                superbuild scheduler
+//   tools/binary_coverage.c                      exact ELF inventory; execution unmeasured
 //   matrix_coverage_*                            authoritative desktop
 //                                                expected/detected/executed
 //                                                coverage and lane policy
@@ -145,6 +146,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
+    BUILD_COMMAND_BINARY_COVERAGE_INVENTORY,
     BUILD_COMMAND_MATRIX_PHASE_RUN,
     BUILD_COMMAND_TEST_UNITS_PARTITIONED,
     BUILD_COMMAND_COUNT,
@@ -23088,6 +23090,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
+        case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         {
             result = true;
@@ -23116,6 +23119,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
         {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_BINARY_COVERAGE_INVENTORY, .owns_arguments = true},
         {.command = BUILD_COMMAND_BUILD, .owns_arguments = false},
         {.command = BUILD_COMMAND_GENERATE, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_ALL_COMBINATIONS, .owns_arguments = false},
@@ -25037,6 +25041,8 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena);
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Arena* arena, SliceString8 arguments);
 
+#include "tools/binary_coverage.c"
+
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     String8 shard = matrix_coverage_shard_current();
@@ -25113,7 +25119,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         {
             return PROCESS_RESULT_FAILED;
         }
-        ProcessResult focused_test_result = musl_directory_self_test(arena);
+        ProcessResult focused_test_result = binary_coverage_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        if (focused_test_result == PROCESS_RESULT_SUCCESS)
+        {
+            // Inventory the running delivery driver, not a source-coverage substitute.
+            // The report remains incomplete: no instruction/edge/MC/DC collector.
+            String8 inventory_arguments[] = {S8("/proc/self/exe")};
+            focused_test_result = binary_coverage_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inventory_arguments));
+        }
+#endif
+        if (focused_test_result == PROCESS_RESULT_SUCCESS)
+        {
+            focused_test_result = musl_directory_self_test(arena);
+        }
 #if BUSTER_LINUX || BUSTER_APPLE
         if (focused_test_result == PROCESS_RESULT_SUCCESS)
         {
@@ -40775,6 +40794,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
+        [BUILD_COMMAND_BINARY_COVERAGE_INVENTORY] = S8_INITIALIZER("binary_coverage_inventory"),
         [BUILD_COMMAND_MATRIX_PHASE_RUN] = S8_INITIALIZER("matrix_phase_run"),
         [BUILD_COMMAND_TEST_UNITS_PARTITIONED] = S8_INITIALIZER("test_units_partitioned"),
     };
@@ -40873,6 +40893,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY: result = binary_coverage_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_GPU_TOOLCHAINS: result = gpu_tools_main(arena, owned_arguments); break;
             default: BUSTER_UNREACHABLE(); break;
         }
@@ -42086,6 +42107,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
+        case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:

@@ -404,6 +404,20 @@ without facts for identical bitcode and diagnostics.
   range into a synthesized token view while retaining either derived index
   gives the wrong classification. Spelling, source recovery, and pack changes
   still belong to the original preprocess result (GitHub #629).
+- Integer `constexpr` declarations consume the existing typed integer query's
+  signed magnitude and both limbs, rather than preprocessing arithmetic or
+  signedness guessed from token spelling. Exact representability uses the
+  expression's C conversions and the destination's target width, including
+  enum underlying types and 128-bit destinations. A value whose magnitude
+  needs the high limb receives an explicit unsupported-storage diagnostic:
+  `CEntity` still publishes one magnitude limb, so full-width constexpr
+  publication remains open under GitHub #1572. The live declaration machine
+  retains its evaluation mode while a scoped arithmetic guard refuses signed
+  overflow, including when later casts would hide it and regardless of `-fwrapv`;
+  machineless validation uses the protected declaration-point query. Supported
+  integer128 scalar objects retain relocation-free 16-byte initializer images.
+  `c_test_constexpr_integer_types` covers typed
+  arithmetic, casts, declaration scope and refused publication.
 - A `_Static_assert` whose expression types as an integer takes its value
   from the typed evaluator (`c_parse_typed_constant`), with C's types,
   promotions and conversions: `0u - 1 == 4294967295u` holds and
