@@ -168,12 +168,14 @@ def main(argv=None) -> int:
     outcomes = collections.Counter()
     refusals = collections.defaultdict(collections.Counter)
     rows = collections.defaultdict(list)
+    refused_lines = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, arguments.jobs)) as pool:
         for line, outcome, detail in pool.map(lambda line: check_line(arguments, line), lines):
             outcomes[outcome] += 1
             rows[outcome].append(f"{line.strip()}\t{detail}")
             if outcome == "refused":
                 refusals[detail][line.split()[0]] += 1
+                refused_lines.append((line, detail))
 
     print(f"listings: {compiled} compiled, {len(compile_failures)} failed")
     print(f"lines: {len(lines)}")
@@ -189,9 +191,11 @@ def main(argv=None) -> int:
             (report / f"{outcome}.txt").write_text("\n".join(sorted(rows[outcome])) + ("\n" if rows[outcome] else ""))
         (report / "compile-failed.txt").write_text("\n".join(compile_failures) + ("\n" if compile_failures else ""))
 
-    undocumented = [row for row in rows["refused"] if not documented_refusal(row.split("\t", 1)[0])]
-    for row in undocumented:
-        print(f"undocumented refusal: {row}")
+    # Match the instruction text itself: report rows also separate the
+    # mnemonic from its operands with a tab.
+    undocumented = [(line, detail) for line, detail in refused_lines if not documented_refusal(line)]
+    for line, detail in undocumented:
+        print(f"undocumented refusal: {line.strip()}\t{detail}")
     for row in compile_failures:
         print(f"fixture did not compile: {row}")
     problems = []

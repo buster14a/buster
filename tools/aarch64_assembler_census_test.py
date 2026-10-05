@@ -73,6 +73,29 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("fixture did not compile", output)
 
+    def refusing_corpus(self, instruction: str) -> None:
+        (self.fixtures / "a.c").write_text("int f(void) { return 1; }\n")
+        # One line both sides encode, plus the instruction under test, which
+        # the stub assembler refuses while llvm-mc's stand-in accepts it.
+        self.clang = stub(self.root, "clang", 'out=""; while [ $# -gt 0 ]; do if [ "$1" = -o ]; then out="$2"; fi; shift; done; '
+                          'printf "\\tadd\\tx0, x1, #1\\n\\t' + instruction + '\\n" > "$out"')
+        self.assembler_refusing = stub(self.root, "refusing", 'src=""; out=""; while [ $# -gt 0 ]; do case "$1" in -o) out="$2";; *.s) src="$1";; esac; shift; done; '
+                                       'if grep -q fml "$src"; then echo "cc: error: line.s:2:1: invalid operands" >&2; exit 1; fi; : > "$out"')
+
+    def test_documented_refusal_passes_end_to_end(self):
+        # The listing separates mnemonic and operands with a tab, as Clang does.
+        self.refusing_corpus("fmla\\tv0.4s, v20.4s, v21.s[0]")
+        status, output = self.run_census("--ide", self.assembler_refusing)
+        self.assertEqual(status, 0, output)
+        self.assertIn("same: 1", output)
+        self.assertIn("refused: 1", output)
+
+    def test_undocumented_refusal_fails_end_to_end(self):
+        self.refusing_corpus("fmla\\tv0.4s, v1.4s, v2.4s")
+        status, output = self.run_census("--ide", self.assembler_refusing)
+        self.assertEqual(status, 1)
+        self.assertIn("undocumented refusal: fmla", output)
+
     def test_allowlist_matches_only_documented_operand_shape(self):
         self.assertTrue(census.documented_refusal("fmla\tv0.4s, v20.4s, v21.s[0]"))
         self.assertTrue(census.documented_refusal("fmls v0.2d, v1.2d, v2.d[1]"))
