@@ -385,7 +385,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec_packets(BqQueue* queue)
 #ifdef _WIN32
     u32 profile_count = 2;
 #else
-    u32 profile_count = BUSTER_ARRAY_LENGTH(recipes);
+    u32 profile_count = (u32)BUSTER_ARRAY_LENGTH(recipes);
 #endif
     for (u32 index = 0; index < profile_count; index += 1)
     {
