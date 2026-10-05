@@ -36,6 +36,9 @@
 //   assembly_aarch64_exclusive_pair_instruction_parse typed memory-owner adapter
 //   assembly_x86_metadata_*                        metadata-driven selection
 //                                                  and emission
+//   assembly_aarch64_base_instruction_parse        AArch64 retry through the
+//                                                  base A64 encoder
+//                                                  (aarch64_base_assembly.h)
 //   assembly_instruction_parse,                    statement recognition and
 //   assembly_source_parse                          the parse phase driver
 //   assembly_relocation_append,                    the emit phase and the
@@ -43,6 +46,7 @@
 
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/aarch64_base_assembly.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.h>
@@ -7128,6 +7132,35 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_register_operand(String8 text,
     return true;
 }
 
+// LDR (literal) also loads S/D/Q registers; the control rows carry their
+// FP/SIMD register class.
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_literal_register_operand(String8 text, BusterAarch64ControlOperandValue* value)
+{
+    text = assembly_trim(text);
+    bool valid = assembly_aarch64_control_register_operand(text, value);
+    char8 prefix = text.length ? assembly_ascii_lower(text.pointer[0]) : 0;
+    u8 width = prefix == 's' ? 32 : prefix == 'd' ? 64 : prefix == 'q' ? 128 : 0;
+    u32 number = 0;
+    bool digits = !valid && width && text.length >= 2 && text.length <= 3 && (text.length == 2 || text.pointer[1] != '0');
+    for (u64 index = 1; digits && index < text.length; index += 1)
+    {
+        digits = text.pointer[index] >= '0' && text.pointer[index] <= '9';
+        number = number * 10u + (u32)(text.pointer[index] - '0');
+    }
+    if (digits && number <= 31)
+    {
+        *value = (BusterAarch64ControlOperandValue){
+            .value = number,
+            .kind = BUSTER_AARCH64_CONTROL_OPERAND_REGISTER,
+            .width = width,
+            .register31_role = BUSTER_AARCH64_CONTROL_REGISTER31_NONE,
+            .register_class = BUSTER_AARCH64_CONTROL_REGISTER_CLASS_FP_SIMD,
+        };
+        valid = true;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_immediate(AssemblyBuilder* builder, String8 text, u8 width,
                                                              BusterAarch64ControlOperandValue* value)
 {
@@ -7787,7 +7820,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_instruction_parse(AssemblyBuil
     }
     else if (assembly_word_equal(mnemonic, S8("ldr")) || assembly_word_equal(mnemonic, S8("ldrsw")))
     {
-        if (token_count != 2 || !assembly_aarch64_control_register_operand(tokens[0], &candidate.operands[0]) ||
+        if (token_count != 2 || !assembly_aarch64_control_literal_register_operand(tokens[0], &candidate.operands[0]) ||
             !assembly_aarch64_control_pc_operand(builder, tokens[1], &candidate.operands[1], &expressions[1]))
         {
             return false;
@@ -8011,6 +8044,19 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         .fixed_word = info.fixed_word,
         .aarch64_direct_simd_row_index = info.aarch64_direct_simd_row_index,
     };
+    // LDR (literal) shares its mnemonic with the scalar memory front door. An
+    // address operand without brackets names a label, which only the control
+    // owner's PC-relative rows can fix up.
+    if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY &&
+        string_first_code_unit(operands, '[') == BUSTER_STRING_NO_MATCH)
+    {
+        AssemblyInstructionInfo control_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+        if (assembly_aarch64_control_lookup(target, mnemonic, &control_info))
+        {
+            instruction.encoding_kind = control_info.encoding_kind;
+            instruction.operand_count = control_info.operand_count;
+        }
+    }
     bool system_register_handled = false;
     bool move_immediate_handled = instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS &&
         assembly_aarch64_move_immediate_parse(builder, operands, &instruction, line, column);
@@ -11496,6 +11542,63 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_diagnostic(AssemblyBuilder* build
     assembly_diagnostic(builder, kind, line, column, length, message);
 }
 
+// The table-driven AArch64 owners above refuse spellings outside their
+// families. Retry those statements with the base A64 encoder: an accepted
+// statement becomes one fixed word and discards the owners' diagnostics, a
+// missing feature is reported as such, and anything else keeps the owners'
+// diagnostic (an unknown-mnemonic report becomes an operand report when the
+// base encoder knows the mnemonic).
+BUSTER_GLOBAL_LOCAL void assembly_aarch64_base_instruction_parse(AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset,
+                                                                  u32 symbol_count, u32 relocation_count, u32 diagnostic_count)
+{
+    String8 trimmed = assembly_trim(statement);
+    u64 mnemonic_end = 0;
+    while (mnemonic_end < trimmed.length && !assembly_space(trimmed.pointer[mnemonic_end]))
+    {
+        mnemonic_end += 1;
+    }
+    String8 mnemonic = string_slice(trimmed, 0, mnemonic_end);
+    u32 word = 0;
+    A64BaseAssemblyStatus status = builder->instruction_count < builder->instruction_capacity
+                                       ? a64_base_assemble(builder->target, mnemonic, string_slice(trimmed, mnemonic_end, trimmed.length), &word)
+                                       : A64_BASE_ASSEMBLY_UNKNOWN_MNEMONIC;
+    String8 feature_message = status == A64_BASE_ASSEMBLY_REQUIRES_FP         ? S8("instruction requires the fp-armv8 target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_FULLFP16   ? S8("instruction requires the fullfp16 target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_NEON       ? S8("instruction requires the neon target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_LSE        ? S8("instruction requires the lse target feature")
+                                                                              : (String8){0};
+    bool unknown_reported = builder->result.diagnostic_count > diagnostic_count &&
+                            builder->result.diagnostics[builder->result.diagnostic_count - 1].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION;
+    if (status == A64_BASE_ASSEMBLY_OK || feature_message.length ||
+        (status == A64_BASE_ASSEMBLY_INVALID_OPERANDS && unknown_reported))
+    {
+        builder->result.symbol_count = symbol_count;
+        builder->result.relocation_count = relocation_count;
+        builder->result.diagnostic_count = diagnostic_count;
+    }
+    if (status == A64_BASE_ASSEMBLY_OK)
+    {
+        builder->instructions[builder->instruction_count++] = (AssemblyInstruction){
+            .offset = offset,
+            .line = line,
+            .column = column,
+            .opcode = ASSEMBLY_OPCODE_COUNT,
+            .encoding_kind = ASSEMBLY_ENCODING_AARCH64_FIXED_WORD,
+            .fixed_word = word,
+            .size = 4,
+        };
+    }
+    else if (feature_message.length)
+    {
+        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length, feature_message);
+    }
+    else if (status == A64_BASE_ASSEMBLY_INVALID_OPERANDS && unknown_reported)
+    {
+        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                            (u32)(trimmed.length - mnemonic_end), S8("invalid AArch64 instruction operands"));
+    }
+}
+
 enum
 {
     ASSEMBLY_X86_SPELLING_OPERAND_CAPACITY = 4,
@@ -11903,6 +12006,10 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
                                     handwritten_diagnostic.length, handwritten_diagnostic.message);
             }
         }
+    }
+    if (!handwritten_succeeded && target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        assembly_aarch64_base_instruction_parse(builder, statement, line, column, offset, symbol_count, relocation_count, diagnostic_count);
     }
 }
 
@@ -12803,6 +12910,10 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                         if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) kind = ASSEMBLY_RELOCATION_AARCH64_CONDBR19;
                         else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) kind = ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19;
                         else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14) kind = ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+                        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_LITERAL19 && builder->unit_control_relocations)
+                        {
+                            kind = ASSEMBLY_RELOCATION_AARCH64_LOAD_LITERAL19;
+                        }
                     }
                     if (kind == ASSEMBLY_RELOCATION_COUNT ||
                         !assembly_relocation_append(builder, instruction->offset, expression, kind, 0))
