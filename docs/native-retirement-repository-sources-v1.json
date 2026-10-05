@@ -151,8 +151,8 @@
     },
     {
       "source": "src/buster/lib/string.c",
-      "bytes": 68955,
-      "sha256": "61512928187afb05a5f5547587389a3596fedc158c25e2e48cc7f1a66add9f97"
+      "bytes": 72668,
+      "sha256": "b7bf4e0b8aae409aa0677b4689ab2c2f81fb8ae870fcc47f543fb1e9ee6a555b"
     },
     {
       "source": "src/buster/lib/string.h",
